@@ -72,6 +72,10 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_STORAGE`          | `sqlite`                       | Set to `memory` for tests; nothing persists |
 | `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Seed users only, no sample records |
 | `COOKIE_SECURE`           | `false`                        | Set to `true` when serving over HTTPS |
+| `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console. |
+| `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
+| `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. |
+| `ATHENA_FAILSAFE_ENGINE_ID` | unset                        | Default engine id a fresh failsafe draft targets. |
 
 Database location, in order: `ATHENA_DB_PATH`, then `ATHENA_USER_DATA/athena.db`,
 then `~/.athena-ai/athena.db` under Electron, then `./athena.db`.
@@ -103,6 +107,14 @@ written by older builds are verified once and transparently upgraded.
 - The Electron renderer runs with `contextIsolation`, `sandbox`, no
   `nodeIntegration`, and a CSP without `unsafe-eval`.
 - `athena.db` and pasted developer logs are not tracked in git.
+- The **Failsafe console** (admin-only, `/failsafe`) can pause, stand down, or
+  terminate an engine, but holds no signing key. It drafts a command and shows
+  the exact bytes to sign; operators sign them out of band with the
+  `mythos-failsafe` CLI (their private key never enters the browser or this
+  server), and this server only relays the signatures. Stand-down and terminate
+  require two distinct operators, terminate also requires typing the engine id,
+  and the engine verifies every signature itself before acting. So neither a
+  compromised server nor the engine itself can trigger a failsafe.
 
 ## Known gaps
 

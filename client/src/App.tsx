@@ -34,6 +34,7 @@ import AIControlPanel from "@/pages/AIControlPanel";
 import AIChat from "@/pages/AIChat";
 import DeletionManagement from "@/pages/DeletionManagement";
 import Classifiers from "@/pages/Classifiers";
+import Failsafe from "@/pages/Failsafe";
 import NotFound from "@/pages/not-found";
 import { checkAuth, logout as apiLogout, isAdmin } from "@/utils/auth";
 import { applyStoredTheme } from "@/lib/theme";
@@ -72,6 +73,7 @@ function AppRoutes({ admin }: { admin: boolean }) {
       {admin && <Route path="/admin" component={Teams} />}
       {admin && <Route path="/ai-control" component={AIControlPanel} />}
       {admin && <Route path="/deletion" component={DeletionManagement} />}
+      {admin && <Route path="/failsafe" component={Failsafe} />}
       <Route path="/">
         <Redirect to="/dashboard" />
       </Route>

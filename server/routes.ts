@@ -5,6 +5,7 @@ import { requireAuth, requireAdmin, asyncHandler, actor } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
 import * as engine from "./engine";
+import * as failsafe from "./failsafe";
 import { controlMap, type ScanFinding } from "./compliance";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
@@ -1324,6 +1325,161 @@ export function registerRoutes(app: Express): void {
     });
 
     res.json(pack);
+  }));
+
+  // ==== FAILSAFE ====
+  //
+  // The operator console for the three engine failsafes -- pause, stand-down,
+  // terminate. This server drafts commands and RELAYS operator signatures; it
+  // never holds a signing key, so nothing here can make an engine act on its
+  // own. Operators sign out of band with `mythos-failsafe` (their private key
+  // stays on their machine), stand-down and terminate need two distinct
+  // operators, and the engine independently verifies every command before
+  // obeying. See server/failsafe.ts for the trust model.
+  //
+  // Every route is admin-only: these are the highest-stakes controls in the
+  // product, so reaching the console at all is a guarded action. The
+  // cryptographic two-person rule is the guard on the actions themselves.
+
+  const FAILSAFE_ACTIONS = ["pause", "resume", "stand_down", "release", "terminate"] as const;
+  const draftCommandSchema = z.object({
+    action: z.enum(FAILSAFE_ACTIONS),
+    engineId: z.string().trim().min(1, "an engine id is required").max(200),
+    reason: z.string().max(2000).optional().default(""),
+  });
+  const submitSignatureSchema = z.object({
+    keyId: z.string().trim().min(1).max(128),
+    sig: z.string().trim().regex(/^[0-9a-fA-F]+$/, "a signature is hex").max(256),
+  });
+  const failsafeUnavailable = (res: Response, cause: unknown): boolean => {
+    if (cause instanceof failsafe.FailsafeUnavailable) {
+      // 503, not 500: the control plane is not there or not answering, which
+      // is a fact about the deployment, not a bug in this server.
+      res.status(503).json({ error: cause.message });
+      return true;
+    }
+    return false;
+  };
+
+  app.get("/api/failsafe/status", requireAdmin, asyncHandler(async (_req, res) => {
+    // status() answers its own unreachability rather than throwing, so a
+    // control plane that is simply not configured renders as words on the
+    // page, not a 503.
+    res.json({ ...(await failsafe.status()), defaultEngineId: failsafe.defaultEngineId() });
+  }));
+
+  app.get("/api/failsafe/state", requireAdmin, asyncHandler(async (req, res) => {
+    const engineId = typeof req.query.engineId === "string" ? req.query.engineId : undefined;
+    try {
+      res.json(await failsafe.state(engineId));
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/failsafe/commands", requireAdmin, asyncHandler(async (req, res) => {
+    const engineId = typeof req.query.engineId === "string" ? req.query.engineId : undefined;
+    const status = typeof req.query.status === "string" ? req.query.status : undefined;
+    try {
+      res.json(await failsafe.listCommands({ engineId, status }));
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.post("/api/failsafe/commands", requireAdmin, asyncHandler(async (req, res) => {
+    const data = draftCommandSchema.parse(req.body);
+    let result;
+    try {
+      result = await failsafe.draftCommand(data);
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      // The backend's own refusal, verbatim -- e.g. terminate from a service
+      // account that is not an admin. The operator needs the reason.
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    // Drafting a failsafe command is an act worth recording on this side too,
+    // independent of the backend's own audit trail.
+    await storage.createActivityLog({
+      action: "drafted",
+      entityType: "failsafe_command",
+      entityId: result.drafted.command.uuid,
+      details: { failsafeAction: data.action, engineId: data.engineId, reason: data.reason },
+      ...actor(req),
+    });
+    res.status(201).json(result.drafted);
+  }));
+
+  app.get("/api/failsafe/commands/:uuid", requireAdmin, asyncHandler(async (req, res) => {
+    let drafted;
+    try {
+      drafted = await failsafe.getCommand(req.params.uuid);
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!drafted) return notFound(res, "Command");
+    res.json(drafted);
+  }));
+
+  app.post("/api/failsafe/commands/:uuid/signatures", requireAdmin, asyncHandler(async (req, res) => {
+    const data = submitSignatureSchema.parse(req.body);
+    let result;
+    try {
+      result = await failsafe.submitSignature(req.params.uuid, data);
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      // A rejected signature (bad key, forged, already signed) is the operator's
+      // to see verbatim -- it is the whole point of relaying it here.
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    await storage.createActivityLog({
+      action: "signed",
+      entityType: "failsafe_command",
+      entityId: req.params.uuid,
+      details: { keyId: data.keyId, status: result.command.status, signers: result.command.signers },
+      ...actor(req),
+    });
+    res.json(result.command);
+  }));
+
+  app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await failsafe.cancelCommand(req.params.uuid);
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    await storage.createActivityLog({
+      action: "canceled",
+      entityType: "failsafe_command",
+      entityId: req.params.uuid,
+      details: { status: result.command.status },
+      ...actor(req),
+    });
+    res.json(result.command);
+  }));
+
+  app.get("/api/failsafe/audit", requireAdmin, asyncHandler(async (req, res) => {
+    const command = typeof req.query.command === "string" ? req.query.command : undefined;
+    try {
+      res.json(await failsafe.audit({ command }));
+    } catch (cause) {
+      if (failsafeUnavailable(res, cause)) return;
+      throw cause;
+    }
   }));
 
   // ==== FINDING LIFECYCLE ====
