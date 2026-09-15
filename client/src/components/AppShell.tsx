@@ -20,6 +20,7 @@ import {
   Users,
   Settings as SettingsIcon,
   ShieldHalf,
+  ShieldAlert,
   FlaskConical,
   ListChecks,
   FolderOpen,
@@ -93,6 +94,7 @@ const TOOLS: NavItem[] = [
   { path: "/ai-control", label: "AI Control", icon: SlidersHorizontal, admin: true },
   { path: "/audit-logs", label: "Audit Logs", icon: FileText, admin: true },
   { path: "/deletion", label: "Deletion", icon: Trash2, admin: true },
+  { path: "/failsafe", label: "Failsafe", icon: ShieldAlert, admin: true },
 ];
 
 interface AppShellProps {
