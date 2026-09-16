@@ -26,6 +26,9 @@ describe("assurance BFF", () => {
   let sawBearer = false;
   let lastUnknownsQuery = "";
   let refusePatch = false;
+  // When set, the next PATCH is refused with this status (and a reason), so the
+  // BFF's 403/409 passthrough can be exercised without disturbing refusePatch.
+  let patchRefusalStatus: number | null = null;
   const unknowns = new Map<string, Record<string, unknown>>();
 
   beforeAll(async () => {
@@ -63,6 +66,11 @@ describe("assurance BFF", () => {
           return json(200, { decision: "ready", decision_label: "Ready" });
         }
 
+        if (path === "/api/assurance/deployments/dep-gone/recompute/" && method === "POST") {
+          // A deployment the backend does not know: a real 404, not a 503.
+          return json(404, { detail: "No Deployment matches the given query." });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -94,6 +102,9 @@ describe("assurance BFF", () => {
 
         const patchMatch = path.match(/^\/api\/assurance\/unknowns\/([^/]+)\/$/);
         if (patchMatch && method === "PATCH") {
+          if (patchRefusalStatus !== null) {
+            return json(patchRefusalStatus, { detail: `the backend refused with ${patchRefusalStatus}` });
+          }
           if (refusePatch) return json(400, { detail: "status is not a valid choice" });
           const uuid = patchMatch[1];
           const patch = raw ? JSON.parse(raw) : {};
@@ -199,6 +210,58 @@ describe("assurance BFF", () => {
     expect(String(denied.body.error)).toContain("valid choice");
     refusePatch = false;
   });
+
+  it("surfaces a backend 404 on recompute as 404 (not 503) with the reason", async () => {
+    const res = await user.post("/api/assurance/deployments/dep-gone/recompute").send({ paused: false });
+    expect(res.status).toBe(404);
+    expect(String(res.body.error)).toMatch(/no deployment/i);
+  });
+
+  it("passes a backend 403 on a disposition through as 403 (not 503)", async () => {
+    patchRefusalStatus = 403;
+    const denied = await user.patch("/api/assurance/unknowns/u-1").send({ status: "resolved" });
+    expect(denied.status).toBe(403);
+    expect(String(denied.body.error)).toContain("403");
+    patchRefusalStatus = null;
+  });
+
+  it("passes a backend 409 on a disposition through as 409 (not 503)", async () => {
+    patchRefusalStatus = 409;
+    const denied = await user.patch("/api/assurance/unknowns/u-1").send({ status: "resolved" });
+    expect(denied.status).toBe(409);
+    expect(String(denied.body.error)).toContain("409");
+    patchRefusalStatus = null;
+  });
+
+  it("gates the two writes to admins: a non-admin gets 403, an admin succeeds", async () => {
+    // Created via the admin, like the failsafe test, then signed in.
+    await user.post("/api/users").send({
+      username: "assurance-analyst", password: "analyst-pass", role: "user", isActive: true,
+    });
+    const analyst = await signIn(app, "assurance-analyst", "analyst-pass");
+
+    // Reads stay open to any signed-in operator.
+    const read = await analyst.get("/api/assurance/deployments");
+    expect(read.status).toBe(200);
+
+    // Writes are admin-only: a clean 403 at the front door.
+    const deniedRecompute = await analyst
+      .post("/api/assurance/deployments/dep-1/recompute")
+      .send({ paused: false });
+    expect(deniedRecompute.status).toBe(403);
+    const deniedPatch = await analyst
+      .patch("/api/assurance/unknowns/u-1")
+      .send({ status: "investigating" });
+    expect(deniedPatch.status).toBe(403);
+
+    // The admin still succeeds on both.
+    const okRecompute = await user
+      .post("/api/assurance/deployments/dep-1/recompute")
+      .send({ paused: false });
+    expect(okRecompute.status).toBe(200);
+    const okPatch = await user.patch("/api/assurance/unknowns/u-1").send({ status: "investigating" });
+    expect(okPatch.status).toBe(200);
+  });
 });
 
 describe("assurance BFF without a control plane", () => {
@@ -223,5 +286,76 @@ describe("assurance BFF without a control plane", () => {
     const res = await user.get("/api/assurance/deployments");
     expect(res.status).toBe(503);
     expect(String(res.body.error)).toMatch(/no athena control plane/i);
+  });
+});
+
+describe("assurance BFF against a paginated control plane", () => {
+  // DRF PageNumberPagination (PAGE_SIZE=50) answers `{count, next, previous,
+  // results}`, so a list past the first page must be followed via `next` and
+  // concatenated -- otherwise everything past page 1 is silently dropped.
+  let app: Express;
+  let user: Awaited<ReturnType<typeof signIn>>;
+  let server: Server;
+
+  beforeAll(async () => {
+    const http = await import("http");
+    server = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        const method = req.method ?? "GET";
+        const url = req.url ?? "";
+        const path = url.split("?")[0];
+        const query = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+        const json = (code: number, payload: unknown) => {
+          res.writeHead(code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+
+        if (path === "/api/token/" && method === "POST") {
+          return json(200, { access: "svc-access-token", refresh: "r" });
+        }
+
+        if (path === "/api/assurance/deployments/" && method === "GET") {
+          const page = new URLSearchParams(query).get("page");
+          const row = (uuid: string, name: string) => ({
+            uuid, name, environment: "production",
+            decision: "ready", decision_label: "Ready",
+            description: "", finding_count: 0,
+            created_at: "2026-09-16T00:00:00Z", updated_at: "2026-09-16T01:00:00Z",
+          });
+          if (page === "2") {
+            return json(200, { count: 2, next: null, previous: `http://${req.headers.host}/api/assurance/deployments/`, results: [row("dep-b", "second")] });
+          }
+          // The `next` link is an absolute URL on the backend's own origin, as
+          // DRF emits it; the BFF must reduce it to path+query to follow.
+          return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/deployments/?page=2`, previous: null, results: [row("dep-a", "first")] });
+        }
+
+        return json(404, { detail: `no route ${method} ${path}` });
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${port}`;
+    process.env.ATHENA_FAILSAFE_USER = "svc-operator";
+    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-secret";
+    vi.resetModules();
+    app = await makeApp();
+    user = await signIn(app);
+  });
+
+  afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    delete process.env.ATHENA_FAILSAFE_USER;
+    delete process.env.ATHENA_FAILSAFE_PASSWORD;
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("follows the DRF `next` link and returns every page's rows", async () => {
+    const res = await user.get("/api/assurance/deployments");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.map((d: { uuid: string }) => d.uuid)).toEqual(["dep-a", "dep-b"]);
   });
 });

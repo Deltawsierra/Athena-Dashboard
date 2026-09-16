@@ -184,13 +184,61 @@ function queryString(params: Record<string, string | undefined>): string {
   return s ? `?${s}` : "";
 }
 
-async function ok<T>(response: Response, map: (raw: Record<string, unknown>) => T): Promise<T[]> {
-  if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+/**
+ * The 4xx codes a backend refusal carries meaning in, and which are returned to
+ * the caller (as `{ok:false}`) rather than laundered into a 503. Everything else
+ * non-ok (5xx, and network failures below) is genuine unavailability.
+ */
+const PASSTHROUGH_STATUS = new Set([400, 403, 404, 409]);
+
+/** A cap on how many pages we will follow, so a backend that always sets `next` cannot spin forever. */
+const MAX_PAGES = 200;
+
+/**
+ * The path+query of a DRF `next` link, or null when there is no next page.
+ *
+ * `next` is an absolute URL on the backend's own origin; we only want the path
+ * and query to hand back to `call()`, which prepends the configured base. A
+ * value that is already a bare path is passed through (made root-relative).
+ */
+function nextPath(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const next = (payload as Record<string, unknown>).next;
+  if (typeof next !== "string" || next === "") return null;
+  try {
+    const u = new URL(next);
+    return `${u.pathname}${u.search}`;
+  } catch {
+    return next.startsWith("/") ? next : `/${next}`;
   }
-  return rows(await response.json()).map(map);
+}
+
+/**
+ * Fetch every page of a DRF list endpoint and concatenate the rows.
+ *
+ * A list endpoint answers either a bare array (not paginated — the whole answer)
+ * or `{count, next, previous, results}` (PageNumberPagination, PAGE_SIZE=50). We
+ * follow the `next` link until it is exhausted so nothing past the first page is
+ * silently dropped; query filters ride along because DRF echoes them into `next`.
+ * A non-ok answer on any page is unavailability, per the existing contract.
+ */
+async function pagedRows(firstPath: string): Promise<Record<string, unknown>[]> {
+  const collected: Record<string, unknown>[] = [];
+  let path: string | null = firstPath;
+  for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
+    const response = await call(path);
+    if (!response.ok) {
+      throw new ControlPlaneUnavailable(
+        `the Athena control plane answered ${response.status}: ${await body(response)}`,
+      );
+    }
+    const payload = await response.json();
+    // A bare array is not paginated: it is the complete answer.
+    if (Array.isArray(payload)) return payload as Record<string, unknown>[];
+    collected.push(...rows(payload));
+    path = nextPath(payload);
+  }
+  return collected;
 }
 
 // ==== Reads ====
@@ -248,7 +296,7 @@ export async function status(): Promise<AssuranceStatus> {
 }
 
 export async function listDeployments(): Promise<AssuranceDeployment[]> {
-  return ok(await call("/api/assurance/deployments/"), deployment);
+  return (await pagedRows("/api/assurance/deployments/")).map(deployment);
 }
 
 export async function listFindings(
@@ -259,7 +307,7 @@ export async function listFindings(
     severity: opts.severity,
     status: opts.status,
   });
-  return ok(await call(`/api/assurance/findings/${query}`), finding);
+  return (await pagedRows(`/api/assurance/findings/${query}`)).map(finding);
 }
 
 export async function listUnknowns(
@@ -270,7 +318,7 @@ export async function listUnknowns(
     status: opts.status,
     impact: opts.impact,
   });
-  return ok(await call(`/api/assurance/unknowns/${query}`), unknown);
+  return (await pagedRows(`/api/assurance/unknowns/${query}`)).map(unknown);
 }
 
 // ==== Writes ====
@@ -283,18 +331,27 @@ export async function listUnknowns(
 export async function recomputeDecision(
   uuid: string,
   paused: boolean,
-): Promise<{ decision: string | null; decisionLabel: string }> {
+): Promise<
+  | { ok: true; decision: string | null; decisionLabel: string }
+  | { ok: false; status: number; detail: string }
+> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/recompute/`, {
     method: "POST",
     body: JSON.stringify({ paused }),
   });
+  // A backend refusal (e.g. the deployment is gone, or the credential may not
+  // recompute it) is the operator's to see with its reason -- not a 503 that
+  // says the control plane is down when it answered perfectly.
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
   if (!response.ok) {
     throw new ControlPlaneUnavailable(
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
   const payload = (await response.json()) as Record<string, unknown>;
-  return { decision: strOrNull(payload.decision), decisionLabel: str(payload.decision_label) };
+  return { ok: true, decision: strOrNull(payload.decision), decisionLabel: str(payload.decision_label) };
 }
 
 /** The disposition fields a human may set on an Unknown. */
@@ -306,9 +363,9 @@ export interface UnknownPatch {
 }
 
 /**
- * Update the human disposition of an Unknown. A backend refusal (400/404) is
- * returned to the caller with its reason rather than thrown, so the console can
- * show exactly why an edit did not take.
+ * Update the human disposition of an Unknown. A backend refusal (400/403/404/409)
+ * is returned to the caller with its reason rather than thrown, so the console
+ * can show exactly why an edit did not take.
  */
 export async function patchUnknown(
   uuid: string,
@@ -324,7 +381,7 @@ export async function patchUnknown(
     method: "PATCH",
     body: JSON.stringify(wire),
   });
-  if (response.status === 400 || response.status === 404) {
+  if (PASSTHROUGH_STATUS.has(response.status)) {
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
