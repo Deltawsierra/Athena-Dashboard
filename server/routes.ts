@@ -1568,6 +1568,15 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  app.get("/api/assurance/providers", asyncHandler(async (_req, res) => {
+    try {
+      res.json(await assurance.listProviders());
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   const recomputeSchema = z.object({ paused: z.boolean().optional().default(false) });
 
   app.post("/api/assurance/deployments/:uuid/recompute", requireAdmin, asyncHandler(async (req, res) => {
