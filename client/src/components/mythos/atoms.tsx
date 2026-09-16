@@ -86,6 +86,97 @@ export function StatusPill({ tone, children }: { tone: StatusTone; children: Rea
   );
 }
 
+/* --- deployment decision pill (six-state) ------------------------------ */
+// The Mythos shared decision vocabulary. `null` is a real state — a deployment
+// with no assessment yet has no decision, and an absent decision is never Ready.
+export type Decision =
+  | "ready"
+  | "ready_restricted"
+  | "needs_more_evidence"
+  | "needs_remediation"
+  | "not_recommended"
+  | "paused"
+  | null;
+const DECISION_LABEL: Record<string, string> = {
+  ready: "Ready",
+  ready_restricted: "Ready · restricted",
+  needs_more_evidence: "More evidence",
+  needs_remediation: "Remediation",
+  not_recommended: "Not recommended",
+  paused: "Paused",
+};
+const DECISION_CLASS: Record<string, string> = {
+  ready: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+  ready_restricted: "text-sky-400 border-sky-500/30 bg-sky-500/10",
+  needs_more_evidence: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  needs_remediation: "text-orange-400 border-orange-500/30 bg-orange-500/10",
+  not_recommended: "text-sev-high border-sev-high/40 bg-sev-high/10",
+  paused: "text-muted-foreground border-border/60 bg-surface-1/50",
+  unassessed: "text-muted-foreground border-border/60 bg-surface-1/50",
+};
+export function DecisionPill({ decision, label }: { decision: Decision; label?: string }) {
+  const key = decision ?? "unassessed";
+  const text = label || DECISION_LABEL[key ?? ""] || "Not assessed";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[12px] font-semibold",
+        DECISION_CLASS[key] ?? DECISION_CLASS.unassessed,
+      )}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {text}
+    </span>
+  );
+}
+
+/* --- evidence class chip (how strongly a thing is known) --------------- */
+// The evidence taxonomy, strongest to weakest. The chip's whole job is to keep
+// an assumption from reading like a fact, so the weaker classes are visibly
+// muted rather than reassuring.
+export type EvidenceClass =
+  | "technically_verified"
+  | "configuration_verified"
+  | "document_supported"
+  | "contractually_stated"
+  | "vendor_asserted"
+  | "partially_verified"
+  | "unknown"
+  | "not_documented";
+const EVIDENCE_LABEL: Record<string, string> = {
+  technically_verified: "Technically verified",
+  configuration_verified: "Config verified",
+  document_supported: "Document supported",
+  contractually_stated: "Contractually stated",
+  vendor_asserted: "Vendor asserted",
+  partially_verified: "Partially verified",
+  unknown: "Unknown",
+  not_documented: "Not documented",
+};
+const EVIDENCE_CLASS: Record<string, string> = {
+  technically_verified: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+  configuration_verified: "text-teal-300 border-teal-500/30 bg-teal-500/10",
+  document_supported: "text-sky-400 border-sky-500/30 bg-sky-500/10",
+  contractually_stated: "text-sky-300/80 border-sky-500/20 bg-sky-500/[0.06]",
+  vendor_asserted: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  partially_verified: "text-amber-300/90 border-amber-500/25 bg-amber-500/[0.08]",
+  unknown: "text-muted-foreground border-border/60 bg-surface-1/50",
+  not_documented: "text-muted-foreground border-dashed border-border/70 bg-surface-1/40",
+};
+export function EvidenceClassChip({ value, label }: { value: string; label?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        EVIDENCE_CLASS[value] ?? EVIDENCE_CLASS.unknown,
+      )}
+      title="How strongly this is known"
+    >
+      {label || EVIDENCE_LABEL[value] || value || "Unknown"}
+    </span>
+  );
+}
+
 /* --- coverage / meter bar ---------------------------------------------- */
 export function Meter({ percent, tone = "gold" }: { percent: number; tone?: "gold" | "emerald" | "sev" }) {
   const bar =

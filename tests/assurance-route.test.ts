@@ -1,0 +1,227 @@
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import type { Express } from "express";
+import type { Server } from "http";
+import type { AddressInfo } from "net";
+import request from "supertest";
+
+import { makeApp, signIn } from "./helpers";
+
+/**
+ * The assurance BFF, against a stubbed control plane (Athena-Backend).
+ *
+ * The dashboard's own server reads the system of record on the browser's
+ * behalf: the browser calls same-origin with its cookie, this server reaches
+ * the backend with a service token. What matters here is that contract — the
+ * routes are behind auth, the service token is obtained and forwarded as a
+ * Bearer, the backend's snake_case is mapped to camelCase, filters are passed
+ * through, a backend refusal reaches the operator with its reason, and an
+ * unconfigured backend answers in words, not a crash.
+ */
+
+describe("assurance BFF", () => {
+  let app: Express;
+  let user: Awaited<ReturnType<typeof signIn>>;
+  let server: Server;
+
+  let sawBearer = false;
+  let lastUnknownsQuery = "";
+  let refusePatch = false;
+  const unknowns = new Map<string, Record<string, unknown>>();
+
+  beforeAll(async () => {
+    const http = await import("http");
+    server = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        const method = req.method ?? "GET";
+        const url = req.url ?? "";
+        const path = url.split("?")[0];
+        const query = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+        const json = (code: number, payload: unknown) => {
+          res.writeHead(code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+        if ((req.headers.authorization ?? "").startsWith("Bearer ")) sawBearer = true;
+
+        if (path === "/api/token/" && method === "POST") {
+          return json(200, { access: "svc-access-token", refresh: "r" });
+        }
+
+        if (path === "/api/assurance/deployments/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "dep-1", name: "acme-chatbot", environment: "production",
+              decision: "needs_remediation", decision_label: "Requires remediation",
+              description: "", finding_count: 3,
+              created_at: "2026-09-16T00:00:00Z", updated_at: "2026-09-16T01:00:00Z",
+            },
+          ]);
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/recompute/" && method === "POST") {
+          return json(200, { decision: "ready", decision_label: "Ready" });
+        }
+
+        if (path === "/api/assurance/findings/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "f-1", deployment_uuid: "dep-1", finding_type: "prompt_injection",
+              title: "Prompt injection may be possible", severity: "high", confidence: 0.6,
+              status: "open", owner: null, impact: "", business_impact: "", recommendation: "",
+              control_mapping: {}, location: "/chat", retest_required: true,
+              evidence_class: "partially_verified",
+              evidence: [{ classification: "partially_verified", classification_label: "Partially verified", summary: "", source: "engine_scan" }],
+              first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+            },
+          ]);
+        }
+
+        if (path === "/api/assurance/unknowns/" && method === "GET") {
+          lastUnknownsQuery = query;
+          return json(200, [
+            {
+              uuid: "u-1", deployment_uuid: "dep-1", finding_uuid: "f-1",
+              question: "Is 'Prompt injection may be possible' real?",
+              why_it_matters: "unverified", evidence_needed: "reproduce it",
+              deployment_impact: "high", impact_label: "High",
+              status: "open", status_label: "Open", source: "derived",
+              owner: null, notes: "", review_by: null,
+              first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+            },
+          ]);
+        }
+
+        const patchMatch = path.match(/^\/api\/assurance\/unknowns\/([^/]+)\/$/);
+        if (patchMatch && method === "PATCH") {
+          if (refusePatch) return json(400, { detail: "status is not a valid choice" });
+          const uuid = patchMatch[1];
+          const patch = raw ? JSON.parse(raw) : {};
+          const merged = {
+            uuid, deployment_uuid: "dep-1", finding_uuid: "f-1",
+            question: "Is 'Prompt injection may be possible' real?",
+            why_it_matters: "unverified", evidence_needed: "reproduce it",
+            deployment_impact: patch.deployment_impact ?? "high", impact_label: "High",
+            status: patch.status ?? "open", status_label: "Open", source: "derived",
+            owner: null, notes: patch.notes ?? "", review_by: patch.review_by ?? null,
+            first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T02:00:00Z",
+            ...unknowns.get(uuid),
+          };
+          unknowns.set(uuid, merged);
+          return json(200, merged);
+        }
+
+        return json(404, { detail: `no route ${method} ${path}` });
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${port}`;
+    process.env.ATHENA_FAILSAFE_USER = "svc-operator";
+    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-secret";
+    vi.resetModules();
+    app = await makeApp();
+    user = await signIn(app);
+  });
+
+  afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    delete process.env.ATHENA_FAILSAFE_USER;
+    delete process.env.ATHENA_FAILSAFE_PASSWORD;
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("refuses assurance reads to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments");
+    expect(anon.status).toBe(401);
+  });
+
+  it("reports the control plane reachable and the credential accepted", async () => {
+    const status = await user.get("/api/assurance/status");
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ configured: true, reachable: true, authorized: true });
+    expect(sawBearer).toBe(true);
+  });
+
+  it("lists deployments with the six-state decision, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({
+      uuid: "dep-1", name: "acme-chatbot", decision: "needs_remediation",
+      decisionLabel: "Requires remediation", findingCount: 3,
+    });
+  });
+
+  it("lists findings with the evidence class surfaced", async () => {
+    const res = await user.get("/api/assurance/findings?deployment=dep-1");
+    expect(res.status).toBe(200);
+    expect(res.body[0]).toMatchObject({
+      uuid: "f-1", severity: "high", evidenceClass: "partially_verified",
+    });
+    expect(res.body[0].evidence[0]).toMatchObject({ classificationLabel: "Partially verified" });
+  });
+
+  it("lists unknowns and forwards the status/impact/deployment filters", async () => {
+    const res = await user.get("/api/assurance/unknowns?status=open&impact=high&deployment=dep-1");
+    expect(res.status).toBe(200);
+    expect(res.body[0]).toMatchObject({
+      uuid: "u-1", deploymentImpact: "high", status: "open", source: "derived",
+    });
+    expect(lastUnknownsQuery).toContain("status=open");
+    expect(lastUnknownsQuery).toContain("impact=high");
+    expect(lastUnknownsQuery).toContain("deployment=dep-1");
+  });
+
+  it("recomputes a deployment's decision", async () => {
+    const res = await user.post("/api/assurance/deployments/dep-1/recompute").send({ paused: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ decision: "ready", decisionLabel: "Ready" });
+  });
+
+  it("patches an unknown's disposition and maps camelCase to the backend", async () => {
+    const res = await user.patch("/api/assurance/unknowns/u-1").send({
+      status: "investigating", deploymentImpact: "medium", notes: "chasing vendor",
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "investigating", deploymentImpact: "medium", notes: "chasing vendor" });
+  });
+
+  it("rejects a disposition the schema will not accept", async () => {
+    const bad = await user.patch("/api/assurance/unknowns/u-1").send({ status: "bogus" });
+    expect(bad.status).toBe(400);
+  });
+
+  it("passes a backend refusal through with its reason", async () => {
+    refusePatch = true;
+    const denied = await user.patch("/api/assurance/unknowns/u-1").send({ status: "resolved" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("valid choice");
+    refusePatch = false;
+  });
+});
+
+describe("assurance BFF without a control plane", () => {
+  let app: Express;
+  let user: Awaited<ReturnType<typeof signIn>>;
+
+  beforeAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    vi.resetModules();
+    app = await makeApp();
+    user = await signIn(app);
+  });
+
+  it("says so in words on status rather than failing", async () => {
+    const status = await user.get("/api/assurance/status");
+    expect(status.status).toBe(200);
+    expect(status.body.configured).toBe(false);
+    expect(String(status.body.detail)).toMatch(/no athena control plane/i);
+  });
+
+  it("answers 503 on a read when nothing is configured", async () => {
+    const res = await user.get("/api/assurance/deployments");
+    expect(res.status).toBe(503);
+    expect(String(res.body.error)).toMatch(/no athena control plane/i);
+  });
+});
