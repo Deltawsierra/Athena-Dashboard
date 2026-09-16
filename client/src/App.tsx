@@ -35,6 +35,7 @@ import AIChat from "@/pages/AIChat";
 import DeletionManagement from "@/pages/DeletionManagement";
 import Classifiers from "@/pages/Classifiers";
 import Failsafe from "@/pages/Failsafe";
+import Assurance from "@/pages/Assurance";
 import NotFound from "@/pages/not-found";
 import { checkAuth, logout as apiLogout, isAdmin } from "@/utils/auth";
 import { applyStoredTheme } from "@/lib/theme";
@@ -62,6 +63,7 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route path="/documents" component={Documents} />
       <Route path="/pentest" component={PentestScan} />
       <Route path="/findings" component={Risks} />
+      <Route path="/assurance" component={Assurance} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/classify-cve" component={CVEClassifier} />
       <Route path="/ai-health" component={AIHealth} />

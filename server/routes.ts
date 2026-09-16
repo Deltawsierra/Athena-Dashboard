@@ -6,6 +6,7 @@ import * as assistant from "./assistant";
 import * as settings from "./settings";
 import * as engine from "./engine";
 import * as failsafe from "./failsafe";
+import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
@@ -1480,6 +1481,127 @@ export function registerRoutes(app: Express): void {
       if (failsafeUnavailable(res, cause)) return;
       throw cause;
     }
+  }));
+
+  // ==== ASSURANCE (system of record, read + disposition) ====
+  //
+  // A read-through to the Athena control plane (Athena-Backend), which is the
+  // system of record for the assurance graph: the deployments under assurance,
+  // their findings graded by how strongly each is known, the six-state
+  // deployment decision, and the Unknowns Register. The browser calls this
+  // server same-origin with its session cookie; this server reaches the backend
+  // with its service account (server/assurance.ts). Every route is behind the
+  // `/api` requireAuth guard above; these are operator reads and dispositions,
+  // not the high-stakes failsafe controls, so they are not additionally
+  // admin-gated. When no control plane is configured the calls answer 503 with
+  // a reason, and the screen says so in words rather than inventing data.
+
+  const assuranceUnavailable = (res: Response, cause: unknown): boolean => {
+    if (cause instanceof assurance.ControlPlaneUnavailable) {
+      res.status(503).json({ error: cause.message });
+      return true;
+    }
+    return false;
+  };
+  const qp = (req: Request, key: string): string | undefined =>
+    typeof req.query[key] === "string" ? (req.query[key] as string) : undefined;
+
+  app.get("/api/assurance/status", asyncHandler(async (_req, res) => {
+    // status() answers its own unreachability rather than throwing, so an
+    // unconfigured backend renders as words, not a 503.
+    res.json(await assurance.status());
+  }));
+
+  app.get("/api/assurance/deployments", asyncHandler(async (_req, res) => {
+    try {
+      res.json(await assurance.listDeployments());
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
+    try {
+      res.json(
+        await assurance.listFindings({
+          deployment: qp(req, "deployment"),
+          severity: qp(req, "severity"),
+          status: qp(req, "status"),
+        }),
+      );
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/unknowns", asyncHandler(async (req, res) => {
+    try {
+      res.json(
+        await assurance.listUnknowns({
+          deployment: qp(req, "deployment"),
+          status: qp(req, "status"),
+          impact: qp(req, "impact"),
+        }),
+      );
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  const recomputeSchema = z.object({ paused: z.boolean().optional().default(false) });
+
+  app.post("/api/assurance/deployments/:uuid/recompute", asyncHandler(async (req, res) => {
+    const { paused } = recomputeSchema.parse(req.body ?? {});
+    let result;
+    try {
+      result = await assurance.recomputeDecision(req.params.uuid, paused);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    await storage.createActivityLog({
+      action: "recomputed",
+      entityType: "assurance_deployment",
+      entityId: req.params.uuid,
+      details: { decision: result.decision, paused },
+      ...actor(req),
+    });
+    res.json(result);
+  }));
+
+  const unknownPatchSchema = z
+    .object({
+      status: z.enum(["open", "investigating", "resolved", "accepted"]).optional(),
+      deploymentImpact: z.enum(["low", "medium", "high"]).optional(),
+      notes: z.string().max(2000).optional(),
+      reviewBy: z.string().max(32).nullable().optional(),
+    })
+    .refine((v) => Object.keys(v).length > 0, { message: "name at least one field to change" });
+
+  app.patch("/api/assurance/unknowns/:uuid", asyncHandler(async (req, res) => {
+    const data = unknownPatchSchema.parse(req.body);
+    let result;
+    try {
+      result = await assurance.patchUnknown(req.params.uuid, data);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      // The backend's own refusal, verbatim, so the operator sees why.
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    await storage.createActivityLog({
+      action: "updated",
+      entityType: "assurance_unknown",
+      entityId: req.params.uuid,
+      details: { status: result.unknown.status, deploymentImpact: result.unknown.deploymentImpact },
+      ...actor(req),
+    });
+    res.json(result.unknown);
   }));
 
   // ==== FINDING LIFECYCLE ====
