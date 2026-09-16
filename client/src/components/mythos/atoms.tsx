@@ -177,6 +177,48 @@ export function EvidenceClassChip({ value, label }: { value: string; label?: str
   );
 }
 
+/* --- asset classification chip (how an asset is governed) -------------- */
+// The asset governance taxonomy for the assurance graph. The chip leads with
+// the classifications that need attention: an unmanaged or high-risk asset must
+// not read as reassuringly as an approved one, so the weaker states carry the
+// alarming tones and an unrecognised value degrades to muted rather than blank.
+export type AssetClass =
+  | "high_risk"
+  | "unmanaged"
+  | "unknown"
+  | "known"
+  | "approved"
+  | "retired";
+const ASSET_CLASS_LABEL: Record<string, string> = {
+  high_risk: "High risk",
+  unmanaged: "Unmanaged",
+  unknown: "Unknown",
+  known: "Known",
+  approved: "Approved",
+  retired: "Retired",
+};
+const ASSET_CLASS_CLASS: Record<string, string> = {
+  high_risk: "text-sev-high border-sev-high/40 bg-sev-high/10",
+  unmanaged: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  unknown: "text-muted-foreground border-border/60 bg-surface-1/50",
+  known: "text-sky-400 border-sky-500/30 bg-sky-500/10",
+  approved: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10",
+  retired: "text-muted-foreground border-dashed border-border/70 bg-surface-1/40",
+};
+export function AssetClassChip({ value, label }: { value: string; label?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        ASSET_CLASS_CLASS[value] ?? ASSET_CLASS_CLASS.unknown,
+      )}
+      title="How this asset is governed"
+    >
+      {label || ASSET_CLASS_LABEL[value] || value || "Unknown"}
+    </span>
+  );
+}
+
 /* --- coverage / meter bar ---------------------------------------------- */
 export function Meter({ percent, tone = "gold" }: { percent: number; tone?: "gold" | "emerald" | "sev" }) {
   const bar =

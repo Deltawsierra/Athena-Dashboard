@@ -46,6 +46,9 @@ export interface AssuranceFinding {
   /** The finding's honest evidence class: the weakest link among its evidence. */
   evidenceClass: string;
   evidence: AssuranceEvidence[];
+  /** The asset this finding is about, when the backend attributed it to one. */
+  assetUuid: string | null;
+  assetName: string | null;
   firstSeen: string | null;
   lastSeen: string | null;
 }
@@ -61,6 +64,23 @@ export interface AssuranceDeployment {
   findingCount: number;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+export interface AssuranceAsset {
+  uuid: string;
+  deploymentUuid: string | null;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  provider: number | null;
+  providerName: string | null;
+  findingCount: number;
+  metadata: Record<string, unknown>;
+  firstSeen: string | null;
+  lastSeen: string | null;
 }
 
 export interface AssuranceUnknown {
@@ -126,6 +146,8 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     evidence: Array.isArray(raw.evidence)
       ? (raw.evidence as Record<string, unknown>[]).map(evidence)
       : [],
+    assetUuid: strOrNull(raw.asset_uuid),
+    assetName: strOrNull(raw.asset_name),
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
   };
@@ -161,6 +183,28 @@ function unknown(raw: Record<string, unknown>): AssuranceUnknown {
     owner: raw.owner == null ? null : String(raw.owner),
     notes: str(raw.notes),
     reviewBy: strOrNull(raw.review_by),
+    firstSeen: strOrNull(raw.first_seen),
+    lastSeen: strOrNull(raw.last_seen),
+  };
+}
+
+function asset(raw: Record<string, unknown>): AssuranceAsset {
+  return {
+    uuid: str(raw.uuid),
+    deploymentUuid: strOrNull(raw.deployment_uuid),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    name: str(raw.name),
+    identifier: str(raw.identifier),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    provider: typeof raw.provider === "number" ? raw.provider : null,
+    providerName: strOrNull(raw.provider_name),
+    findingCount: num(raw.finding_count, 0),
+    metadata:
+      raw.metadata && typeof raw.metadata === "object" && !Array.isArray(raw.metadata)
+        ? (raw.metadata as Record<string, unknown>)
+        : {},
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
   };
@@ -319,6 +363,17 @@ export async function listUnknowns(
     impact: opts.impact,
   });
   return (await pagedRows(`/api/assurance/unknowns/${query}`)).map(unknown);
+}
+
+export async function listAssets(
+  opts: { deployment?: string; kind?: string; classification?: string } = {},
+): Promise<AssuranceAsset[]> {
+  const query = queryString({
+    deployment: opts.deployment,
+    kind: opts.kind,
+    classification: opts.classification,
+  });
+  return (await pagedRows(`/api/assurance/assets/${query}`)).map(asset);
 }
 
 // ==== Writes ====

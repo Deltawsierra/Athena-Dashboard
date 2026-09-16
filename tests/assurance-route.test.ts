@@ -85,6 +85,19 @@ describe("assurance BFF", () => {
           ]);
         }
 
+        if (path === "/api/assurance/assets/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "a-1", deployment_uuid: "dep-1", kind: "api", kind_label: "API",
+              name: "billing-api", identifier: "https://billing.acme.test",
+              classification: "known", classification_label: "Known",
+              provider: null, provider_name: null, finding_count: 1,
+              metadata: { region: "us-east-1" },
+              first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+            },
+          ]);
+        }
+
         if (path === "/api/assurance/unknowns/" && method === "GET") {
           lastUnknownsQuery = query;
           return json(200, [
@@ -171,6 +184,22 @@ describe("assurance BFF", () => {
       uuid: "f-1", severity: "high", evidenceClass: "partially_verified",
     });
     expect(res.body[0].evidence[0]).toMatchObject({ classificationLabel: "Partially verified" });
+  });
+
+  it("refuses the assets read to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/assets");
+    expect(anon.status).toBe(401);
+  });
+
+  it("lists assets, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/assets");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({
+      uuid: "a-1", deploymentUuid: "dep-1", kind: "api", kindLabel: "API",
+      name: "billing-api", classification: "known", classificationLabel: "Known",
+      providerName: null, findingCount: 1,
+    });
   });
 
   it("lists unknowns and forwards the status/impact/deployment filters", async () => {
@@ -332,6 +361,21 @@ describe("assurance BFF against a paginated control plane", () => {
           return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/deployments/?page=2`, previous: null, results: [row("dep-a", "first")] });
         }
 
+        if (path === "/api/assurance/assets/" && method === "GET") {
+          const page = new URLSearchParams(query).get("page");
+          const row = (uuid: string, name: string) => ({
+            uuid, deployment_uuid: "dep-1", kind: "model", kind_label: "Model",
+            name, identifier: `id-${uuid}`,
+            classification: "approved", classification_label: "Approved",
+            provider: null, provider_name: null, finding_count: 0, metadata: {},
+            first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+          });
+          if (page === "2") {
+            return json(200, { count: 2, next: null, previous: `http://${req.headers.host}/api/assurance/assets/`, results: [row("asset-b", "second")] });
+          }
+          return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/assets/?page=2`, previous: null, results: [row("asset-a", "first")] });
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -357,5 +401,12 @@ describe("assurance BFF against a paginated control plane", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
     expect(res.body.map((d: { uuid: string }) => d.uuid)).toEqual(["dep-a", "dep-b"]);
+  });
+
+  it("follows the DRF `next` link across asset pages and returns every row", async () => {
+    const res = await user.get("/api/assurance/assets");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.map((a: { uuid: string }) => a.uuid)).toEqual(["asset-a", "asset-b"]);
   });
 });

@@ -16,11 +16,12 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Boxes, HelpCircle, RefreshCw, ShieldQuestion } from "lucide-react";
+import { Boxes, HelpCircle, Network, RefreshCw, ShieldQuestion } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
 import { Divider } from "@/components/mythos/Ornament";
 import {
+  AssetClassChip,
   DecisionPill,
   EvidenceClassChip,
   SeverityPill,
@@ -54,6 +55,18 @@ interface Finding {
   status: string;
   evidenceClass: string;
   location: string;
+  assetName: string | null;
+}
+interface Asset {
+  uuid: string;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  providerName: string | null;
+  findingCount: number;
 }
 interface Unknown {
   uuid: string;
@@ -70,6 +83,14 @@ interface Unknown {
 }
 
 const UNKNOWN_STATUSES = ["open", "investigating", "resolved", "accepted"] as const;
+// The classifications that need attention lead: an unmanaged or high-risk asset
+// is the one an operator has to see first, an approved or retired one last. An
+// unrecognised classification sorts after the known order rather than vanishing.
+const ASSET_CLASS_ORDER = ["high_risk", "unmanaged", "unknown", "known", "approved", "retired"];
+function assetRank(classification: string): number {
+  const i = ASSET_CLASS_ORDER.indexOf(classification);
+  return i === -1 ? ASSET_CLASS_ORDER.length : i;
+}
 const IMPACT_TONE: Record<string, string> = {
   high: "text-sev-high",
   medium: "text-sev-medium",
@@ -123,6 +144,10 @@ export default function Assurance() {
     queryKey: ["/api/assurance/unknowns", selected ? { deployment: selected } : {}],
     enabled: reachable,
   });
+  const { data: assets = [] } = useQuery<Asset[]>({
+    queryKey: ["/api/assurance/assets", selected ? { deployment: selected } : {}],
+    enabled: reachable,
+  });
 
   const recompute = useMutation({
     mutationFn: async (uuid: string) =>
@@ -149,6 +174,15 @@ export default function Assurance() {
   const openUnknowns = useMemo(
     () => unknowns.filter((u) => u.status === "open" || u.status === "investigating"),
     [unknowns],
+  );
+
+  const sortedAssets = useMemo(
+    () =>
+      [...assets].sort((a, b) => {
+        const byClass = assetRank(a.classification) - assetRank(b.classification);
+        return byClass !== 0 ? byClass : a.name.localeCompare(b.name);
+      }),
+    [assets],
   );
 
   return (
@@ -272,6 +306,36 @@ export default function Assurance() {
             )}
           </GlassCard>
 
+          {/* The asset graph: what is deployed, and how each thing is governed. */}
+          <GlassCard>
+            <div className="mb-4 flex items-center gap-2">
+              <Network className="h-4 w-4 text-primary" />
+              <h2 className="text-[15px] font-semibold text-foreground">Assets</h2>
+            </div>
+            {sortedAssets.length === 0 ? (
+              <p className="text-[13px] text-muted-foreground">No assets discovered yet.</p>
+            ) : (
+              <ul className="space-y-2.5">
+                {sortedAssets.map((a) => (
+                  <li
+                    key={a.uuid}
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-border/40 bg-surface-0/40 p-3"
+                  >
+                    <span className="text-[13px] font-semibold text-foreground">{a.name}</span>
+                    <span className="text-[12px] text-muted-foreground">{a.kindLabel}</span>
+                    <AssetClassChip value={a.classification} label={a.classificationLabel || undefined} />
+                    <span className="text-[11px] text-muted-foreground">
+                      {a.findingCount} {a.findingCount === 1 ? "finding" : "findings"}
+                    </span>
+                    {a.providerName && (
+                      <span className="text-[11px] text-muted-foreground">· {a.providerName}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </GlassCard>
+
           <div className="grid gap-6 lg:grid-cols-2">
             {/* Findings, with the evidence class surfaced. */}
             <GlassCard>
@@ -289,6 +353,9 @@ export default function Assurance() {
                       <div className="mt-2 flex flex-wrap items-center gap-2">
                         <EvidenceClassChip value={f.evidenceClass} />
                         <span className="text-[11px] text-muted-foreground">{f.status}</span>
+                        {f.assetName && (
+                          <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
+                        )}
                         {f.location && (
                           <span className="text-[11px] text-muted-foreground">· {f.location}</span>
                         )}
