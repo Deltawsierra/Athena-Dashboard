@@ -48,13 +48,18 @@ async function throwIfResNotOk(res: Response): Promise<void> {
     throw new UnauthorizedError();
   }
 
-  // Prefer the server's JSON message; fall back to text, then status.
+  // Prefer the server's JSON `message`; then its `error` (the assurance and
+  // failsafe routes answer with `{error}`, and the literal `{"error":"…"}` is
+  // not a sentence to show a person); fall back to text, then status.
   const body = await res.clone().json().catch(() => null);
   if (body && typeof body.message === "string") {
     const issues = Array.isArray(body.issues)
       ? body.issues.map((i: { path: string; message: string }) => `${i.path}: ${i.message}`).join("; ")
       : "";
     throw new Error(issues ? `${body.message} (${issues})` : body.message);
+  }
+  if (body && typeof body.error === "string") {
+    throw new Error(body.error);
   }
   const text = (await res.text().catch(() => "")) || res.statusText;
   throw new Error(text || `Request failed with status ${res.status}`);

@@ -1491,10 +1491,12 @@ export function registerRoutes(app: Express): void {
   // deployment decision, and the Unknowns Register. The browser calls this
   // server same-origin with its session cookie; this server reaches the backend
   // with its service account (server/assurance.ts). Every route is behind the
-  // `/api` requireAuth guard above; these are operator reads and dispositions,
-  // not the high-stakes failsafe controls, so they are not additionally
-  // admin-gated. When no control plane is configured the calls answer 503 with
-  // a reason, and the screen says so in words rather than inventing data.
+  // `/api` requireAuth guard above; the reads stay open to any signed-in
+  // operator, but the two writes -- recompute a decision, dispose of an Unknown
+  // -- are admin-only, so a non-admin gets a clean 403 at the front door rather
+  // than reaching the backend (which enforces the same rule independently).
+  // When no control plane is configured the calls answer 503 with a reason, and
+  // the screen says so in words rather than inventing data.
 
   const assuranceUnavailable = (res: Response, cause: unknown): boolean => {
     if (cause instanceof assurance.ControlPlaneUnavailable) {
@@ -1553,7 +1555,7 @@ export function registerRoutes(app: Express): void {
 
   const recomputeSchema = z.object({ paused: z.boolean().optional().default(false) });
 
-  app.post("/api/assurance/deployments/:uuid/recompute", asyncHandler(async (req, res) => {
+  app.post("/api/assurance/deployments/:uuid/recompute", requireAdmin, asyncHandler(async (req, res) => {
     const { paused } = recomputeSchema.parse(req.body ?? {});
     let result;
     try {
@@ -1562,6 +1564,11 @@ export function registerRoutes(app: Express): void {
       if (assuranceUnavailable(res, cause)) return;
       throw cause;
     }
+    if (!result.ok) {
+      // The backend's own refusal (a deployment that is gone, a credential that
+      // may not recompute it), verbatim, so the operator sees why.
+      return void res.status(result.status).json({ error: result.detail });
+    }
     await storage.createActivityLog({
       action: "recomputed",
       entityType: "assurance_deployment",
@@ -1569,7 +1576,7 @@ export function registerRoutes(app: Express): void {
       details: { decision: result.decision, paused },
       ...actor(req),
     });
-    res.json(result);
+    res.json({ decision: result.decision, decisionLabel: result.decisionLabel });
   }));
 
   const unknownPatchSchema = z
@@ -1581,7 +1588,7 @@ export function registerRoutes(app: Express): void {
     })
     .refine((v) => Object.keys(v).length > 0, { message: "name at least one field to change" });
 
-  app.patch("/api/assurance/unknowns/:uuid", asyncHandler(async (req, res) => {
+  app.patch("/api/assurance/unknowns/:uuid", requireAdmin, asyncHandler(async (req, res) => {
     const data = unknownPatchSchema.parse(req.body);
     let result;
     try {

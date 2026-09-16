@@ -77,14 +77,35 @@ const IMPACT_TONE: Record<string, string> = {
 };
 
 function asSeverity(s: string): Severity {
-  return (["critical", "high", "medium", "low", "info"].includes(s) ? s : "info") as Severity;
+  // Lowercased first: a backend "Critical"/"HIGH" must not collapse to the Info
+  // pill because the case did not match.
+  const lower = (s ?? "").toLowerCase();
+  return (["critical", "high", "medium", "low", "info"].includes(lower) ? lower : "info") as Severity;
+}
+
+/**
+ * The banner headline, accurate to why the console is not reading. Configured
+ * but unreachable, reachable but the credential was rejected, and reachable but
+ * the backend errored are three different facts, and saying "not answering" for
+ * all of them is a lie about a backend that answered.
+ */
+function bannerHeadline(status: AssuranceStatus): string {
+  if (!status.configured) return "No control plane is configured.";
+  if (status.reachable === false) return "The control plane is not answering.";
+  if (status.authorized === false) return "The control plane rejected this console's credential.";
+  return "The control plane returned an error.";
 }
 
 export default function Assurance() {
   const { toast } = useToast();
   const [selected, setSelected] = useState<string | "">("");
 
-  const { data: status } = useQuery<AssuranceStatus>({
+  const {
+    data: status,
+    isLoading: statusLoading,
+    isError: statusError,
+    error: statusErr,
+  } = useQuery<AssuranceStatus>({
     queryKey: ["/api/assurance/status"],
     refetchInterval: 30_000,
   });
@@ -139,14 +160,33 @@ export default function Assurance() {
         verbs={["Scan", "Analyze", "Evidence", "Deploy"]}
       />
 
-      {/* Control-plane honesty banner. */}
+      {/* Still checking: never a bare hero with no explanation. */}
+      {statusLoading && !statusError && (
+        <GlassCard bodyClassName="flex items-center gap-3">
+          <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
+          <p className="text-[13px] text-muted-foreground">Checking the control plane…</p>
+        </GlassCard>
+      )}
+
+      {/* The status query itself failed (this server unreachable, not the backend). */}
+      {statusError && (
+        <GlassCard bodyClassName="flex items-start gap-3">
+          <ShieldQuestion className="mt-0.5 h-5 w-5 shrink-0 text-sev-high" />
+          <div className="text-[13px] leading-relaxed">
+            <p className="font-medium text-foreground">Could not check the control plane.</p>
+            <p className="mt-1 text-muted-foreground">
+              {statusErr instanceof Error ? statusErr.message : "The status request failed."}
+            </p>
+          </div>
+        </GlassCard>
+      )}
+
+      {/* Control-plane honesty banner, accurate to why it is not reading. */}
       {status && !reachable && (
         <GlassCard bodyClassName="flex items-start gap-3">
           <ShieldQuestion className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
           <div className="text-[13px] leading-relaxed">
-            <p className="font-medium text-foreground">
-              {status.configured ? "The control plane is not answering." : "No control plane is configured."}
-            </p>
+            <p className="font-medium text-foreground">{bannerHeadline(status)}</p>
             <p className="mt-1 text-muted-foreground">{status.detail}</p>
           </div>
         </GlassCard>
@@ -204,10 +244,15 @@ export default function Assurance() {
                           <button
                             className="inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-primary disabled:opacity-50"
                             onClick={() => recompute.mutate(d.uuid)}
-                            disabled={recompute.isPending}
+                            disabled={recompute.isPending && recompute.variables === d.uuid}
                             title="Recompute the decision from current findings"
                           >
-                            <RefreshCw className={cn("h-3.5 w-3.5", recompute.isPending && "animate-spin")} />
+                            <RefreshCw
+                              className={cn(
+                                "h-3.5 w-3.5",
+                                recompute.isPending && recompute.variables === d.uuid && "animate-spin",
+                              )}
+                            />
                             Recompute
                           </button>
                         </td>
@@ -294,7 +339,7 @@ export default function Assurance() {
                           id={`u-${u.uuid}`}
                           className="rounded-md border border-border/60 bg-surface-1/60 px-2 py-1 text-[12px] text-foreground"
                           value={u.status}
-                          disabled={setDisposition.isPending}
+                          disabled={setDisposition.isPending && setDisposition.variables?.uuid === u.uuid}
                           onChange={(e) => setDisposition.mutate({ uuid: u.uuid, status: e.target.value })}
                         >
                           {UNKNOWN_STATUSES.map((s) => (
