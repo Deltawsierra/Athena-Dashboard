@@ -1553,6 +1553,21 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  app.get("/api/assurance/assets", asyncHandler(async (req, res) => {
+    try {
+      res.json(
+        await assurance.listAssets({
+          deployment: qp(req, "deployment"),
+          kind: qp(req, "kind"),
+          classification: qp(req, "classification"),
+        }),
+      );
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   const recomputeSchema = z.object({ paused: z.boolean().optional().default(false) });
 
   app.post("/api/assurance/deployments/:uuid/recompute", requireAdmin, asyncHandler(async (req, res) => {
