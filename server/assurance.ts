@@ -525,3 +525,106 @@ export async function patchUnknown(
   }
   return { ok: true, unknown: unknown((await response.json()) as Record<string, unknown>) };
 }
+
+/**
+ * A write that expects a JSON body back (create/update). Backend refusals
+ * (400/403/404/409 — a validation error, a duplicate field, the credential not
+ * being allowed to write) are returned to the caller with their reason rather
+ * than laundered into a 503, so the console can show exactly why the write did
+ * not take. Genuine unavailability (5xx, network) still throws.
+ */
+async function writeJson<T>(
+  path: string,
+  method: "POST" | "PATCH",
+  wire: Record<string, unknown>,
+  map: (raw: Record<string, unknown>) => T,
+): Promise<{ ok: true; value: T } | { ok: false; status: number; detail: string }> {
+  const response = await call(path, { method, body: JSON.stringify(wire) });
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return { ok: true, value: map((await response.json()) as Record<string, unknown>) };
+}
+
+/** The identity a human declares when registering a provider by hand. */
+export interface ProviderInput {
+  name: string;
+  kind: string;
+}
+
+/**
+ * Register a provider a deployment relies on (a vector DB, a gateway) — one that
+ * asset discovery did not auto-register from an LLM target. Admin-only on the
+ * control plane; the BFF route gates it too.
+ */
+export async function createProvider(input: ProviderInput) {
+  return writeJson("/api/assurance/providers/", "POST", { name: input.name, kind: input.kind }, provider);
+}
+
+/** The fields a human sets when recording or editing a provider assertion. */
+export interface ProviderAssertionInput {
+  provider: string;
+  field: string;
+  value: string;
+  evidenceClass?: string;
+  source?: string;
+  notes?: string;
+}
+export interface ProviderAssertionPatch {
+  value?: string;
+  evidenceClass?: string;
+  source?: string;
+  notes?: string;
+}
+
+function assertionWire(input: Partial<ProviderAssertionInput>): Record<string, unknown> {
+  const wire: Record<string, unknown> = {};
+  if (input.provider !== undefined) wire.provider = input.provider;
+  if (input.field !== undefined) wire.field = input.field;
+  if (input.value !== undefined) wire.value = input.value;
+  if (input.evidenceClass !== undefined) wire.evidence_class = input.evidenceClass;
+  if (input.source !== undefined) wire.source = input.source;
+  if (input.notes !== undefined) wire.notes = input.notes;
+  return wire;
+}
+
+/** Record a new graded fact in a provider's assurance profile. */
+export async function createProviderAssertion(input: ProviderAssertionInput) {
+  return writeJson("/api/assurance/provider-assertions/", "POST", assertionWire(input), assertion);
+}
+
+/** Edit an existing assertion in place (its value, evidence class, source, notes). */
+export async function updateProviderAssertion(uuid: string, patch: ProviderAssertionPatch) {
+  return writeJson(
+    `/api/assurance/provider-assertions/${encodeURIComponent(uuid)}/`,
+    "PATCH",
+    assertionWire(patch),
+    assertion,
+  );
+}
+
+/**
+ * Delete an assertion. A backend refusal (403/404) is returned to the caller;
+ * a 204 (or 200) is success. Genuine unavailability throws.
+ */
+export async function deleteProviderAssertion(
+  uuid: string,
+): Promise<{ ok: true } | { ok: false; status: number; detail: string }> {
+  const response = await call(`/api/assurance/provider-assertions/${encodeURIComponent(uuid)}/`, {
+    method: "DELETE",
+  });
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return { ok: true };
+}

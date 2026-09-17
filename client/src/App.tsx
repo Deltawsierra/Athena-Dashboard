@@ -63,7 +63,7 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route path="/documents" component={Documents} />
       <Route path="/pentest" component={PentestScan} />
       <Route path="/findings" component={Risks} />
-      <Route path="/assurance" component={Assurance} />
+      <Route path="/assurance">{() => <Assurance admin={admin} />}</Route>
       <Route path="/compliance" component={Compliance} />
       <Route path="/classify-cve" component={CVEClassifier} />
       <Route path="/ai-health" component={AIHealth} />

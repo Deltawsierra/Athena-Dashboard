@@ -1635,6 +1635,149 @@ export function registerRoutes(app: Express): void {
     res.json(result.unknown);
   }));
 
+  // ==== PROVIDER ASSURANCE PROFILE (admin-only writes) ====
+  //
+  // A provider's profile is declared, not measured, so a human records it: an
+  // admin registers a provider a deployment relies on and records each graded
+  // fact (region, retention, logging, training) with the evidence class that is
+  // honest for it. Reads are open (above); every write is admin-only here and on
+  // the control plane, and a backend refusal (a duplicate field, a validation
+  // error) is returned verbatim so the operator sees why.
+
+  // Mirrors assurance/models.py; kept in lockstep so the console never offers a
+  // choice the backend will reject.
+  const EVIDENCE_CLASSES = [
+    "technically_verified",
+    "configuration_verified",
+    "document_supported",
+    "contractually_stated",
+    "vendor_asserted",
+    "partially_verified",
+    "unknown",
+    "not_documented",
+  ] as const;
+  const ASSERTION_FIELDS = [
+    "region",
+    "data_retention",
+    "logging",
+    "trains_on_data",
+    "subprocessors",
+    "certifications",
+    "dpa",
+  ] as const;
+  const ASSERTION_SOURCES = ["vendor_doc", "contract", "self_declared", "measured"] as const;
+  const PROVIDER_KINDS = [
+    "model_provider",
+    "gateway",
+    "embedding",
+    "vector_db",
+    "observability",
+    "cloud",
+    "other",
+  ] as const;
+
+  const providerCreateSchema = z.object({
+    name: z.string().trim().min(1).max(200),
+    kind: z.enum(PROVIDER_KINDS),
+  });
+
+  app.post("/api/assurance/providers", requireAdmin, asyncHandler(async (req, res) => {
+    const input = providerCreateSchema.parse(req.body);
+    let result;
+    try {
+      result = await assurance.createProvider(input);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "created",
+      entityType: "assurance_provider",
+      entityId: result.value.uuid,
+      details: { name: result.value.name, kind: result.value.kind },
+      ...actor(req),
+    });
+    res.status(201).json(result.value);
+  }));
+
+  const assertionCreateSchema = z.object({
+    provider: z.string().trim().min(1),
+    field: z.enum(ASSERTION_FIELDS),
+    value: z.string().max(4000).optional().default(""),
+    evidenceClass: z.enum(EVIDENCE_CLASSES).optional(),
+    source: z.enum(ASSERTION_SOURCES).optional(),
+    notes: z.string().max(4000).optional(),
+  });
+
+  app.post("/api/assurance/provider-assertions", requireAdmin, asyncHandler(async (req, res) => {
+    const input = assertionCreateSchema.parse(req.body);
+    let result;
+    try {
+      result = await assurance.createProviderAssertion(input);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "created",
+      entityType: "assurance_provider_assertion",
+      entityId: result.value.uuid,
+      details: { provider: input.provider, field: result.value.field, evidenceClass: result.value.evidenceClass },
+      ...actor(req),
+    });
+    res.status(201).json(result.value);
+  }));
+
+  const assertionPatchSchema = z
+    .object({
+      value: z.string().max(4000).optional(),
+      evidenceClass: z.enum(EVIDENCE_CLASSES).optional(),
+      source: z.enum(ASSERTION_SOURCES).optional(),
+      notes: z.string().max(4000).optional(),
+    })
+    .refine((v) => Object.keys(v).length > 0, { message: "name at least one field to change" });
+
+  app.patch("/api/assurance/provider-assertions/:uuid", requireAdmin, asyncHandler(async (req, res) => {
+    const patch = assertionPatchSchema.parse(req.body);
+    let result;
+    try {
+      result = await assurance.updateProviderAssertion(req.params.uuid, patch);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "updated",
+      entityType: "assurance_provider_assertion",
+      entityId: req.params.uuid,
+      details: { field: result.value.field, evidenceClass: result.value.evidenceClass },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  app.delete("/api/assurance/provider-assertions/:uuid", requireAdmin, asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await assurance.deleteProviderAssertion(req.params.uuid);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "deleted",
+      entityType: "assurance_provider_assertion",
+      entityId: req.params.uuid,
+      details: {},
+      ...actor(req),
+    });
+    res.status(204).end();
+  }));
+
   // ==== FINDING LIFECYCLE ====
   //
   // A finding as a thing with a life: an identity that survives a rescan, an

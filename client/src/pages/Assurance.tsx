@@ -33,8 +33,11 @@ import {
   HelpCircle,
   LayoutList,
   Network,
+  Pencil,
+  Plus,
   RefreshCw,
   ShieldQuestion,
+  Trash2,
 } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
@@ -176,6 +179,417 @@ function groupBy<T>(rows: T[], keyOf: (row: T) => string | null): Map<string, T[
   return m;
 }
 
+// The admin editing vocabularies, kept in lockstep with assurance/models.py and
+// the BFF's write schemas so the console never offers a choice the backend
+// rejects. [value, label] pairs, strongest evidence first.
+const FIELD_OPTIONS: [string, string][] = [
+  ["region", "Data region"],
+  ["data_retention", "Data retention"],
+  ["logging", "Logging"],
+  ["trains_on_data", "Trains on customer data"],
+  ["subprocessors", "Subprocessors"],
+  ["certifications", "Certifications"],
+  ["dpa", "Data-processing agreement"],
+];
+const EVIDENCE_OPTIONS: [string, string][] = [
+  ["technically_verified", "Technically verified"],
+  ["configuration_verified", "Config verified"],
+  ["document_supported", "Document supported"],
+  ["contractually_stated", "Contractually stated"],
+  ["vendor_asserted", "Vendor asserted"],
+  ["partially_verified", "Partially verified"],
+  ["unknown", "Unknown"],
+  ["not_documented", "Not documented"],
+];
+const SOURCE_OPTIONS: [string, string][] = [
+  ["vendor_doc", "Vendor documentation"],
+  ["contract", "Contract / DPA"],
+  ["self_declared", "Self-declared"],
+  ["measured", "Independently measured"],
+];
+const PROVIDER_KIND_OPTIONS: [string, string][] = [
+  ["model_provider", "Model provider"],
+  ["gateway", "AI gateway"],
+  ["embedding", "Embedding provider"],
+  ["vector_db", "Vector database"],
+  ["observability", "Observability / logging"],
+  ["cloud", "Cloud"],
+  ["other", "Other"],
+];
+
+const fieldInput =
+  "rounded-md border border-border/60 bg-surface-1/60 px-2 py-1 text-[12px] text-foreground";
+
+/** The values an assertion form collects. `field` is set only when creating. */
+interface AssertionFormValue {
+  field?: string;
+  value: string;
+  evidenceClass: string;
+  source: string;
+}
+
+/**
+ * A form for recording or editing one graded provider fact. When `fieldChoices`
+ * is given it is a create form (the field is chosen from the ones not yet
+ * declared); otherwise it edits an existing fact in place and the field is
+ * fixed. Evidence class defaults to `vendor_asserted` — a fact is a claim until
+ * something stronger backs it.
+ */
+function AssertionForm({
+  fieldChoices,
+  initial,
+  submitLabel,
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  fieldChoices?: [string, string][];
+  initial?: Partial<AssertionFormValue>;
+  submitLabel: string;
+  pending: boolean;
+  onSubmit: (v: AssertionFormValue) => void;
+  onCancel: () => void;
+}) {
+  const [field, setField] = useState(initial?.field ?? fieldChoices?.[0]?.[0] ?? "");
+  const [value, setValue] = useState(initial?.value ?? "");
+  const [evidenceClass, setEvidenceClass] = useState(initial?.evidenceClass ?? "vendor_asserted");
+  const [source, setSource] = useState(initial?.source ?? "self_declared");
+  const isCreate = fieldChoices !== undefined;
+
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
+      {isCreate && (
+        <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          Fact
+          <select className={fieldInput} value={field} onChange={(e) => setField(e.target.value)}>
+            {fieldChoices!.map(([v, l]) => (
+              <option key={v} value={v}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      <textarea
+        className={cn(fieldInput, "w-full")}
+        rows={2}
+        value={value}
+        placeholder="The vendor's stated value — e.g. 'us-east-1', '30 days', 'No — zero-retention endpoint', 'SOC 2 Type II'"
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          Evidence
+          <select
+            className={fieldInput}
+            value={evidenceClass}
+            onChange={(e) => setEvidenceClass(e.target.value)}
+          >
+            {EVIDENCE_OPTIONS.map(([v, l]) => (
+              <option key={v} value={v}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          Source
+          <select className={fieldInput} value={source} onChange={(e) => setSource(e.target.value)}>
+            {SOURCE_OPTIONS.map(([v, l]) => (
+              <option key={v} value={v}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded-md bg-primary/15 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+          disabled={pending || (isCreate && !field)}
+          onClick={() => onSubmit({ field: isCreate ? field : undefined, value, evidenceClass, source })}
+        >
+          {submitLabel}
+        </button>
+        <button
+          className="text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+          disabled={pending}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** A form for registering a provider a deployment relies on. */
+function ProviderForm({
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  pending: boolean;
+  onSubmit: (v: { name: string; kind: string }) => void;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState("model_provider");
+  return (
+    <div className="mb-3 space-y-2 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          className={cn(fieldInput, "min-w-[12rem] flex-1")}
+          value={name}
+          placeholder="Provider name — e.g. Pinecone, Cloudflare AI Gateway"
+          onChange={(e) => setName(e.target.value)}
+        />
+        <select className={fieldInput} value={kind} onChange={(e) => setKind(e.target.value)}>
+          {PROVIDER_KIND_OPTIONS.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded-md bg-primary/15 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+          disabled={pending || !name.trim()}
+          onClick={() => onSubmit({ name: name.trim(), kind })}
+        >
+          Add provider
+        </button>
+        <button
+          className="text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+          disabled={pending}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface ProviderMutations {
+  createProvider: (v: { name: string; kind: string }) => Promise<unknown>;
+  creatingProvider: boolean;
+  createAssertion: (v: {
+    provider: string;
+    field: string;
+    value: string;
+    evidenceClass: string;
+    source: string;
+  }) => Promise<unknown>;
+  creatingAssertion: boolean;
+  updateAssertion: (
+    uuid: string,
+    patch: { value: string; evidenceClass: string; source: string },
+  ) => Promise<unknown>;
+  updatingAssertionUuid: string | null;
+  deleteAssertion: (uuid: string) => Promise<unknown>;
+  deletingAssertionUuid: string | null;
+}
+
+/**
+ * The provider registry with its admin editing controls. Reads render for
+ * everyone; the create/edit/delete affordances render only for an admin, and
+ * even then the control plane is the real gate — a non-admin who forged a
+ * request is refused there. Forms close on a resolved write and stay open on a
+ * rejected one (the mutation surfaces the backend's reason in a toast), so an
+ * operator never loses what they typed to a refusal.
+ */
+function ProvidersRegistry({
+  providers,
+  admin,
+  m,
+}: {
+  providers: Provider[];
+  admin: boolean;
+  m: ProviderMutations;
+}) {
+  const [addingProvider, setAddingProvider] = useState(false);
+  const [addingAssertionFor, setAddingAssertionFor] = useState<string | null>(null);
+  const [editingAssertion, setEditingAssertion] = useState<string | null>(null);
+
+  const submitNewProvider = async (v: { name: string; kind: string }) => {
+    try {
+      await m.createProvider(v);
+      setAddingProvider(false);
+    } catch {
+      /* the mutation toasts the reason; keep the form open */
+    }
+  };
+
+  return (
+    <GlassCard>
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Building2 className="h-4 w-4 text-primary" />
+          <h2 className="text-[15px] font-semibold text-foreground">Providers</h2>
+        </div>
+        {admin && !addingProvider && (
+          <button
+            className="inline-flex items-center gap-1 text-[12px] text-primary hover:underline"
+            onClick={() => setAddingProvider(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add provider
+          </button>
+        )}
+      </div>
+
+      {admin && addingProvider && (
+        <ProviderForm
+          pending={m.creatingProvider}
+          onSubmit={submitNewProvider}
+          onCancel={() => setAddingProvider(false)}
+        />
+      )}
+
+      {providers.length === 0 ? (
+        <p className="text-[13px] text-muted-foreground">
+          {admin
+            ? "No providers recorded yet. Add the vendors this deployment relies on."
+            : "No providers recorded yet."}
+        </p>
+      ) : (
+        <ul className="space-y-3">
+          {providers.map((p) => {
+            const declaredFields = new Set(p.assertions.map((a) => a.field));
+            const availableFields = FIELD_OPTIONS.filter(([v]) => !declaredFields.has(v));
+            return (
+              <li key={p.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                  <span className="text-[13px] font-semibold text-foreground">{p.name}</span>
+                  <span className="text-[12px] text-muted-foreground">{p.kindLabel}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+                  <span>
+                    {p.profile.declaredFields} {p.profile.declaredFields === 1 ? "fact" : "facts"}
+                  </span>
+                  {p.profile.weakestEvidence && (
+                    <span className="flex items-center gap-1.5">
+                      <span>weakest:</span>
+                      <EvidenceClassChip value={p.profile.weakestEvidence} />
+                    </span>
+                  )}
+                </div>
+
+                {p.assertions.length === 0 ? (
+                  <p className="mt-2 text-[12px] text-muted-foreground">No profile facts recorded.</p>
+                ) : (
+                  <ul className="mt-2 space-y-1.5">
+                    {p.assertions.map((a) =>
+                      admin && editingAssertion === a.uuid ? (
+                        <li key={a.uuid} className="border-t border-border/30 pt-1.5">
+                          <span className="text-[11px] text-muted-foreground">{a.fieldLabel}</span>
+                          <AssertionForm
+                            initial={{ value: a.value, evidenceClass: a.evidenceClass, source: a.source }}
+                            submitLabel="Save"
+                            pending={m.updatingAssertionUuid === a.uuid}
+                            onSubmit={async (v) => {
+                              try {
+                                await m.updateAssertion(a.uuid, {
+                                  value: v.value,
+                                  evidenceClass: v.evidenceClass,
+                                  source: v.source,
+                                });
+                                setEditingAssertion(null);
+                              } catch {
+                                /* keep the form open; the reason is toasted */
+                              }
+                            }}
+                            onCancel={() => setEditingAssertion(null)}
+                          />
+                        </li>
+                      ) : (
+                        <li
+                          key={a.uuid}
+                          className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/30 pt-1.5"
+                        >
+                          <span className="min-w-[9rem] text-[12px] text-muted-foreground">
+                            {a.fieldLabel}
+                          </span>
+                          <span className="flex-1 text-[12px] text-foreground">{a.value}</span>
+                          <EvidenceClassChip value={a.evidenceClass} />
+                          {admin && (
+                            <span className="flex items-center gap-2">
+                              <button
+                                className="text-muted-foreground hover:text-primary disabled:opacity-50"
+                                disabled={m.deletingAssertionUuid === a.uuid}
+                                onClick={() => {
+                                  setAddingAssertionFor(null);
+                                  setEditingAssertion(a.uuid);
+                                }}
+                                title="Edit this fact"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                className="text-muted-foreground hover:text-sev-high disabled:opacity-50"
+                                disabled={m.deletingAssertionUuid === a.uuid}
+                                onClick={() => void m.deleteAssertion(a.uuid).catch(() => {})}
+                                title="Delete this fact"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </span>
+                          )}
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                )}
+
+                {admin &&
+                  (addingAssertionFor === p.uuid ? (
+                    <AssertionForm
+                      fieldChoices={availableFields}
+                      submitLabel="Record fact"
+                      pending={m.creatingAssertion}
+                      onSubmit={async (v) => {
+                        try {
+                          await m.createAssertion({
+                            provider: p.uuid,
+                            field: v.field ?? "",
+                            value: v.value,
+                            evidenceClass: v.evidenceClass,
+                            source: v.source,
+                          });
+                          setAddingAssertionFor(null);
+                        } catch {
+                          /* keep the form open; the reason is toasted */
+                        }
+                      }}
+                      onCancel={() => setAddingAssertionFor(null)}
+                    />
+                  ) : availableFields.length > 0 ? (
+                    <button
+                      className="mt-2 inline-flex items-center gap-1 text-[12px] text-primary hover:underline"
+                      onClick={() => {
+                        setEditingAssertion(null);
+                        setAddingAssertionFor(p.uuid);
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add fact
+                    </button>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      Every profile field is declared. Edit a fact to change it.
+                    </p>
+                  ))}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </GlassCard>
+  );
+}
+
 function asSeverity(s: string): Severity {
   // Lowercased first: a backend "Critical"/"HIGH" must not collapse to the Info
   // pill because the case did not match.
@@ -305,7 +719,7 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
   );
 }
 
-export default function Assurance() {
+export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
   // List view: the deployment a reader has narrowed the flat tables to.
@@ -374,6 +788,78 @@ export default function Assurance() {
   const onDisposition = (uuid: string, next: string) => setDisposition.mutate({ uuid, status: next });
   const dispositionPending = (uuid: string) =>
     setDisposition.isPending && setDisposition.variables?.uuid === uuid;
+
+  // ---- Provider profile editing (admin-only; the control plane is the gate) ----
+
+  const invalidateProviders = () =>
+    queryClient.invalidateQueries({ queryKey: ["/api/assurance/providers"] });
+
+  const createProvider = useMutation({
+    mutationFn: async (input: { name: string; kind: string }) =>
+      (await apiRequest("POST", "/api/assurance/providers", input)).json(),
+    onSuccess: () => {
+      invalidateProviders();
+      toast({ title: "Provider added" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not add provider", description: error.message, variant: "destructive" }),
+  });
+
+  const createAssertion = useMutation({
+    mutationFn: async (input: {
+      provider: string;
+      field: string;
+      value: string;
+      evidenceClass: string;
+      source: string;
+    }) => (await apiRequest("POST", "/api/assurance/provider-assertions", input)).json(),
+    onSuccess: () => {
+      invalidateProviders();
+      toast({ title: "Fact recorded" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not record fact", description: error.message, variant: "destructive" }),
+  });
+
+  const updateAssertion = useMutation({
+    mutationFn: async ({
+      uuid,
+      patch,
+    }: {
+      uuid: string;
+      patch: { value: string; evidenceClass: string; source: string };
+    }) => (await apiRequest("PATCH", `/api/assurance/provider-assertions/${uuid}`, patch)).json(),
+    onSuccess: () => {
+      invalidateProviders();
+      toast({ title: "Fact updated" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not update fact", description: error.message, variant: "destructive" }),
+  });
+
+  const deleteAssertion = useMutation({
+    mutationFn: async (uuid: string) => {
+      await apiRequest("DELETE", `/api/assurance/provider-assertions/${uuid}`);
+    },
+    onSuccess: () => {
+      invalidateProviders();
+      toast({ title: "Fact removed" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not remove fact", description: error.message, variant: "destructive" }),
+  });
+
+  const providerMutations: ProviderMutations = {
+    createProvider: (v) => createProvider.mutateAsync(v),
+    creatingProvider: createProvider.isPending,
+    createAssertion: (v) => createAssertion.mutateAsync(v),
+    creatingAssertion: createAssertion.isPending,
+    updateAssertion: (uuid, patch) => updateAssertion.mutateAsync({ uuid, patch }),
+    updatingAssertionUuid:
+      updateAssertion.isPending ? updateAssertion.variables?.uuid ?? null : null,
+    deleteAssertion: (uuid) => deleteAssertion.mutateAsync(uuid),
+    deletingAssertionUuid: deleteAssertion.isPending ? deleteAssertion.variables ?? null : null,
+  };
 
   // ---- Derivations shared by both views ----
 
@@ -780,56 +1266,11 @@ export default function Assurance() {
                 )}
               </GlassCard>
 
-              {/* The provider registry and each vendor's declared profile (Phase 1.5). */}
-              <GlassCard>
-                <div className="mb-4 flex items-center gap-2">
-                  <Building2 className="h-4 w-4 text-primary" />
-                  <h2 className="text-[15px] font-semibold text-foreground">Providers</h2>
-                </div>
-                {providers.length === 0 ? (
-                  <p className="text-[13px] text-muted-foreground">No providers recorded yet.</p>
-                ) : (
-                  <ul className="space-y-3">
-                    {providers.map((p) => (
-                      <li key={p.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                          <span className="text-[13px] font-semibold text-foreground">{p.name}</span>
-                          <span className="text-[12px] text-muted-foreground">{p.kindLabel}</span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
-                          <span>
-                            {p.profile.declaredFields} {p.profile.declaredFields === 1 ? "fact" : "facts"}
-                          </span>
-                          {p.profile.weakestEvidence && (
-                            <span className="flex items-center gap-1.5">
-                              <span>weakest:</span>
-                              <EvidenceClassChip value={p.profile.weakestEvidence} />
-                            </span>
-                          )}
-                        </div>
-                        {p.assertions.length === 0 ? (
-                          <p className="mt-2 text-[12px] text-muted-foreground">No profile facts recorded.</p>
-                        ) : (
-                          <ul className="mt-2 space-y-1.5">
-                            {p.assertions.map((a) => (
-                              <li
-                                key={a.uuid}
-                                className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/30 pt-1.5"
-                              >
-                                <span className="min-w-[9rem] text-[12px] text-muted-foreground">
-                                  {a.fieldLabel}
-                                </span>
-                                <span className="flex-1 text-[12px] text-foreground">{a.value}</span>
-                                <EvidenceClassChip value={a.evidenceClass} />
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </GlassCard>
+              {/* The provider registry and each vendor's declared profile (Phase 1.5),
+                  with the admin create/edit/delete controls for those declared
+                  facts (Phase 1.7). Reads render for everyone; writes are
+                  admin-only here and on the control plane. */}
+              <ProvidersRegistry providers={providers} admin={admin} m={providerMutations} />
 
               <div className="grid gap-6 lg:grid-cols-2">
                 {/* Findings, with the evidence class surfaced. */}
