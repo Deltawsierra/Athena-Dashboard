@@ -159,6 +159,61 @@ export interface AssuranceRouteMap {
   };
 }
 
+// AI-BOM (Phase 1.7): the AI supply-chain bill of materials — an exportable,
+// tamper-evident inventory of components and the providers behind them.
+export interface BomComponent {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  shadow: boolean;
+  providerUuid: string | null;
+  providerName: string | null;
+  facts: Record<string, unknown>;
+  firstSeen: string | null;
+  lastSeen: string | null;
+}
+export interface BomProviderFact {
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+}
+export interface BomProvider {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  region: string;
+  declaredFacts: BomProviderFact[];
+  declaredFieldCount: number;
+  weakestEvidence: string | null;
+}
+export interface AssuranceAiBom {
+  format: string;
+  version: string;
+  deployment: { uuid: string; name: string };
+  components: BomComponent[];
+  providers: BomProvider[];
+  summary: {
+    componentCount: number;
+    providerCount: number;
+    shadowComponents: number;
+    componentsByKind: Record<string, number>;
+    componentsByClassification: Record<string, number>;
+    declaredFactCount: number;
+    weakestEvidence: string | null;
+  };
+  receipt: { algorithm: string; digest: string };
+  generatedAt: string | null;
+}
+
 export interface AssuranceDeployment {
   uuid: string;
   name: string;
@@ -457,6 +512,97 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
       layersPresent: strList(rawSummary.layers_present),
       logsObserved: bool(rawSummary.logs_observed),
     },
+  };
+}
+
+/** A passthrough object of {string: number}, filtered to numeric values. */
+function numRecord(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "number") out[k] = v;
+  }
+  return out;
+}
+
+function bomComponent(raw: Record<string, unknown>): BomComponent {
+  return {
+    uuid: str(raw.uuid),
+    name: str(raw.name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    identifier: str(raw.identifier),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    shadow: bool(raw.shadow),
+    providerUuid: strOrNull(raw.provider_uuid),
+    providerName: strOrNull(raw.provider_name),
+    facts:
+      raw.facts && typeof raw.facts === "object" && !Array.isArray(raw.facts)
+        ? (raw.facts as Record<string, unknown>)
+        : {},
+    firstSeen: strOrNull(raw.first_seen),
+    lastSeen: strOrNull(raw.last_seen),
+  };
+}
+
+function bomProvider(raw: Record<string, unknown>): BomProvider {
+  return {
+    uuid: str(raw.uuid),
+    name: str(raw.name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    region: str(raw.region),
+    declaredFacts: Array.isArray(raw.declared_facts)
+      ? (raw.declared_facts as Record<string, unknown>[]).map((f) => ({
+          field: str(f.field),
+          fieldLabel: str(f.field_label),
+          value: str(f.value),
+          evidenceClass: str(f.evidence_class),
+          evidenceClassLabel: str(f.evidence_class_label),
+          source: str(f.source),
+          sourceLabel: str(f.source_label),
+        }))
+      : [],
+    declaredFieldCount: num(raw.declared_field_count, 0),
+    weakestEvidence: strOrNull(raw.weakest_evidence),
+  };
+}
+
+function mapAiBom(raw: Record<string, unknown>): AssuranceAiBom {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  const rawDeployment =
+    raw.deployment && typeof raw.deployment === "object" && !Array.isArray(raw.deployment)
+      ? (raw.deployment as Record<string, unknown>)
+      : {};
+  const rawReceipt =
+    raw.receipt && typeof raw.receipt === "object" && !Array.isArray(raw.receipt)
+      ? (raw.receipt as Record<string, unknown>)
+      : {};
+  return {
+    format: str(raw.format),
+    version: str(raw.version),
+    deployment: { uuid: str(rawDeployment.uuid), name: str(rawDeployment.name) },
+    components: Array.isArray(raw.components)
+      ? (raw.components as Record<string, unknown>[]).map(bomComponent)
+      : [],
+    providers: Array.isArray(raw.providers)
+      ? (raw.providers as Record<string, unknown>[]).map(bomProvider)
+      : [],
+    summary: {
+      componentCount: num(rawSummary.component_count, 0),
+      providerCount: num(rawSummary.provider_count, 0),
+      shadowComponents: num(rawSummary.shadow_components, 0),
+      componentsByKind: numRecord(rawSummary.components_by_kind),
+      componentsByClassification: numRecord(rawSummary.components_by_classification),
+      declaredFactCount: num(rawSummary.declared_fact_count, 0),
+      weakestEvidence: strOrNull(rawSummary.weakest_evidence),
+    },
+    receipt: { algorithm: str(rawReceipt.algorithm), digest: str(rawReceipt.digest) },
+    generatedAt: strOrNull(raw.generated_at),
   };
 }
 
@@ -797,6 +943,22 @@ export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
     );
   }
   return mapRouteMap((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's AI-BOM (Phase 1.7): the AI supply-chain bill of materials — its
+ * components and the providers behind them, each provider fact evidence-graded,
+ * with a tamper-evident digest. A read (open), so a non-ok answer is genuine
+ * unavailability like the other reads.
+ */
+export async function aiBom(uuid: string): Promise<AssuranceAiBom> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/ai-bom/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapAiBom((await response.json()) as Record<string, unknown>);
 }
 
 /**

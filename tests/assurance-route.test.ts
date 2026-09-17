@@ -160,6 +160,50 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/ai-bom/" && method === "GET") {
+          return json(200, {
+            format: "athena-ai-bom", version: "1.0",
+            deployment: { uuid: "dep-1", name: "acme-chatbot" },
+            components: [
+              {
+                uuid: "c-1", name: "gpt-x", kind: "model", kind_label: "Model",
+                identifier: "openai:gpt-x", classification: "known", classification_label: "Known",
+                shadow: false, provider_uuid: "p-1", provider_name: "OpenAI",
+                facts: { model: "gpt-x", version: "2026-01" },
+                first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+              },
+              {
+                uuid: "c-2", name: "rogue-mcp", kind: "mcp_server", kind_label: "MCP server",
+                identifier: "mcp://rogue", classification: "unmanaged", classification_label: "Unmanaged",
+                shadow: true, provider_uuid: null, provider_name: null, facts: {},
+                first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+              },
+            ],
+            providers: [
+              {
+                uuid: "p-1", name: "OpenAI", kind: "model_provider", kind_label: "Model provider",
+                region: "us-east-1",
+                declared_facts: [
+                  {
+                    field: "data_retention", field_label: "Data retention", value: "30 days",
+                    evidence_class: "vendor_asserted", evidence_class_label: "Vendor asserted",
+                    source: "vendor_doc", source_label: "Vendor documentation",
+                  },
+                ],
+                declared_field_count: 1, weakest_evidence: "vendor_asserted",
+              },
+            ],
+            summary: {
+              component_count: 2, provider_count: 1, shadow_components: 1,
+              components_by_kind: { model: 1, mcp_server: 1 },
+              components_by_classification: { known: 1, unmanaged: 1 },
+              declared_fact_count: 1, weakest_evidence: "vendor_asserted",
+            },
+            receipt: { algorithm: "sha256", digest: "a".repeat(64) },
+            generated_at: "2026-09-17T00:00:00Z",
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/data-boundary/") {
           // The assessment shape both GET and PUT return. GET before any
           // boundary reads undeclared; a PUT declares one and the flow that was
@@ -443,6 +487,31 @@ describe("assurance BFF", () => {
 
   it("refuses the route map to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/route-map");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's AI-BOM, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/ai-bom");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ format: "athena-ai-bom", version: "1.0" });
+    expect(res.body.summary).toMatchObject({
+      componentCount: 2, providerCount: 1, shadowComponents: 1,
+      declaredFactCount: 1, weakestEvidence: "vendor_asserted",
+    });
+    expect(res.body.summary.componentsByKind).toMatchObject({ model: 1, mcp_server: 1 });
+    // A component's facts and the shadow flag come through.
+    const shadow = res.body.components.find((c: { uuid: string }) => c.uuid === "c-2");
+    expect(shadow.shadow).toBe(true);
+    // The supply chain carries evidence-graded facts.
+    expect(res.body.providers[0].declaredFacts[0]).toMatchObject({
+      field: "data_retention", evidenceClass: "vendor_asserted",
+    });
+    // The tamper-evident digest is surfaced.
+    expect(res.body.receipt).toMatchObject({ algorithm: "sha256", digest: "a".repeat(64) });
+  });
+
+  it("refuses the AI-BOM to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/ai-bom");
     expect(anon.status).toBe(401);
   });
 

@@ -31,6 +31,8 @@ import {
   ChevronRight,
   Clock,
   Cpu,
+  Download,
+  FileText,
   Fingerprint,
   GitBranch,
   HelpCircle,
@@ -196,6 +198,51 @@ interface RouteMap {
     layersPresent: string[];
     logsObserved: boolean;
   };
+}
+interface BomComponent {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  shadow: boolean;
+  providerName: string | null;
+  facts: Record<string, unknown>;
+}
+interface BomProviderFact {
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+}
+interface BomProvider {
+  uuid: string;
+  name: string;
+  kindLabel: string;
+  region: string;
+  declaredFacts: BomProviderFact[];
+  weakestEvidence: string | null;
+}
+interface AiBom {
+  format: string;
+  version: string;
+  deployment: { uuid: string; name: string };
+  components: BomComponent[];
+  providers: BomProvider[];
+  summary: {
+    componentCount: number;
+    providerCount: number;
+    shadowComponents: number;
+    componentsByKind: Record<string, number>;
+    componentsByClassification: Record<string, number>;
+    declaredFactCount: number;
+    weakestEvidence: string | null;
+  };
+  receipt: { algorithm: string; digest: string };
+  generatedAt: string | null;
 }
 interface BoundaryPosture {
   value: string;
@@ -866,6 +913,173 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * The AI-BOM (Phase 1.7) for one deployment: the AI supply-chain bill of
+ * materials — every component and the providers behind it, each provider fact
+ * evidence-graded, with a tamper-evident digest. Self-fetching (mounted only
+ * inside an expanded deployment). It is an exportable artifact (procurement,
+ * audit, M&A, security questionnaires): a reader can download the JSON and a
+ * recipient can recompute the digest to confirm nothing was altered. Honest by
+ * construction — every fact shows how strongly it is known, and shadow supply
+ * chain is flagged, never smoothed over.
+ */
+function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { toast } = useToast();
+  const { data, isLoading, isError, error } = useQuery<AiBom>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/ai-bom`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <FileText className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">AI-BOM</h3>
+      <span className="text-[11px] text-muted-foreground">supply-chain bill of materials</span>
+      {data && data.summary.componentCount > 0 && (
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={() => {
+            try {
+              const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `ai-bom-${data.deployment.name || data.deployment.uuid}.json`;
+              a.click();
+              URL.revokeObjectURL(url);
+            } catch {
+              toast({ title: "Could not export the AI-BOM", variant: "destructive" });
+            }
+          }}
+        >
+          <Download className="h-3 w-3" />
+          Export JSON
+        </button>
+      )}
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the bill of materials…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the AI-BOM{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {summary.componentCount === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No components discovered for this deployment yet — nothing to inventory.
+        </p>
+      ) : (
+        <>
+          {/* The scoreboard, including the honest headline: the softest evidence
+              among all the vendor facts in this BOM. */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.componentCount} {summary.componentCount === 1 ? "component" : "components"}
+            </span>
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.providerCount} {summary.providerCount === 1 ? "provider" : "providers"}
+            </span>
+            {summary.shadowComponents > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.shadowComponents} shadow
+              </span>
+            )}
+            {summary.weakestEvidence && (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-muted-foreground">weakest evidence:</span>
+                <EvidenceClassChip value={summary.weakestEvidence} />
+              </span>
+            )}
+          </div>
+
+          {/* Components. */}
+          <ul className="space-y-1.5">
+            {data.components.map((c) => (
+              <li
+                key={c.uuid}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border/40 bg-surface-0/40 p-2"
+              >
+                <span className="text-[12px] font-semibold text-foreground">{c.name}</span>
+                <span className="text-[11px] text-muted-foreground">{c.kindLabel}</span>
+                <AssetClassChip value={c.classification} label={c.classificationLabel || undefined} />
+                {c.shadow && (
+                  <span className="inline-flex items-center rounded-full border border-sev-high/40 bg-sev-high/10 px-2 py-0.5 text-[10px] font-medium text-sev-high">
+                    Shadow
+                  </span>
+                )}
+                {c.providerName && (
+                  <span className="text-[10px] text-muted-foreground">· {c.providerName}</span>
+                )}
+                {typeof c.facts.version === "string" && (
+                  <span className="text-[10px] text-muted-foreground/80">v{c.facts.version}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          {/* The supply chain: each vendor and its declared, evidence-graded facts. */}
+          {data.providers.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Supply chain
+              </p>
+              <ul className="space-y-2">
+                {data.providers.map((p) => (
+                  <li key={p.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <span className="text-[12px] font-semibold text-foreground">{p.name}</span>
+                      <span className="text-[11px] text-muted-foreground">{p.kindLabel}</span>
+                      {p.region && <span className="text-[10px] text-muted-foreground">· {p.region}</span>}
+                    </div>
+                    {p.declaredFacts.length > 0 && (
+                      <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 border-l border-border/40 pl-2.5">
+                        {p.declaredFacts.map((f) => (
+                          <li key={f.field} className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                            <span className="text-foreground">{f.fieldLabel}:</span>
+                            <span>{f.value}</span>
+                            <EvidenceClassChip value={f.evidenceClass} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* The tamper-evident digest: a recipient recomputes it to verify the
+              exported BOM is unaltered. */}
+          <div className="mt-3 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            <Fingerprint className="h-3 w-3" />
+            <span className="uppercase tracking-wide">{data.receipt.algorithm}</span>
+            <code className="font-mono">{data.receipt.digest.slice(0, 16)}…</code>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1891,6 +2105,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             the deployment. Self-fetches, so it loads only for an
                             expanded deployment. */}
                         <RouteMapPanel deploymentUuid={d.uuid} />
+
+                        {/* AI-BOM (Phase 1.7): the exportable supply-chain bill of
+                            materials. Self-fetches, so it loads only for an
+                            expanded deployment. */}
+                        <AiBomPanel deploymentUuid={d.uuid} />
 
                         {/* AI system capability map (Phase 1.3): what this
                             deployment can do. Self-fetches, so it loads only for
