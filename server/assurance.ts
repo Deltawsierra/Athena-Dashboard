@@ -408,6 +408,51 @@ export interface AssuranceCompliance {
   };
 }
 
+// ==== Business-impact Map (Phase 2.4) ====
+//
+// An HONEST map of a deployment's findings onto the business-impact dimensions
+// they implicate — inferred *potential* exposure, never a realized loss or a
+// dollar figure. A dimension is implicated only by its ACTIVE findings; its
+// `exposureBand` (elevated/moderate/low) is an ORDINAL signal of how much is at
+// stake, not a quantity, and is null when nothing is active — read as "no active
+// exposure", never "safe". The finding types no dimension claims (`unmapped`)
+// ride alongside, surfaced rather than hidden.
+
+export interface BusinessImpactDimension {
+  key: string;
+  label: string;
+  description: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  /** The worst severity among this dimension's ACTIVE findings, or null when none. */
+  worstSeverity: string | null;
+  /** Ordinal exposure signal (elevated/moderate/low), or null when nothing is active. */
+  exposureBand: string | null;
+  findingTypes: string[];
+}
+export interface BusinessImpactUnmapped {
+  findingType: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+}
+export interface AssuranceBusinessImpact {
+  dimensions: BusinessImpactDimension[];
+  unmapped: BusinessImpactUnmapped[];
+  summary: {
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    mappedFindingTypes: number;
+    unmappedFindingTypes: number;
+    dimensions: number;
+    dimensionsTouched: number;
+    dimensionsWithActiveExposure: number;
+    worstSeverity: string | null;
+    worstExposureBand: string | null;
+  };
+}
+
 // ==== Mappers ====
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -796,6 +841,51 @@ function mapCompliance(raw: Record<string, unknown>): AssuranceCompliance {
   };
 }
 
+function businessImpactDimension(raw: Record<string, unknown>): BusinessImpactDimension {
+  return {
+    key: str(raw.key),
+    label: str(raw.label),
+    description: str(raw.description),
+    activeFindingCount: num(raw.active_finding_count, 0),
+    resolvedFindingCount: num(raw.resolved_finding_count, 0),
+    worstSeverity: strOrNull(raw.worst_severity),
+    exposureBand: strOrNull(raw.exposure_band),
+    findingTypes: strList(raw.finding_types),
+  };
+}
+
+function mapBusinessImpact(raw: Record<string, unknown>): AssuranceBusinessImpact {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    dimensions: Array.isArray(raw.dimensions)
+      ? (raw.dimensions as Record<string, unknown>[]).map(businessImpactDimension)
+      : [],
+    unmapped: Array.isArray(raw.unmapped)
+      ? (raw.unmapped as Record<string, unknown>[]).map((u) => ({
+          findingType: str(u.finding_type),
+          activeFindingCount: num(u.active_finding_count, 0),
+          resolvedFindingCount: num(u.resolved_finding_count, 0),
+          worstSeverity: strOrNull(u.worst_severity),
+        }))
+      : [],
+    summary: {
+      totalFindings: num(rawSummary.total_findings, 0),
+      activeFindings: num(rawSummary.active_findings, 0),
+      resolvedFindings: num(rawSummary.resolved_findings, 0),
+      mappedFindingTypes: num(rawSummary.mapped_finding_types, 0),
+      unmappedFindingTypes: num(rawSummary.unmapped_finding_types, 0),
+      dimensions: num(rawSummary.dimensions, 0),
+      dimensionsTouched: num(rawSummary.dimensions_touched, 0),
+      dimensionsWithActiveExposure: num(rawSummary.dimensions_with_active_exposure, 0),
+      worstSeverity: strOrNull(rawSummary.worst_severity),
+      worstExposureBand: strOrNull(rawSummary.worst_exposure_band),
+    },
+  };
+}
+
 function deployment(raw: Record<string, unknown>): AssuranceDeployment {
   return {
     uuid: str(raw.uuid),
@@ -1123,6 +1213,28 @@ export async function compliance(uuid: string): Promise<AssuranceCompliance> {
     );
   }
   return mapCompliance((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's business-impact map (Phase 2.4): the business-impact dimensions
+ * its findings implicate. This is inferred *potential* exposure, never a realized
+ * loss or a dollar figure — a dimension is implicated only by its active
+ * findings, and its exposure band is an ordinal signal (elevated/moderate/low)
+ * of how much is at stake, never a quantity. A dimension with no active findings
+ * carries no exposure band and reads as "no active exposure", never "safe"; the
+ * unmapped finding types ride alongside. A read (open), so a non-ok answer is
+ * genuine unavailability like the other reads.
+ */
+export async function businessImpact(uuid: string): Promise<AssuranceBusinessImpact> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/business-impact/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapBusinessImpact((await response.json()) as Record<string, unknown>);
 }
 
 export async function listFindings(
