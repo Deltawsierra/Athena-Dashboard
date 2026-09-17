@@ -22,7 +22,7 @@
  * Nothing here decides anything: it surfaces the backend's conclusions so a
  * human can make the release decision from them.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Boxes,
@@ -570,6 +570,347 @@ interface PackApplied {
     activeFindings: number;
     resolvedFindings: number;
     unmappedFindingTypes: number;
+  };
+}
+
+// ==== Access & Blast Radius (Phase 3.1 + 2.5) ====
+interface AccessCapabilitySource {
+  assetName: string;
+  permission: string;
+}
+interface AccessCapability {
+  key: string;
+  label: string;
+  category: string;
+  risk: string;
+  sources: AccessCapabilitySource[];
+}
+interface AccessReach {
+  target: string;
+  targetKind: string;
+  targetKindLabel: string;
+  targetClassification: string | null;
+  targetManaged: boolean;
+  via: string[];
+  capability: string;
+  risk: string;
+}
+interface AccessGap {
+  type: string;
+  risk: string;
+  detail: string;
+  capabilities?: string[];
+  categories?: string[];
+  targets?: string[];
+}
+interface AccessPrincipal {
+  key: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  classification: string | null;
+  classificationLabel: string | null;
+  managed: boolean;
+  shadow: boolean;
+  privilegeLevel: string;
+  capabilities: AccessCapability[];
+  effectiveReach: AccessReach[];
+  gaps: AccessGap[];
+  risk: string;
+  privileged: boolean;
+  overBroad: boolean;
+  orphaned: boolean;
+}
+interface EffectiveAccess {
+  principals: AccessPrincipal[];
+  summary: {
+    principals: number;
+    privileged: number;
+    shadow: number;
+    orphaned: number;
+    overBroad: number;
+    highRiskReach: number;
+    worstRisk: string | null;
+  };
+}
+interface RippleFinding {
+  uuid: string;
+  findingType: string;
+  severity: string;
+  title: string;
+}
+interface RippleOrigin {
+  key: string;
+  origin: string;
+  originTypes: string[];
+  reasons: string[];
+  risk: string;
+  findings: RippleFinding[];
+  principalKind?: string;
+  principalKindLabel?: string;
+  privilegeLevel?: string;
+  evidencedReach: boolean;
+  consequenceCount: number;
+  note: string | null;
+}
+interface RippleConsequence {
+  origin: string;
+  originKey: string;
+  consequence: string;
+  category: string;
+  categoryLabel: string;
+  target: string;
+  targets: string[];
+  via: string[];
+  risk: string;
+  potential: boolean;
+  evidenceBasis: string[];
+}
+interface RippleEffect {
+  origins: RippleOrigin[];
+  consequences: RippleConsequence[];
+  summary: {
+    origins: number;
+    originsWithReach: number;
+    consequences: number;
+    evidencedConsequences: number;
+    bounded: boolean;
+    byCategory: Record<string, number>;
+    worstRisk: string | null;
+  };
+}
+
+// ==== Posture, credential-gated (Phase 3.2 / 3.3 / 3.4) ====
+interface PostureDomainRef {
+  name: string;
+  label: string;
+  configured: boolean;
+}
+interface PostureCatalog {
+  domains: PostureDomainRef[];
+}
+interface PostureCheckCatalog {
+  check: string;
+  title: string;
+  severity: string;
+  category: string;
+  resource: string;
+  description: string;
+}
+interface PostureFinding {
+  check: string;
+  title: string;
+  status: string;
+  severity: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  detail: string;
+  resource: string;
+  category: string;
+}
+interface PostureDomain {
+  domain: string;
+  domainLabel: string;
+  connected: boolean;
+  detail: string | null;
+  checks: PostureCheckCatalog[];
+  findings: PostureFinding[];
+  summary: {
+    connected: boolean;
+    planned: number;
+    total: number;
+    pass: number;
+    gap: number;
+    unknown: number;
+    gapsBySeverity: Record<string, number>;
+    maxRisk: string;
+    weakestEvidence: string | null;
+  };
+}
+
+// ==== Data & Context (Phase 3.5) ====
+interface PersonalReader {
+  principal: string;
+  principalKind: string;
+  principalKindLabel: string;
+  privilegeLevel: string;
+  shadow: boolean;
+  overBroad: boolean;
+  risk: string;
+  via: string[];
+}
+interface PersonalGap {
+  type: string;
+  risk: string;
+  detail: string;
+  principals?: string[];
+  assetName?: string;
+}
+interface PersonalStore {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  providerName: string | null;
+  dataSensitivity: string;
+  personalData: boolean;
+  signals: string[];
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  reachableBy: PersonalReader[];
+  readerCount: number;
+  gaps: PersonalGap[];
+  risk: string;
+}
+interface PersonalContext {
+  stores: PersonalStore[];
+  gaps: PersonalGap[];
+  summary: {
+    dataBearingComponents: number;
+    personalDataComponents: number;
+    unclassifiedComponents: number;
+    reachableByShadow: number;
+    reachableByOverBroad: number;
+    crossingBoundary: number;
+    gaps: number;
+    worstRisk: string | null;
+  };
+}
+interface LifecycleComponent {
+  name: string;
+  kindLabel: string;
+  how: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+}
+interface LifecycleStage {
+  stage: string;
+  stageLabel: string;
+  controlStage: boolean;
+  evidenced: boolean;
+  components: LifecycleComponent[];
+  weakestEvidence: string | null;
+  weakestEvidenceLabel: string | null;
+  gap: boolean;
+  gapDetail: string | null;
+  risk: string;
+}
+interface LifecycleGap {
+  stage: string;
+  stageLabel: string;
+  risk: string;
+  detail: string;
+}
+interface DataLifecycle {
+  stages: LifecycleStage[];
+  gaps: LifecycleGap[];
+  summary: {
+    stagesTotal: number;
+    evidenced: number;
+    notEvidenced: number;
+    controlGaps: number;
+    worstRisk: string | null;
+  };
+}
+interface ReusePosture {
+  field: string;
+  fieldLabel: string;
+  concern: string;
+  value: string;
+  posture: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+  verified: boolean;
+}
+interface TrainingDependentAsset {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+}
+interface TrainingGap {
+  type: string;
+  field: string;
+  risk: string;
+  detail: string;
+  providerName?: string;
+}
+interface TrainingProvider {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  dependentAssets: TrainingDependentAsset[];
+  postures: ReusePosture[];
+  reusePossible: boolean;
+  reuseDeclared: boolean;
+  gaps: TrainingGap[];
+  risk: string;
+}
+interface TrainingReuse {
+  providers: TrainingProvider[];
+  gaps: TrainingGap[];
+  summary: {
+    providers: number;
+    reuseDeclared: number;
+    reusePossible: number;
+    verifiedNoReuse: number;
+    gaps: number;
+    worstRisk: string | null;
+  };
+}
+interface LogCategory {
+  category: string;
+  label: string;
+  basis: string;
+}
+interface MetadataGap {
+  type: string;
+  risk: string;
+  detail: string;
+  assetName?: string;
+}
+interface LogSink {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  providerName: string | null;
+  basis: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  sensitiveCategories: LogCategory[];
+  controlEvidenced: boolean;
+  controlDetail: string | null;
+  gaps: MetadataGap[];
+  risk: string;
+}
+interface HandledCategory {
+  category: string;
+  basis: string;
+  label: string;
+}
+interface MetadataLogging {
+  sinks: LogSink[];
+  sensitiveCategoriesHandled: HandledCategory[];
+  gaps: MetadataGap[];
+  summary: {
+    sinks: number;
+    shadowSinks: number;
+    sinksWithoutControl: number;
+    sensitiveCategoriesHandled: number;
+    gaps: number;
+    worstRisk: string | null;
   };
 }
 
@@ -3553,6 +3894,1143 @@ function ExecutiveSummaryPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// ==== Access & Blast Radius + Posture + Data & Context (Phase 3 + 2.5) ====
+
+/**
+ * A group heading that opens one of the three Phase-3 dashboard sections. It is a
+ * visual grouping only — each panel below still owns its own honest read.
+ */
+function SectionHeading({
+  icon: Icon,
+  title,
+  blurb,
+}: {
+  icon: typeof Fingerprint;
+  title: string;
+  blurb: string;
+}) {
+  return (
+    <div className="border-b border-border/40 pb-1.5">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 text-primary" />
+        <h3 className="text-[13px] font-semibold uppercase tracking-wide text-foreground">{title}</h3>
+      </div>
+      <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{blurb}</p>
+    </div>
+  );
+}
+
+/** A declared reach path, rendered hop → hop. Evidenced, never invented — it is the
+ *  path the backend attested, shown so a reader can audit the reach. */
+function ViaPath({ via }: { via: string[] }) {
+  if (via.length === 0) return null;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1 text-[10px] text-muted-foreground">
+      {via.map((hop, i) => (
+        <span key={i} className="inline-flex items-center gap-1">
+          {i > 0 && <span className="text-muted-foreground/50">→</span>}
+          <span className="rounded bg-surface-1/50 px-1 py-0.5 text-foreground/80">{hop}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** A principal's privilege band, worn honestly — derived from the sensitive powers
+ *  it holds, never a claim it is least-privileged. */
+function PrivilegeChip({ level }: { level: string }) {
+  const look =
+    level === "high"
+      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "High privilege" }
+      : level === "elevated"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Elevated privilege" }
+        : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: "Standard" };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+      title="Derived from the sensitive powers this identity holds — never a claim it is least-privileged"
+    >
+      {look.label}
+    </span>
+  );
+}
+
+/**
+ * Identity Assurance & Effective Access (Phase 3.1) for one deployment: the
+ * principals that can act, each one's privilege, held capabilities, transitive
+ * effective reach (with the evidenced via-path), and identity-assurance gaps. Self-
+ * fetching (mounted only inside an expanded deployment). Honest by construction: it
+ * never claims least privilege is satisfied or an identity is secure — powers,
+ * reach, and gaps only, and a shadow (unmanaged) principal reads as shadow.
+ */
+function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<EffectiveAccess>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/effective-access`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Fingerprint className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Effective access</h4>
+      <span className="text-[11px] text-muted-foreground">who can reach what</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the effective-access view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the effective-access view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      {data.principals.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No principals resolved for this deployment yet — no identity that can act is on record.
+        </p>
+      ) : (
+        <>
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            Every path is <span className="text-foreground">evidenced</span> — a reach is claimed only
+            where a declared edge attests each hop. This never says least privilege is satisfied or an
+            identity is secure; it surfaces powers, transitive reach, and gaps.
+          </p>
+
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.principals} principal{summary.principals === 1 ? "" : "s"}
+            </span>
+            {summary.privileged > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.privileged} privileged
+              </span>
+            )}
+            {summary.overBroad > 0 && (
+              <span className="rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                {summary.overBroad} over-broad
+              </span>
+            )}
+            {summary.shadow > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                {summary.shadow} shadow
+              </span>
+            )}
+            {summary.orphaned > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                {summary.orphaned} orphaned
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground">worst:</span>
+              <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+            </span>
+          </div>
+
+          <div className="space-y-2.5">
+            {data.principals.map((p) => (
+              <div key={p.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{p.name}</span>
+                  <CapabilityRiskChip risk={p.risk} />
+                  <PrivilegeChip level={p.privilegeLevel} />
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {p.kindLabel}
+                  </span>
+                  {p.shadow && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
+                      title="Evidenced only by unmanaged / unknown assets — a power nobody approved"
+                    >
+                      <ShieldQuestion className="h-3 w-3" /> Shadow
+                    </span>
+                  )}
+                </div>
+
+                {/* Held sensitive capabilities — the powers privilege is derived from. */}
+                {p.capabilities.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {p.capabilities.map((c) => (
+                      <span
+                        key={c.key}
+                        className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                        title={c.sources.map((s) => `${s.assetName}: ${s.permission}`).join(" · ")}
+                      >
+                        <span className="text-foreground">{c.label}</span>
+                        <CapabilityRiskChip risk={c.risk} />
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Transitive effective reach, each with its evidenced via-path. */}
+                {p.effectiveReach.length > 0 && (
+                  <div className="mt-2 border-l border-border/40 pl-2.5">
+                    <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Effective reach
+                    </p>
+                    <ul className="space-y-1">
+                      {p.effectiveReach.map((r, i) => (
+                        <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                          <span
+                            className={cn(
+                              "font-medium",
+                              r.targetKind === "capability"
+                                ? "text-amber-300"
+                                : r.targetManaged
+                                  ? "text-foreground"
+                                  : "text-sev-high",
+                            )}
+                          >
+                            {r.target}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground/80">{r.targetKindLabel}</span>
+                          <CapabilityRiskChip risk={r.risk} />
+                          <ViaPath via={r.via} />
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Identity-assurance gaps — surfaced, never smoothed. */}
+                {p.gaps.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-amber-500/30 pl-2.5">
+                    {p.gaps.map((g, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-amber-400">
+                        {g.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Ripple Effect / blast-radius (Phase 2.5) for one deployment: for each origin worth
+ * tracing, a few well-supported downstream consequences a compromise of it could
+ * have, each tied to the evidenced via-path. Self-fetching (mounted only inside an
+ * expanded deployment). Honest by construction: every consequence is potential and
+ * evidence-based, the list is bounded to the well-supported core (and the full
+ * evidenced count shown so the bounding is visible), and an origin with no evidenced
+ * downstream reach reads as exactly that, never as safe or contained.
+ */
+function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<RippleEffect>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/ripple-effect`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Zap className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Ripple effect</h4>
+      <span className="text-[11px] text-muted-foreground">bounded blast radius</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the ripple-effect view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the ripple-effect view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      {summary.origins === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No origins worth tracing — no active high/critical finding on a component and no privileged
+          or high-risk principal on record.
+        </p>
+      ) : (
+        <>
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            Each consequence is a <span className="text-foreground">potential</span>, evidence-based
+            downstream effect a compromise <span className="text-foreground">could</span> have — never a
+            realized harm or a cascade the graph does not attest. The list is bounded to a{" "}
+            <span className="text-foreground">few well-supported</span> consequences per origin.
+          </p>
+
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.origins} origin{summary.origins === 1 ? "" : "s"} · {summary.originsWithReach} with
+              evidenced reach
+            </span>
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.consequences} shown
+              {summary.bounded && (
+                <span className="text-amber-400"> · {summary.evidencedConsequences} evidenced (bounded)</span>
+              )}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground">worst:</span>
+              <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+            </span>
+          </div>
+
+          {/* The well-supported consequences, ranked most-concerning first. */}
+          {data.consequences.length > 0 && (
+            <div className="mb-3 space-y-1.5">
+              {data.consequences.map((c, i) => (
+                <div
+                  key={i}
+                  className="rounded-lg border border-border/40 bg-surface-0/40 p-2"
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                    <CapabilityRiskChip risk={c.risk} />
+                    <span className="font-medium text-foreground">{c.consequence}</span>
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {c.categoryLabel}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="text-[10px] text-muted-foreground">from</span>
+                    <span className="text-[10px] font-medium text-foreground/80">{c.origin}</span>
+                    <ViaPath via={c.via} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Origins, with the honest "no evidenced downstream reach" note where it
+              applies — never rounded up to "safe". */}
+          <div className="space-y-1.5">
+            {data.origins.map((o) => (
+              <div key={o.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+                  <CapabilityRiskChip risk={o.risk} />
+                  <span className="font-semibold text-foreground">{o.origin}</span>
+                  {o.originTypes.map((t) => (
+                    <span
+                      key={t}
+                      className="rounded border border-border/50 bg-surface-1/40 px-1 py-0.5 text-[9px] uppercase tracking-wide text-muted-foreground"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                  <span className="ml-auto text-[10px] text-muted-foreground">
+                    {o.consequenceCount} evidenced consequence{o.consequenceCount === 1 ? "" : "s"}
+                  </span>
+                </div>
+                {o.reasons.length > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {o.reasons.map((r, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-muted-foreground">
+                        · {r}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {!o.evidencedReach && o.note && (
+                  <p className="mt-1 text-[10px] italic text-muted-foreground/80">{o.note}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/** One posture finding's status, worn honestly: a "pass" is the observed absence of
+ *  ONE gap, never a claim the system is secure; unknown reads unknown. */
+function PostureStatusChip({ status }: { status: string }) {
+  const look =
+    status === "gap"
+      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Gap", title: "A gap was observed in the data read" }
+      : status === "unknown"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Unknown", title: "No data to judge — never read as a pass" }
+        : {
+            cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+            label: "No gap observed",
+            title: "The observed absence of THIS gap — not a claim the system is secure",
+          };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+      title={look.title}
+    >
+      {look.label}
+    </span>
+  );
+}
+
+/** One posture domain (cloud / secrets / repo): connected vs honestly not-connected,
+ *  and, when connected, its checks/findings. An inert domain reads as "Not connected
+ *  — no credentials configured", NEVER "all clear". */
+function PostureDomainCard({
+  icon: Icon,
+  deploymentUuid,
+  domain,
+  query,
+}: {
+  icon: typeof Cpu;
+  deploymentUuid: string;
+  domain: string;
+  query: string;
+}) {
+  const { data, isLoading, isError, error } = useQuery<PostureDomain>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/${query}`],
+  });
+
+  const shell = (children: ReactNode, label?: string) => (
+    <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+      <div className="mb-1 flex items-center gap-2">
+        <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-[12px] font-semibold text-foreground">{label ?? domain}</span>
+      </div>
+      {children}
+    </div>
+  );
+
+  if (isLoading) return shell(<p className="text-[11px] text-muted-foreground">Loading…</p>);
+  if (isError || !data) {
+    return shell(
+      <p className="text-[11px] text-muted-foreground">
+        Could not load{error instanceof Error ? `: ${error.message}` : "."}
+      </p>,
+    );
+  }
+
+  // The honest inert read: not connected is not "all clear". The catalog of checks
+  // it WOULD run is shown so a reader sees what is going unassessed.
+  if (!data.connected) {
+    return shell(
+      <>
+        <span
+          className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400"
+          title="No credentials are configured for this domain, so nothing was read — this is not a clean bill"
+        >
+          <ShieldQuestion className="h-3 w-3" /> Not connected — no credentials configured
+        </span>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-muted-foreground">
+          Nothing was read, so nothing is asserted. It would run{" "}
+          <span className="text-foreground">{data.summary.planned}</span> check
+          {data.summary.planned === 1 ? "" : "s"} once credentials are supplied.
+        </p>
+        {data.checks.length > 0 && (
+          <ul className="mt-1.5 flex flex-wrap gap-1">
+            {data.checks.map((c) => (
+              <li
+                key={c.check}
+                className="inline-flex items-center gap-1 rounded border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[9px] text-muted-foreground"
+                title={c.description}
+              >
+                <span className="text-foreground/80">{c.title}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </>,
+      data.domainLabel,
+    );
+  }
+
+  // Connected: the checks evaluated against read data, most-actionable first.
+  const s = data.summary;
+  return shell(
+    <>
+      <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-300">
+          <ShieldCheck className="h-3 w-3" /> Connected
+        </span>
+        {s.gap > 0 && (
+          <span className="rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-sev-high">
+            {s.gap} gap{s.gap === 1 ? "" : "s"}
+          </span>
+        )}
+        {s.unknown > 0 && (
+          <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-amber-400">
+            {s.unknown} unknown
+          </span>
+        )}
+        <span className="text-muted-foreground">{s.pass} no-gap</span>
+        {s.weakestEvidence && (
+          <span className="inline-flex items-center gap-1">
+            <span className="text-muted-foreground">weakest:</span>
+            <EvidenceClassChip value={s.weakestEvidence} />
+          </span>
+        )}
+      </div>
+      {data.findings.length > 0 && (
+        <ul className="mt-2 space-y-1 border-l border-border/40 pl-2.5">
+          {data.findings.map((f) => (
+            <li key={f.check} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+              <PostureStatusChip status={f.status} />
+              <CapabilityRiskChip risk={f.severity} />
+              <span className="text-foreground/90">{f.title}</span>
+              <EvidenceClassChip value={f.evidenceClass} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </>,
+    data.domainLabel,
+  );
+}
+
+/**
+ * The credential-gated posture section (Phase 3.2–3.4) for one deployment: the
+ * catalog of posture domains, and per domain (cloud / secrets / repo) whether it is
+ * connected — and, honestly, "Not connected — no credentials configured" when it is
+ * inert. Self-fetching (mounted only inside an expanded deployment). An inert domain
+ * never reads as "all clear": nothing was read, so nothing is asserted.
+ */
+function PosturePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<PostureCatalog>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/posture`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <ShieldQuestion className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Posture domains</h4>
+      <span className="text-[11px] text-muted-foreground">credential-gated</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the posture catalog…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the posture catalog{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const configured = data.domains.filter((d) => d.configured).length;
+
+  return (
+    <section>
+      {heading}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        These domains read a customer&apos;s cloud, secret store, or source-control through granted
+        credentials. With none configured a domain is{" "}
+        <span className="text-foreground">inert</span> — it reads nothing, so it asserts nothing.{" "}
+        <span className="text-foreground">Not connected is never &quot;all clear&quot;.</span>{" "}
+        {configured} of {data.domains.length} configured.
+      </p>
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        <PostureDomainCard icon={Cpu} deploymentUuid={deploymentUuid} domain="Cloud" query="cloud-posture" />
+        <PostureDomainCard
+          icon={ShieldCheck}
+          deploymentUuid={deploymentUuid}
+          domain="Secrets"
+          query="secrets-posture"
+        />
+        <PostureDomainCard
+          icon={GitBranch}
+          deploymentUuid={deploymentUuid}
+          domain="Repository"
+          query="repo-posture"
+        />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Personal Context Exposure (Phase 3.5) for one deployment: the data-bearing
+ * components, what personal data each evidences (or an honest unknown), which
+ * principals can reach it, and the gaps. Self-fetching (mounted only inside an
+ * expanded deployment). An unclassified store reads as UNKNOWN — personal-data
+ * exposure cannot be ruled out, never "no PII" — and no data value is shown.
+ */
+function PersonalContextPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<PersonalContext>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/personal-context`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <User className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Personal context</h4>
+      <span className="text-[11px] text-muted-foreground">personal data &amp; who can reach it</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the personal-context view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the personal-context view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      {data.stores.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No data-bearing components discovered for this deployment yet.
+        </p>
+      ) : (
+        <>
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            An <span className="text-foreground">unclassified</span> store reads as{" "}
+            <span className="text-foreground">unknown</span> — personal-data exposure cannot be ruled
+            out, never &quot;no PII&quot;. No data value is shown, only what the graph evidences.
+          </p>
+
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.dataBearingComponents} data-bearing · {summary.personalDataComponents} personal ·{" "}
+              {summary.unclassifiedComponents} unknown
+            </span>
+            {summary.crossingBoundary > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.crossingBoundary} crossing boundary
+              </span>
+            )}
+            {(summary.reachableByShadow > 0 || summary.reachableByOverBroad > 0) && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                {summary.reachableByShadow} reachable-by-shadow · {summary.reachableByOverBroad} over-broad
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2.5">
+            {data.stores.map((store) => (
+              <div
+                key={store.assetName}
+                className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5"
+              >
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{store.assetName}</span>
+                  <CapabilityRiskChip risk={store.risk} />
+                  {store.personalData ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-sev-high/40 bg-sev-high/10 px-2 py-0.5 text-[9px] font-medium text-sev-high">
+                      Personal data
+                    </span>
+                  ) : store.dataSensitivity === "unknown" ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
+                      title="Unclassified — personal-data exposure cannot be ruled out, never 'no PII'"
+                    >
+                      <ShieldQuestion className="h-3 w-3" /> Sensitivity unknown
+                    </span>
+                  ) : (
+                    <span className="rounded-full border border-border/50 bg-surface-1/40 px-2 py-0.5 text-[9px] font-medium text-muted-foreground">
+                      {store.dataSensitivity}
+                    </span>
+                  )}
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {store.kindLabel}
+                  </span>
+                  <EvidenceClassChip value={store.evidenceClass} />
+                  <span className="ml-auto text-[10px] text-muted-foreground">
+                    {store.readerCount} principal{store.readerCount === 1 ? "" : "s"} can reach
+                  </span>
+                </div>
+
+                {store.reachableBy.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-border/40 pl-2.5">
+                    {store.reachableBy.map((r, i) => (
+                      <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+                        <span
+                          className={cn(
+                            "font-medium",
+                            r.shadow || r.overBroad ? "text-sev-high" : "text-foreground/90",
+                          )}
+                        >
+                          {r.principal}
+                        </span>
+                        <span className="text-muted-foreground/80">{r.principalKindLabel}</span>
+                        <CapabilityRiskChip risk={r.risk} />
+                        <ViaPath via={r.via} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {store.gaps.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-amber-500/30 pl-2.5">
+                    {store.gaps.map((g, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-amber-400">
+                        {g.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Data Lifecycle Review (Phase 3.5) for one deployment: each lifecycle stage, the
+ * components that evidence it and at what strength, and the gaps where a stage has no
+ * evidenced control. Self-fetching (mounted only inside an expanded deployment). An
+ * unevidenced stage reads "not evidenced", never "compliant"; a weakly-evidenced
+ * control is still a gap.
+ */
+function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<DataLifecycle>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/data-lifecycle`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Route className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Data lifecycle</h4>
+      <span className="text-[11px] text-muted-foreground">stages evidenced &amp; gaps</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the data-lifecycle view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the data-lifecycle view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        An <span className="text-foreground">unevidenced</span> stage reads &quot;not evidenced&quot;,
+        never &quot;compliant&quot;; a control evidenced only weakly (vendor-asserted) is still a gap.
+      </p>
+
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+          {summary.evidenced}/{summary.stagesTotal} stages evidenced
+        </span>
+        {summary.controlGaps > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+            <HelpCircle className="h-3.5 w-3.5" /> {summary.controlGaps} control gap
+            {summary.controlGaps === 1 ? "" : "s"}
+          </span>
+        )}
+        <span className="inline-flex items-center gap-1">
+          <span className="text-muted-foreground">worst:</span>
+          <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+        </span>
+      </div>
+
+      <div className="space-y-1.5">
+        {data.stages.map((st) => (
+          <div key={st.stage} className="rounded-lg border border-border/40 bg-surface-0/40 p-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+              <span className="font-semibold text-foreground">{st.stageLabel}</span>
+              {st.controlStage && (
+                <span className="rounded border border-border/50 bg-surface-1/40 px-1 py-0.5 text-[9px] uppercase tracking-wide text-muted-foreground">
+                  control
+                </span>
+              )}
+              {st.evidenced ? (
+                st.weakestEvidence ? (
+                  <EvidenceClassChip value={st.weakestEvidence} />
+                ) : null
+              ) : (
+                <span
+                  className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
+                  title="No component evidences this stage — not evidenced, never 'compliant'"
+                >
+                  Not evidenced
+                </span>
+              )}
+              {st.gap && <CapabilityRiskChip risk={st.risk} />}
+            </div>
+            {st.components.length > 0 && (
+              <ul className="mt-1 flex flex-wrap gap-1">
+                {st.components.map((c, i) => (
+                  <li
+                    key={i}
+                    className="inline-flex items-center gap-1 rounded border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[9px] text-muted-foreground"
+                    title={c.how}
+                  >
+                    <span className="text-foreground/80">{c.name}</span>
+                    <span className="text-muted-foreground/70">{c.kindLabel}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {st.gap && st.gapDetail && (
+              <p className="mt-1 text-[10px] leading-relaxed text-amber-400">{st.gapDetail}</p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** One reuse posture, worn honestly: reused / not reused / unknown, and whether the
+ *  claim is independently verified (a vendor claim never upgrades to "verified"). */
+function ReusePostureChip({ posture, verified }: { posture: string; verified: boolean }) {
+  if (posture === "reused") {
+    return (
+      <span className="inline-flex items-center rounded-full border border-sev-high/40 bg-sev-high/10 px-2 py-0.5 text-[9px] font-medium text-sev-high">
+        Reused{verified ? "" : " (asserted)"}
+      </span>
+    );
+  }
+  if (posture === "not_reused") {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center rounded-full border px-2 py-0.5 text-[9px] font-medium",
+          verified
+            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+            : "border-amber-500/40 bg-amber-500/10 text-amber-400",
+        )}
+        title={verified ? "Independently verified" : "The vendor's own word — not independently verified"}
+      >
+        Not reused{verified ? " (verified)" : " (asserted)"}
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
+      title="No policy declared — reuse cannot be ruled out, never 'safe'"
+    >
+      Unknown
+    </span>
+  );
+}
+
+/**
+ * Training / Reuse Review (Phase 3.5) for one deployment: per provider, whether
+ * customer / internal data is reused for training, sharing or retention — verified vs
+ * merely asserted — each posture at its true evidence class. Self-fetching (mounted
+ * only inside an expanded deployment). A vendor_asserted "we don't train on your
+ * data" reads as vendor-asserted, never verified; an unstated policy is a gap, never
+ * "safe".
+ */
+function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<TrainingReuse>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/training-reuse`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <RefreshCw className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Training &amp; reuse</h4>
+      <span className="text-[11px] text-muted-foreground">verified vs asserted</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the training/reuse view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the training/reuse view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      {data.providers.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No providers resolved for this deployment yet — nothing on record to assess.
+        </p>
+      ) : (
+        <>
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            A <span className="text-foreground">vendor-asserted</span> &quot;we don&apos;t train on your
+            data&quot; reads as the vendor&apos;s own word, never verified. An unstated policy is a gap —
+            reuse cannot be ruled out, never &quot;safe&quot;.
+          </p>
+
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.providers} provider{summary.providers === 1 ? "" : "s"} · {summary.reuseDeclared}{" "}
+              reuse-declared
+            </span>
+            {summary.reusePossible > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                {summary.reusePossible} where reuse cannot be ruled out
+              </span>
+            )}
+            {summary.verifiedNoReuse > 0 && (
+              <span className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-emerald-300">
+                {summary.verifiedNoReuse} verified no-reuse
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2.5">
+            {data.providers.map((p) => (
+              <div key={p.providerUuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{p.providerName}</span>
+                  <CapabilityRiskChip risk={p.risk} />
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {p.kindLabel}
+                  </span>
+                </div>
+                <ul className="mt-2 space-y-1 border-l border-border/40 pl-2.5">
+                  {p.postures.map((po) => (
+                    <li key={po.field} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+                      <span className="font-medium text-foreground/90">{po.concern}</span>
+                      <ReusePostureChip posture={po.posture} verified={po.verified} />
+                      {po.value && <span className="text-muted-foreground">{po.value}</span>}
+                      <EvidenceClassChip value={po.evidenceClass} />
+                    </li>
+                  ))}
+                </ul>
+                {p.gaps.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-amber-500/30 pl-2.5">
+                    {p.gaps.map((g, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-amber-400">
+                        {g.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Metadata & Logging Risk (Phase 3.5) for one deployment: the evidenced logging
+ * sinks, the sensitive categories that could reach each, whether a leak-limiting
+ * control is evidenced, and the gaps. Self-fetching (mounted only inside an expanded
+ * deployment). No sensitive value is ever shown — only the presence of a category
+ * and its lineage; an unknown reads unknown.
+ */
+function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<MetadataLogging>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/metadata-logging`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Scale className="h-4 w-4 text-primary" />
+      <h4 className="text-[13px] font-semibold text-foreground">Metadata &amp; logging</h4>
+      <span className="text-[11px] text-muted-foreground">what lands in logs</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the metadata/logging view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the metadata/logging view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        Only logging the graph <span className="text-foreground">evidences</span> is flagged, and{" "}
+        <span className="text-foreground">no sensitive value is shown</span> — only the presence of a
+        category and its lineage. An unknown reads unknown.
+      </p>
+
+      {data.sensitiveCategoriesHandled.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Handled</span>
+          {data.sensitiveCategoriesHandled.map((c) => (
+            <span
+              key={c.category}
+              className="inline-flex items-center rounded-md border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[10px] text-foreground/80"
+              title={c.basis}
+            >
+              {c.label}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {data.sinks.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No logging sinks evidenced in the asset graph for this deployment.
+        </p>
+      ) : (
+        <>
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.sinks} sink{summary.sinks === 1 ? "" : "s"}
+            </span>
+            {summary.sinksWithoutControl > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.sinksWithoutControl} without evidenced
+                control
+              </span>
+            )}
+            {summary.shadowSinks > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                {summary.shadowSinks} shadow sink{summary.shadowSinks === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2.5">
+            {data.sinks.map((sink) => (
+              <div key={sink.assetName} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{sink.assetName}</span>
+                  <CapabilityRiskChip risk={sink.risk} />
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {sink.kindLabel}
+                  </span>
+                  {sink.controlEvidenced ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-medium text-emerald-300"
+                      title={sink.controlDetail ?? undefined}
+                    >
+                      <ShieldCheck className="h-3 w-3" /> Control evidenced
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400">
+                      <ShieldQuestion className="h-3 w-3" /> No evidenced control
+                    </span>
+                  )}
+                  <EvidenceClassChip value={sink.evidenceClass} />
+                </div>
+                {sink.sensitiveCategories.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                    <span className="text-[10px] text-muted-foreground">could reach:</span>
+                    {sink.sensitiveCategories.map((c) => (
+                      <span
+                        key={c.category}
+                        className="inline-flex items-center rounded border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[9px] text-foreground/80"
+                        title={c.basis}
+                      >
+                        {c.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {sink.gaps.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-amber-500/30 pl-2.5">
+                    {sink.gaps.map((g, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-amber-400">
+                        {g.detail}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -4091,6 +5569,47 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             root, result, per-assessment digests. Self-fetches, so
                             it loads only for an expanded deployment. */}
                         <AssuranceReceiptPanel deploymentUuid={d.uuid} />
+
+                        {/* ---- Access & Blast Radius (Phase 3.1 + 2.5) ----
+                            Who can reach what, and — bounded and evidence-based —
+                            how far a compromise could ripple. Self-fetch, so they
+                            load only for an expanded deployment. */}
+                        <div className="space-y-5">
+                          <SectionHeading
+                            icon={Fingerprint}
+                            title="Access & blast radius"
+                            blurb="The identities that can act and what each can effectively reach, then the bounded, evidence-based ripple a compromise could have. Powers, reach and gaps — never a claim of least privilege or safety."
+                          />
+                          <EffectiveAccessPanel deploymentUuid={d.uuid} />
+                          <RippleEffectPanel deploymentUuid={d.uuid} />
+                        </div>
+
+                        {/* ---- Posture, credential-gated (Phase 3.2 / 3.3 / 3.4) ----
+                            The three posture domains, honest about which are inert
+                            for lack of credentials. Self-fetch. */}
+                        <div className="space-y-5">
+                          <SectionHeading
+                            icon={ShieldQuestion}
+                            title="Posture (credential-gated)"
+                            blurb="Cloud, secrets and repository posture read through granted credentials. A domain with none configured is inert — it reads nothing, so it asserts nothing. Not connected is never 'all clear'."
+                          />
+                          <PosturePanel deploymentUuid={d.uuid} />
+                        </div>
+
+                        {/* ---- Data & Context (Phase 3.5) ----
+                            Personal data, its lifecycle, training/reuse, and what
+                            lands in logs — each honest per its own read. Self-fetch. */}
+                        <div className="space-y-5">
+                          <SectionHeading
+                            icon={User}
+                            title="Data & context"
+                            blurb="Personal data and who can reach it, the lifecycle stages evidenced, training / reuse posture (verified vs asserted), and what sensitive data could land in logs. Unknown is never 'no PII'; unevidenced is never 'compliant'; no sensitive value is shown."
+                          />
+                          <PersonalContextPanel deploymentUuid={d.uuid} />
+                          <DataLifecyclePanel deploymentUuid={d.uuid} />
+                          <TrainingReusePanel deploymentUuid={d.uuid} />
+                          <MetadataLoggingPanel deploymentUuid={d.uuid} />
+                        </div>
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>

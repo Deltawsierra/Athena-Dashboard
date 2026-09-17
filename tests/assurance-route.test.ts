@@ -752,6 +752,333 @@ describe("assurance BFF", () => {
           return json(200, merged);
         }
 
+        // ---- Access & Blast Radius (Phase 3.1 + 2.5) ----
+
+        if (path === "/api/assurance/deployments/dep-1/effective-access/" && method === "GET") {
+          // A privileged agent with a transitive reach (evidenced via-path) and
+          // gaps, plus a shadow (unmanaged) principal — powers, reach, and gaps
+          // only, never a claim of least privilege.
+          return json(200, {
+            principals: [
+              {
+                key: "asset:agent-1", name: "orchestrator", kind: "agent", kind_label: "Agent",
+                classification: "known", classification_label: "Known", managed: true, shadow: false,
+                privilege_level: "high",
+                capabilities: [
+                  {
+                    key: "code_execution", label: "Execute code", category: "execution", risk: "high",
+                    sources: [{ asset_name: "python-tool", permission: "exec" }],
+                  },
+                ],
+                effective_reach: [
+                  {
+                    target: "customer-db", target_kind: "data_store", target_kind_label: "Data store",
+                    target_classification: "known", target_managed: true,
+                    via: ["orchestrator", "sql-tool", "customer-db"], capability: "data_query", risk: "elevated",
+                  },
+                ],
+                gaps: [
+                  {
+                    type: "privileged_access", risk: "high",
+                    detail: "Holds privileged capability: code_execution", capabilities: ["code_execution"],
+                  },
+                ],
+                risk: "high", privileged: true, over_broad: false, orphaned: false,
+              },
+              {
+                key: "asset:sa-1", name: "shadow-runner", kind: "service_account",
+                kind_label: "Service account", classification: "unmanaged", classification_label: "Unmanaged",
+                managed: false, shadow: true, privilege_level: "standard",
+                capabilities: [], effective_reach: [],
+                gaps: [
+                  {
+                    type: "shadow_identity", risk: "elevated",
+                    detail: "Identity is evidenced only by unmanaged/unknown assets — a power nobody approved.",
+                  },
+                ],
+                risk: "elevated", privileged: false, over_broad: false, orphaned: false,
+              },
+            ],
+            summary: {
+              principals: 2, privileged: 1, shadow: 1, orphaned: 0, over_broad: 0,
+              high_risk_reach: 0, worst_risk: "high",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/ripple-effect/" && method === "GET") {
+          // A privileged origin with a bounded, evidence-based downstream
+          // consequence (evidenced via-path), and an origin with NO evidenced
+          // downstream reach — read honestly, never as "safe".
+          return json(200, {
+            origins: [
+              {
+                key: "asset:agent-1", origin: "orchestrator", origin_types: ["principal"],
+                reasons: ["privileged principal"], risk: "high", findings: [],
+                principal_kind: "agent", principal_kind_label: "Agent", privilege_level: "high",
+                evidenced_reach: true, consequence_count: 1,
+              },
+              {
+                key: "node:isolated-tool", origin: "isolated-tool", origin_types: ["finding"],
+                reasons: ["active high finding: Prompt injection may be possible"], risk: "high",
+                findings: [
+                  { uuid: "f-9", finding_type: "prompt_injection", severity: "high", title: "Prompt injection may be possible" },
+                ],
+                evidenced_reach: false, consequence_count: 0,
+                note: "No evidenced downstream reach — no path the asset graph attests.",
+              },
+            ],
+            consequences: [
+              {
+                origin: "orchestrator", origin_key: "asset:agent-1",
+                consequence: "Could read or exfiltrate data from customer-db",
+                category: "data_exposure", category_label: "Data exposure",
+                target: "customer-db", targets: ["customer-db"],
+                via: ["orchestrator", "sql-tool", "customer-db"], risk: "elevated",
+                potential: true,
+                evidence_basis: ["declared reach path through the asset graph (invoke/connect edges)"],
+              },
+            ],
+            summary: {
+              origins: 2, origins_with_reach: 1, consequences: 1, evidenced_consequences: 1,
+              bounded: false, by_category: { data_exposure: 1 }, worst_risk: "elevated",
+            },
+          });
+        }
+
+        // ---- Posture, credential-gated (Phase 3.2 / 3.3 / 3.4) ----
+
+        if (path === "/api/assurance/deployments/dep-1/posture/" && method === "GET") {
+          return json(200, {
+            domains: [
+              { name: "cloud", label: "Cloud Assurance", configured: false },
+              { name: "secrets", label: "Secrets / Crypto", configured: false },
+              { name: "repo", label: "Repository / SDLC", configured: false },
+            ],
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/cloud-posture/" && method === "GET") {
+          // Inert by default: connected:false is a NORMAL 200 body — an inert
+          // domain reads as "not connected", never "all clear". The catalog of
+          // checks it WOULD run rides along.
+          return json(200, {
+            domain: "cloud", domain_label: "Cloud Assurance", connected: false,
+            detail: "cloud posture source not configured",
+            checks: [
+              {
+                check: "public_exposure", title: "No public exposure", severity: "high",
+                category: "exposure", resource: "instances", description: "Instances are not publicly reachable.",
+              },
+            ],
+            findings: [],
+            summary: {
+              connected: false, planned: 1, total: 0, pass: 0, gap: 0, unknown: 0,
+              gaps_by_severity: { high: 0, elevated: 0, baseline: 0 }, max_risk: "baseline",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/secrets-posture/" && method === "GET") {
+          return json(200, {
+            domain: "secrets", domain_label: "Secrets / Crypto", connected: false,
+            detail: "secrets posture source not configured",
+            checks: [],
+            findings: [],
+            summary: {
+              connected: false, planned: 0, total: 0, pass: 0, gap: 0, unknown: 0,
+              gaps_by_severity: { high: 0, elevated: 0, baseline: 0 }, max_risk: "baseline",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/repo-posture/" && method === "GET") {
+          // A CONNECTED domain, to exercise the connected mapper: a gap finding at
+          // its true evidence class — a "pass" is the observed absence of ONE gap,
+          // never a claim the system is secure.
+          return json(200, {
+            domain: "repo", domain_label: "Repository / SDLC", connected: true,
+            checks: [
+              {
+                check: "branch_protection", title: "Branch protection enabled", severity: "elevated",
+                category: "sdlc", resource: "repo", description: "The default branch is protected.",
+              },
+            ],
+            findings: [
+              {
+                check: "branch_protection", title: "Branch protection enabled", status: "gap",
+                severity: "elevated", evidence_class: "configuration_verified",
+                evidence_class_label: "Configuration verified",
+                detail: "The default branch is not protected.", resource: "repo", category: "sdlc",
+              },
+            ],
+            summary: {
+              connected: true, planned: 1, total: 1, pass: 0, gap: 1, unknown: 0,
+              gaps_by_severity: { high: 0, elevated: 1, baseline: 0 }, max_risk: "elevated",
+              weakest_evidence: "configuration_verified",
+            },
+          });
+        }
+
+        // ---- Data & Context (Phase 3.5) ----
+
+        if (path === "/api/assurance/deployments/dep-1/personal-context/" && method === "GET") {
+          // An UNCLASSIFIED store reads as unknown — personal-data exposure cannot
+          // be ruled out, never "no PII".
+          return json(200, {
+            stores: [
+              {
+                asset_name: "scratch-cache", kind: "data_store", kind_label: "Data store",
+                identifier: "cache-1", classification: "unmanaged", classification_label: "Unmanaged",
+                managed: false, provider_name: null,
+                data_sensitivity: "unknown", personal_data: false, signals: [],
+                evidence_class: "not_documented", evidence_class_label: "Not documented",
+                reachable_by: [
+                  {
+                    principal: "orchestrator", principal_kind: "agent", principal_kind_label: "Agent",
+                    privilege_level: "high", shadow: false, over_broad: false, risk: "elevated",
+                    via: ["orchestrator", "sql-tool", "scratch-cache"],
+                  },
+                ],
+                reader_count: 1,
+                gaps: [
+                  {
+                    type: "reachable_by_privileged", risk: "elevated",
+                    detail: "Reachable by high-privilege principals: orchestrator",
+                    principals: ["orchestrator"],
+                  },
+                ],
+                risk: "elevated",
+              },
+            ],
+            gaps: [
+              {
+                type: "reachable_by_privileged", risk: "elevated",
+                detail: "Reachable by high-privilege principals: orchestrator",
+                principals: ["orchestrator"], asset_name: "scratch-cache",
+              },
+            ],
+            summary: {
+              data_bearing_components: 1, personal_data_components: 0, unclassified_components: 1,
+              reachable_by_shadow: 0, reachable_by_over_broad: 0, crossing_boundary: 0,
+              gaps: 1, worst_risk: "elevated",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/data-lifecycle/" && method === "GET") {
+          return json(200, {
+            stages: [
+              {
+                stage: "collected", stage_label: "Collected", control_stage: false, evidenced: true,
+                components: [
+                  {
+                    name: "gpt-x", kind_label: "Model", how: "holds or receives data",
+                    evidence_class: "configuration_verified", evidence_class_label: "Configuration verified",
+                  },
+                ],
+                weakest_evidence: "configuration_verified", weakest_evidence_label: "Configuration verified",
+                gap: false, gap_detail: null, risk: "baseline",
+              },
+              {
+                stage: "deleted", stage_label: "Deleted", control_stage: true, evidenced: false,
+                components: [], weakest_evidence: null, weakest_evidence_label: null,
+                gap: true, gap_detail: "No evidenced control for the 'Deleted' stage.", risk: "high",
+              },
+            ],
+            gaps: [
+              { stage: "deleted", stage_label: "Deleted", risk: "high", detail: "No evidenced control for the 'Deleted' stage." },
+            ],
+            summary: { stages_total: 2, evidenced: 1, not_evidenced: 1, control_gaps: 1, worst_risk: "high" },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/training-reuse/" && method === "GET") {
+          // A vendor-asserted "we don't train on your data" — reads as
+          // vendor-asserted, never verified.
+          return json(200, {
+            providers: [
+              {
+                provider_uuid: "p-1", provider_name: "OpenAI", kind: "model_provider",
+                kind_label: "Model provider",
+                dependent_assets: [
+                  {
+                    asset_name: "gpt-x", kind: "model", kind_label: "Model",
+                    classification: "known", classification_label: "Known", managed: true,
+                  },
+                ],
+                postures: [
+                  {
+                    field: "trains_on_data", field_label: "Trains on customer data",
+                    concern: "Training on customer data", value: "No — zero-retention endpoint",
+                    posture: "not_reused", evidence_class: "vendor_asserted",
+                    evidence_class_label: "Vendor asserted", source: "self_declared",
+                    source_label: "Self-declared", verified: false,
+                  },
+                ],
+                reuse_possible: true, reuse_declared: false,
+                gaps: [
+                  {
+                    type: "reuse_denied_unverified", field: "trains_on_data", risk: "elevated",
+                    detail: "Training on customer data — declared not reused ('No — zero-retention endpoint'), but only vendor asserted; the denial is not independently verified.",
+                  },
+                ],
+                risk: "elevated",
+              },
+            ],
+            gaps: [
+              {
+                type: "reuse_denied_unverified", field: "trains_on_data", risk: "elevated",
+                detail: "Training on customer data — declared not reused, not independently verified.",
+                provider_name: "OpenAI",
+              },
+            ],
+            summary: {
+              providers: 1, reuse_declared: 0, reuse_possible: 1, verified_no_reuse: 0,
+              gaps: 1, worst_risk: "elevated",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/metadata-logging/" && method === "GET") {
+          return json(200, {
+            sinks: [
+              {
+                asset_name: "otel-collector", kind: "tool", kind_label: "Tool",
+                identifier: "otel-1", classification: "known", classification_label: "Known",
+                managed: true, provider_name: "Datadog",
+                basis: "routes to observability provider 'Datadog'",
+                evidence_class: "configuration_verified", evidence_class_label: "Configuration verified",
+                sensitive_categories: [
+                  { category: "prompts", label: "Prompts & traces", basis: "a model or gateway processes prompts and traces" },
+                ],
+                control_evidenced: false, control_detail: null,
+                gaps: [
+                  {
+                    type: "logged_without_control", risk: "elevated",
+                    detail: "Sensitive categories could reach this sink with no evidenced control: Prompts & traces",
+                  },
+                ],
+                risk: "elevated",
+              },
+            ],
+            sensitive_categories_handled: [
+              { category: "prompts", basis: "a model or gateway processes prompts and traces", label: "Prompts & traces" },
+            ],
+            gaps: [
+              {
+                type: "logged_without_control", risk: "elevated",
+                detail: "Sensitive categories could reach this sink with no evidenced control: Prompts & traces",
+                asset_name: "otel-collector",
+              },
+            ],
+            summary: {
+              sinks: 1, shadow_sinks: 0, sinks_without_control: 1,
+              sensitive_categories_handled: 1, gaps: 1, worst_risk: "elevated",
+            },
+          });
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -1467,6 +1794,179 @@ describe("assurance BFF", () => {
       (await analyst.patch("/api/assurance/provider-assertions/as-2").send({ value: "y" })).status,
     ).toBe(403);
     expect((await analyst.delete("/api/assurance/provider-assertions/as-2")).status).toBe(403);
+  });
+
+  // ---- Access & Blast Radius (Phase 3.1 + 2.5) ----
+
+  it("returns a deployment's effective-access view, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/effective-access");
+    expect(res.status).toBe(200);
+    // The roll-up counts principals honestly — worst risk is an ordinal signal.
+    expect(res.body.summary).toMatchObject({
+      principals: 2, privileged: 1, shadow: 1, highRiskReach: 0, worstRisk: "high",
+    });
+    const agent = res.body.principals.find((p: { name: string }) => p.name === "orchestrator");
+    expect(agent).toMatchObject({ privilegeLevel: "high", privileged: true, shadow: false, risk: "high" });
+    // A held capability carries its source (asset + declared permission).
+    expect(agent.capabilities[0]).toMatchObject({ key: "code_execution", risk: "high" });
+    expect(agent.capabilities[0].sources[0]).toMatchObject({ assetName: "python-tool", permission: "exec" });
+    // A transitive reach carries the evidenced via-path, kept verbatim.
+    expect(agent.effectiveReach[0]).toMatchObject({
+      target: "customer-db", targetKind: "data_store", targetManaged: true, risk: "elevated",
+    });
+    expect(agent.effectiveReach[0].via).toEqual(["orchestrator", "sql-tool", "customer-db"]);
+    // A shadow principal reads as shadow, never smoothed.
+    const shadow = res.body.principals.find((p: { name: string }) => p.name === "shadow-runner");
+    expect(shadow).toMatchObject({ shadow: true, classification: "unmanaged" });
+    expect(shadow.gaps[0]).toMatchObject({ type: "shadow_identity" });
+  });
+
+  it("refuses the effective-access view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/effective-access");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's ripple-effect view, honest about bounding and no-reach", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/ripple-effect");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({
+      origins: 2, originsWithReach: 1, consequences: 1, evidencedConsequences: 1,
+      bounded: false, worstRisk: "elevated",
+    });
+    // A consequence is POTENTIAL and evidence-based, with the evidenced via-path.
+    const c = res.body.consequences[0];
+    expect(c).toMatchObject({
+      origin: "orchestrator", category: "data_exposure", target: "customer-db",
+      risk: "elevated", potential: true,
+    });
+    expect(c.via).toEqual(["orchestrator", "sql-tool", "customer-db"]);
+    expect(c.consequence).toContain("Could");
+    // An origin with no evidenced downstream reach reads as exactly that, never "safe".
+    const isolated = res.body.origins.find((o: { origin: string }) => o.origin === "isolated-tool");
+    expect(isolated).toMatchObject({ evidencedReach: false, consequenceCount: 0 });
+    expect(String(isolated.note)).toContain("No evidenced downstream reach");
+  });
+
+  it("refuses the ripple-effect view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/ripple-effect");
+    expect(anon.status).toBe(401);
+  });
+
+  // ---- Posture, credential-gated (Phase 3.2 / 3.3 / 3.4) ----
+
+  it("returns the posture catalog, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/posture");
+    expect(res.status).toBe(200);
+    expect(res.body.domains).toHaveLength(3);
+    expect(res.body.domains[0]).toMatchObject({ name: "cloud", label: "Cloud Assurance", configured: false });
+  });
+
+  it("refuses the posture catalog to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/posture");
+    expect(anon.status).toBe(401);
+  });
+
+  it("passes an inert cloud-posture (connected:false) through as a normal 200 — never 'all clear'", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/cloud-posture");
+    expect(res.status).toBe(200);
+    // The inert domain reads as NOT connected; its detail says why, and the catalog
+    // of checks it WOULD run is carried so nothing reads as assessed.
+    expect(res.body).toMatchObject({ domain: "cloud", connected: false });
+    expect(String(res.body.detail)).toContain("not configured");
+    expect(res.body.checks[0]).toMatchObject({ check: "public_exposure", severity: "high" });
+    expect(res.body.findings).toEqual([]);
+    expect(res.body.summary).toMatchObject({ connected: false, planned: 1, gap: 0 });
+    // No findings were fabricated for an inert domain.
+    expect(res.body.summary.weakestEvidence).toBeNull();
+  });
+
+  it("returns a connected repo-posture with checks/findings, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/repo-posture");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ domain: "repo", connected: true });
+    // detail is null when connected (no not-configured reason).
+    expect(res.body.detail).toBeNull();
+    expect(res.body.findings[0]).toMatchObject({
+      check: "branch_protection", status: "gap", severity: "elevated",
+      evidenceClass: "configuration_verified",
+    });
+    expect(res.body.summary).toMatchObject({ connected: true, gap: 1, weakestEvidence: "configuration_verified" });
+  });
+
+  it("refuses the posture domains to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/deployments/dep-1/cloud-posture")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/deployments/dep-1/secrets-posture")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/deployments/dep-1/repo-posture")).status).toBe(401);
+  });
+
+  // ---- Data & Context (Phase 3.5) ----
+
+  it("returns personal-context, reading an unclassified store as unknown (never 'no PII')", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/personal-context");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({
+      dataBearingComponents: 1, personalDataComponents: 0, unclassifiedComponents: 1, worstRisk: "elevated",
+    });
+    const store = res.body.stores[0];
+    // Unknown sensitivity is carried honestly — personalData stays false, but the
+    // store is NOT read as "no PII"; its sensitivity is "unknown".
+    expect(store).toMatchObject({ assetName: "scratch-cache", dataSensitivity: "unknown", personalData: false });
+    // A reader carries the evidenced via-path.
+    expect(store.reachableBy[0]).toMatchObject({ principal: "orchestrator", risk: "elevated" });
+    expect(store.reachableBy[0].via).toEqual(["orchestrator", "sql-tool", "scratch-cache"]);
+  });
+
+  it("refuses the personal-context view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/personal-context");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns data-lifecycle, reading an unevidenced stage as 'not evidenced' (never compliant)", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/data-lifecycle");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ stagesTotal: 2, evidenced: 1, notEvidenced: 1, controlGaps: 1, worstRisk: "high" });
+    const deleted = res.body.stages.find((s: { stage: string }) => s.stage === "deleted");
+    // An unevidenced control stage is a gap at true strength, weakestEvidence null.
+    expect(deleted).toMatchObject({ evidenced: false, gap: true, risk: "high", weakestEvidence: null });
+    expect(String(deleted.gapDetail)).toContain("No evidenced control");
+  });
+
+  it("refuses the data-lifecycle view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/data-lifecycle");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns training-reuse, carrying a vendor-asserted denial at true strength (never verified)", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/training-reuse");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ providers: 1, reusePossible: 1, verifiedNoReuse: 0, worstRisk: "elevated" });
+    const posture = res.body.providers[0].postures[0];
+    // A vendor_asserted "not reused" reads as vendor-asserted and NOT verified.
+    expect(posture).toMatchObject({
+      field: "trains_on_data", posture: "not_reused", verified: false,
+      evidenceClass: "vendor_asserted", source: "self_declared",
+    });
+    expect(res.body.providers[0].gaps[0]).toMatchObject({ type: "reuse_denied_unverified" });
+  });
+
+  it("refuses the training-reuse view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/training-reuse");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns metadata-logging, surfacing a sink with a sensitive category and no evidenced control", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/metadata-logging");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ sinks: 1, sinksWithoutControl: 1, sensitiveCategoriesHandled: 1, worstRisk: "elevated" });
+    const sink = res.body.sinks[0];
+    expect(sink).toMatchObject({ assetName: "otel-collector", controlEvidenced: false, controlDetail: null, risk: "elevated" });
+    expect(sink.sensitiveCategories[0]).toMatchObject({ category: "prompts", label: "Prompts & traces" });
+    expect(res.body.sensitiveCategoriesHandled[0]).toMatchObject({ category: "prompts", label: "Prompts & traces" });
+  });
+
+  it("refuses the metadata-logging view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/metadata-logging");
+    expect(anon.status).toBe(401);
   });
 });
 
