@@ -1649,6 +1649,141 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // ---- Access & Blast Radius (Phase 3.1 + 2.5) ----
+
+  // The deployment's Identity Assurance & Effective Access (Phase 3.1): every
+  // principal that can act and what each can effectively reach (direct and
+  // transitive, evidenced paths only), with its identity-assurance gaps. It never
+  // claims least privilege is satisfied — powers, reach, and gaps only. A read,
+  // behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/effective-access", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.effectiveAccess(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Ripple Effect / blast-radius (Phase 2.5): for each origin
+  // worth tracing, a few well-supported downstream consequences a compromise of it
+  // could have, each tied to the evidenced via-path. Every consequence is potential
+  // and evidence-based, never a realized harm or a monetary figure; an origin with
+  // no evidenced reach reads honestly as such, never as safe. A read, behind
+  // requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/ripple-effect", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.rippleEffect(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // ---- Posture (credential-gated, Phase 3.2 / 3.3 / 3.4) ----
+
+  // The posture catalog: which posture domains exist and whether each is
+  // configured. A read, behind requireAuth. It triggers nothing.
+  app.get("/api/assurance/deployments/:uuid/posture", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.postureCatalog(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Cloud Assurance posture (Phase 3.2, credential-gated). A read,
+  // behind requireAuth. Inert by default: with no credentials the backend answers a
+  // normal 200 `{connected:false, ...}`, which is passed through — an inert domain
+  // reads as "not connected", never "all clear".
+  app.get("/api/assurance/deployments/:uuid/cloud-posture", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.cloudPosture(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Secrets / Crypto posture (Phase 3.3, credential-gated). A read,
+  // behind requireAuth. Inert by default; no secret value is ever emitted.
+  app.get("/api/assurance/deployments/:uuid/secrets-posture", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.secretsPosture(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Repository / SDLC posture (Phase 3.4, credential-gated). A
+  // read, behind requireAuth. Inert by default.
+  app.get("/api/assurance/deployments/:uuid/repo-posture", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.repoPosture(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // ---- Data & Context (Phase 3.5) ----
+
+  // The deployment's Personal Context Exposure (Phase 3.5): what personal / customer
+  // data it holds, in which components, and which principals can reach it. An
+  // unclassified store reads as unknown (exposure cannot be ruled out), never "no
+  // PII"; no data value is emitted. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/personal-context", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.personalContext(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Data Lifecycle Review (Phase 3.5): the lifecycle stages
+  // evidenced in the graph, the components that evidence each at their true strength,
+  // and the gaps where a stage has no evidenced control. An unevidenced stage reads
+  // "not evidenced", never "compliant". A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/data-lifecycle", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.dataLifecycle(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Training / Reuse Review (Phase 3.5): whether customer / internal
+  // data is reused for training, sharing or retention — verified vs merely asserted —
+  // per provider, each at its true evidence class. A vendor_asserted "we don't train
+  // on your data" reads as vendor-asserted, never verified; an unstated policy is a
+  // gap, never "safe". A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/training-reuse", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.trainingReuse(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's Metadata & Logging Risk (Phase 3.5): where prompts / traces /
+  // embeddings / metadata get logged, the sensitive categories that could reach those
+  // sinks, and the gaps where sensitive data is logged with no evidenced control. No
+  // sensitive value is ever emitted — only the presence of a category and its
+  // lineage. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/metadata-logging", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.metadataLogging(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // The Vertical Assurance Packs catalog (commercial spine): the static, code-only
   // catalog of industry packs. A read, behind requireAuth like the rest. Apply one
   // to the deployment via the pack route below.

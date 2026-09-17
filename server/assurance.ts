@@ -766,6 +766,449 @@ export interface AssurancePackApplied {
   };
 }
 
+// ==== Identity Assurance & Effective Access (Phase 3.1) ====
+//
+// The honest inventory of a deployment's PRINCIPALS — the identities that can act
+// (service accounts, agents, and the app/model surface itself) — and what each can
+// effectively REACH, by direct and transitive paths through the asset graph. A
+// computed read, never stored. It never claims least privilege is satisfied or an
+// identity is secure: it reports powers, transitive reach, and gaps only. A shadow
+// (unmanaged) principal reads as shadow with its risk raised; a transitive path is
+// reported only where a declared edge evidences every hop, never invented.
+
+/** One source that grants a principal a held capability: the component and the
+ *  declared permission string that attests it. */
+export interface AccessCapabilitySource {
+  assetName: string;
+  permission: string;
+}
+/** A sensitive capability a principal wields, via its own or a reached tool's
+ *  declared permissions. `risk` is the capability's ordinal band. */
+export interface AccessCapability {
+  key: string;
+  label: string;
+  category: string;
+  risk: string;
+  sources: AccessCapabilitySource[];
+}
+/**
+ * One thing a principal can effectively reach: a concrete component (a data store,
+ * an MCP server, a tool) or a capability-power. `via` is the declared path the
+ * reach followed, hop by hop — evidenced, never invented. `targetClassification`
+ * is null for a capability-power reach.
+ */
+export interface AccessReach {
+  target: string;
+  targetKind: string;
+  targetKindLabel: string;
+  targetClassification: string | null;
+  targetManaged: boolean;
+  via: string[];
+  capability: string;
+  risk: string;
+}
+/** An identity-assurance gap surfaced on a principal (privileged access, over-broad
+ *  reach, shadow identity, ungoverned reach, orphaned). Its ordinal `risk`, a human
+ *  `detail`, and the type-specific arrays the backend carried. */
+export interface AccessGap {
+  type: string;
+  risk: string;
+  detail: string;
+  capabilities?: string[];
+  categories?: string[];
+  targets?: string[];
+}
+/** One principal: an identity that can act, its held capabilities, effective reach,
+ *  identity-assurance gaps, and an honest risk band. `classification` is null for
+ *  the deployment's own app/model base principal. */
+export interface AccessPrincipal {
+  key: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  classification: string | null;
+  classificationLabel: string | null;
+  managed: boolean;
+  shadow: boolean;
+  /** "high" | "elevated" | "standard" — derived from the sensitive powers held. */
+  privilegeLevel: string;
+  capabilities: AccessCapability[];
+  effectiveReach: AccessReach[];
+  gaps: AccessGap[];
+  risk: string;
+  // Convenience flags the summary rolls up (concern signals, never a "pass").
+  privileged: boolean;
+  overBroad: boolean;
+  orphaned: boolean;
+}
+export interface AssuranceEffectiveAccess {
+  principals: AccessPrincipal[];
+  summary: {
+    principals: number;
+    privileged: number;
+    shadow: number;
+    orphaned: number;
+    overBroad: number;
+    highRiskReach: number;
+    /** Most concerning risk across principals, or null when there are none. */
+    worstRisk: string | null;
+  };
+}
+
+// ==== Ripple Effect / blast radius (Phase 2.5) ====
+//
+// For each origin worth tracing — an active high/critical finding tied to a
+// component, or a privileged / high-risk principal — a FEW WELL-SUPPORTED
+// downstream consequences a compromise of it could have, each tied to the evidenced
+// path that supports it. Reads only the effective-access reach graph and the data
+// boundary, so it re-derives no reachability. Every consequence is potential and
+// evidence-based, never a realized harm or a monetary figure; the list is ranked
+// and bounded to the well-supported core, and the full evidenced count is reported
+// so the bounding is visible. An origin with no evidenced downstream reach reads
+// honestly as such, never as safe or contained.
+
+export interface RippleFinding {
+  uuid: string;
+  findingType: string;
+  severity: string;
+  title: string;
+}
+export interface RippleOrigin {
+  key: string;
+  origin: string;
+  originTypes: string[];
+  reasons: string[];
+  risk: string;
+  findings: RippleFinding[];
+  // Present when the origin is (also) a principal.
+  principalKind?: string;
+  principalKindLabel?: string;
+  privilegeLevel?: string;
+  /** Whether the origin has any evidenced downstream reach. False is NOT "safe". */
+  evidencedReach: boolean;
+  consequenceCount: number;
+  /** The honest note carried when there is no evidenced downstream reach. */
+  note: string | null;
+}
+export interface RippleConsequence {
+  origin: string;
+  originKey: string;
+  consequence: string;
+  category: string;
+  categoryLabel: string;
+  target: string;
+  targets: string[];
+  via: string[];
+  risk: string;
+  /** Always true — a potential effect, never a realized harm. */
+  potential: boolean;
+  evidenceBasis: string[];
+}
+export interface AssuranceRippleEffect {
+  origins: RippleOrigin[];
+  consequences: RippleConsequence[];
+  summary: {
+    origins: number;
+    originsWithReach: number;
+    consequences: number;
+    /** The full evidenced count before bounding — the bounding is visible. */
+    evidencedConsequences: number;
+    bounded: boolean;
+    byCategory: Record<string, number>;
+    worstRisk: string | null;
+  };
+}
+
+// ==== Credential-gated posture (Phase 3.2 / 3.3 / 3.4) ====
+//
+// The three posture domains — cloud, secrets, repo — read a customer's cloud
+// account, secret store, or source-control/CI through credentials the customer
+// grants. INERT BY DEFAULT: with no configured credentials a domain makes no fetch
+// and returns `{connected: false, ...}` with the catalog of checks it WOULD run.
+// An inert domain reads as "not connected", never "all clear". When connected, a
+// `pass` is the observed absence of one gap, never a claim the system is secure.
+
+/** The posture catalog: which domains exist and whether each is configured. */
+export interface PostureDomainRef {
+  name: string;
+  label: string;
+  configured: boolean;
+}
+export interface AssurancePostureCatalog {
+  domains: PostureDomainRef[];
+}
+/** One curated check as it appears in the catalog (no result — safe to show even
+ *  when the domain is inert). */
+export interface PostureCheckCatalog {
+  check: string;
+  title: string;
+  severity: string;
+  category: string;
+  resource: string;
+  description: string;
+}
+/** The honest answer to one check over observed data. `evidenceClass` reflects HOW
+ *  it was determined (configuration- vs technically-verified). */
+export interface PostureFinding {
+  check: string;
+  title: string;
+  /** "pass" | "gap" | "unknown". */
+  status: string;
+  severity: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  detail: string;
+  resource: string;
+  category: string;
+}
+export interface AssurancePostureDomain {
+  domain: string;
+  domainLabel: string;
+  connected: boolean;
+  /** The "not configured" reason on an inert domain; null when connected. */
+  detail: string | null;
+  checks: PostureCheckCatalog[];
+  findings: PostureFinding[];
+  summary: {
+    connected: boolean;
+    planned: number;
+    total: number;
+    pass: number;
+    gap: number;
+    unknown: number;
+    gapsBySeverity: Record<string, number>;
+    maxRisk: string;
+    /** The weakest evidence behind any finding — present only when connected. */
+    weakestEvidence: string | null;
+  };
+}
+
+// ==== Personal Context Exposure (Phase 3.5) ====
+//
+// What personal / customer data the deployment holds, in which data-bearing
+// components, and which principals can reach it. Reuses the effective-access reach
+// graph and the data boundary. An UNCLASSIFIED data store reads as UNKNOWN
+// (personal-data exposure cannot be ruled out), never "no PII". No data value is
+// ever emitted.
+
+/** A principal that can reach a data store, read from the evidenced reach graph. */
+export interface PersonalReader {
+  principal: string;
+  principalKind: string;
+  principalKindLabel: string;
+  privilegeLevel: string;
+  shadow: boolean;
+  overBroad: boolean;
+  risk: string;
+  via: string[];
+}
+/** A personal-context gap. The roll-up variant also carries `assetName`. */
+export interface PersonalGap {
+  type: string;
+  risk: string;
+  detail: string;
+  principals?: string[];
+  assetName?: string;
+}
+export interface PersonalStore {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  providerName: string | null;
+  /** "personal" | "unknown" | ... — "unknown" is not "no PII". */
+  dataSensitivity: string;
+  personalData: boolean;
+  signals: string[];
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  reachableBy: PersonalReader[];
+  readerCount: number;
+  gaps: PersonalGap[];
+  risk: string;
+}
+export interface AssurancePersonalContext {
+  stores: PersonalStore[];
+  gaps: PersonalGap[];
+  summary: {
+    dataBearingComponents: number;
+    personalDataComponents: number;
+    unclassifiedComponents: number;
+    reachableByShadow: number;
+    reachableByOverBroad: number;
+    crossingBoundary: number;
+    gaps: number;
+    worstRisk: string | null;
+  };
+}
+
+// ==== Data Lifecycle Review (Phase 3.5) ====
+//
+// The lifecycle stages evidenced in the graph — collected, transmitted, processed,
+// logged, retained, reused, deleted — the components that evidence each (at their
+// true evidence strength), and the gaps where a stage has no evidenced control. An
+// UNEVIDENCED stage reads "not evidenced", never "compliant"; a weakly-evidenced
+// (vendor-asserted) control is still a gap.
+
+export interface LifecycleComponent {
+  name: string;
+  kindLabel: string;
+  how: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+}
+export interface LifecycleStage {
+  stage: string;
+  stageLabel: string;
+  /** A control stage (logged/retained/reused/deleted) vs a flow stage. */
+  controlStage: boolean;
+  evidenced: boolean;
+  components: LifecycleComponent[];
+  /** The weakest evidence behind the stage, or null when unevidenced. */
+  weakestEvidence: string | null;
+  weakestEvidenceLabel: string | null;
+  gap: boolean;
+  gapDetail: string | null;
+  risk: string;
+}
+export interface LifecycleGap {
+  stage: string;
+  stageLabel: string;
+  risk: string;
+  detail: string;
+}
+export interface AssuranceDataLifecycle {
+  stages: LifecycleStage[];
+  gaps: LifecycleGap[];
+  summary: {
+    stagesTotal: number;
+    evidenced: number;
+    notEvidenced: number;
+    controlGaps: number;
+    worstRisk: string | null;
+  };
+}
+
+// ==== Training / Reuse Review (Phase 3.5) ====
+//
+// Whether customer / internal data is reused for training, sharing or retention —
+// VERIFIED vs merely ASSERTED — per provider, each posture carried at its true
+// evidence class. A vendor_asserted "we don't train on your data" reads as
+// vendor-asserted, never verified; an unstated reuse policy is a gap (reuse cannot
+// be ruled out), never "safe".
+
+export interface ReusePosture {
+  field: string;
+  fieldLabel: string;
+  concern: string;
+  value: string;
+  /** "reused" | "not_reused" | "unknown". */
+  posture: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+  /** True ONLY when independently evidenced — a vendor claim never upgrades. */
+  verified: boolean;
+}
+export interface TrainingDependentAsset {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+}
+export interface TrainingGap {
+  type: string;
+  field: string;
+  risk: string;
+  detail: string;
+  providerName?: string;
+}
+export interface TrainingProvider {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  dependentAssets: TrainingDependentAsset[];
+  postures: ReusePosture[];
+  reusePossible: boolean;
+  reuseDeclared: boolean;
+  gaps: TrainingGap[];
+  risk: string;
+}
+export interface AssuranceTrainingReuse {
+  providers: TrainingProvider[];
+  gaps: TrainingGap[];
+  summary: {
+    providers: number;
+    reuseDeclared: number;
+    reusePossible: number;
+    verifiedNoReuse: number;
+    gaps: number;
+    worstRisk: string | null;
+  };
+}
+
+// ==== Metadata & Logging Risk (Phase 3.5) ====
+//
+// Where prompts / traces / embeddings / metadata get logged, what sensitive
+// categories could reach those sinks, and the gaps where sensitive data is logged
+// with no evidenced control. NO sensitive value is ever emitted — only the presence
+// of a category and its lineage; an unknown reads unknown.
+
+export interface LogCategory {
+  category: string;
+  label: string;
+  basis: string;
+}
+export interface MetadataGap {
+  type: string;
+  risk: string;
+  detail: string;
+  assetName?: string;
+}
+export interface LogSink {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  providerName: string | null;
+  basis: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  sensitiveCategories: LogCategory[];
+  controlEvidenced: boolean;
+  controlDetail: string | null;
+  gaps: MetadataGap[];
+  risk: string;
+}
+export interface HandledCategory {
+  category: string;
+  basis: string;
+  label: string;
+}
+export interface AssuranceMetadataLogging {
+  sinks: LogSink[];
+  sensitiveCategoriesHandled: HandledCategory[];
+  gaps: MetadataGap[];
+  summary: {
+    sinks: number;
+    shadowSinks: number;
+    sinksWithoutControl: number;
+    sensitiveCategoriesHandled: number;
+    gaps: number;
+    worstRisk: string | null;
+  };
+}
+
 // ==== Mappers ====
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -1749,6 +2192,489 @@ async function pagedRows(firstPath: string): Promise<Record<string, unknown>[]> 
   return collected;
 }
 
+// ==== Phase 3 + 2.5 assessment mappers ====
+
+/** A nested object, or `{}` when the value is not a plain object. */
+function objOf(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/** The optional string arrays a gap dict may carry, mapped verbatim when present.
+ *  Absent keys stay absent so a gap never gains an invented empty array. */
+function gapExtras(raw: Record<string, unknown>): {
+  capabilities?: string[];
+  categories?: string[];
+  targets?: string[];
+  principals?: string[];
+} {
+  const out: { capabilities?: string[]; categories?: string[]; targets?: string[]; principals?: string[] } = {};
+  if (Array.isArray(raw.capabilities)) out.capabilities = strList(raw.capabilities);
+  if (Array.isArray(raw.categories)) out.categories = strList(raw.categories);
+  if (Array.isArray(raw.targets)) out.targets = strList(raw.targets);
+  if (Array.isArray(raw.principals)) out.principals = strList(raw.principals);
+  return out;
+}
+
+function accessCapability(raw: Record<string, unknown>): AccessCapability {
+  return {
+    key: str(raw.key),
+    label: str(raw.label),
+    category: str(raw.category),
+    risk: str(raw.risk),
+    sources: Array.isArray(raw.sources)
+      ? (raw.sources as Record<string, unknown>[]).map((s) => ({
+          assetName: str(s.asset_name),
+          permission: str(s.permission),
+        }))
+      : [],
+  };
+}
+
+function accessReach(raw: Record<string, unknown>): AccessReach {
+  return {
+    target: str(raw.target),
+    targetKind: str(raw.target_kind),
+    targetKindLabel: str(raw.target_kind_label),
+    // Null for a capability-power reach — carried honestly, never "".
+    targetClassification: strOrNull(raw.target_classification),
+    targetManaged: bool(raw.target_managed),
+    via: strList(raw.via),
+    capability: str(raw.capability),
+    risk: str(raw.risk),
+  };
+}
+
+function accessPrincipal(raw: Record<string, unknown>): AccessPrincipal {
+  return {
+    key: str(raw.key),
+    name: str(raw.name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    // Null for the deployment's own app/model base principal.
+    classification: strOrNull(raw.classification),
+    classificationLabel: strOrNull(raw.classification_label),
+    managed: bool(raw.managed),
+    shadow: bool(raw.shadow),
+    privilegeLevel: str(raw.privilege_level),
+    capabilities: Array.isArray(raw.capabilities)
+      ? (raw.capabilities as Record<string, unknown>[]).map(accessCapability)
+      : [],
+    effectiveReach: Array.isArray(raw.effective_reach)
+      ? (raw.effective_reach as Record<string, unknown>[]).map(accessReach)
+      : [],
+    gaps: Array.isArray(raw.gaps)
+      ? (raw.gaps as Record<string, unknown>[]).map((g) => ({
+          type: str(g.type),
+          risk: str(g.risk),
+          detail: str(g.detail),
+          ...gapExtras(g),
+        }))
+      : [],
+    risk: str(raw.risk),
+    privileged: bool(raw.privileged),
+    overBroad: bool(raw.over_broad),
+    orphaned: bool(raw.orphaned),
+  };
+}
+
+function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAccess {
+  const summary = objOf(raw.summary);
+  return {
+    principals: Array.isArray(raw.principals)
+      ? (raw.principals as Record<string, unknown>[]).map(accessPrincipal)
+      : [],
+    summary: {
+      principals: num(summary.principals, 0),
+      privileged: num(summary.privileged, 0),
+      shadow: num(summary.shadow, 0),
+      orphaned: num(summary.orphaned, 0),
+      overBroad: num(summary.over_broad, 0),
+      highRiskReach: num(summary.high_risk_reach, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
+function rippleOrigin(raw: Record<string, unknown>): RippleOrigin {
+  const out: RippleOrigin = {
+    key: str(raw.key),
+    origin: str(raw.origin),
+    originTypes: strList(raw.origin_types),
+    reasons: strList(raw.reasons),
+    risk: str(raw.risk),
+    findings: Array.isArray(raw.findings)
+      ? (raw.findings as Record<string, unknown>[]).map((f) => ({
+          uuid: str(f.uuid),
+          findingType: str(f.finding_type),
+          severity: str(f.severity),
+          title: str(f.title),
+        }))
+      : [],
+    evidencedReach: bool(raw.evidenced_reach),
+    consequenceCount: num(raw.consequence_count, 0),
+    // The honest "no evidenced downstream reach" note, when present.
+    note: strOrNull(raw.note),
+  };
+  // Principal fields ride along only when the origin is (also) a principal.
+  if (typeof raw.principal_kind === "string") out.principalKind = raw.principal_kind;
+  if (typeof raw.principal_kind_label === "string") out.principalKindLabel = raw.principal_kind_label;
+  if (typeof raw.privilege_level === "string") out.privilegeLevel = raw.privilege_level;
+  return out;
+}
+
+function rippleConsequence(raw: Record<string, unknown>): RippleConsequence {
+  return {
+    origin: str(raw.origin),
+    originKey: str(raw.origin_key),
+    consequence: str(raw.consequence),
+    category: str(raw.category),
+    categoryLabel: str(raw.category_label),
+    target: str(raw.target),
+    targets: strList(raw.targets),
+    via: strList(raw.via),
+    risk: str(raw.risk),
+    potential: bool(raw.potential),
+    evidenceBasis: strList(raw.evidence_basis),
+  };
+}
+
+function mapRippleEffect(raw: Record<string, unknown>): AssuranceRippleEffect {
+  const summary = objOf(raw.summary);
+  return {
+    origins: Array.isArray(raw.origins)
+      ? (raw.origins as Record<string, unknown>[]).map(rippleOrigin)
+      : [],
+    consequences: Array.isArray(raw.consequences)
+      ? (raw.consequences as Record<string, unknown>[]).map(rippleConsequence)
+      : [],
+    summary: {
+      origins: num(summary.origins, 0),
+      originsWithReach: num(summary.origins_with_reach, 0),
+      consequences: num(summary.consequences, 0),
+      evidencedConsequences: num(summary.evidenced_consequences, 0),
+      bounded: bool(summary.bounded),
+      byCategory: numRecord(summary.by_category),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
+function mapPostureCatalog(raw: Record<string, unknown>): AssurancePostureCatalog {
+  return {
+    domains: Array.isArray(raw.domains)
+      ? (raw.domains as Record<string, unknown>[]).map((d) => ({
+          name: str(d.name),
+          label: str(d.label),
+          configured: bool(d.configured),
+        }))
+      : [],
+  };
+}
+
+function postureCheckCatalog(raw: Record<string, unknown>): PostureCheckCatalog {
+  return {
+    check: str(raw.check),
+    title: str(raw.title),
+    severity: str(raw.severity),
+    category: str(raw.category),
+    resource: str(raw.resource),
+    description: str(raw.description),
+  };
+}
+
+function postureFinding(raw: Record<string, unknown>): PostureFinding {
+  return {
+    check: str(raw.check),
+    title: str(raw.title),
+    status: str(raw.status),
+    severity: str(raw.severity),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    detail: str(raw.detail),
+    resource: str(raw.resource),
+    category: str(raw.category),
+  };
+}
+
+/**
+ * One posture domain (cloud / secrets / repo). The inert `connected:false` body is
+ * a NORMAL 200 response, mapped like any other — the panel reads `connected` and
+ * says "not connected", never "all clear". `detail` is the not-configured reason on
+ * an inert domain and null when connected; `weakestEvidence` is present only when
+ * connected.
+ */
+function mapPostureDomain(raw: Record<string, unknown>): AssurancePostureDomain {
+  const summary = objOf(raw.summary);
+  return {
+    domain: str(raw.domain),
+    domainLabel: str(raw.domain_label),
+    connected: bool(raw.connected),
+    detail: strOrNull(raw.detail),
+    checks: Array.isArray(raw.checks)
+      ? (raw.checks as Record<string, unknown>[]).map(postureCheckCatalog)
+      : [],
+    findings: Array.isArray(raw.findings)
+      ? (raw.findings as Record<string, unknown>[]).map(postureFinding)
+      : [],
+    summary: {
+      connected: bool(summary.connected),
+      planned: num(summary.planned, 0),
+      total: num(summary.total, 0),
+      pass: num(summary.pass, 0),
+      gap: num(summary.gap, 0),
+      unknown: num(summary.unknown, 0),
+      gapsBySeverity: numRecord(summary.gaps_by_severity),
+      maxRisk: str(summary.max_risk),
+      weakestEvidence: strOrNull(summary.weakest_evidence),
+    },
+  };
+}
+
+function personalReader(raw: Record<string, unknown>): PersonalReader {
+  return {
+    principal: str(raw.principal),
+    principalKind: str(raw.principal_kind),
+    principalKindLabel: str(raw.principal_kind_label),
+    privilegeLevel: str(raw.privilege_level),
+    shadow: bool(raw.shadow),
+    overBroad: bool(raw.over_broad),
+    risk: str(raw.risk),
+    via: strList(raw.via),
+  };
+}
+
+function personalGap(raw: Record<string, unknown>): PersonalGap {
+  const out: PersonalGap = { type: str(raw.type), risk: str(raw.risk), detail: str(raw.detail) };
+  if (Array.isArray(raw.principals)) out.principals = strList(raw.principals);
+  // The roll-up variant carries the asset it belongs to.
+  if (typeof raw.asset_name === "string") out.assetName = raw.asset_name;
+  return out;
+}
+
+function personalStore(raw: Record<string, unknown>): PersonalStore {
+  return {
+    assetName: str(raw.asset_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    identifier: str(raw.identifier),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    managed: bool(raw.managed),
+    providerName: strOrNull(raw.provider_name),
+    // "unknown" is an honest unknown, NOT "no PII".
+    dataSensitivity: str(raw.data_sensitivity),
+    personalData: bool(raw.personal_data),
+    signals: strList(raw.signals),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    reachableBy: Array.isArray(raw.reachable_by)
+      ? (raw.reachable_by as Record<string, unknown>[]).map(personalReader)
+      : [],
+    readerCount: num(raw.reader_count, 0),
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(personalGap) : [],
+    risk: str(raw.risk),
+  };
+}
+
+function mapPersonalContext(raw: Record<string, unknown>): AssurancePersonalContext {
+  const summary = objOf(raw.summary);
+  return {
+    stores: Array.isArray(raw.stores)
+      ? (raw.stores as Record<string, unknown>[]).map(personalStore)
+      : [],
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(personalGap) : [],
+    summary: {
+      dataBearingComponents: num(summary.data_bearing_components, 0),
+      personalDataComponents: num(summary.personal_data_components, 0),
+      unclassifiedComponents: num(summary.unclassified_components, 0),
+      reachableByShadow: num(summary.reachable_by_shadow, 0),
+      reachableByOverBroad: num(summary.reachable_by_over_broad, 0),
+      crossingBoundary: num(summary.crossing_boundary, 0),
+      gaps: num(summary.gaps, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
+function lifecycleComponent(raw: Record<string, unknown>): LifecycleComponent {
+  return {
+    name: str(raw.name),
+    kindLabel: str(raw.kind_label),
+    how: str(raw.how),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+  };
+}
+
+function lifecycleStage(raw: Record<string, unknown>): LifecycleStage {
+  return {
+    stage: str(raw.stage),
+    stageLabel: str(raw.stage_label),
+    controlStage: bool(raw.control_stage),
+    evidenced: bool(raw.evidenced),
+    components: Array.isArray(raw.components)
+      ? (raw.components as Record<string, unknown>[]).map(lifecycleComponent)
+      : [],
+    // Null when the stage is unevidenced — a chain is as strong as its weakest link.
+    weakestEvidence: strOrNull(raw.weakest_evidence),
+    weakestEvidenceLabel: strOrNull(raw.weakest_evidence_label),
+    gap: bool(raw.gap),
+    gapDetail: strOrNull(raw.gap_detail),
+    risk: str(raw.risk),
+  };
+}
+
+function mapDataLifecycle(raw: Record<string, unknown>): AssuranceDataLifecycle {
+  const summary = objOf(raw.summary);
+  return {
+    stages: Array.isArray(raw.stages)
+      ? (raw.stages as Record<string, unknown>[]).map(lifecycleStage)
+      : [],
+    gaps: Array.isArray(raw.gaps)
+      ? (raw.gaps as Record<string, unknown>[]).map((g) => ({
+          stage: str(g.stage),
+          stageLabel: str(g.stage_label),
+          risk: str(g.risk),
+          detail: str(g.detail),
+        }))
+      : [],
+    summary: {
+      stagesTotal: num(summary.stages_total, 0),
+      evidenced: num(summary.evidenced, 0),
+      notEvidenced: num(summary.not_evidenced, 0),
+      controlGaps: num(summary.control_gaps, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
+function reusePosture(raw: Record<string, unknown>): ReusePosture {
+  return {
+    field: str(raw.field),
+    fieldLabel: str(raw.field_label),
+    concern: str(raw.concern),
+    value: str(raw.value),
+    posture: str(raw.posture),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    source: str(raw.source),
+    sourceLabel: str(raw.source_label),
+    // Verified only when independently evidenced — a vendor claim never upgrades.
+    verified: bool(raw.verified),
+  };
+}
+
+function trainingGap(raw: Record<string, unknown>): TrainingGap {
+  const out: TrainingGap = {
+    type: str(raw.type),
+    field: str(raw.field),
+    risk: str(raw.risk),
+    detail: str(raw.detail),
+  };
+  if (typeof raw.provider_name === "string") out.providerName = raw.provider_name;
+  return out;
+}
+
+function trainingProvider(raw: Record<string, unknown>): TrainingProvider {
+  return {
+    providerUuid: str(raw.provider_uuid),
+    providerName: str(raw.provider_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    dependentAssets: Array.isArray(raw.dependent_assets)
+      ? (raw.dependent_assets as Record<string, unknown>[]).map((a) => ({
+          assetName: str(a.asset_name),
+          kind: str(a.kind),
+          kindLabel: str(a.kind_label),
+          classification: str(a.classification),
+          classificationLabel: str(a.classification_label),
+          managed: bool(a.managed),
+        }))
+      : [],
+    postures: Array.isArray(raw.postures)
+      ? (raw.postures as Record<string, unknown>[]).map(reusePosture)
+      : [],
+    reusePossible: bool(raw.reuse_possible),
+    reuseDeclared: bool(raw.reuse_declared),
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(trainingGap) : [],
+    risk: str(raw.risk),
+  };
+}
+
+function mapTrainingReuse(raw: Record<string, unknown>): AssuranceTrainingReuse {
+  const summary = objOf(raw.summary);
+  return {
+    providers: Array.isArray(raw.providers)
+      ? (raw.providers as Record<string, unknown>[]).map(trainingProvider)
+      : [],
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(trainingGap) : [],
+    summary: {
+      providers: num(summary.providers, 0),
+      reuseDeclared: num(summary.reuse_declared, 0),
+      reusePossible: num(summary.reuse_possible, 0),
+      verifiedNoReuse: num(summary.verified_no_reuse, 0),
+      gaps: num(summary.gaps, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
+function metadataGap(raw: Record<string, unknown>): MetadataGap {
+  const out: MetadataGap = { type: str(raw.type), risk: str(raw.risk), detail: str(raw.detail) };
+  if (typeof raw.asset_name === "string") out.assetName = raw.asset_name;
+  return out;
+}
+
+function logSink(raw: Record<string, unknown>): LogSink {
+  return {
+    assetName: str(raw.asset_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    identifier: str(raw.identifier),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    managed: bool(raw.managed),
+    providerName: strOrNull(raw.provider_name),
+    basis: str(raw.basis),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    sensitiveCategories: Array.isArray(raw.sensitive_categories)
+      ? (raw.sensitive_categories as Record<string, unknown>[]).map((c) => ({
+          category: str(c.category),
+          label: str(c.label),
+          basis: str(c.basis),
+        }))
+      : [],
+    controlEvidenced: bool(raw.control_evidenced),
+    controlDetail: strOrNull(raw.control_detail),
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(metadataGap) : [],
+    risk: str(raw.risk),
+  };
+}
+
+function mapMetadataLogging(raw: Record<string, unknown>): AssuranceMetadataLogging {
+  const summary = objOf(raw.summary);
+  return {
+    sinks: Array.isArray(raw.sinks) ? (raw.sinks as Record<string, unknown>[]).map(logSink) : [],
+    sensitiveCategoriesHandled: Array.isArray(raw.sensitive_categories_handled)
+      ? (raw.sensitive_categories_handled as Record<string, unknown>[]).map((c) => ({
+          category: str(c.category),
+          basis: str(c.basis),
+          label: str(c.label),
+        }))
+      : [],
+    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(metadataGap) : [],
+    summary: {
+      sinks: num(summary.sinks, 0),
+      shadowSinks: num(summary.shadow_sinks, 0),
+      sinksWithoutControl: num(summary.sinks_without_control, 0),
+      sensitiveCategoriesHandled: num(summary.sensitive_categories_handled, 0),
+      gaps: num(summary.gaps, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+    },
+  };
+}
+
 // ==== Reads ====
 
 /** Is the assurance backend there, and does it accept our service credential? */
@@ -2099,6 +3025,188 @@ export async function listAssets(
  */
 export async function listProviders(): Promise<AssuranceProvider[]> {
   return (await pagedRows("/api/assurance/providers/")).map(provider);
+}
+
+/**
+ * A deployment's Identity Assurance & Effective Access (Phase 3.1): every principal
+ * that can act, what each can effectively reach (direct and transitive, via
+ * evidenced paths only), its identity-assurance gaps, and an honest roll-up. A read
+ * (open), so a non-ok answer is genuine unavailability like the other reads. It
+ * never claims least privilege is satisfied or an identity is secure — powers,
+ * reach, and gaps only.
+ */
+export async function effectiveAccess(uuid: string): Promise<AssuranceEffectiveAccess> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/effective-access/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapEffectiveAccess((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Ripple Effect / blast-radius (Phase 2.5): for each origin worth
+ * tracing, a few well-supported downstream consequences a compromise of it could
+ * have, each tied to the evidenced via-path. A read (open), so a non-ok answer is
+ * genuine unavailability. Every consequence is potential and evidence-based, never a
+ * realized harm or a monetary figure; the list is bounded and the full evidenced
+ * count reported so the bounding is visible; an origin with no evidenced reach reads
+ * honestly as such, never as safe.
+ */
+export async function rippleEffect(uuid: string): Promise<AssuranceRippleEffect> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/ripple-effect/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapRippleEffect((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * The credential-gated posture catalog (Phase 3.2–3.4): the posture domains and
+ * whether each is configured. A read (open), so a non-ok answer is genuine
+ * unavailability. It triggers nothing — it just says which posture assessments
+ * exist and which are inert for lack of credentials.
+ */
+export async function postureCatalog(uuid: string): Promise<AssurancePostureCatalog> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/posture/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapPostureCatalog((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Cloud Assurance posture (Phase 3.2, credential-gated). A read
+ * (open): a non-ok answer is genuine unavailability, but the INERT
+ * `{connected:false, ...}` body is a NORMAL 200 that is mapped and passed through —
+ * an inert domain reads as "not connected", never "all clear".
+ */
+export async function cloudPosture(uuid: string): Promise<AssurancePostureDomain> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/cloud-posture/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Secrets / Crypto posture (Phase 3.3, credential-gated). A read
+ * (open): a non-ok answer is genuine unavailability, the inert `connected:false`
+ * body is a normal 200 passed through. No secret value is ever emitted — only
+ * presence / hygiene facts.
+ */
+export async function secretsPosture(uuid: string): Promise<AssurancePostureDomain> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/secrets-posture/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Repository / SDLC posture (Phase 3.4, credential-gated). A read
+ * (open): a non-ok answer is genuine unavailability, the inert `connected:false`
+ * body is a normal 200 passed through.
+ */
+export async function repoPosture(uuid: string): Promise<AssurancePostureDomain> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/repo-posture/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Personal Context Exposure (Phase 3.5): what personal / customer
+ * data it holds, in which components, and which principals can reach it. A read
+ * (open), so a non-ok answer is genuine unavailability. An unclassified data store
+ * reads as UNKNOWN (personal-data exposure cannot be ruled out), never "no PII"; no
+ * data value is emitted.
+ */
+export async function personalContext(uuid: string): Promise<AssurancePersonalContext> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/personal-context/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapPersonalContext((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Data Lifecycle Review (Phase 3.5): the lifecycle stages evidenced
+ * in the graph, the components that evidence each at their true evidence strength,
+ * and the gaps where a stage has no evidenced control. A read (open), so a non-ok
+ * answer is genuine unavailability. An unevidenced stage reads "not evidenced",
+ * never "compliant".
+ */
+export async function dataLifecycle(uuid: string): Promise<AssuranceDataLifecycle> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/data-lifecycle/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapDataLifecycle((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Training / Reuse Review (Phase 3.5): whether customer / internal
+ * data is reused for training, sharing or retention — verified vs merely asserted —
+ * per provider, each posture at its true evidence class. A read (open), so a non-ok
+ * answer is genuine unavailability. A vendor_asserted "we don't train on your data"
+ * reads as vendor-asserted, never verified; an unstated policy is a gap, never
+ * "safe".
+ */
+export async function trainingReuse(uuid: string): Promise<AssuranceTrainingReuse> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/training-reuse/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapTrainingReuse((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Metadata & Logging Risk (Phase 3.5): where prompts / traces /
+ * embeddings / metadata get logged, the sensitive categories that could reach those
+ * sinks, and the gaps where sensitive data is logged with no evidenced control. A
+ * read (open), so a non-ok answer is genuine unavailability. No sensitive value is
+ * ever emitted — only the presence of a category and its lineage; an unknown reads
+ * unknown.
+ */
+export async function metadataLogging(uuid: string): Promise<AssuranceMetadataLogging> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/metadata-logging/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapMetadataLogging((await response.json()) as Record<string, unknown>);
 }
 
 // ==== Writes ====
