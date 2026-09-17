@@ -98,6 +98,30 @@ describe("assurance BFF", () => {
           ]);
         }
 
+        if (path === "/api/assurance/providers/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "p-1", name: "OpenAI", kind: "model_provider", kind_label: "Model provider",
+              region: "us", notes: "", evidence_class: "vendor_asserted",
+              assertions: [
+                {
+                  uuid: "as-1", field: "region", field_label: "Region", value: "us-east",
+                  evidence_class: "vendor_asserted", evidence_class_label: "Vendor asserted",
+                  source: "vendor_doc", source_label: "Vendor documentation",
+                  notes: "", updated_at: "2026-09-16T00:00:00Z",
+                },
+                {
+                  uuid: "as-2", field: "logging", field_label: "Logging", value: "30 days",
+                  evidence_class: "partially_verified", evidence_class_label: "Partially verified",
+                  source: "vendor_doc", source_label: "Vendor documentation",
+                  notes: "", updated_at: "2026-09-16T00:00:00Z",
+                },
+              ],
+              profile: { declared_fields: 2, weakest_evidence: "vendor_asserted" },
+            },
+          ]);
+        }
+
         if (path === "/api/assurance/unknowns/" && method === "GET") {
           lastUnknownsQuery = query;
           return json(200, [
@@ -199,6 +223,25 @@ describe("assurance BFF", () => {
       uuid: "a-1", deploymentUuid: "dep-1", kind: "api", kindLabel: "API",
       name: "billing-api", classification: "known", classificationLabel: "Known",
       providerName: null, findingCount: 1,
+    });
+  });
+
+  it("refuses the providers read to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/providers");
+    expect(anon.status).toBe(401);
+  });
+
+  it("lists providers with the declared assurance profile, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/providers");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({
+      uuid: "p-1", name: "OpenAI", kind: "model_provider", kindLabel: "Model provider",
+    });
+    expect(res.body[0].profile).toMatchObject({ declaredFields: 2, weakestEvidence: "vendor_asserted" });
+    expect(res.body[0].assertions).toHaveLength(2);
+    expect(res.body[0].assertions[0]).toMatchObject({
+      field: "region", fieldLabel: "Region", evidenceClass: "vendor_asserted",
     });
   });
 
@@ -376,6 +419,19 @@ describe("assurance BFF against a paginated control plane", () => {
           return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/assets/?page=2`, previous: null, results: [row("asset-a", "first")] });
         }
 
+        if (path === "/api/assurance/providers/" && method === "GET") {
+          const page = new URLSearchParams(query).get("page");
+          const row = (uuid: string, name: string) => ({
+            uuid, name, kind: "model_provider", kind_label: "Model provider",
+            region: "us", notes: "", evidence_class: "vendor_asserted",
+            assertions: [], profile: { declared_fields: 0, weakest_evidence: null },
+          });
+          if (page === "2") {
+            return json(200, { count: 2, next: null, previous: `http://${req.headers.host}/api/assurance/providers/`, results: [row("prov-b", "second")] });
+          }
+          return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/providers/?page=2`, previous: null, results: [row("prov-a", "first")] });
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -408,5 +464,12 @@ describe("assurance BFF against a paginated control plane", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
     expect(res.body.map((a: { uuid: string }) => a.uuid)).toEqual(["asset-a", "asset-b"]);
+  });
+
+  it("follows the DRF `next` link across provider pages and returns every row", async () => {
+    const res = await user.get("/api/assurance/providers");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.map((p: { uuid: string }) => p.uuid)).toEqual(["prov-a", "prov-b"]);
   });
 });

@@ -16,7 +16,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Boxes, HelpCircle, Network, RefreshCw, ShieldQuestion } from "lucide-react";
+import { Boxes, Building2, HelpCircle, Network, RefreshCw, ShieldQuestion } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
 import { Divider } from "@/components/mythos/Ornament";
@@ -67,6 +67,24 @@ interface Asset {
   classificationLabel: string;
   providerName: string | null;
   findingCount: number;
+}
+interface Assertion {
+  uuid: string;
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+}
+interface Provider {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  assertions: Assertion[];
+  profile: { declaredFields: number; weakestEvidence: string | null };
 }
 interface Unknown {
   uuid: string;
@@ -146,6 +164,11 @@ export default function Assurance() {
   });
   const { data: assets = [] } = useQuery<Asset[]>({
     queryKey: ["/api/assurance/assets", selected ? { deployment: selected } : {}],
+    enabled: reachable,
+  });
+  // Providers are a global registry — not scoped to the selected deployment.
+  const { data: providers = [] } = useQuery<Provider[]>({
+    queryKey: ["/api/assurance/providers"],
     enabled: reachable,
   });
 
@@ -329,6 +352,61 @@ export default function Assurance() {
                     </span>
                     {a.providerName && (
                       <span className="text-[11px] text-muted-foreground">· {a.providerName}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </GlassCard>
+
+          {/* The provider registry: the vendors under assurance and each one's
+              declared assurance profile (Phase 1.5). Read-only. */}
+          <GlassCard>
+            <div className="mb-4 flex items-center gap-2">
+              <Building2 className="h-4 w-4 text-primary" />
+              <h2 className="text-[15px] font-semibold text-foreground">Providers</h2>
+            </div>
+            {providers.length === 0 ? (
+              <p className="text-[13px] text-muted-foreground">No providers recorded yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {providers.map((p) => (
+                  <li
+                    key={p.uuid}
+                    className="rounded-lg border border-border/40 bg-surface-0/40 p-3"
+                  >
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <span className="text-[13px] font-semibold text-foreground">{p.name}</span>
+                      <span className="text-[12px] text-muted-foreground">{p.kindLabel}</span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+                      <span>
+                        {p.profile.declaredFields} {p.profile.declaredFields === 1 ? "fact" : "facts"}
+                      </span>
+                      {p.profile.weakestEvidence && (
+                        <span className="flex items-center gap-1.5">
+                          <span>weakest:</span>
+                          <EvidenceClassChip value={p.profile.weakestEvidence} />
+                        </span>
+                      )}
+                    </div>
+                    {p.assertions.length === 0 ? (
+                      <p className="mt-2 text-[12px] text-muted-foreground">No profile facts recorded.</p>
+                    ) : (
+                      <ul className="mt-2 space-y-1.5">
+                        {p.assertions.map((a) => (
+                          <li
+                            key={a.uuid}
+                            className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border/30 pt-1.5"
+                          >
+                            <span className="min-w-[9rem] text-[12px] text-muted-foreground">
+                              {a.fieldLabel}
+                            </span>
+                            <span className="flex-1 text-[12px] text-foreground">{a.value}</span>
+                            <EvidenceClassChip value={a.evidenceClass} />
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </li>
                 ))}

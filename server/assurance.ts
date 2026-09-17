@@ -83,6 +83,35 @@ export interface AssuranceAsset {
   lastSeen: string | null;
 }
 
+export interface AssuranceProviderAssertion {
+  uuid: string;
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+  notes: string;
+  updatedAt: string | null;
+}
+
+export interface AssuranceProvider {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  region: string;
+  notes: string;
+  evidenceClass: string;
+  assertions: AssuranceProviderAssertion[];
+  /**
+   * The vendor's declared assurance profile: how many facts it has declared, and
+   * the WEAKEST evidence class among them (null when nothing is declared).
+   */
+  profile: { declaredFields: number; weakestEvidence: string | null };
+}
+
 export interface AssuranceUnknown {
   uuid: string;
   deploymentUuid: string | null;
@@ -207,6 +236,44 @@ function asset(raw: Record<string, unknown>): AssuranceAsset {
         : {},
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
+  };
+}
+
+function assertion(raw: Record<string, unknown>): AssuranceProviderAssertion {
+  return {
+    uuid: str(raw.uuid),
+    field: str(raw.field),
+    fieldLabel: str(raw.field_label),
+    value: str(raw.value),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    source: str(raw.source),
+    sourceLabel: str(raw.source_label),
+    notes: str(raw.notes),
+    updatedAt: strOrNull(raw.updated_at),
+  };
+}
+
+function provider(raw: Record<string, unknown>): AssuranceProvider {
+  const rawProfile =
+    raw.profile && typeof raw.profile === "object" && !Array.isArray(raw.profile)
+      ? (raw.profile as Record<string, unknown>)
+      : {};
+  return {
+    uuid: str(raw.uuid),
+    name: str(raw.name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    region: str(raw.region),
+    notes: str(raw.notes),
+    evidenceClass: str(raw.evidence_class),
+    assertions: Array.isArray(raw.assertions)
+      ? (raw.assertions as Record<string, unknown>[]).map(assertion)
+      : [],
+    profile: {
+      declaredFields: num(rawProfile.declared_fields, 0),
+      weakestEvidence: strOrNull(rawProfile.weakest_evidence),
+    },
   };
 }
 
@@ -374,6 +441,15 @@ export async function listAssets(
     classification: opts.classification,
   });
   return (await pagedRows(`/api/assurance/assets/${query}`)).map(asset);
+}
+
+/**
+ * The provider registry: the third-party vendors under a deployment's supply
+ * chain and each one's declared assurance profile. It is a global registry, not
+ * scoped to a deployment, so it takes no filters.
+ */
+export async function listProviders(): Promise<AssuranceProvider[]> {
+  return (await pagedRows("/api/assurance/providers/")).map(provider);
 }
 
 // ==== Writes ====
