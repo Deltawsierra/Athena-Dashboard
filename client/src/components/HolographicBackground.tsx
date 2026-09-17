@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
-import { motion, useScroll, useTransform, useSpring, useMotionTemplate } from "framer-motion";
+import { motion, useScroll, useTransform, useSpring } from "framer-motion";
 
 // Animated particle field - creates depth and movement
 const ParticleField = ({ scrollY }: { scrollY: any }) => {

@@ -14,7 +14,6 @@ import {
   TriangleAlert,
   CheckCircle2,
   ShieldCheck,
-  ChevronRight,
   MoreHorizontal,
   X,
   ShieldAlert,

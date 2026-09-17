@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Search, Settings, Shield, ShieldCheck, UserX, Key, Mail } from "lucide-react";
+import { Plus, Search, Settings, ShieldCheck, UserX, Key, Mail } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
 import GlassCard from "@/components/GlassCard";

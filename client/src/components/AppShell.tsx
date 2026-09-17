@@ -22,7 +22,6 @@ import {
   ShieldHalf,
   ShieldAlert,
   ShieldQuestion,
-  FlaskConical,
   ListChecks,
   FolderOpen,
   Brain,
