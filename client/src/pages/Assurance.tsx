@@ -519,20 +519,6 @@ interface ExecutiveSummary {
   };
   posture: string;
   assuranceMaturity: string;
-  summary: {
-    totalAssets: number;
-    coverageRatio: number | null;
-    shadowAssets: number;
-    totalFindings: number;
-    activeFindings: number;
-    resolvedFindings: number;
-    worstActiveSeverity: string | null;
-    openRemediation: number;
-    resolvedRemediation: number;
-    decision: string | null;
-    posture: string;
-    assuranceMaturity: string;
-  };
 }
 
 // Vertical Assurance Packs (commercial spine): the compliance map read through an
@@ -2285,6 +2271,31 @@ function BoundaryForm({
 }
 
 /**
+ * Every per-deployment assurance panel is a read-only view derived from the same
+ * assurance graph, keyed by a single-string query key of the shape
+ * `/api/assurance/deployments/<uuid>/<panel>`. With staleTime in force a mounted
+ * panel only refreshes on explicit invalidation, and one write feeds several
+ * panels at once — so an under-scoped invalidation leaves a sibling panel
+ * rendering a value that contradicts the one just saved. This refreshes ALL of a
+ * deployment's computed panels (and the deployments list, whose decision may
+ * have moved), by predicate on the key prefix, so no panel can be missed as new
+ * ones are added. Omit `uuid` for a write whose blast radius is not a single
+ * deployment — a provider fact feeds every deployment that uses it, a
+ * remediation move feeds cross-deployment roll-ups — to refresh every
+ * deployment's computed panels.
+ */
+function invalidateAssuranceComputed(uuid?: string): void {
+  const prefix = `/api/assurance/deployments/${uuid ? `${uuid}/` : ""}`;
+  queryClient.invalidateQueries({
+    predicate: (query) => {
+      const key = query.queryKey[0];
+      return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length;
+    },
+  });
+  queryClient.invalidateQueries({ queryKey: ["/api/assurance/deployments"] });
+}
+
+/**
  * The AI Data Boundary Assessment (Phase 1.4) for one deployment: the flagship
  * reconciliation of the *approved* boundary a human declared against the
  * deployment's *actual* data destinations. Self-fetching (mounted only inside an
@@ -2315,9 +2326,11 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
         })
       ).json(),
     onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: [`/api/assurance/deployments/${deploymentUuid}/data-boundary`],
-      });
+      // The declared boundary feeds this panel and several read-only siblings —
+      // assurance-receipt (policy + digest), executive-summary, training-reuse,
+      // personal-context — so refresh every computed panel for this deployment,
+      // not only this one, or a sibling contradicts the boundary just saved.
+      invalidateAssuranceComputed(deploymentUuid);
       setEditing(false);
       toast({ title: "Data boundary saved" });
     },
@@ -3966,10 +3979,17 @@ function PrivilegeChip({ level }: { level: string }) {
  * never claims least privilege is satisfied or an identity is secure — powers,
  * reach, and gaps only, and a shadow (unmanaged) principal reads as shadow.
  */
+// A deployment can resolve hundreds of principals, each with nested capability,
+// reach, and gap lists; rendering them all at once janks the card. Show the
+// attention-first slice and reveal the rest on demand, always with the true
+// total in view so nothing reads as hidden or complete.
+const PRINCIPAL_RENDER_CAP = 50;
+
 function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<EffectiveAccess>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/effective-access`],
   });
+  const [showAllPrincipals, setShowAllPrincipals] = useState(false);
 
   const heading = (
     <div className="mb-2 flex items-center gap-2">
@@ -4046,7 +4066,10 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
           </div>
 
           <div className="space-y-2.5">
-            {data.principals.map((p) => (
+            {(showAllPrincipals
+              ? data.principals
+              : data.principals.slice(0, PRINCIPAL_RENDER_CAP)
+            ).map((p) => (
               <div key={p.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                   <span className="text-[12px] font-semibold text-foreground">{p.name}</span>
@@ -4124,6 +4147,18 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
               </div>
             ))}
           </div>
+
+          {data.principals.length > PRINCIPAL_RENDER_CAP && (
+            <button
+              onClick={() => setShowAllPrincipals((v) => !v)}
+              className="mt-2.5 inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+              aria-expanded={showAllPrincipals}
+            >
+              {showAllPrincipals
+                ? `Show fewer (of ${data.principals.length})`
+                : `Show ${data.principals.length - PRINCIPAL_RENDER_CAP} more (${data.principals.length} total)`}
+            </button>
+          )}
         </>
       )}
     </section>
@@ -5091,8 +5126,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const recompute = useMutation({
     mutationFn: async (uuid: string) =>
       (await apiRequest("POST", `/api/assurance/deployments/${uuid}/recompute`, { paused: false })).json(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/assurance/deployments"] });
+    onSuccess: (_data, uuid) => {
+      // Recompute moves the decision AND rewrites the derived read-only panels
+      // for this deployment (executive-summary, assurance-receipt, and the rest),
+      // so refresh every computed key for it — not only the deployments list.
+      invalidateAssuranceComputed(uuid);
       toast({ title: "Decision recomputed" });
     },
     onError: (error: Error) =>
@@ -5116,19 +5154,14 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
 
   // ---- Remediation workflow (Phase 2.3; admin-only; the control plane is the
   // gate). A workflow move never changes the finding's security status or the
-  // deployment's decision, but it does change the finding record, so on success
-  // we refresh the findings query and the per-deployment computed panels
-  // (compliance, business-impact) to keep the whole card fresh. A backend 400
-  // (illegal transition, unknown user) reaches the operator as a toast.
-  const REMEDIATION_PANEL_SUFFIXES = ["/compliance", "/business-impact"];
+  // deployment's decision, but it does change the finding record and the
+  // executive-summary / operational roll-ups derived over it, so on success we
+  // refresh the findings query and every deployment's computed panels (a move is
+  // not scoped to one deployment on the client). A backend 400 (illegal
+  // transition, unknown user) reaches the operator as a toast.
   const invalidateRemediation = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/assurance/findings"] });
-    queryClient.invalidateQueries({
-      predicate: (query) => {
-        const key = query.queryKey[0];
-        return typeof key === "string" && REMEDIATION_PANEL_SUFFIXES.some((s) => key.endsWith(s));
-      },
-    });
+    invalidateAssuranceComputed();
   };
 
   const transitionRemediation = useMutation({
@@ -5170,21 +5203,14 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   // ---- Provider profile editing (admin-only; the control plane is the gate) ----
 
   // A provider fact feeds every per-deployment computed assessment (data
-  // boundary, capabilities, route map, AI-BOM), so editing one must refresh
-  // those panels too — not only the providers list. Their query keys are
-  // per-deployment single-string arrays, so a prefix match can't reach them;
-  // a predicate on the key suffix does.
-  const COMPUTED_PANEL_SUFFIXES = ["/data-boundary", "/capabilities", "/route-map", "/ai-bom"];
+  // boundary, capabilities, route map, AI-BOM, vendor-assurance, training-reuse,
+  // the executive-summary vendor roll-up, and more), so editing one must refresh
+  // those panels too — not only the providers list. A fact is not scoped to one
+  // deployment on the client (any deployment using the provider is affected), so
+  // refresh every deployment's computed panels.
   const invalidateProviders = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/assurance/providers"] });
-    queryClient.invalidateQueries({
-      predicate: (query) => {
-        const key = query.queryKey[0];
-        return (
-          typeof key === "string" && COMPUTED_PANEL_SUFFIXES.some((s) => key.endsWith(s))
-        );
-      },
-    });
+    invalidateAssuranceComputed();
   };
 
   const createProvider = useMutation({
