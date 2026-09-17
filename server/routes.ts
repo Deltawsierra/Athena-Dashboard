@@ -1592,6 +1592,19 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's business-impact map (Phase 2.4): the business-impact
+  // dimensions its findings implicate — inferred potential exposure, never a
+  // realized loss or a dollar figure. A read, behind requireAuth like the rest
+  // of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/business-impact", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.businessImpact(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
     try {
       res.json(

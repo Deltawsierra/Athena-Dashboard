@@ -26,6 +26,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Boxes,
+  Briefcase,
   Building2,
   ChevronDown,
   ChevronRight,
@@ -323,6 +324,39 @@ interface Compliance {
     controlsTouched: number;
     controlsWithActiveFindings: number;
     worstSeverity: string | null;
+  };
+}
+
+interface BusinessImpactDimension {
+  key: string;
+  label: string;
+  description: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+  exposureBand: string | null;
+  findingTypes: string[];
+}
+interface BusinessImpactUnmapped {
+  findingType: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+}
+interface BusinessImpact {
+  dimensions: BusinessImpactDimension[];
+  unmapped: BusinessImpactUnmapped[];
+  summary: {
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    mappedFindingTypes: number;
+    unmappedFindingTypes: number;
+    dimensions: number;
+    dimensionsTouched: number;
+    dimensionsWithActiveExposure: number;
+    worstSeverity: string | null;
+    worstExposureBand: string | null;
   };
 }
 
@@ -1987,6 +2021,204 @@ function CompliancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// A dimension's exposure band, worn honestly as an ORDINAL signal, never a
+// quantity: elevated leads in red, moderate in amber, low in muted. A dimension
+// with no active findings has no band — it reads as "no active exposure", never
+// "safe". Anything unrecognised falls back to muted.
+function ExposureBandChip({ band }: { band: string | null }) {
+  if (!band) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-border/50 bg-surface-1/40 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+        No active exposure
+      </span>
+    );
+  }
+  const look =
+    band === "elevated"
+      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Elevated" }
+      : band === "moderate"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Moderate" }
+        : band === "low"
+          ? { cls: "border-sev-medium/40 bg-sev-medium/10 text-sev-medium", label: "Low" }
+          : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: band };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+    >
+      {look.label} exposure
+    </span>
+  );
+}
+
+/**
+ * The Business-impact Map (Phase 2.4) for one deployment: the business-impact
+ * dimensions its findings implicate, strongest-exposure-first. Self-fetching
+ * (mounted only inside an expanded deployment). This is inferred *potential*
+ * exposure, NEVER a realized loss or a dollar figure — a dimension is implicated
+ * only by its ACTIVE findings, and its exposure band is an ORDINAL signal
+ * (elevated/moderate/low) of how much is at stake, not a quantity. A dimension
+ * with no active findings carries no band and reads as "no active exposure",
+ * never "safe"; the finding types no dimension claims (unmapped) are surfaced,
+ * never smoothed over.
+ */
+function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<BusinessImpact>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/business-impact`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Briefcase className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Business-impact map</h3>
+      <span className="text-[11px] text-muted-foreground">impact dimensions with active findings</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the business-impact map…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the business-impact map{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {summary.totalFindings === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No findings recorded for this deployment yet — nothing to map to an impact dimension.
+        </p>
+      ) : (
+        <>
+          {/* Honest framing: this is inferred potential exposure, never a
+              realized loss. The band is an ordinal signal, not a quantity. */}
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            An implicated dimension is one an <span className="text-sev-high">active finding</span>{" "}
+            exposes — inferred <span className="text-foreground">potential</span> exposure, never a
+            realized loss. The exposure band is an ordinal signal, not a quantity.
+          </p>
+
+          {/* The scoreboard: active vs resolved, the dimensions carrying active
+              exposure, and the honest worst band and severity across the map. */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.activeFindings} active · {summary.resolvedFindings} resolved
+            </span>
+            {summary.dimensionsWithActiveExposure > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.dimensionsWithActiveExposure} dimension
+                {summary.dimensionsWithActiveExposure === 1 ? "" : "s"} with active exposure
+              </span>
+            )}
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.dimensionsTouched} touched · {summary.mappedFindingTypes} type
+              {summary.mappedFindingTypes === 1 ? "" : "s"} mapped
+            </span>
+            {summary.unmappedFindingTypes > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                <HelpCircle className="h-3.5 w-3.5" /> {summary.unmappedFindingTypes} unmapped type
+                {summary.unmappedFindingTypes === 1 ? "" : "s"}
+              </span>
+            )}
+            {summary.worstExposureBand && (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-muted-foreground">worst:</span>
+                <ExposureBandChip band={summary.worstExposureBand} />
+              </span>
+            )}
+            {summary.worstSeverity && (
+              <span className="inline-flex items-center gap-1">
+                <SeverityPill severity={asSeverity(summary.worstSeverity)} />
+              </span>
+            )}
+          </div>
+
+          {/* Each implicated dimension, strongest-exposure-first (the backend's
+              order). A dimension with no active findings reads as "no active
+              exposure", never "safe". */}
+          <div className="space-y-2.5">
+            {data.dimensions.map((dim) => (
+              <div key={dim.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{dim.label}</span>
+                  <ExposureBandChip band={dim.exposureBand} />
+                  {dim.activeFindingCount > 0 ? (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-[11px] text-sev-high">
+                      <ShieldAlert className="h-3 w-3" /> {dim.activeFindingCount} active
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground/80">no active findings</span>
+                  )}
+                  {dim.resolvedFindingCount > 0 && (
+                    <span className="text-[11px] text-muted-foreground/80">
+                      {dim.resolvedFindingCount} resolved
+                    </span>
+                  )}
+                  {dim.worstSeverity && (
+                    <span className="ml-auto">
+                      <SeverityPill severity={asSeverity(dim.worstSeverity)} />
+                    </span>
+                  )}
+                </div>
+                {dim.description && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                    {dim.description}
+                  </p>
+                )}
+                {dim.findingTypes.length > 0 && (
+                  <p className="mt-1 text-[10px] text-muted-foreground/80">
+                    {dim.findingTypes.join(", ")}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Unmapped finding types: the engine found these and no dimension in
+              this map claims them — surfaced as a gap, never dropped. */}
+          {data.unmapped.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
+                Unmapped finding types
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {data.unmapped.map((u) => (
+                  <li
+                    key={u.findingType}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] text-amber-400"
+                  >
+                    <span className="text-foreground">{u.findingType}</span>
+                    <span>{u.activeFindingCount} active</span>
+                    {u.worstSeverity && <SeverityPill severity={asSeverity(u.worstSeverity)} />}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -2433,6 +2665,12 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             deployment's findings against the frameworks. Self-
                             fetches, so it loads only for an expanded deployment. */}
                         <CompliancePanel deploymentUuid={d.uuid} />
+
+                        {/* Business-impact map (Phase 2.4): the impact dimensions
+                            this deployment's active findings implicate — inferred
+                            potential exposure, never a realized loss. Self-fetches,
+                            so it loads only for an expanded deployment. */}
+                        <BusinessImpactPanel deploymentUuid={d.uuid} />
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>

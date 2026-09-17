@@ -292,6 +292,43 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/business-impact/" && method === "GET") {
+          // An honest exposure map: dimensions strongest-first, a dimension with
+          // active exposure, a dimension with only resolved findings (no active
+          // exposure — worst_severity and exposure_band both null), the unmapped
+          // types the engine found, and the ordinal summary bands.
+          return json(200, {
+            dimensions: [
+              {
+                key: "data_confidentiality", label: "Data confidentiality",
+                description: "Sensitive data could be read by someone who should not.",
+                active_finding_count: 2, resolved_finding_count: 1,
+                worst_severity: "high", exposure_band: "elevated",
+                finding_types: ["sql_injection", "xss"],
+              },
+              {
+                key: "service_availability", label: "Service availability",
+                description: "The deployment could be knocked offline.",
+                active_finding_count: 0, resolved_finding_count: 2,
+                worst_severity: null, exposure_band: null,
+                finding_types: ["denial_of_service"],
+              },
+            ],
+            unmapped: [
+              {
+                finding_type: "quantum_teapot_anomaly", active_finding_count: 1,
+                resolved_finding_count: 0, worst_severity: "medium",
+              },
+            ],
+            summary: {
+              total_findings: 7, active_findings: 5, resolved_findings: 2,
+              mapped_finding_types: 4, unmapped_finding_types: 1, dimensions: 6,
+              dimensions_touched: 3, dimensions_with_active_exposure: 3,
+              worst_severity: "critical", worst_exposure_band: "elevated",
+            },
+          });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -614,6 +651,43 @@ describe("assurance BFF", () => {
 
   it("refuses the compliance map to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/compliance");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's business-impact map, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/business-impact");
+    expect(res.status).toBe(200);
+    // The scoreboard counts findings and dimensions honestly, camelCased — an
+    // ordinal worst band, never a quantity or a dollar figure.
+    expect(res.body.summary).toMatchObject({
+      totalFindings: 7, activeFindings: 5, resolvedFindings: 2,
+      mappedFindingTypes: 4, unmappedFindingTypes: 1, dimensions: 6,
+      dimensionsTouched: 3, dimensionsWithActiveExposure: 3,
+      worstSeverity: "critical", worstExposureBand: "elevated",
+    });
+    // A dimension implicated by active findings carries its ordinal exposure
+    // band and worst severity, camelCased — never a "safe"/"passed" flag.
+    const conf = res.body.dimensions.find((d: { key: string }) => d.key === "data_confidentiality");
+    expect(conf).toMatchObject({
+      label: "Data confidentiality", activeFindingCount: 2, resolvedFindingCount: 1,
+      worstSeverity: "high", exposureBand: "elevated",
+    });
+    expect(conf.findingTypes).toEqual(["sql_injection", "xss"]);
+    // A dimension with no active findings reads as no active exposure, never
+    // "safe": its worst severity and exposure band are both null.
+    const avail = res.body.dimensions.find((d: { key: string }) => d.key === "service_availability");
+    expect(avail).toMatchObject({
+      activeFindingCount: 0, resolvedFindingCount: 2,
+      worstSeverity: null, exposureBand: null,
+    });
+    // The unmapped finding types the engine found are surfaced, not hidden.
+    expect(res.body.unmapped[0]).toMatchObject({
+      findingType: "quantum_teapot_anomaly", activeFindingCount: 1, worstSeverity: "medium",
+    });
+  });
+
+  it("refuses the business-impact map to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/business-impact");
     expect(anon.status).toBe(401);
   });
 
