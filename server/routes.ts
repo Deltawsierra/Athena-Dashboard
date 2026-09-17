@@ -1579,6 +1579,19 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's compliance map (Phase 2.1): an honest gap map of its
+  // findings against the compliance frameworks -- which controls a finding has
+  // touched (an open finding against them), never which controls are "met". A
+  // read, behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/compliance", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.compliance(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
     try {
       res.json(

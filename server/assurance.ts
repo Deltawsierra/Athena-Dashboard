@@ -351,6 +351,63 @@ export interface DataBoundaryInput {
   notes?: string;
 }
 
+// ==== Compliance Map (Phase 2.1) ====
+//
+// An HONEST gap map of a deployment's findings against the compliance
+// frameworks, not a certificate. A "touched" control is a control with an open
+// finding against it — its `activeFindingCount` and `worstSeverity` are the gap
+// signal, never a claim the control is met. Finding types no framework claims
+// (`unmapped`) and the raw engine taxonomy the engine cited (`engineReferences`,
+// CWE/OWASP-by-id) ride alongside, surfaced rather than hidden.
+
+export interface ComplianceControl {
+  controlId: string;
+  name: string | null;
+  family: string | null;
+  familyName: string | null;
+  /** Whether the control is in the catalogue, or only referenced by a finding. */
+  catalogued: boolean;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  /** The worst severity among this control's findings, or null when none. */
+  worstSeverity: string | null;
+  findingTypes: string[];
+}
+export interface ComplianceFramework {
+  key: string;
+  name: string;
+  controls: ComplianceControl[];
+  summary: { controlsTouched: number; controlsWithActiveFindings: number; worstSeverity: string | null };
+}
+export interface ComplianceUnmapped {
+  findingType: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+}
+export interface ComplianceEngineReference {
+  taxonomy: string;
+  id: string;
+  findingCount: number;
+  findingTypes: string[];
+}
+export interface AssuranceCompliance {
+  frameworks: ComplianceFramework[];
+  unmapped: ComplianceUnmapped[];
+  engineReferences: ComplianceEngineReference[];
+  summary: {
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    mappedFindingTypes: number;
+    unmappedFindingTypes: number;
+    frameworks: number;
+    controlsTouched: number;
+    controlsWithActiveFindings: number;
+    worstSeverity: string | null;
+  };
+}
+
 // ==== Mappers ====
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -669,6 +726,76 @@ function dataBoundaryAssessment(raw: Record<string, unknown>): AssuranceDataBoun
   };
 }
 
+function complianceControl(raw: Record<string, unknown>): ComplianceControl {
+  return {
+    controlId: str(raw.control_id),
+    name: strOrNull(raw.name),
+    family: strOrNull(raw.family),
+    familyName: strOrNull(raw.family_name),
+    catalogued: bool(raw.catalogued),
+    activeFindingCount: num(raw.active_finding_count, 0),
+    resolvedFindingCount: num(raw.resolved_finding_count, 0),
+    worstSeverity: strOrNull(raw.worst_severity),
+    findingTypes: strList(raw.finding_types),
+  };
+}
+
+function mapCompliance(raw: Record<string, unknown>): AssuranceCompliance {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    frameworks: Array.isArray(raw.frameworks)
+      ? (raw.frameworks as Record<string, unknown>[]).map((f) => {
+          const fSummary =
+            f.summary && typeof f.summary === "object" && !Array.isArray(f.summary)
+              ? (f.summary as Record<string, unknown>)
+              : {};
+          return {
+            key: str(f.key),
+            name: str(f.name),
+            controls: Array.isArray(f.controls)
+              ? (f.controls as Record<string, unknown>[]).map(complianceControl)
+              : [],
+            summary: {
+              controlsTouched: num(fSummary.controls_touched, 0),
+              controlsWithActiveFindings: num(fSummary.controls_with_active_findings, 0),
+              worstSeverity: strOrNull(fSummary.worst_severity),
+            },
+          };
+        })
+      : [],
+    unmapped: Array.isArray(raw.unmapped)
+      ? (raw.unmapped as Record<string, unknown>[]).map((u) => ({
+          findingType: str(u.finding_type),
+          activeFindingCount: num(u.active_finding_count, 0),
+          resolvedFindingCount: num(u.resolved_finding_count, 0),
+          worstSeverity: strOrNull(u.worst_severity),
+        }))
+      : [],
+    engineReferences: Array.isArray(raw.engine_references)
+      ? (raw.engine_references as Record<string, unknown>[]).map((e) => ({
+          taxonomy: str(e.taxonomy),
+          id: str(e.id),
+          findingCount: num(e.finding_count, 0),
+          findingTypes: strList(e.finding_types),
+        }))
+      : [],
+    summary: {
+      totalFindings: num(rawSummary.total_findings, 0),
+      activeFindings: num(rawSummary.active_findings, 0),
+      resolvedFindings: num(rawSummary.resolved_findings, 0),
+      mappedFindingTypes: num(rawSummary.mapped_finding_types, 0),
+      unmappedFindingTypes: num(rawSummary.unmapped_finding_types, 0),
+      frameworks: num(rawSummary.frameworks, 0),
+      controlsTouched: num(rawSummary.controls_touched, 0),
+      controlsWithActiveFindings: num(rawSummary.controls_with_active_findings, 0),
+      worstSeverity: strOrNull(rawSummary.worst_severity),
+    },
+  };
+}
+
 function deployment(raw: Record<string, unknown>): AssuranceDeployment {
   return {
     uuid: str(raw.uuid),
@@ -977,6 +1104,25 @@ export async function dataBoundary(uuid: string): Promise<AssuranceDataBoundary>
     );
   }
   return dataBoundaryAssessment((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's compliance map (Phase 2.1): an honest gap map of its findings
+ * against the compliance frameworks (NIST 800-53, OWASP 2021, OWASP LLM 2025,
+ * DoD Zero Trust). A touched control is a control with an open finding against
+ * it — its active-finding count and worst severity are the gap signal, never a
+ * claim the control is met; the unmapped finding types and engine taxonomy
+ * references ride alongside. A read (open), so a non-ok answer is genuine
+ * unavailability like the other reads.
+ */
+export async function compliance(uuid: string): Promise<AssuranceCompliance> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/compliance/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapCompliance((await response.json()) as Record<string, unknown>);
 }
 
 export async function listFindings(

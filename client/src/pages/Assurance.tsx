@@ -42,6 +42,7 @@ import {
   Plus,
   RefreshCw,
   Route,
+  Scale,
   ShieldAlert,
   ShieldCheck,
   ShieldQuestion,
@@ -278,6 +279,51 @@ interface DataBoundary {
   flows: BoundaryFlow[];
   shadowDestinations: BoundaryShadow[];
   summary: { approved: number; violations: number; unknowns: number; shadowDestinations: number };
+}
+interface ComplianceControl {
+  controlId: string;
+  name: string | null;
+  family: string | null;
+  familyName: string | null;
+  catalogued: boolean;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+  findingTypes: string[];
+}
+interface ComplianceFramework {
+  key: string;
+  name: string;
+  controls: ComplianceControl[];
+  summary: { controlsTouched: number; controlsWithActiveFindings: number; worstSeverity: string | null };
+}
+interface ComplianceUnmapped {
+  findingType: string;
+  activeFindingCount: number;
+  resolvedFindingCount: number;
+  worstSeverity: string | null;
+}
+interface ComplianceEngineReference {
+  taxonomy: string;
+  id: string;
+  findingCount: number;
+  findingTypes: string[];
+}
+interface Compliance {
+  frameworks: ComplianceFramework[];
+  unmapped: ComplianceUnmapped[];
+  engineReferences: ComplianceEngineReference[];
+  summary: {
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    mappedFindingTypes: number;
+    unmappedFindingTypes: number;
+    frameworks: number;
+    controlsTouched: number;
+    controlsWithActiveFindings: number;
+    worstSeverity: string | null;
+  };
 }
 
 type ViewMode = "graph" | "list";
@@ -1732,6 +1778,215 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
   );
 }
 
+/**
+ * The Compliance Map (Phase 2.1) for one deployment: an HONEST gap map of its
+ * findings against the compliance frameworks (NIST 800-53, OWASP 2021, OWASP LLM
+ * 2025, DoD Zero Trust, in the backend's fixed order). Self-fetching (mounted
+ * only inside an expanded deployment). A "touched" control is a control with an
+ * open finding against it — its active-finding count and worst severity are the
+ * gap signal, never a claim the control is met or passed. A framework with
+ * nothing mapped reads as untouched, never as passing; the finding types no
+ * framework claims (unmapped) and the raw engine taxonomy references
+ * (CWE/OWASP-by-id) are surfaced, never smoothed over.
+ */
+function CompliancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<Compliance>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/compliance`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Scale className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Compliance map</h3>
+      <span className="text-[11px] text-muted-foreground">framework controls with open findings</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the compliance map…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the compliance map{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {summary.totalFindings === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No findings recorded for this deployment yet — nothing to map to a framework.
+        </p>
+      ) : (
+        <>
+          {/* This is a gap map, not a certificate: a touched control is one with
+              an open finding, never a control met. */}
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            A touched control is a control with an <span className="text-sev-high">open finding</span>{" "}
+            against it — a gap to close, never a control met.
+          </p>
+
+          {/* The scoreboard: active vs resolved, the controls carrying open
+              findings, and the honest worst severity across the map. */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.activeFindings} active · {summary.resolvedFindings} resolved
+            </span>
+            {summary.controlsWithActiveFindings > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.controlsWithActiveFindings} control
+                {summary.controlsWithActiveFindings === 1 ? "" : "s"} with active findings
+              </span>
+            )}
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.controlsTouched} touched · {summary.mappedFindingTypes} type
+              {summary.mappedFindingTypes === 1 ? "" : "s"} mapped
+            </span>
+            {summary.unmappedFindingTypes > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                <HelpCircle className="h-3.5 w-3.5" /> {summary.unmappedFindingTypes} unmapped type
+                {summary.unmappedFindingTypes === 1 ? "" : "s"}
+              </span>
+            )}
+            {summary.worstSeverity && (
+              <span className="inline-flex items-center gap-1">
+                <span className="text-muted-foreground">worst:</span>
+                <SeverityPill severity={asSeverity(summary.worstSeverity)} />
+              </span>
+            )}
+          </div>
+
+          {/* Each framework, in the backend's fixed order. A framework with no
+              touched controls reads as "no findings mapped here", never passing. */}
+          <div className="space-y-2.5">
+            {data.frameworks.map((fw) => (
+              <div key={fw.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{fw.name}</span>
+                  {fw.summary.controlsTouched > 0 ? (
+                    <span className="text-[11px] text-muted-foreground">
+                      {fw.summary.controlsTouched} control{fw.summary.controlsTouched === 1 ? "" : "s"} touched
+                      {fw.summary.controlsWithActiveFindings > 0 &&
+                        ` · ${fw.summary.controlsWithActiveFindings} with active findings`}
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground/80">no findings mapped here</span>
+                  )}
+                  {fw.summary.worstSeverity && (
+                    <span className="ml-auto">
+                      <SeverityPill severity={asSeverity(fw.summary.worstSeverity)} />
+                    </span>
+                  )}
+                </div>
+                {fw.controls.length > 0 && (
+                  <ul className="mt-2 space-y-1.5 border-l border-border/40 pl-2.5">
+                    {fw.controls.map((c) => (
+                      <li
+                        key={c.controlId}
+                        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
+                      >
+                        <span
+                          className="font-mono text-[11px] font-semibold text-foreground"
+                          title={c.familyName ? `${c.family ?? ""} · ${c.familyName}` : undefined}
+                        >
+                          {c.controlId}
+                        </span>
+                        {c.name && <span className="text-muted-foreground">{c.name}</span>}
+                        {!c.catalogued && (
+                          <span
+                            className="rounded-full border border-border/60 bg-surface-1/40 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted-foreground"
+                            title="Referenced by a finding but not present in the control catalogue"
+                          >
+                            uncatalogued
+                          </span>
+                        )}
+                        {c.activeFindingCount > 0 ? (
+                          <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-sev-high">
+                            <ShieldAlert className="h-3 w-3" /> {c.activeFindingCount} active
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/80">{c.resolvedFindingCount} resolved</span>
+                        )}
+                        {c.worstSeverity && <SeverityPill severity={asSeverity(c.worstSeverity)} />}
+                        {c.findingTypes.length > 0 && (
+                          <span className="text-[10px] text-muted-foreground/80">
+                            {c.findingTypes.join(", ")}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Unmapped finding types: the engine found these and no framework in
+              this set claims them — surfaced as a gap, never dropped. */}
+          {data.unmapped.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
+                Unmapped finding types
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {data.unmapped.map((u) => (
+                  <li
+                    key={u.findingType}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] text-amber-400"
+                  >
+                    <span className="text-foreground">{u.findingType}</span>
+                    <span>{u.activeFindingCount} active</span>
+                    {u.worstSeverity && <SeverityPill severity={asSeverity(u.worstSeverity)} />}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Engine taxonomy references (CWE / OWASP by id): the raw taxonomy the
+              engine cited, kept visible beside the framework mapping. */}
+          {data.engineReferences.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Engine references
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {data.engineReferences.map((e) => (
+                  <li
+                    key={`${e.taxonomy}-${e.id}`}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border/50 bg-surface-0/50 px-2 py-1 text-[11px] text-muted-foreground"
+                    title={e.findingTypes.join(", ")}
+                  >
+                    <span className="text-[9px] uppercase tracking-wide text-muted-foreground/70">
+                      {e.taxonomy}
+                    </span>
+                    <span className="font-mono text-foreground">{e.id}</span>
+                    <span>×{e.findingCount}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -2173,6 +2428,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             actual ones. Self-fetches, so it loads only for an
                             expanded deployment. */}
                         <DataBoundaryPanel deploymentUuid={d.uuid} admin={admin} />
+
+                        {/* Compliance map (Phase 2.1): an honest gap map of this
+                            deployment's findings against the frameworks. Self-
+                            fetches, so it loads only for an expanded deployment. */}
+                        <CompliancePanel deploymentUuid={d.uuid} />
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>
