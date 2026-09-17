@@ -22,7 +22,7 @@
  * Nothing here decides anything: it surfaces the backend's conclusions so a
  * human can make the release decision from them.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Boxes,
@@ -1737,8 +1737,14 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const [view, setView] = useState<ViewMode>("graph");
   // List view: the deployment a reader has narrowed the flat tables to.
   const [selected, setSelected] = useState<string | "">("");
-  // Graph view: the deployments a reader has collapsed (empty = all expanded).
+  // Graph view: which deployments a reader has collapsed. Each deployment's
+  // heavy panels (route map, AI-BOM, capabilities, data boundary) self-fetch
+  // only while its card is expanded, so we start every deployment collapsed
+  // except the first (attention-first) one — otherwise opening the page fires
+  // four computed-assessment requests for *every* deployment at once. Seeded
+  // once, when the deployment list first loads (see the effect below).
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const collapseSeeded = useRef(false);
 
   const {
     data: status,
@@ -1804,8 +1810,23 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
 
   // ---- Provider profile editing (admin-only; the control plane is the gate) ----
 
-  const invalidateProviders = () =>
+  // A provider fact feeds every per-deployment computed assessment (data
+  // boundary, capabilities, route map, AI-BOM), so editing one must refresh
+  // those panels too — not only the providers list. Their query keys are
+  // per-deployment single-string arrays, so a prefix match can't reach them;
+  // a predicate on the key suffix does.
+  const COMPUTED_PANEL_SUFFIXES = ["/data-boundary", "/capabilities", "/route-map", "/ai-bom"];
+  const invalidateProviders = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/assurance/providers"] });
+    queryClient.invalidateQueries({
+      predicate: (query) => {
+        const key = query.queryKey[0];
+        return (
+          typeof key === "string" && COMPUTED_PANEL_SUFFIXES.some((s) => key.endsWith(s))
+        );
+      },
+    });
+  };
 
   const createProvider = useMutation({
     mutationFn: async (input: { name: string; kind: string }) =>
@@ -1906,6 +1927,16 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
       }),
     [deployments],
   );
+
+  // Seed the collapsed set once the deployments arrive: everything but the
+  // first attention-first deployment starts collapsed, so only one card's
+  // computed panels fetch on load. A reader expands the rest on demand; their
+  // toggles are preserved because this runs a single time.
+  useEffect(() => {
+    if (collapseSeeded.current || orderedDeployments.length === 0) return;
+    collapseSeeded.current = true;
+    setCollapsed(new Set(orderedDeployments.slice(1).map((d) => d.uuid)));
+  }, [orderedDeployments]);
 
   const toggleCollapsed = (uuid: string) =>
     setCollapsed((prev) => {
