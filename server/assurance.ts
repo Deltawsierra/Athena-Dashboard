@@ -201,6 +201,54 @@ export interface AssuranceStatus {
   detail: string;
 }
 
+// ==== Data Boundary Assessment (Phase 1.4) ====
+
+export interface DataBoundaryPosture {
+  value: string;
+  evidenceClass: string;
+}
+export interface DataBoundaryFlow {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  assets: string[];
+  region: DataBoundaryPosture | null;
+  training: DataBoundaryPosture | null;
+  /** "approved" | "violation" | "unknown". */
+  status: string;
+  violations: string[];
+  unknowns: string[];
+}
+export interface DataBoundaryShadow {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+}
+export interface DataBoundaryPolicy {
+  allowedRegions: string[];
+  trainingAllowed: boolean;
+  thirdPartySharingAllowed: boolean;
+  notes: string;
+  updatedAt: string | null;
+}
+export interface AssuranceDataBoundary {
+  /** Whether an approved boundary has been declared. */
+  declared: boolean;
+  policy: DataBoundaryPolicy | null;
+  flows: DataBoundaryFlow[];
+  shadowDestinations: DataBoundaryShadow[];
+  summary: { approved: number; violations: number; unknowns: number; shadowDestinations: number };
+}
+/** The approved boundary a human declares (the PUT body). */
+export interface DataBoundaryInput {
+  allowedRegions: string[];
+  trainingAllowed: boolean;
+  thirdPartySharingAllowed: boolean;
+  notes?: string;
+}
+
 // ==== Mappers ====
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -305,6 +353,69 @@ function capabilityMap(raw: Record<string, unknown>): AssuranceCapabilityMap {
       baseline: num(rawSummary.baseline, 0),
       declared: num(rawSummary.declared, 0),
       shadow: num(rawSummary.shadow, 0),
+    },
+  };
+}
+
+function posture(raw: unknown): DataBoundaryPosture | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const p = raw as Record<string, unknown>;
+  return { value: str(p.value), evidenceClass: str(p.evidence_class) };
+}
+
+function strList(raw: unknown): string[] {
+  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+}
+
+function dataBoundaryFlow(raw: Record<string, unknown>): DataBoundaryFlow {
+  return {
+    providerUuid: str(raw.provider_uuid),
+    providerName: str(raw.provider_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    assets: strList(raw.assets),
+    region: posture(raw.region),
+    training: posture(raw.training),
+    status: str(raw.status),
+    violations: strList(raw.violations),
+    unknowns: strList(raw.unknowns),
+  };
+}
+
+function dataBoundaryAssessment(raw: Record<string, unknown>): AssuranceDataBoundary {
+  const rawPolicy =
+    raw.policy && typeof raw.policy === "object" && !Array.isArray(raw.policy)
+      ? (raw.policy as Record<string, unknown>)
+      : null;
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    declared: bool(raw.declared),
+    policy: rawPolicy
+      ? {
+          allowedRegions: strList(rawPolicy.allowed_regions),
+          trainingAllowed: bool(rawPolicy.training_allowed),
+          thirdPartySharingAllowed: bool(rawPolicy.third_party_sharing_allowed),
+          notes: str(rawPolicy.notes),
+          updatedAt: strOrNull(rawPolicy.updated_at),
+        }
+      : null,
+    flows: Array.isArray(raw.flows) ? (raw.flows as Record<string, unknown>[]).map(dataBoundaryFlow) : [],
+    shadowDestinations: Array.isArray(raw.shadow_destinations)
+      ? (raw.shadow_destinations as Record<string, unknown>[]).map((s) => ({
+          assetName: str(s.asset_name),
+          kind: str(s.kind),
+          kindLabel: str(s.kind_label),
+          identifier: str(s.identifier),
+        }))
+      : [],
+    summary: {
+      approved: num(rawSummary.approved, 0),
+      violations: num(rawSummary.violations, 0),
+      unknowns: num(rawSummary.unknowns, 0),
+      shadowDestinations: num(rawSummary.shadow_destinations, 0),
     },
   };
 }
@@ -569,6 +680,24 @@ export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap
   return capabilityMap((await response.json()) as Record<string, unknown>);
 }
 
+/**
+ * A deployment's AI data-boundary assessment (Phase 1.4): the approved boundary
+ * a human declared reconciled against the deployment's actual data destinations
+ * (its provider flows and their declared postures), plus the shadow destinations
+ * that escape it. A read (open), so a non-ok answer is genuine unavailability.
+ */
+export async function dataBoundary(uuid: string): Promise<AssuranceDataBoundary> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/data-boundary/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return dataBoundaryAssessment((await response.json()) as Record<string, unknown>);
+}
+
 export async function listFindings(
   opts: { deployment?: string; severity?: string; status?: string } = {},
 ): Promise<AssuranceFinding[]> {
@@ -705,6 +834,44 @@ async function writeJson<T>(
     );
   }
   return { ok: true, value: map((await response.json()) as Record<string, unknown>) };
+}
+
+/**
+ * Declare (or replace) the approved data boundary for a deployment (Phase 1.4).
+ * A PUT: admin-only on the control plane, gated again on the BFF route. The
+ * response is the freshly recomputed assessment. A backend refusal (400/403/404)
+ * is returned with its reason rather than laundered into a 503.
+ */
+export async function setDataBoundary(
+  uuid: string,
+  input: DataBoundaryInput,
+): Promise<
+  | { ok: true; value: AssuranceDataBoundary }
+  | { ok: false; status: number; detail: string }
+> {
+  const wire: Record<string, unknown> = {
+    allowed_regions: input.allowedRegions,
+    training_allowed: input.trainingAllowed,
+    third_party_sharing_allowed: input.thirdPartySharingAllowed,
+  };
+  if (input.notes !== undefined) wire.notes = input.notes;
+
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/data-boundary/`,
+    { method: "PUT", body: JSON.stringify(wire) },
+  );
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return {
+    ok: true,
+    value: dataBoundaryAssessment((await response.json()) as Record<string, unknown>),
+  };
 }
 
 /** The identity a human declares when registering a provider by hand. */

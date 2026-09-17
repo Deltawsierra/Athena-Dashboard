@@ -117,6 +117,53 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/data-boundary/") {
+          // The assessment shape both GET and PUT return. GET before any
+          // boundary reads undeclared; a PUT declares one and the flow that was
+          // an unknown now violates it, so the two are distinguished by method.
+          if (method === "PUT") {
+            const b = raw ? JSON.parse(raw) : {};
+            return json(200, {
+              declared: true,
+              policy: {
+                allowed_regions: b.allowed_regions ?? [],
+                training_allowed: b.training_allowed ?? false,
+                third_party_sharing_allowed: b.third_party_sharing_allowed ?? false,
+                notes: b.notes ?? "",
+                updated_at: "2026-09-17T02:00:00Z",
+              },
+              flows: [
+                {
+                  provider_uuid: "p-1", provider_name: "OpenAI", kind: "model_provider",
+                  kind_label: "Model provider", assets: ["gpt-x"],
+                  region: { value: "us-east-1", evidence_class: "vendor_asserted" },
+                  training: null, status: "violation",
+                  violations: ["declared region 'us-east-1' is not within the approved boundary ['eu']"],
+                  unknowns: [],
+                },
+              ],
+              shadow_destinations: [
+                { asset_name: "shadow-mcp", kind: "mcp_server", kind_label: "MCP server", identifier: "mcp://rogue" },
+              ],
+              summary: { approved: 0, violations: 1, unknowns: 0, shadow_destinations: 1 },
+            });
+          }
+          return json(200, {
+            declared: false, policy: null,
+            flows: [
+              {
+                provider_uuid: "p-1", provider_name: "OpenAI", kind: "model_provider",
+                kind_label: "Model provider", assets: ["gpt-x"],
+                region: { value: "us-east-1", evidence_class: "vendor_asserted" },
+                training: null, status: "unknown",
+                violations: [], unknowns: ["no data boundary has been approved for this deployment"],
+              },
+            ],
+            shadow_destinations: [],
+            summary: { approved: 0, violations: 0, unknowns: 1, shadow_destinations: 0 },
+          });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -331,6 +378,54 @@ describe("assurance BFF", () => {
   it("refuses the capability map to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/capabilities");
     expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's data-boundary assessment, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/data-boundary");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      declared: false, policy: null,
+      summary: { approved: 0, violations: 0, unknowns: 1, shadowDestinations: 0 },
+    });
+    // An undeclared boundary never reads as a pass: the flow is an unknown.
+    expect(res.body.flows[0]).toMatchObject({
+      providerName: "OpenAI", kindLabel: "Model provider", status: "unknown",
+    });
+    expect(res.body.flows[0].region).toMatchObject({ value: "us-east-1", evidenceClass: "vendor_asserted" });
+  });
+
+  it("refuses the data-boundary read to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/data-boundary");
+    expect(anon.status).toBe(401);
+  });
+
+  it("declares a data boundary (admin PUT) and returns the recomputed assessment", async () => {
+    const res = await user
+      .put("/api/assurance/deployments/dep-1/data-boundary")
+      .send({ allowedRegions: ["eu"], trainingAllowed: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      declared: true,
+      policy: { allowedRegions: ["eu"], trainingAllowed: false },
+      summary: { violations: 1, shadowDestinations: 1 },
+    });
+    // The us-east-1 flow now violates the eu-only boundary.
+    expect(res.body.flows[0]).toMatchObject({ status: "violation" });
+    expect(res.body.shadowDestinations[0]).toMatchObject({ assetName: "shadow-mcp", kindLabel: "MCP server" });
+  });
+
+  it("gates declaring a data boundary to admins: a non-admin gets 403", async () => {
+    await user.post("/api/users").send({
+      username: "boundary-analyst", password: "analyst-pass", role: "user", isActive: true,
+    });
+    const analyst = await signIn(app, "boundary-analyst", "analyst-pass");
+    // The read stays open.
+    expect((await analyst.get("/api/assurance/deployments/dep-1/data-boundary")).status).toBe(200);
+    // The write is admin-only, refused at the front door.
+    const denied = await analyst
+      .put("/api/assurance/deployments/dep-1/data-boundary")
+      .send({ allowedRegions: ["eu"] });
+    expect(denied.status).toBe(403);
   });
 
   it("refuses the assets read to anyone not signed in", async () => {
