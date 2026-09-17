@@ -1,42 +1,79 @@
 /**
- * Athena's scan page: one system, watched end to end while it is taken apart.
+ * Athena's scan page: one system, dispatched to the engine and watched while it
+ * is taken apart.
  *
- * The layout is a claim in three parts, read left to right. What is being
- * scanned (the target), how far the scan has got and through what (the ring and
- * its modules), and what Athena is thinking while she does it (the reasoning).
- * Underneath, the readings a decision is actually made on: a risk score, the
- * shape of the findings, how much of the system has been covered, and what
- * sensitive data is exposed -- then the findings themselves.
+ * What this replaced is the failure the whole product is against. The page held
+ * one fixture (`SAMPLE_SCAN`) shaped like a live run — a ring that filled to 72%
+ * on no data, a reasoning log written into the source, a risk score nobody
+ * computed, eight modules that scanned nothing. It looked like the truth and was
+ * not. Now every figure comes from a real scan: the engine's state, the findings
+ * it returned, and the severity counts counted from those findings. What the
+ * engine does not report, the page does not draw — a scan people cannot trust is
+ * worse than no scan. When no engine is configured it says so in a sentence and
+ * the button stays down, and the risk band is *derived* from the real counts,
+ * never invented.
  *
- * Every figure comes from one fixture (`SAMPLE_SCAN`) shaped like a live scan,
- * so wiring this to the engine is a swap of the source, not a redraw.
+ * This is the flagship twin of the Pentest console: the same live contract
+ * (`/api/engine/status` + `/api/scans`), read in Athena's language.
  */
-import { ChevronRight, Lock, Landmark, FileText, KeyRound } from "lucide-react";
-import { motion } from "framer-motion";
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { AlertTriangle, ChevronRight, Play, Plug, ShieldCheck, Square } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import GlassCard from "@/components/GlassCard";
-import ScanProgress from "@/components/athena/ScanProgress";
-import AthenaReasoning from "@/components/athena/AthenaReasoning";
-import RiskDial from "@/components/athena/RiskDial";
+import { Divider } from "@/components/mythos/Ornament";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import templeStorm from "@assets/mythos/temple-storm.webp";
-import { Divider } from "@/components/mythos/Ornament";
 import {
-  SAMPLE_SCAN,
   SCAN_STAGES,
+  SEVERITY_LABEL,
   SEVERITY_ORDER,
-  type Finding,
+  RISK_BAND_TONE,
+  bandFromCounts,
+  severityToken,
+  type SeverityCounts,
   type Severity,
 } from "@/lib/athenaScan";
+import type { Client, Site, Test } from "@shared/schema";
 
-const SEVERITY_LABEL: Record<Exclude<Severity, "info">, string> = {
-  critical: "Critical",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-};
+interface EngineStatus {
+  configured: boolean;
+  reachable: boolean;
+  /** Whether the engine took our key. null when it could not be checked. */
+  authorized: boolean | null;
+  url: string | null;
+  detail: string;
+}
+
+/** One finding, in the engine's own shape. */
+interface EngineFinding {
+  type?: string;
+  message?: string;
+  details?: string;
+  severity?: string;
+  confidence?: number;
+  internal?: boolean;
+}
+
+interface ScanView {
+  test: Test;
+  state: string;
+  detail?: string;
+  engine: { findings?: EngineFinding[]; detail?: string } | null;
+}
+
+/** States the engine reports for a run that has stopped moving. */
+const FINISHED = new Set(["completed", "aborted", "failed", "refused"]);
 
 function SeverityBadge({ severity }: { severity: Severity }) {
-  const key = severity as Exclude<Severity, "info">;
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold"
@@ -46,34 +83,103 @@ function SeverityBadge({ severity }: { severity: Severity }) {
         background: `hsl(var(--sev-${severity}) / 0.1)`,
       }}
     >
-      <span
-        className="h-1.5 w-1.5 rounded-full"
-        style={{ background: `hsl(var(--sev-${severity}))` }}
-      />
-      {SEVERITY_LABEL[key] ?? severity}
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(--sev-${severity}))` }} />
+      {severity === "info" ? "Info" : SEVERITY_LABEL[severity]}
     </span>
   );
 }
 
-const EXPOSURE_ICON = {
-  pii: Lock,
-  financial: Landmark,
-  internal: FileText,
-  credential: KeyRound,
-} as const;
-
-function ImpactText({ impact }: { impact: Finding["impact"] }) {
-  const tone =
-    impact === "High"
-      ? "text-sev-high"
-      : impact === "Medium"
-        ? "text-sev-medium"
-        : "text-muted-foreground";
-  return <span className={cn("text-[13px] font-medium", tone)}>{impact}</span>;
-}
-
 export default function AthenaScan() {
-  const scan = SAMPLE_SCAN;
+  const { toast } = useToast();
+
+  const [clientId, setClientId] = useState("");
+  const [siteId, setSiteId] = useState("");
+  const [target, setTarget] = useState("");
+  const [testId, setTestId] = useState<string | null>(null);
+
+  const { data: engine } = useQuery<EngineStatus>({
+    queryKey: ["/api/engine/status"],
+    refetchInterval: 30_000,
+  });
+
+  const { data: clients = [] } = useQuery<Client[]>({ queryKey: ["/api/clients"] });
+  const { data: sites = [] } = useQuery<Site[]>({ queryKey: ["/api/sites"] });
+
+  const sitesForClient = useMemo(
+    () => sites.filter((site) => site.clientId === clientId),
+    [sites, clientId],
+  );
+  useEffect(() => {
+    if (siteId && !sitesForClient.some((site) => site.id === siteId)) setSiteId("");
+  }, [siteId, sitesForClient]);
+
+  const { data: scan } = useQuery<ScanView>({
+    queryKey: [`/api/scans/${testId}`],
+    enabled: testId !== null,
+    // Polled while it moves, left alone once it has stopped.
+    refetchInterval: (query) => {
+      const state = (query.state.data as ScanView | undefined)?.state;
+      return state && FINISHED.has(state) ? false : 2_000;
+    },
+  });
+
+  const start = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", "/api/scans", {
+        clientId,
+        siteId: siteId || undefined,
+        target: target.trim(),
+      });
+      return (await response.json()) as { test: Test; runId: string | null };
+    },
+    onSuccess: (result) => {
+      setTestId(result.test.id);
+      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+    },
+    onError: (error: Error) =>
+      // The engine's own refusal, verbatim — "the target is a loopback address"
+      // is the sentence an operator needs, not "scan failed".
+      toast({ title: "The scan did not start", description: error.message, variant: "destructive" }),
+  });
+
+  const stop = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", `/api/scans/${testId}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/scans/${testId}`] });
+      toast({
+        title: "Stop sent",
+        description: "The engine will send no further request for this scan.",
+      });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
+  });
+
+  // Reachable is not enough: the engine's /health takes no credential, so a
+  // wrong key answers it happily. `null` (an engine too old to be asked) is
+  // allowed through rather than grounding a working deployment.
+  const engineReady = Boolean(engine?.configured && engine?.reachable) && engine?.authorized !== false;
+  const engagementReady = clientId !== "" && target.trim() !== "";
+  const canScan = engineReady && engagementReady;
+
+  const returned = scan?.engine?.findings ?? [];
+  const findings = returned.filter((f) => !f.internal);
+  const notes = returned.filter((f) => f.internal);
+  const running = scan !== undefined && !FINISHED.has(scan.state);
+  const finished = scan !== undefined && FINISHED.has(scan.state);
+
+  const counts: SeverityCounts = {
+    critical: Number(scan?.test.criticalCount ?? 0),
+    high: Number(scan?.test.highCount ?? 0),
+    medium: Number(scan?.test.mediumCount ?? 0),
+    low: Number(scan?.test.lowCount ?? 0),
+  };
+  const totalFindings = counts.critical + counts.high + counts.medium + counts.low;
+  const band = bandFromCounts(counts);
+  const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-6 md:px-8 md:py-8">
@@ -115,221 +221,275 @@ export default function AthenaScan() {
 
       <Divider variant="astrolabe" className="mt-5" />
 
-      {/* ---- Top row ----------------------------------------------------- */}
-      <div className="mt-6 grid grid-cols-1 gap-5 xl:grid-cols-[330px_minmax(0,1fr)_360px]">
-        {/* Scan target */}
-        <GlassCard hover={false} className="flex flex-col">
-          <div className="flex items-center justify-between">
-            <p className="athena-label">Scan Target</p>
-            <span className="flex items-center gap-1.5 text-[11px] font-medium text-primary">
-              <span className="athena-live h-2 w-2 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary)/0.9)]" />
-              Running
-            </span>
-          </div>
-
-          <h2 className="mt-4 text-xl font-semibold text-foreground">
-            {scan.target.name}
-          </h2>
-          <p className="mt-1 text-[13px] text-muted-foreground">
-            {scan.target.version} &nbsp;|&nbsp; {scan.target.environment}
-          </p>
-          <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">
-            {scan.target.description}
-          </p>
-
-          <div className="mt-4 flex flex-wrap gap-2">
-            {scan.target.tags.map((t) => (
-              <span
-                key={t}
-                className="rounded-md border border-border/70 bg-surface-1/50 px-2.5 py-1 text-[11px] text-muted-foreground"
-              >
-                {t}
-              </span>
-            ))}
-          </div>
-
-          <div className="mt-4 grid grid-cols-3 gap-2 border-t border-border/40 pt-4">
-            {[
-              { k: "Started", v: scan.target.startedLabel },
-              { k: "Elapsed", v: scan.target.elapsedLabel },
-              { k: "Est. Completion", v: scan.target.etaLabel },
-            ].map((x) => (
-              <div key={x.k}>
-                <p className="athena-label">{x.k}</p>
-                <p className="mt-1 text-[13px] font-medium text-foreground">{x.v}</p>
-              </div>
-            ))}
-          </div>
-        </GlassCard>
-
-        {/* Scan progress */}
-        <GlassCard hover={false} glow={false} className="flex items-center">
-          <div className="w-full">
-            <ScanProgress modules={scan.modules} percent={scan.percent} />
-          </div>
-        </GlassCard>
-
-        {/* Reasoning */}
-        <GlassCard hover={false} ruling className="flex flex-col">
-          <AthenaReasoning narration={scan.narration} entries={scan.reasoning} />
-        </GlassCard>
-      </div>
-
-      {/* ---- Metric row -------------------------------------------------- */}
-      <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-4">
-        {/* Risk overview */}
-        <GlassCard className="flex flex-col">
-          <p className="athena-label">Risk Overview</p>
-          <div className="mt-3 flex items-center gap-4">
-            <RiskDial score={scan.risk.score} band={scan.risk.band} />
-            <div className="min-w-0">
-              <p className="whitespace-nowrap text-base font-semibold text-gold">{scan.risk.band} Risk</p>
-              <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
-                {scan.risk.summary}
+      {/* ---- Engine status: the honest banner --------------------------- */}
+      {engine?.reachable && engineReady && (
+        <div className="mt-6 flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="text-engine-connected">
+          <span className="athena-live h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary)/0.9)]" />
+          <span className="athena-mono">engine at {engine.url}</span>
+        </div>
+      )}
+      {engine && !engineReady && (
+        <GlassCard ruling className="mt-6">
+          <div className="flex items-start gap-3">
+            <Plug className="mt-0.5 h-5 w-5 shrink-0 text-gold" />
+            <div className="space-y-1">
+              <p className="athena-label">
+                {engine.reachable ? "The engine will not accept this key" : "No engine connected"}
+              </p>
+              <p className="text-[13px] text-muted-foreground" data-testid="text-engine-detail">
+                {engine.detail}
               </p>
             </div>
           </div>
         </GlassCard>
+      )}
 
-        {/* Findings */}
-        <GlassCard className="flex flex-col">
-          <p className="athena-label">Findings</p>
-          <div className="mt-2 flex items-center gap-5">
-            <div className="shrink-0">
-              <span className="athena-figure text-[44px] font-semibold leading-none text-foreground">
-                {scan.findings.total}
-              </span>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">Total findings</p>
+      {/* ---- Start a scan ----------------------------------------------- */}
+      <GlassCard className="mt-5">
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (canScan && !running) start.mutate();
+          }}
+        >
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="client">Deployment owner</Label>
+              <Select value={clientId} onValueChange={setClientId}>
+                <SelectTrigger id="client" data-testid="select-client">
+                  <SelectValue placeholder="Choose the engagement" />
+                </SelectTrigger>
+                <SelectContent>
+                  {clients.map((client) => (
+                    <SelectItem key={client.id} value={client.id}>
+                      {client.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            <ul className="flex-1 space-y-1.5">
-              {SEVERITY_ORDER.map((sev) => (
-                <li key={sev} className="flex items-center justify-between text-[12px]">
-                  <span className="flex items-center gap-2 text-muted-foreground">
-                    <span
-                      className="h-2 w-2 rounded-full"
-                      style={{ background: `hsl(var(--sev-${sev}))` }}
-                    />
-                    {SEVERITY_LABEL[sev]}
-                  </span>
-                  <span className="font-medium text-foreground">
-                    {scan.findings.bySeverity[sev]}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        </GlassCard>
-
-        {/* Coverage */}
-        <GlassCard>
-          <p className="athena-label">Scan Coverage</p>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="athena-figure text-4xl font-semibold text-foreground">
-              {scan.coverage.completed}
-            </span>
-            <span className="text-lg text-muted-foreground">/ {scan.coverage.total}</span>
-          </div>
-          <p className="mt-1 text-[11px] text-muted-foreground">Modules complete</p>
-          <div className="mt-4">
-            <div className="h-2 w-full overflow-hidden rounded-full bg-surface-2">
-              <motion.div
-                className="h-full rounded-full bg-gradient-to-r from-gold-dim to-gold"
-                initial={{ width: 0 }}
-                animate={{ width: `${scan.coverage.percent}%` }}
-                transition={{ duration: 1.2, ease: "easeOut" }}
+            <div className="space-y-2">
+              <Label htmlFor="site">System</Label>
+              <Select
+                value={siteId}
+                onValueChange={setSiteId}
+                disabled={clientId === "" || sitesForClient.length === 0}
+              >
+                <SelectTrigger id="site" data-testid="select-site">
+                  <SelectValue
+                    placeholder={
+                      clientId === ""
+                        ? "Choose an owner first"
+                        : sitesForClient.length === 0
+                          ? "No systems recorded"
+                          : "Optional"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {sitesForClient.map((site) => (
+                    <SelectItem key={site.id} value={site.id}>
+                      {site.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="target">Target</Label>
+              <Input
+                id="target"
+                data-testid="input-target"
+                placeholder="https://app.customer.example"
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
               />
             </div>
-            <p className="mt-1.5 text-right text-[11px] font-medium text-gold">
-              {scan.coverage.percent}%
-            </p>
           </div>
-        </GlassCard>
+          <p className="text-[12px] text-muted-foreground">
+            The engine checks the target against its own egress policy and refuses
+            anything it may not reach; its reason is shown here unchanged.
+          </p>
 
-        {/* Data exposure */}
-        <GlassCard>
-          <p className="athena-label">Data Exposure</p>
-          <div className="mt-2 flex items-baseline gap-2">
-            <span className="athena-figure text-4xl font-semibold text-foreground">
-              {scan.dataExposure.length}
-            </span>
-            <span className="text-[12px] text-muted-foreground">Sensitive data types</span>
+          <div className="flex items-center gap-3">
+            <Button type="submit" data-testid="button-start-scan" disabled={!canScan || start.isPending || running}>
+              <Play className="mr-2 h-4 w-4" />
+              {start.isPending ? "Asking the engine…" : "Start scan"}
+            </Button>
+            {running && (
+              <Button
+                type="button"
+                variant="destructive"
+                onClick={() => stop.mutate()}
+                disabled={stop.isPending}
+                data-testid="button-stop-scan"
+              >
+                <Square className="mr-2 h-4 w-4" />
+                {stop.isPending ? "Stopping…" : "Stop"}
+              </Button>
+            )}
+            {engine && !engineReady && (
+              <span className="text-[12px] text-muted-foreground">
+                {engine.reachable ? "Scanning needs a key the engine accepts." : "Scanning needs an engine."}
+              </span>
+            )}
           </div>
-          <div className="mt-4 flex flex-wrap gap-1.5">
-            {scan.dataExposure.map((d) => {
-              const Icon = EXPOSURE_ICON[d.kind] ?? Lock;
-              return (
-                <span
-                  key={d.label}
-                  className="inline-flex items-center gap-1 rounded-md border border-gold-dim/40 bg-gold/[0.06] px-2 py-1 text-[11px] font-medium text-gold"
-                >
-                  <Icon className="h-3 w-3" />
-                  {d.label}
-                </span>
-              );
-            })}
-          </div>
-        </GlassCard>
-      </div>
-
-      {/* ---- Top findings ------------------------------------------------ */}
-      <GlassCard hover={false} glow={false} className="mt-5">
-        <div className="flex items-center justify-between">
-          <p className="athena-label">Top Findings</p>
-          <a
-            href="/findings"
-            className="flex items-center gap-1 text-[12px] font-medium text-primary hover:underline"
-          >
-            View all findings <ChevronRight className="h-3.5 w-3.5" />
-          </a>
-        </div>
-
-        <div className="mt-4 -mx-2 overflow-x-auto">
-          <table className="w-full min-w-[720px] border-collapse">
-            <thead>
-              <tr className="text-left align-middle">
-                {["#", "Severity", "Finding", "Category", "Affected Area", "Impact", "Status"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      className="athena-label px-2 pb-3 font-medium"
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {scan.findings.top.map((f, i) => (
-                <tr
-                  key={f.id}
-                  data-testid={`finding-${f.id}`}
-                  className="border-t border-border/40 align-middle hover:bg-surface-1/40"
-                >
-                  <td className="px-2 py-3 text-[13px] text-muted-foreground">{i + 1}</td>
-                  <td className="px-2 py-3">
-                    <SeverityBadge severity={f.severity} />
-                  </td>
-                  <td className="px-2 py-3 text-[13px] font-medium text-foreground">
-                    {f.title}
-                  </td>
-                  <td className="px-2 py-3 text-[13px] text-muted-foreground">{f.category}</td>
-                  <td className="px-2 py-3 text-[13px] text-muted-foreground">{f.area}</td>
-                  <td className="px-2 py-3">
-                    <ImpactText impact={f.impact} />
-                  </td>
-                  <td className="px-2 py-3">
-                    <button className="inline-flex items-center gap-1 rounded-md border border-border/70 bg-surface-1/50 px-2.5 py-1 text-[12px] font-medium text-foreground hover:border-primary/50">
-                      {f.status}
-                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        </form>
       </GlassCard>
+
+      {/* ---- Live scan: only real readings ------------------------------ */}
+      {scan && (
+        <>
+          {/* Top row: target + state */}
+          <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+            <GlassCard hover={false} className="flex flex-col">
+              <div className="flex items-center justify-between">
+                <p className="athena-label">Scan Target</p>
+                <span
+                  className={cn(
+                    "flex items-center gap-1.5 text-[11px] font-medium",
+                    running ? "text-primary" : "text-muted-foreground",
+                  )}
+                  data-testid="text-state"
+                >
+                  {running && <span className="athena-live h-2 w-2 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary)/0.9)]" />}
+                  {scan.state}
+                </span>
+              </div>
+              <h2 className="mt-3 break-all text-xl font-semibold text-foreground">{target || "—"}</h2>
+              <p className="mt-1 text-[13px] text-muted-foreground">{clientName}</p>
+              {scan.detail && <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{scan.detail}</p>}
+              <div className="mt-4 border-t border-border/40 pt-4">
+                <p className="athena-label">Started</p>
+                <p className="mt-1 text-[13px] font-medium text-foreground">
+                  {scan.test.startedAt ? new Date(scan.test.startedAt).toLocaleString() : "—"}
+                </p>
+              </div>
+            </GlassCard>
+
+            {/* Risk — derived from the real counts, never invented. */}
+            <GlassCard className="flex flex-col justify-center">
+              <p className="athena-label">Risk</p>
+              <div className="mt-2 flex items-baseline gap-3">
+                <span
+                  className="whitespace-nowrap text-2xl font-semibold"
+                  style={{ color: `hsl(var(--${RISK_BAND_TONE[band]}))` }}
+                  data-testid="text-risk-band"
+                >
+                  {band === "Clear" && !finished ? "Assessing…" : band}
+                </span>
+              </div>
+              <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
+                {band === "Clear"
+                  ? finished
+                    ? "The scan returned no gradable findings."
+                    : "No gradable findings yet."
+                  : "Derived from the worst severity found — not a score."}
+              </p>
+            </GlassCard>
+          </div>
+
+          {/* Findings by severity — real counts */}
+          <GlassCard className="mt-5">
+            <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
+              <div className="shrink-0">
+                <span className="athena-figure text-[40px] font-semibold leading-none text-foreground" data-testid="text-total">
+                  {totalFindings}
+                </span>
+                <p className="mt-1 text-[11px] text-muted-foreground">Total findings</p>
+              </div>
+              {SEVERITY_ORDER.map((sev) => (
+                <div key={sev}>
+                  <p className="athena-label">{SEVERITY_LABEL[sev]}</p>
+                  <p
+                    className="athena-figure text-2xl font-semibold"
+                    style={{ color: `hsl(var(--sev-${sev}))` }}
+                    data-testid={`text-count-${sev}`}
+                  >
+                    {counts[sev]}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </GlassCard>
+
+          {/* Findings themselves — real, non-internal engine findings */}
+          <GlassCard hover={false} glow={false} className="mt-5">
+            <p className="athena-label">Findings</p>
+            {findings.length === 0 && finished && (
+              <div className="mt-3 flex items-start gap-3">
+                <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                <p className="text-[13px] text-muted-foreground">
+                  The scan finished and returned no findings. That is a result, not an absence of one.
+                </p>
+              </div>
+            )}
+            {findings.length === 0 && running && (
+              <p className="mt-3 text-[13px] text-muted-foreground">The engine has reported nothing yet.</p>
+            )}
+            {findings.length > 0 && (
+              <ul className="mt-4 space-y-3" data-testid="list-findings">
+                {findings.map((f, i) => {
+                  const level = severityToken(f.severity);
+                  return (
+                    <li
+                      key={i}
+                      className="space-y-1 rounded-lg border p-4"
+                      style={{ borderColor: `hsl(var(--sev-${level}) / 0.35)` }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <SeverityBadge severity={level} />
+                        <span className="athena-mono text-[11px] text-muted-foreground">{f.type}</span>
+                      </div>
+                      <p className="text-[13px] font-medium text-foreground">{f.message}</p>
+                      {f.details && <p className="text-[13px] text-muted-foreground">{f.details}</p>}
+                      {typeof f.confidence === "number" && (
+                        <p className="athena-mono text-[11px] text-muted-foreground">
+                          confidence {f.confidence.toFixed(2)}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {notes.length > 0 && (
+              <div className="mt-5 space-y-2 border-t border-border/40 pt-4">
+                <p className="athena-label">From the engine</p>
+                {notes.map((note, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[13px] text-muted-foreground">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>{note.details ?? note.message}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {finished && totalFindings > 0 && (
+              <a
+                href="/findings"
+                className="mt-4 inline-flex items-center gap-1 text-[12px] font-medium text-primary hover:underline"
+              >
+                View all findings <ChevronRight className="h-3.5 w-3.5" />
+              </a>
+            )}
+          </GlassCard>
+        </>
+      )}
+
+      {/* No scan yet: an honest prompt, not a fabricated run. */}
+      {!scan && engineReady && (
+        <GlassCard className="mt-5">
+          <p className="text-[13px] text-muted-foreground">
+            No scan running. Choose a deployment and a target above, and Athena dispatches a
+            real run to the engine — every figure on this page comes back from it.
+          </p>
+        </GlassCard>
+      )}
+
+      <Divider className="mt-6" />
     </div>
   );
 }
