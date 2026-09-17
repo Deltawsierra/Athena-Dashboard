@@ -58,8 +58,23 @@ export interface AssuranceFinding {
   changeLabel: string;
   ageDays: number | null;
   stale: boolean;
+  /**
+   * The finding's assurance receipt (spine): a recomputable digest binding it to
+   * its evidence hashes. Attests integrity/provenance — that the evidence is
+   * unaltered — not that the conclusion is true.
+   */
+  receipt: AssuranceReceipt;
   firstSeen: string | null;
   lastSeen: string | null;
+}
+
+export interface AssuranceReceipt {
+  algorithm: string;
+  digest: string;
+  /** Present on a finding receipt; a deployment receipt reports findingCount. */
+  evidenceCount?: number;
+  findingCount?: number;
+  computedAt: string | null;
 }
 
 export interface AssuranceDeployment {
@@ -192,8 +207,20 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     changeLabel: str(raw.change_label),
     ageDays: typeof raw.age_days === "number" ? raw.age_days : null,
     stale: bool(raw.stale),
+    receipt: receipt(raw.receipt),
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
+  };
+}
+
+function receipt(raw: unknown): AssuranceReceipt {
+  const r = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return {
+    algorithm: str(r.algorithm),
+    digest: str(r.digest),
+    evidenceCount: typeof r.evidence_count === "number" ? r.evidence_count : undefined,
+    findingCount: typeof r.finding_count === "number" ? r.finding_count : undefined,
+    computedAt: strOrNull(r.computed_at),
   };
 }
 
@@ -424,6 +451,21 @@ export async function status(): Promise<AssuranceStatus> {
 
 export async function listDeployments(): Promise<AssuranceDeployment[]> {
   return (await pagedRows("/api/assurance/deployments/")).map(deployment);
+}
+
+/**
+ * A deployment's assurance receipt: one recomputable digest over its findings'
+ * evidence hashes, for an auditor to verify the evidence is unaltered. A read
+ * (open), so a non-ok answer is genuine unavailability like the other reads.
+ */
+export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/receipt/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return receipt(await response.json());
 }
 
 export async function listFindings(

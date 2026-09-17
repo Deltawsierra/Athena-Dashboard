@@ -1523,6 +1523,17 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's assurance receipt (spine): a recomputable digest an auditor
+  // verifies. A read, behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/receipt", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.deploymentReceipt(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
     try {
       res.json(

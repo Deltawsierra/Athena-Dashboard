@@ -74,6 +74,13 @@ describe("assurance BFF", () => {
           return json(404, { detail: "No Deployment matches the given query." });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/receipt/" && method === "GET") {
+          return json(200, {
+            algorithm: "sha256", digest: "e".repeat(64), finding_count: 2,
+            computed_at: "2026-09-17T00:00:00Z",
+          });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -84,6 +91,7 @@ describe("assurance BFF", () => {
               evidence_class: "partially_verified",
               evidence: [{ classification: "partially_verified", classification_label: "Partially verified", summary: "", source: "engine_scan" }],
               change_status: "recurring", change_label: "Recurring", age_days: 3, stale: false,
+              receipt: { algorithm: "sha256", digest: "d".repeat(64), evidence_count: 1, computed_at: "2026-09-17T00:00:00Z" },
               first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
             },
           ]);
@@ -250,8 +258,24 @@ describe("assurance BFF", () => {
       uuid: "f-1", severity: "high", evidenceClass: "partially_verified",
       // Change intelligence surfaced (spine).
       changeStatus: "recurring", changeLabel: "Recurring", ageDays: 3, stale: false,
+      // Assurance receipt surfaced (spine).
+      receipt: { algorithm: "sha256", digest: "d".repeat(64), evidenceCount: 1 },
     });
     expect(res.body[0].evidence[0]).toMatchObject({ classificationLabel: "Partially verified" });
+  });
+
+  it("returns a deployment's assurance receipt, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/receipt");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      algorithm: "sha256", digest: "e".repeat(64), findingCount: 2,
+      computedAt: "2026-09-17T00:00:00Z",
+    });
+  });
+
+  it("refuses the deployment receipt to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/receipt");
+    expect(anon.status).toBe(401);
   });
 
   it("refuses the assets read to anyone not signed in", async () => {
