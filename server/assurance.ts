@@ -112,6 +112,53 @@ export interface AssuranceCapabilityMap {
   summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
 }
 
+// System / Route Map (Phase 1.6): the layered data-flow graph, app → gateway →
+// model → data → tools → logs.
+export interface RouteNode {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  layer: string;
+  shadow: boolean;
+  providerName: string | null;
+}
+export interface RouteEdge {
+  source: string;
+  target: string;
+  kind: string;
+  label: string;
+  /** Declared: the inventory attests it. Inferred: the reference pipeline spine. */
+  declared: boolean;
+}
+export interface RouteLayer {
+  key: string;
+  label: string;
+  nodes: RouteNode[];
+}
+export interface RouteUnresolved {
+  agent: string;
+  toolIdentifier: string;
+}
+export interface AssuranceRouteMap {
+  layers: RouteLayer[];
+  nodes: RouteNode[];
+  edges: RouteEdge[];
+  unresolved: RouteUnresolved[];
+  summary: {
+    nodeCount: number;
+    edgeCount: number;
+    declaredEdges: number;
+    inferredEdges: number;
+    shadowNodes: number;
+    unresolvedEdges: number;
+    layersPresent: string[];
+    logsObserved: boolean;
+  };
+}
+
 export interface AssuranceDeployment {
   uuid: string;
   name: string;
@@ -353,6 +400,62 @@ function capabilityMap(raw: Record<string, unknown>): AssuranceCapabilityMap {
       baseline: num(rawSummary.baseline, 0),
       declared: num(rawSummary.declared, 0),
       shadow: num(rawSummary.shadow, 0),
+    },
+  };
+}
+
+function routeNode(raw: Record<string, unknown>): RouteNode {
+  return {
+    uuid: str(raw.uuid),
+    name: str(raw.name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    layer: str(raw.layer),
+    shadow: bool(raw.shadow),
+    providerName: strOrNull(raw.provider_name),
+  };
+}
+
+function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    layers: Array.isArray(raw.layers)
+      ? (raw.layers as Record<string, unknown>[]).map((l) => ({
+          key: str(l.key),
+          label: str(l.label),
+          nodes: Array.isArray(l.nodes) ? (l.nodes as Record<string, unknown>[]).map(routeNode) : [],
+        }))
+      : [],
+    nodes: Array.isArray(raw.nodes) ? (raw.nodes as Record<string, unknown>[]).map(routeNode) : [],
+    edges: Array.isArray(raw.edges)
+      ? (raw.edges as Record<string, unknown>[]).map((e) => ({
+          source: str(e.source),
+          target: str(e.target),
+          kind: str(e.kind),
+          label: str(e.label),
+          declared: bool(e.declared),
+        }))
+      : [],
+    unresolved: Array.isArray(raw.unresolved)
+      ? (raw.unresolved as Record<string, unknown>[]).map((u) => ({
+          agent: str(u.agent),
+          toolIdentifier: str(u.tool_identifier),
+        }))
+      : [],
+    summary: {
+      nodeCount: num(rawSummary.node_count, 0),
+      edgeCount: num(rawSummary.edge_count, 0),
+      declaredEdges: num(rawSummary.declared_edges, 0),
+      inferredEdges: num(rawSummary.inferred_edges, 0),
+      shadowNodes: num(rawSummary.shadow_nodes, 0),
+      unresolvedEdges: num(rawSummary.unresolved_edges, 0),
+      layersPresent: strList(rawSummary.layers_present),
+      logsObserved: bool(rawSummary.logs_observed),
     },
   };
 }
@@ -678,6 +781,22 @@ export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap
     );
   }
   return capabilityMap((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's System / Route Map (Phase 1.6): the layered data-flow graph
+ * (app → gateway → model → data → tools → logs) reconstructed from its asset
+ * graph and declared edges. A read (open), so a non-ok answer is genuine
+ * unavailability like the other reads.
+ */
+export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/route-map/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapRouteMap((await response.json()) as Record<string, unknown>);
 }
 
 /**
