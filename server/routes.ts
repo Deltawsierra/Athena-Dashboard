@@ -1534,6 +1534,21 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's full, versioned Assurance Receipt (spine): the roadmap tuple
+  // — system, receipt version, policy, evidence root, result, per-assessment
+  // digests — as one deterministic, portable, signable payload. The standardised
+  // superset of the bare receipt above; computed, never stored. A read, behind
+  // requireAuth like the rest of the assurance reads. It attests integrity and
+  // provenance, never that the conclusions are true or the system is secure.
+  app.get("/api/assurance/deployments/:uuid/assurance-receipt", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.assuranceReceipt(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // The deployment's AI System Capability Map (Phase 1.3): the ground-truth
   // inventory of what it can do. A read, behind requireAuth like the rest.
   app.get("/api/assurance/deployments/:uuid/capabilities", asyncHandler(async (req, res) => {
