@@ -88,10 +88,10 @@ describe("assurance BFF", () => {
         if (path === "/api/assurance/assets/" && method === "GET") {
           return json(200, [
             {
-              uuid: "a-1", deployment_uuid: "dep-1", kind: "api", kind_label: "API",
-              name: "billing-api", identifier: "https://billing.acme.test",
+              uuid: "a-1", deployment_uuid: "dep-1", kind: "model", kind_label: "Model",
+              name: "gpt-x", identifier: "openai:gpt-x",
               classification: "known", classification_label: "Known",
-              provider: null, provider_name: null, finding_count: 1,
+              provider: 7, provider_uuid: "p-1", provider_name: "OpenAI", finding_count: 1,
               metadata: { region: "us-east-1" },
               first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
             },
@@ -220,9 +220,11 @@ describe("assurance BFF", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(1);
     expect(res.body[0]).toMatchObject({
-      uuid: "a-1", deploymentUuid: "dep-1", kind: "api", kindLabel: "API",
-      name: "billing-api", classification: "known", classificationLabel: "Known",
-      providerName: null, findingCount: 1,
+      uuid: "a-1", deploymentUuid: "dep-1", kind: "model", kindLabel: "Model",
+      name: "gpt-x", classification: "known", classificationLabel: "Known",
+      // provider_uuid is the join key the assurance graph uses to link an asset
+      // to its provider's profile; provider_name rides along for the label.
+      providerUuid: "p-1", providerName: "OpenAI", findingCount: 1,
     });
   });
 

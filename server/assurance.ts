@@ -76,6 +76,8 @@ export interface AssuranceAsset {
   classification: string;
   classificationLabel: string;
   provider: number | null;
+  /** The provider this asset resolves to, by uuid — the join key to its profile. */
+  providerUuid: string | null;
   providerName: string | null;
   findingCount: number;
   metadata: Record<string, unknown>;
@@ -228,6 +230,7 @@ function asset(raw: Record<string, unknown>): AssuranceAsset {
     classification: str(raw.classification),
     classificationLabel: str(raw.classification_label),
     provider: typeof raw.provider === "number" ? raw.provider : null,
+    providerUuid: strOrNull(raw.provider_uuid),
     providerName: strOrNull(raw.provider_name),
     findingCount: num(raw.finding_count, 0),
     metadata:
