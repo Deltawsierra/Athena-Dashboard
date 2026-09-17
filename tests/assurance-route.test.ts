@@ -83,6 +83,7 @@ describe("assurance BFF", () => {
               control_mapping: {}, location: "/chat", retest_required: true,
               evidence_class: "partially_verified",
               evidence: [{ classification: "partially_verified", classification_label: "Partially verified", summary: "", source: "engine_scan" }],
+              change_status: "recurring", change_label: "Recurring", age_days: 3, stale: false,
               first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
             },
           ]);
@@ -247,6 +248,8 @@ describe("assurance BFF", () => {
     expect(res.status).toBe(200);
     expect(res.body[0]).toMatchObject({
       uuid: "f-1", severity: "high", evidenceClass: "partially_verified",
+      // Change intelligence surfaced (spine).
+      changeStatus: "recurring", changeLabel: "Recurring", ageDays: 3, stale: false,
     });
     expect(res.body[0].evidence[0]).toMatchObject({ classificationLabel: "Partially verified" });
   });

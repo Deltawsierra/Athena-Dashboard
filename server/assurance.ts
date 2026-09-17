@@ -49,6 +49,15 @@ export interface AssuranceFinding {
   /** The asset this finding is about, when the backend attributed it to one. */
   assetUuid: string | null;
   assetName: string | null;
+  /**
+   * Change intelligence (spine): the finding's state vs the deployment's latest
+   * scan — "new" | "recurring" | "cleared" (cleared = no longer reported, NOT
+   * fixed) — its label, and whether its evidence has gone stale (a retest is due).
+   */
+  changeStatus: string;
+  changeLabel: string;
+  ageDays: number | null;
+  stale: boolean;
   firstSeen: string | null;
   lastSeen: string | null;
 }
@@ -179,6 +188,10 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
       : [],
     assetUuid: strOrNull(raw.asset_uuid),
     assetName: strOrNull(raw.asset_name),
+    changeStatus: str(raw.change_status),
+    changeLabel: str(raw.change_label),
+    ageDays: typeof raw.age_days === "number" ? raw.age_days : null,
+    stale: bool(raw.stale),
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
   };
