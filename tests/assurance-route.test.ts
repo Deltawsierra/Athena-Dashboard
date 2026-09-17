@@ -81,6 +81,42 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/capabilities/" && method === "GET") {
+          return json(200, {
+            capabilities: [
+              {
+                key: "code_execution", label: "Execute code or shell commands",
+                category: "execution", description: "A tool declares it can run code.",
+                risk: "high", declared: false, shadow: true,
+                sources: [
+                  {
+                    asset_name: "rogue-tool", kind: "tool", kind_label: "Tool",
+                    classification: "unmanaged", classification_label: "Unmanaged",
+                    managed: false, detail: "permission 'exec'",
+                  },
+                ],
+              },
+              {
+                key: "model_inference", label: "Generate model output",
+                category: "cognition", description: "Produces text from a language model.",
+                risk: "baseline", declared: true, shadow: false,
+                sources: [
+                  {
+                    asset_name: "gpt-x", kind: "model", kind_label: "Model",
+                    classification: "known", classification_label: "Known",
+                    managed: true, detail: "",
+                  },
+                ],
+              },
+            ],
+            categories: [
+              { category: "execution", count: 1, max_risk: "high" },
+              { category: "cognition", count: 1, max_risk: "baseline" },
+            ],
+            summary: { total: 2, high_risk: 1, elevated: 0, baseline: 1, declared: 1, shadow: 1 },
+          });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -275,6 +311,25 @@ describe("assurance BFF", () => {
 
   it("refuses the deployment receipt to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/receipt");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's capability map, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/capabilities");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ total: 2, highRisk: 1, declared: 1, shadow: 1 });
+    // Most-concerning capability leads; the shadow high-risk power is honest.
+    expect(res.body.capabilities[0]).toMatchObject({
+      key: "code_execution", risk: "high", shadow: true, declared: false,
+    });
+    expect(res.body.capabilities[0].sources[0]).toMatchObject({
+      assetName: "rogue-tool", kindLabel: "Tool", managed: false, detail: "permission 'exec'",
+    });
+    expect(res.body.categories[0]).toMatchObject({ category: "execution", count: 1, maxRisk: "high" });
+  });
+
+  it("refuses the capability map to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/capabilities");
     expect(anon.status).toBe(401);
   });
 
