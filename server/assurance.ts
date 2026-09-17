@@ -66,6 +66,16 @@ export interface AssuranceFinding {
   receipt: AssuranceReceipt;
   firstSeen: string | null;
   lastSeen: string | null;
+  /**
+   * The remediation workflow (Phase 2.3): who the finding is assigned to, and
+   * which of the six workflow states it is in. Both READ-ONLY on the finding
+   * serializer — moved with the dedicated remediation endpoints. This is the
+   * *human process* of fixing, NOT the security disposition: `remediationState`
+   * "resolved" means the workflow closed it, never that the finding is fixed in
+   * the security sense (see `status`).
+   */
+  assignee: string | null;
+  remediationState: string;
 }
 
 export interface AssuranceReceipt {
@@ -294,6 +304,30 @@ export interface AssuranceUnknown {
   lastSeen: string | null;
 }
 
+// ==== Remediation workflow (Phase 2.3) ====
+//
+// A finding's remediation workflow is the *human process* of getting it fixed —
+// who owns it and where it is in the six-state pipeline (new → triaged →
+// in_progress → in_review → resolved, with wont_fix off to the side). It is
+// tracked and audited separately from the security disposition: a workflow move
+// never changes the finding's severity, status or the deployment's decision, and
+// `resolved` here means the process closed the ticket, NOT that the finding is
+// fixed in the security sense. Every move is recorded as an event.
+
+export interface RemediationEvent {
+  fromState: string | null;
+  toState: string;
+  actor: string | null;
+  note: string;
+  createdAt: string | null;
+}
+export interface AssuranceRemediation {
+  state: string;
+  stateLabel: string;
+  assignee: string | null;
+  events: RemediationEvent[];
+}
+
 export interface AssuranceStatus {
   configured: boolean;
   reachable: boolean;
@@ -497,6 +531,8 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     receipt: receipt(raw.receipt),
     firstSeen: strOrNull(raw.first_seen),
     lastSeen: strOrNull(raw.last_seen),
+    assignee: raw.assignee == null ? null : String(raw.assignee),
+    remediationState: str(raw.remediation_state),
   };
 }
 
@@ -921,6 +957,27 @@ function unknown(raw: Record<string, unknown>): AssuranceUnknown {
   };
 }
 
+function remediationEvent(raw: Record<string, unknown>): RemediationEvent {
+  return {
+    fromState: strOrNull(raw.from_state),
+    toState: str(raw.to_state),
+    actor: raw.actor == null ? null : String(raw.actor),
+    note: str(raw.note),
+    createdAt: strOrNull(raw.created_at),
+  };
+}
+
+function mapRemediation(raw: Record<string, unknown>): AssuranceRemediation {
+  return {
+    state: str(raw.state),
+    stateLabel: str(raw.state_label),
+    assignee: raw.assignee == null ? null : String(raw.assignee),
+    events: Array.isArray(raw.events)
+      ? (raw.events as Record<string, unknown>[]).map(remediationEvent)
+      : [],
+  };
+}
+
 function asset(raw: Record<string, unknown>): AssuranceAsset {
   return {
     uuid: str(raw.uuid),
@@ -1237,6 +1294,24 @@ export async function businessImpact(uuid: string): Promise<AssuranceBusinessImp
   return mapBusinessImpact((await response.json()) as Record<string, unknown>);
 }
 
+/**
+ * A finding's remediation workflow (Phase 2.3): its current workflow state, the
+ * assignee, and the full audit trail of state moves. An open read (any operator
+ * may see who is working a finding and how far along it is), so a non-ok answer
+ * is genuine unavailability like the other reads.
+ */
+export async function remediation(uuid: string): Promise<AssuranceRemediation> {
+  const response = await call(
+    `/api/assurance/findings/${encodeURIComponent(uuid)}/remediation/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapRemediation((await response.json()) as Record<string, unknown>);
+}
+
 export async function listFindings(
   opts: { deployment?: string; severity?: string; status?: string } = {},
 ): Promise<AssuranceFinding[]> {
@@ -1489,4 +1564,41 @@ export async function deleteProviderAssertion(
     );
   }
   return { ok: true };
+}
+
+/**
+ * Move a finding's remediation workflow to a new state (Phase 2.3). Admin-only
+ * on the control plane; the BFF route gates it too. The backend refuses an
+ * illegal transition with a 400 (only certain moves are legal — see the state
+ * machine), which is passed back to the caller with its reason rather than
+ * laundered into a 503, so the console can say exactly why the move did not
+ * take. The response is the updated workflow (its new state and audit trail).
+ * A workflow move never changes the finding's security status or the
+ * deployment's decision.
+ */
+export async function remediationTransition(uuid: string, toState: string, note?: string) {
+  const wire: Record<string, unknown> = { to_state: toState };
+  if (note !== undefined) wire.note = note;
+  return writeJson(
+    `/api/assurance/findings/${encodeURIComponent(uuid)}/remediation/transition/`,
+    "POST",
+    wire,
+    mapRemediation,
+  );
+}
+
+/**
+ * Set or clear a finding's remediation assignee (Phase 2.3). `null` clears it.
+ * Admin-only on the control plane and the BFF route. The backend refuses an
+ * unknown user with a 400, passed back with its reason rather than a 503.
+ */
+export async function remediationAssign(uuid: string, assignee: string | null, note?: string) {
+  const wire: Record<string, unknown> = { assignee };
+  if (note !== undefined) wire.note = note;
+  return writeJson(
+    `/api/assurance/findings/${encodeURIComponent(uuid)}/remediation/assign/`,
+    "POST",
+    wire,
+    mapRemediation,
+  );
 }
