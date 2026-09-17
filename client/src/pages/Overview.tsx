@@ -14,9 +14,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ShieldCheck,
-  Activity,
   FileCheck2,
-  Rocket,
   Calendar,
   ArrowRight,
 } from "lucide-react";
@@ -34,7 +32,7 @@ import mythosGlyph from "@assets/mythos/mark-glyph.webp";
 import PageHero from "@/components/mythos/PageHero";
 import { Divider, RingFrame } from "@/components/mythos/Ornament";
 import StatCard from "@/components/mythos/StatCard";
-import { Label, SeverityPill, StatusPill, type Severity } from "@/components/mythos/atoms";
+import { Label, SeverityPill, type Severity } from "@/components/mythos/atoms";
 import { cn } from "@/lib/utils";
 
 const TREND = [

@@ -4,7 +4,6 @@ import { motion } from "framer-motion";
 import { Trash2, AlertTriangle, FileText, Users, Shield, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Client, Test, Document } from "@shared/schema";
