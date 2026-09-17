@@ -1649,6 +1649,22 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's operational / continuous-assurance roll-up (commercial
+  // spine): where it sits in the continuous-assurance loop — evidence
+  // freshness/staleness, the change backlog needing reassessment, remediation
+  // velocity, the six-state decision, and an ordinal readiness band (weakest-wins,
+  // never green-by-default; an unassessed deployment reads `stale`). Every ratio is
+  // null when there is no basis to compute it. A read, behind requireAuth like the
+  // rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/operational-assurance", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.operationalAssurance(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // ---- Access & Blast Radius (Phase 3.1 + 2.5) ----
 
   // The deployment's Identity Assurance & Effective Access (Phase 3.1): every
