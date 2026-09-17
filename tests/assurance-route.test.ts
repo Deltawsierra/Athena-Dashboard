@@ -1494,7 +1494,6 @@ describe("assurance BFF", () => {
     expect(res.body.assetCoverage.coverageRatio).toBeNull();
     expect(res.body.assetCoverage.managedRatio).toBeNull();
     expect(res.body.remediation.resolutionRatio).toBeNull();
-    expect(res.body.summary.coverageRatio).toBeNull();
     // The ordinal posture and maturity bands come through; no dollar/ROI field.
     expect(res.body).toMatchObject({ posture: "high", assuranceMaturity: "sparsely_evidenced" });
     // Sibling headlines are rolled up, camelCased.
@@ -2105,5 +2104,65 @@ describe("assurance BFF against a paginated control plane", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
     expect(res.body.map((p: { uuid: string }) => p.uuid)).toEqual(["prov-a", "prov-b"]);
+  });
+});
+
+describe("assurance BFF against a control plane returning a non-object body", () => {
+  // A read mapper indexes into the parsed body; a `200` carrying `null` (or a
+  // primitive/array) is not the object it expects, and casting-then-indexing it
+  // throws a TypeError that would surface as a generic 500. That non-object body
+  // must instead be treated as unavailability — the honest 503 "control plane
+  // unavailable" path — never a 500.
+  let app: Express;
+  let user: Awaited<ReturnType<typeof signIn>>;
+  let server: Server;
+
+  beforeAll(async () => {
+    const http = await import("http");
+    server = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        const method = req.method ?? "GET";
+        const path = (req.url ?? "").split("?")[0];
+        const json = (code: number, payload: unknown) => {
+          res.writeHead(code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(payload));
+        };
+
+        if (path === "/api/token/" && method === "POST") {
+          return json(200, { access: "svc-access-token", refresh: "r" });
+        }
+
+        // A 200 that is honest HTTP-wise but carries `null` where the mapper
+        // expects an object.
+        if (path === "/api/assurance/deployments/dep-1/executive-summary/" && method === "GET") {
+          return json(200, null);
+        }
+
+        return json(404, { detail: `no route ${method} ${path}` });
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${port}`;
+    process.env.ATHENA_FAILSAFE_USER = "svc-operator";
+    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-secret";
+    vi.resetModules();
+    app = await makeApp();
+    user = await signIn(app);
+  });
+
+  afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    delete process.env.ATHENA_FAILSAFE_USER;
+    delete process.env.ATHENA_FAILSAFE_PASSWORD;
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("answers 503 (not 500) when a read's 200 body is not a JSON object", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/executive-summary");
+    expect(res.status).toBe(503);
+    expect(String(res.body.error)).toMatch(/not a json object/i);
   });
 });

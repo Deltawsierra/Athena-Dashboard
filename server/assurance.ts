@@ -693,20 +693,6 @@ export interface AssuranceExecutiveSummary {
   posture: string;
   /** Ordinal assurance-maturity band; describes evidence coverage, never security. */
   assuranceMaturity: string;
-  summary: {
-    totalAssets: number;
-    coverageRatio: number | null;
-    shadowAssets: number;
-    totalFindings: number;
-    activeFindings: number;
-    resolvedFindings: number;
-    worstActiveSeverity: string | null;
-    openRemediation: number;
-    resolvedRemediation: number;
-    decision: string | null;
-    posture: string;
-    assuranceMaturity: string;
-  };
 }
 
 // ==== Vertical Assurance Packs (commercial spine) ====
@@ -1762,7 +1748,6 @@ function mapExecutiveSummary(raw: Record<string, unknown>): AssuranceExecutiveSu
   const aCapabilities = obj(assessments.capabilities);
   const aBoundary = obj(assessments.boundary);
   const aVendors = obj(assessments.vendors);
-  const summary = obj(raw.summary);
   return {
     system: {
       name: str(system.name),
@@ -1839,20 +1824,6 @@ function mapExecutiveSummary(raw: Record<string, unknown>): AssuranceExecutiveSu
     },
     posture: str(raw.posture),
     assuranceMaturity: str(raw.assurance_maturity),
-    summary: {
-      totalAssets: num(summary.total_assets, 0),
-      coverageRatio: numOrNull(summary.coverage_ratio),
-      shadowAssets: num(summary.shadow_assets, 0),
-      totalFindings: num(summary.total_findings, 0),
-      activeFindings: num(summary.active_findings, 0),
-      resolvedFindings: num(summary.resolved_findings, 0),
-      worstActiveSeverity: strOrNull(summary.worst_active_severity),
-      openRemediation: num(summary.open_remediation, 0),
-      resolvedRemediation: num(summary.resolved_remediation, 0),
-      decision: strOrNull(summary.decision),
-      posture: str(summary.posture),
-      assuranceMaturity: str(summary.assurance_maturity),
-    },
   };
 }
 
@@ -2197,6 +2168,25 @@ async function pagedRows(firstPath: string): Promise<Record<string, unknown>[]> 
 /** A nested object, or `{}` when the value is not a plain object. */
 function objOf(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+/**
+ * The parsed body of a read that the mappers expect to be a JSON object, or a
+ * thrown `ControlPlaneUnavailable`. Every read below checks `response.ok` first,
+ * so by here the status is 2xx; but a `200` carrying `null`, a primitive, or an
+ * array is not the object the mapper will index into — casting it and reading a
+ * key throws a `TypeError` that surfaces as a generic 500. Treating a non-object
+ * body as unavailability routes it to the honest 503 "control plane
+ * unavailable" path instead.
+ */
+async function readObject(response: Response): Promise<Record<string, unknown>> {
+  const payload = await response.json().catch(() => null);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new ControlPlaneUnavailable(
+      "the Athena control plane returned a body that was not a JSON object",
+    );
+  }
+  return payload as Record<string, unknown>;
 }
 
 /** The optional string arrays a gap dict may carry, mapped verbatim when present.
@@ -2766,7 +2756,7 @@ export async function assuranceReceipt(uuid: string): Promise<AssuranceReceiptSt
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapAssuranceReceipt((await response.json()) as Record<string, unknown>);
+  return mapAssuranceReceipt(await readObject(response));
 }
 
 /**
@@ -2782,7 +2772,7 @@ export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return capabilityMap((await response.json()) as Record<string, unknown>);
+  return capabilityMap(await readObject(response));
 }
 
 /**
@@ -2798,7 +2788,7 @@ export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapRouteMap((await response.json()) as Record<string, unknown>);
+  return mapRouteMap(await readObject(response));
 }
 
 /**
@@ -2814,7 +2804,7 @@ export async function aiBom(uuid: string): Promise<AssuranceAiBom> {
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapAiBom((await response.json()) as Record<string, unknown>);
+  return mapAiBom(await readObject(response));
 }
 
 /**
@@ -2832,7 +2822,7 @@ export async function dataBoundary(uuid: string): Promise<AssuranceDataBoundary>
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return dataBoundaryAssessment((await response.json()) as Record<string, unknown>);
+  return dataBoundaryAssessment(await readObject(response));
 }
 
 /**
@@ -2851,7 +2841,7 @@ export async function compliance(uuid: string): Promise<AssuranceCompliance> {
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapCompliance((await response.json()) as Record<string, unknown>);
+  return mapCompliance(await readObject(response));
 }
 
 /**
@@ -2873,7 +2863,7 @@ export async function businessImpact(uuid: string): Promise<AssuranceBusinessImp
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapBusinessImpact((await response.json()) as Record<string, unknown>);
+  return mapBusinessImpact(await readObject(response));
 }
 
 /**
@@ -2894,7 +2884,7 @@ export async function vendorAssurance(uuid: string): Promise<AssuranceVendorAssu
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapVendorAssurance((await response.json()) as Record<string, unknown>);
+  return mapVendorAssurance(await readObject(response));
 }
 
 /**
@@ -2916,7 +2906,7 @@ export async function executiveSummary(uuid: string): Promise<AssuranceExecutive
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapExecutiveSummary((await response.json()) as Record<string, unknown>);
+  return mapExecutiveSummary(await readObject(response));
 }
 
 /**
@@ -2935,7 +2925,7 @@ export async function assurancePacks(uuid: string): Promise<AssurancePacksCatalo
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapAssurancePacks((await response.json()) as Record<string, unknown>);
+  return mapAssurancePacks(await readObject(response));
 }
 
 /**
@@ -2964,7 +2954,7 @@ export async function assurancePack(
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, value: mapAssurancePack((await response.json()) as Record<string, unknown>) };
+  return { ok: true, value: mapAssurancePack(await readObject(response)) };
 }
 
 /**
@@ -2982,7 +2972,7 @@ export async function remediation(uuid: string): Promise<AssuranceRemediation> {
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapRemediation((await response.json()) as Record<string, unknown>);
+  return mapRemediation(await readObject(response));
 }
 
 export async function listFindings(
@@ -3044,7 +3034,7 @@ export async function effectiveAccess(uuid: string): Promise<AssuranceEffectiveA
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapEffectiveAccess((await response.json()) as Record<string, unknown>);
+  return mapEffectiveAccess(await readObject(response));
 }
 
 /**
@@ -3065,7 +3055,7 @@ export async function rippleEffect(uuid: string): Promise<AssuranceRippleEffect>
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapRippleEffect((await response.json()) as Record<string, unknown>);
+  return mapRippleEffect(await readObject(response));
 }
 
 /**
@@ -3081,7 +3071,7 @@ export async function postureCatalog(uuid: string): Promise<AssurancePostureCata
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapPostureCatalog((await response.json()) as Record<string, unknown>);
+  return mapPostureCatalog(await readObject(response));
 }
 
 /**
@@ -3097,7 +3087,7 @@ export async function cloudPosture(uuid: string): Promise<AssurancePostureDomain
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+  return mapPostureDomain(await readObject(response));
 }
 
 /**
@@ -3113,7 +3103,7 @@ export async function secretsPosture(uuid: string): Promise<AssurancePostureDoma
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+  return mapPostureDomain(await readObject(response));
 }
 
 /**
@@ -3128,7 +3118,7 @@ export async function repoPosture(uuid: string): Promise<AssurancePostureDomain>
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapPostureDomain((await response.json()) as Record<string, unknown>);
+  return mapPostureDomain(await readObject(response));
 }
 
 /**
@@ -3147,7 +3137,7 @@ export async function personalContext(uuid: string): Promise<AssurancePersonalCo
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapPersonalContext((await response.json()) as Record<string, unknown>);
+  return mapPersonalContext(await readObject(response));
 }
 
 /**
@@ -3166,7 +3156,7 @@ export async function dataLifecycle(uuid: string): Promise<AssuranceDataLifecycl
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapDataLifecycle((await response.json()) as Record<string, unknown>);
+  return mapDataLifecycle(await readObject(response));
 }
 
 /**
@@ -3186,7 +3176,7 @@ export async function trainingReuse(uuid: string): Promise<AssuranceTrainingReus
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapTrainingReuse((await response.json()) as Record<string, unknown>);
+  return mapTrainingReuse(await readObject(response));
 }
 
 /**
@@ -3206,7 +3196,7 @@ export async function metadataLogging(uuid: string): Promise<AssuranceMetadataLo
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return mapMetadataLogging((await response.json()) as Record<string, unknown>);
+  return mapMetadataLogging(await readObject(response));
 }
 
 // ==== Writes ====
@@ -3238,7 +3228,7 @@ export async function recomputeDecision(
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = await readObject(response);
   return { ok: true, decision: strOrNull(payload.decision), decisionLabel: str(payload.decision_label) };
 }
 
@@ -3277,7 +3267,7 @@ export async function patchUnknown(
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, unknown: unknown((await response.json()) as Record<string, unknown>) };
+  return { ok: true, unknown: unknown(await readObject(response)) };
 }
 
 /**
@@ -3302,7 +3292,7 @@ async function writeJson<T>(
       `the Athena control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, value: map((await response.json()) as Record<string, unknown>) };
+  return { ok: true, value: map(await readObject(response)) };
 }
 
 /**
@@ -3339,7 +3329,7 @@ export async function setDataBoundary(
   }
   return {
     ok: true,
-    value: dataBoundaryAssessment((await response.json()) as Record<string, unknown>),
+    value: dataBoundaryAssessment(await readObject(response)),
   };
 }
 
