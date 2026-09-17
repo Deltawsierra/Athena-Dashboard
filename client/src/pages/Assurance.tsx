@@ -44,6 +44,7 @@ import {
   ShieldCheck,
   ShieldQuestion,
   Trash2,
+  Waypoints,
   Zap,
 } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
@@ -161,6 +162,40 @@ interface CapabilityMap {
   capabilities: Capability[];
   categories: { category: string; count: number; maxRisk: string }[];
   summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
+}
+interface RouteNode {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  layer: string;
+  shadow: boolean;
+  providerName: string | null;
+}
+interface RouteEdge {
+  source: string;
+  target: string;
+  kind: string;
+  label: string;
+  declared: boolean;
+}
+interface RouteMap {
+  layers: { key: string; label: string; nodes: RouteNode[] }[];
+  nodes: RouteNode[];
+  edges: RouteEdge[];
+  unresolved: { agent: string; toolIdentifier: string }[];
+  summary: {
+    nodeCount: number;
+    edgeCount: number;
+    declaredEdges: number;
+    inferredEdges: number;
+    shadowNodes: number;
+    unresolvedEdges: number;
+    layersPresent: string[];
+    logsObserved: boolean;
+  };
 }
 interface BoundaryPosture {
   value: string;
@@ -831,6 +866,176 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * The System / Route Map (Phase 1.6) for one deployment: the layered data-flow
+ * graph — app → gateway → model → data → tools → logs — reconstructed from the
+ * asset graph and its declared edges. Self-fetching (mounted only inside an
+ * expanded deployment). It lays components out by pipeline layer, draws each
+ * edge honestly (a declared edge the inventory attests vs the inferred reference
+ * spine), and surfaces the gaps: a dangling tool reference, a shadow node, and
+ * whether anyone can even say where the logs go.
+ */
+function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<RouteMap>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/route-map`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Waypoints className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Route map</h3>
+      <span className="text-[11px] text-muted-foreground">how data flows through the system</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the route map…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the route map{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const nameOf = new Map(data.nodes.map((n) => [n.uuid, n.name]));
+  const { summary } = data;
+  // Only the layers that actually have nodes, in the pipeline order the backend
+  // already sorted them into.
+  const populated = data.layers.filter((l) => l.nodes.length > 0);
+
+  return (
+    <section>
+      {heading}
+
+      {summary.nodeCount === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No components discovered for this deployment yet — nothing to map.
+        </p>
+      ) : (
+        <>
+          {/* The scoreboard: how big the map is, how much of it is attested vs
+              inferred, and the honest gaps. */}
+          <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.nodeCount} {summary.nodeCount === 1 ? "node" : "nodes"}
+            </span>
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.declaredEdges} declared · {summary.inferredEdges} inferred{" "}
+              {summary.edgeCount === 1 ? "edge" : "edges"}
+            </span>
+            {summary.shadowNodes > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.shadowNodes} shadow
+              </span>
+            )}
+            {summary.unresolvedEdges > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                <HelpCircle className="h-3.5 w-3.5" /> {summary.unresolvedEdges} unresolved
+              </span>
+            )}
+            <span
+              className={cn(
+                "rounded-md border px-2 py-1",
+                summary.logsObserved
+                  ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-400"
+                  : "border-amber-500/30 bg-amber-500/5 text-amber-400",
+              )}
+            >
+              {summary.logsObserved ? "logs observed" : "no logging discovered"}
+            </span>
+          </div>
+
+          {/* The pipeline, layer by layer. Only populated layers render; each is
+              a band of its component nodes. */}
+          <div className="space-y-2">
+            {populated.map((layer, i) => (
+              <div key={layer.key} className="flex flex-wrap items-center gap-2">
+                <span className="w-20 shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {i > 0 && <span className="mr-1 text-primary/60">→</span>}
+                  {layer.label}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {layer.nodes.map((n) => (
+                    <span
+                      key={n.uuid}
+                      title={n.providerName ? `${n.kindLabel} · ${n.providerName}` : n.kindLabel}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px]",
+                        n.shadow
+                          ? "border-sev-high/40 bg-sev-high/10 text-sev-high"
+                          : "border-border/50 bg-surface-0/50 text-foreground",
+                      )}
+                    >
+                      {n.name}
+                      <span className="text-[9px] uppercase tracking-wide text-muted-foreground">
+                        {n.kindLabel}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* The edges, each labelled and marked declared (attested) or inferred
+              (the reference spine). */}
+          {data.edges.length > 0 && (
+            <ul className="mt-3 space-y-1">
+              {data.edges.map((e, i) => (
+                <li key={`${e.source}-${e.target}-${e.kind}-${i}`} className="text-[11px] text-muted-foreground">
+                  <span className="text-foreground">{nameOf.get(e.source) ?? "?"}</span>
+                  <span className="mx-1 text-primary/60">→</span>
+                  <span className="text-foreground">{nameOf.get(e.target) ?? "?"}</span>
+                  <span className="ml-1">{e.label}</span>
+                  <span
+                    className={cn(
+                      "ml-1.5 rounded-full border px-1.5 py-0.5 text-[9px] uppercase tracking-wide",
+                      e.declared
+                        ? "border-emerald-500/30 text-emerald-400"
+                        : "border-border/50 text-muted-foreground",
+                    )}
+                  >
+                    {e.declared ? "declared" : "inferred"}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* Dangling tool references: an agent names a tool discovery could not
+              place — a gap to chase, not a silent drop. */}
+          {data.unresolved.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
+                Unresolved references
+              </p>
+              <ul className="space-y-1">
+                {data.unresolved.map((u, i) => (
+                  <li key={i} className="text-[11px] text-muted-foreground">
+                    <span className="text-foreground">{u.agent}</span> names{" "}
+                    <span className="text-amber-400/90">{u.toolIdentifier}</span>, which discovery could
+                    not place.
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -1681,6 +1886,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             ))}
                           </div>
                         )}
+
+                        {/* System / route map (Phase 1.6): how data flows through
+                            the deployment. Self-fetches, so it loads only for an
+                            expanded deployment. */}
+                        <RouteMapPanel deploymentUuid={d.uuid} />
 
                         {/* AI system capability map (Phase 1.3): what this
                             deployment can do. Self-fetches, so it loads only for

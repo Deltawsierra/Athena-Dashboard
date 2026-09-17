@@ -117,6 +117,49 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/route-map/" && method === "GET") {
+          return json(200, {
+            layers: [
+              { key: "app", label: "Application", nodes: [
+                { uuid: "n-agent", name: "assistant", kind: "agent", kind_label: "Agent",
+                  classification: "known", classification_label: "Known", layer: "app",
+                  shadow: false, provider_name: null },
+              ] },
+              { key: "model", label: "Model", nodes: [
+                { uuid: "n-model", name: "gpt-x", kind: "model", kind_label: "Model",
+                  classification: "known", classification_label: "Known", layer: "model",
+                  shadow: false, provider_name: "OpenAI" },
+              ] },
+              { key: "tools", label: "Tools", nodes: [
+                { uuid: "n-tool", name: "rogue", kind: "mcp_server", kind_label: "MCP server",
+                  classification: "unmanaged", classification_label: "Unmanaged", layer: "tools",
+                  shadow: true, provider_name: null },
+              ] },
+            ],
+            nodes: [
+              { uuid: "n-agent", name: "assistant", kind: "agent", kind_label: "Agent",
+                classification: "known", classification_label: "Known", layer: "app",
+                shadow: false, provider_name: null },
+              { uuid: "n-model", name: "gpt-x", kind: "model", kind_label: "Model",
+                classification: "known", classification_label: "Known", layer: "model",
+                shadow: false, provider_name: "OpenAI" },
+              { uuid: "n-tool", name: "rogue", kind: "mcp_server", kind_label: "MCP server",
+                classification: "unmanaged", classification_label: "Unmanaged", layer: "tools",
+                shadow: true, provider_name: null },
+            ],
+            edges: [
+              { source: "n-agent", target: "n-tool", kind: "invokes", label: "invokes", declared: true },
+              { source: "n-agent", target: "n-model", kind: "prompts", label: "prompts", declared: false },
+            ],
+            unresolved: [{ agent: "assistant", tool_identifier: "ghost-tool" }],
+            summary: {
+              node_count: 3, edge_count: 2, declared_edges: 1, inferred_edges: 1,
+              shadow_nodes: 1, unresolved_edges: 1, layers_present: ["app", "model", "tools"],
+              logs_observed: false,
+            },
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/data-boundary/") {
           // The assessment shape both GET and PUT return. GET before any
           // boundary reads undeclared; a PUT declares one and the flow that was
@@ -377,6 +420,29 @@ describe("assurance BFF", () => {
 
   it("refuses the capability map to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/capabilities");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's route map, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/route-map");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({
+      nodeCount: 3, declaredEdges: 1, inferredEdges: 1, shadowNodes: 1,
+      unresolvedEdges: 1, logsObserved: false,
+    });
+    expect(res.body.summary.layersPresent).toEqual(["app", "model", "tools"]);
+    // A declared edge and the inferred spine are distinguished.
+    const declared = res.body.edges.find((e: { kind: string }) => e.kind === "invokes");
+    expect(declared).toMatchObject({ source: "n-agent", target: "n-tool", declared: true });
+    const inferred = res.body.edges.find((e: { kind: string }) => e.kind === "prompts");
+    expect(inferred.declared).toBe(false);
+    // The shadow node and the dangling reference come through.
+    expect(res.body.nodes.find((n: { uuid: string }) => n.uuid === "n-tool").shadow).toBe(true);
+    expect(res.body.unresolved[0]).toMatchObject({ agent: "assistant", toolIdentifier: "ghost-tool" });
+  });
+
+  it("refuses the route map to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/route-map");
     expect(anon.status).toBe(401);
   });
 
