@@ -30,6 +30,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Fingerprint,
   GitBranch,
   HelpCircle,
   LayoutList,
@@ -85,6 +86,8 @@ interface Finding {
   changeLabel: string;
   ageDays: number | null;
   stale: boolean;
+  // Assurance receipt (spine): a recomputable digest over the finding's evidence.
+  receipt: { algorithm: string; digest: string; evidenceCount?: number };
 }
 interface Asset {
   uuid: string;
@@ -665,6 +668,15 @@ function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
         )}
         {f.location && <span className="text-[11px] text-muted-foreground">· {f.location}</span>}
+        {f.receipt?.digest && (
+          <span
+            className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+            title={`Assurance receipt (${f.receipt.algorithm}) — recomputable digest over this finding's evidence, attesting it is unaltered:\n${f.receipt.digest}`}
+          >
+            <Fingerprint className="h-3 w-3" />
+            {f.receipt.digest.slice(0, 12)}
+          </span>
+        )}
       </div>
     </li>
   );
