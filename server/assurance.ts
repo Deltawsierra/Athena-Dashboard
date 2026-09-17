@@ -525,11 +525,259 @@ export interface AssuranceBusinessImpact {
   };
 }
 
+// ==== Third-Party Vendor Assurance (commercial spine) ====
+//
+// The posture of the vendors a deployment leans on. It runs no scan: it
+// reconciles each vendor's graded assertions (the Provider Assurance Profile),
+// the components that depend on it, and the ungoverned dependencies, into a
+// per-vendor posture a procurement/third-party-risk reader can act on. HONEST by
+// construction: a vendor claim reads as a vendor claim — an assertion is
+// `independentlyEvidenced` only when backed by evidence stronger than a bare
+// vendor claim AND from a non-self-declared source, otherwise it is carried at
+// its true (vendor-asserted / self-attested) strength and counted a gap. Nothing
+// is claimed secure: `postureBand` is an ordinal risk band (high/elevated/
+// baseline) derived from the WEAKEST evidence, a concern signal, never a grade.
+
+/** One declared vendor fact, evidence-graded, with its honest independence flag. */
+export interface VendorAssertion {
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+  /**
+   * True ONLY when backed by evidence stronger than a bare vendor claim and from
+   * a source that is not the vendor's own say-so. A vendor_asserted (or weaker)
+   * class, or a self_declared source, is never independently evidenced.
+   */
+  independentlyEvidenced: boolean;
+  /** A weak or self-attested fact is a gap — the profile's soft spot, surfaced. */
+  gap: boolean;
+}
+/** A component that depends on a vendor. */
+export interface VendorDependentAsset {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+}
+export interface Vendor {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  region: string;
+  assertions: VendorAssertion[];
+  dependentAssets: VendorDependentAsset[];
+  /** Human-readable gaps: weak/self-attested claims, unmanaged dependencies. */
+  gaps: string[];
+  /** The softest evidence class among the assertions, or null when none. */
+  weakestEvidence: string | null;
+  /** Ordinal risk band (high/elevated/baseline); a concern signal, never "secure". */
+  postureBand: string;
+  summary: {
+    assertionCount: number;
+    independentlyEvidenced: number;
+    /** Assertions read as vendor-asserted / self-attested (a gap). */
+    vendorAsserted: number;
+    gapCount: number;
+    dependentAssetCount: number;
+    unmanagedDependencies: number;
+  };
+}
+/** A dependency with no vendor behind it and/or an unmanaged (shadow) component. */
+export interface UngovernedDependency {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  /** "no_provider" | "no_provider_and_unmanaged" | "unmanaged". */
+  reason: string;
+}
+export interface AssuranceVendorAssurance {
+  vendors: Vendor[];
+  ungovernedDependencies: UngovernedDependency[];
+  summary: {
+    vendors: number;
+    assertionsTotal: number;
+    assertionsByEvidenceStrength: Record<string, number>;
+    independentlyEvidenced: number;
+    vendorAsserted: number;
+    gaps: number;
+    providerLessDependencies: number;
+    unmanagedDependencies: number;
+    /** Most concerning band across vendors, or null when no vendors. */
+    worstPostureBand: string | null;
+  };
+}
+
+// ==== Executive Summary (commercial spine) ====
+//
+// The assurance graph rolled up for a leadership reader — asset coverage,
+// evidence distribution, finding posture by severity, remediation velocity, the
+// six-state decision, an ordinal posture and assurance-maturity band, and a
+// headline from each sibling assessment. Every value is a real count, a TRUE
+// ratio of two real counts, or an ordinal band. There is NO dollar figure, ROI
+// amount, or realized-loss number anywhere, by design; a ratio the backend could
+// not compute (a zero denominator) is carried as `null`, never a fake 0%. A
+// resolved *remediation* is a process claim (someone called the work done),
+// never the security disposition; nothing here says the system is secure.
+export interface ExecutiveAssetCoverage {
+  totalAssets: number;
+  classified: number;
+  managed: number;
+  unknown: number;
+  shadow: number;
+  highRisk: number;
+  byClassification: Record<string, number>;
+  /** classified / total, or null when there are no assets (never a fake 0). */
+  coverageRatio: number | null;
+  /** managed / total, or null when there are no assets (never a fake 0). */
+  managedRatio: number | null;
+}
+export interface ExecutiveEvidence {
+  byClass: Record<string, number>;
+  independentlyEvidenced: number;
+  unverified: number;
+  findingCount: number;
+}
+export interface ExecutiveFindings {
+  total: number;
+  active: number;
+  resolved: number;
+  activeBySeverity: Record<string, number>;
+  worstActiveSeverity: string | null;
+}
+export interface ExecutiveRemediation {
+  open: number;
+  resolved: number;
+  wontFix: number;
+  byState: Record<string, number>;
+  statesReached: string[];
+  eventCount: number;
+  /**
+   * A PROCESS claim: resolved-in-workflow over all findings, or null when there
+   * are no findings. NOT a security closure rate — a finding is securely closed
+   * only through its status, which the decision already reflects.
+   */
+  resolutionRatio: number | null;
+}
+export interface ExecutiveAssessments {
+  compliance: { controlsWithActiveFindings: number; worstSeverity: string | null };
+  businessImpact: { dimensionsWithActiveExposure: number; worstExposureBand: string | null };
+  capabilities: { highRisk: number; shadow: number };
+  boundary: { declared: boolean; violations: number; unknowns: number; shadowDestinations: number };
+  vendors: {
+    vendors: number;
+    gaps: number;
+    worstPostureBand: string | null;
+    independentlyEvidenced: number;
+    vendorAsserted: number;
+  };
+}
+export interface AssuranceExecutiveSummary {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  /** The standing six-state decision, or null when none has been computed. */
+  decision: { decision: string | null; decisionLabel: string | null };
+  assetCoverage: ExecutiveAssetCoverage;
+  evidence: ExecutiveEvidence;
+  findings: ExecutiveFindings;
+  remediation: ExecutiveRemediation;
+  assessments: ExecutiveAssessments;
+  /** Ordinal risk posture (high/elevated/baseline); never "secure". */
+  posture: string;
+  /** Ordinal assurance-maturity band; describes evidence coverage, never security. */
+  assuranceMaturity: string;
+  summary: {
+    totalAssets: number;
+    coverageRatio: number | null;
+    shadowAssets: number;
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    worstActiveSeverity: string | null;
+    openRemediation: number;
+    resolvedRemediation: number;
+    decision: string | null;
+    posture: string;
+    assuranceMaturity: string;
+  };
+}
+
+// ==== Vertical Assurance Packs (commercial spine) ====
+//
+// A pack is a curated, code-only catalog entry read through an industry lens: the
+// control frameworks it emphasizes (identifiers the compliance map already
+// defines), the regulatory regimes it targets, and the evidence a buyer in that
+// vertical expects. Applying a pack filters the compliance map to those
+// frameworks — it computes no new controls. HONEST about the difference between a
+// framework we compute and a regime we do not: a pack's `regulatoryRegimes` are
+// carried as CONTEXT, each with a note that Athena holds no control catalog for
+// it, and never as scored coverage; and a touched control is an open gap, never
+// "passed" or "compliant".
+
+/** The catalog view of one pack (identity, emphasized frameworks, regimes). */
+export interface AssurancePack {
+  key: string;
+  name: string;
+  vertical: string;
+  description: string;
+  /** The framework identifiers this pack emphasizes (kept verbatim). */
+  frameworks: string[];
+  /** Framework id → display name, for the emphasized frameworks. */
+  frameworkNames: Record<string, string>;
+  /** The regulatory regimes this vertical answers to — context, not coverage. */
+  regulatoryRegimes: string[];
+  evidenceExpectations: string[];
+}
+export interface AssurancePacksCatalog {
+  packs: AssurancePack[];
+  summary: { packs: number };
+}
+/**
+ * A regulatory regime carried as CONTEXT, never computed coverage. The note is
+ * kept verbatim — it is the "not computed coverage" disclaimer that must be
+ * rendered so a reader never mistakes the regime for scored/passing coverage.
+ */
+export interface RegulatoryRegime {
+  name: string;
+  note: string;
+}
+export interface AssurancePackApplied {
+  pack: AssurancePack;
+  /** The emphasized frameworks' compliance slices, verbatim (a touched control
+   *  is an open gap, carried through unchanged — never "passed"). */
+  frameworks: ComplianceFramework[];
+  regulatoryRegimes: RegulatoryRegime[];
+  summary: {
+    frameworksEmphasized: number;
+    controlsTouched: number;
+    controlsWithActiveFindings: number;
+    worstSeverity: string | null;
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    unmappedFindingTypes: number;
+  };
+}
+
 // ==== Mappers ====
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const strOrNull = (v: unknown): string | null => (typeof v === "string" && v !== "" ? v : null);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
+/**
+ * A number carried as a number, or null when the backend emitted null. Distinct
+ * from `num`: a ratio the backend reports as `null` means "no basis to compute"
+ * (a zero denominator), and must never be laundered into a fake 0 (0%). Anything
+ * that is not a number becomes null.
+ */
+const numOrNull = (v: unknown): number | null => (typeof v === "number" ? v : null);
 const bool = (v: unknown): boolean => v === true;
 
 function evidence(raw: Record<string, unknown>): AssuranceEvidence {
@@ -956,6 +1204,305 @@ function mapBusinessImpact(raw: Record<string, unknown>): AssuranceBusinessImpac
       dimensionsWithActiveExposure: num(rawSummary.dimensions_with_active_exposure, 0),
       worstSeverity: strOrNull(rawSummary.worst_severity),
       worstExposureBand: strOrNull(rawSummary.worst_exposure_band),
+    },
+  };
+}
+
+/** A {string: number} passthrough. Alias of numRecord, named for the vendor
+ *  evidence-strength / by-class / by-state distributions the roll-ups carry. */
+const countRecord = numRecord;
+
+function vendorAssertion(raw: Record<string, unknown>): VendorAssertion {
+  return {
+    field: str(raw.field),
+    fieldLabel: str(raw.field_label),
+    value: str(raw.value),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    source: str(raw.source),
+    sourceLabel: str(raw.source_label),
+    // Honesty flags carried at their true strength — never inferred or promoted.
+    independentlyEvidenced: bool(raw.independently_evidenced),
+    gap: bool(raw.gap),
+  };
+}
+
+function vendorDependentAsset(raw: Record<string, unknown>): VendorDependentAsset {
+  return {
+    assetName: str(raw.asset_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    managed: bool(raw.managed),
+  };
+}
+
+function vendor(raw: Record<string, unknown>): Vendor {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    providerUuid: str(raw.provider_uuid),
+    providerName: str(raw.provider_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    region: str(raw.region),
+    assertions: Array.isArray(raw.assertions)
+      ? (raw.assertions as Record<string, unknown>[]).map(vendorAssertion)
+      : [],
+    dependentAssets: Array.isArray(raw.dependent_assets)
+      ? (raw.dependent_assets as Record<string, unknown>[]).map(vendorDependentAsset)
+      : [],
+    gaps: strList(raw.gaps),
+    // The band string is kept verbatim; a null weakest-evidence carries as null.
+    weakestEvidence: strOrNull(raw.weakest_evidence),
+    postureBand: str(raw.posture_band),
+    summary: {
+      assertionCount: num(rawSummary.assertion_count, 0),
+      independentlyEvidenced: num(rawSummary.independently_evidenced, 0),
+      vendorAsserted: num(rawSummary.vendor_asserted, 0),
+      gapCount: num(rawSummary.gap_count, 0),
+      dependentAssetCount: num(rawSummary.dependent_asset_count, 0),
+      unmanagedDependencies: num(rawSummary.unmanaged_dependencies, 0),
+    },
+  };
+}
+
+function mapVendorAssurance(raw: Record<string, unknown>): AssuranceVendorAssurance {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    vendors: Array.isArray(raw.vendors)
+      ? (raw.vendors as Record<string, unknown>[]).map(vendor)
+      : [],
+    ungovernedDependencies: Array.isArray(raw.ungoverned_dependencies)
+      ? (raw.ungoverned_dependencies as Record<string, unknown>[]).map((u) => ({
+          assetName: str(u.asset_name),
+          kind: str(u.kind),
+          kindLabel: str(u.kind_label),
+          classification: str(u.classification),
+          classificationLabel: str(u.classification_label),
+          reason: str(u.reason),
+        }))
+      : [],
+    summary: {
+      vendors: num(rawSummary.vendors, 0),
+      assertionsTotal: num(rawSummary.assertions_total, 0),
+      assertionsByEvidenceStrength: countRecord(rawSummary.assertions_by_evidence_strength),
+      independentlyEvidenced: num(rawSummary.independently_evidenced, 0),
+      vendorAsserted: num(rawSummary.vendor_asserted, 0),
+      gaps: num(rawSummary.gaps, 0),
+      providerLessDependencies: num(rawSummary.provider_less_dependencies, 0),
+      unmanagedDependencies: num(rawSummary.unmanaged_dependencies, 0),
+      // The worst band is null when there are no vendors — carried, not coerced.
+      worstPostureBand: strOrNull(rawSummary.worst_posture_band),
+    },
+  };
+}
+
+function mapExecutiveSummary(raw: Record<string, unknown>): AssuranceExecutiveSummary {
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const system = obj(raw.system);
+  const decision = obj(raw.decision);
+  const coverage = obj(raw.asset_coverage);
+  const evidence = obj(raw.evidence);
+  const findings = obj(raw.findings);
+  const remediation = obj(raw.remediation);
+  const assessments = obj(raw.assessments);
+  const aCompliance = obj(assessments.compliance);
+  const aImpact = obj(assessments.business_impact);
+  const aCapabilities = obj(assessments.capabilities);
+  const aBoundary = obj(assessments.boundary);
+  const aVendors = obj(assessments.vendors);
+  const summary = obj(raw.summary);
+  return {
+    system: {
+      name: str(system.name),
+      uuid: str(system.uuid),
+      environment: str(system.environment),
+      environmentLabel: str(system.environment_label),
+    },
+    decision: {
+      // None-safe: an unassessed deployment has no decision; never read as ready.
+      decision: strOrNull(decision.decision),
+      decisionLabel: strOrNull(decision.decision_label),
+    },
+    assetCoverage: {
+      totalAssets: num(coverage.total_assets, 0),
+      classified: num(coverage.classified, 0),
+      managed: num(coverage.managed, 0),
+      unknown: num(coverage.unknown, 0),
+      shadow: num(coverage.shadow, 0),
+      highRisk: num(coverage.high_risk, 0),
+      byClassification: countRecord(coverage.by_classification),
+      // Ratios carried as null when there is no basis to compute — never a 0.
+      coverageRatio: numOrNull(coverage.coverage_ratio),
+      managedRatio: numOrNull(coverage.managed_ratio),
+    },
+    evidence: {
+      byClass: countRecord(evidence.by_class),
+      independentlyEvidenced: num(evidence.independently_evidenced, 0),
+      unverified: num(evidence.unverified, 0),
+      findingCount: num(evidence.finding_count, 0),
+    },
+    findings: {
+      total: num(findings.total, 0),
+      active: num(findings.active, 0),
+      resolved: num(findings.resolved, 0),
+      activeBySeverity: countRecord(findings.active_by_severity),
+      worstActiveSeverity: strOrNull(findings.worst_active_severity),
+    },
+    remediation: {
+      open: num(remediation.open, 0),
+      resolved: num(remediation.resolved, 0),
+      wontFix: num(remediation.wont_fix, 0),
+      byState: countRecord(remediation.by_state),
+      statesReached: strList(remediation.states_reached),
+      eventCount: num(remediation.event_count, 0),
+      // A process claim, null when there are no findings — never a fake rate.
+      resolutionRatio: numOrNull(remediation.resolution_ratio),
+    },
+    assessments: {
+      compliance: {
+        controlsWithActiveFindings: num(aCompliance.controls_with_active_findings, 0),
+        worstSeverity: strOrNull(aCompliance.worst_severity),
+      },
+      businessImpact: {
+        dimensionsWithActiveExposure: num(aImpact.dimensions_with_active_exposure, 0),
+        worstExposureBand: strOrNull(aImpact.worst_exposure_band),
+      },
+      capabilities: {
+        highRisk: num(aCapabilities.high_risk, 0),
+        shadow: num(aCapabilities.shadow, 0),
+      },
+      boundary: {
+        declared: bool(aBoundary.declared),
+        violations: num(aBoundary.violations, 0),
+        unknowns: num(aBoundary.unknowns, 0),
+        shadowDestinations: num(aBoundary.shadow_destinations, 0),
+      },
+      vendors: {
+        vendors: num(aVendors.vendors, 0),
+        gaps: num(aVendors.gaps, 0),
+        worstPostureBand: strOrNull(aVendors.worst_posture_band),
+        independentlyEvidenced: num(aVendors.independently_evidenced, 0),
+        vendorAsserted: num(aVendors.vendor_asserted, 0),
+      },
+    },
+    posture: str(raw.posture),
+    assuranceMaturity: str(raw.assurance_maturity),
+    summary: {
+      totalAssets: num(summary.total_assets, 0),
+      coverageRatio: numOrNull(summary.coverage_ratio),
+      shadowAssets: num(summary.shadow_assets, 0),
+      totalFindings: num(summary.total_findings, 0),
+      activeFindings: num(summary.active_findings, 0),
+      resolvedFindings: num(summary.resolved_findings, 0),
+      worstActiveSeverity: strOrNull(summary.worst_active_severity),
+      openRemediation: num(summary.open_remediation, 0),
+      resolvedRemediation: num(summary.resolved_remediation, 0),
+      decision: strOrNull(summary.decision),
+      posture: str(summary.posture),
+      assuranceMaturity: str(summary.assurance_maturity),
+    },
+  };
+}
+
+/** One pack's catalog view, snake→camel. Framework identifiers and their names
+ *  are kept verbatim — they are the compliance map's own identifiers. */
+function packView(raw: Record<string, unknown>): AssurancePack {
+  const names =
+    raw.framework_names && typeof raw.framework_names === "object" && !Array.isArray(raw.framework_names)
+      ? (raw.framework_names as Record<string, unknown>)
+      : {};
+  const frameworkNames: Record<string, string> = {};
+  for (const [k, v] of Object.entries(names)) {
+    if (typeof v === "string") frameworkNames[k] = v;
+  }
+  return {
+    key: str(raw.key),
+    name: str(raw.name),
+    vertical: str(raw.vertical),
+    description: str(raw.description),
+    frameworks: strList(raw.frameworks),
+    frameworkNames,
+    regulatoryRegimes: strList(raw.regulatory_regimes),
+    evidenceExpectations: strList(raw.evidence_expectations),
+  };
+}
+
+function mapAssurancePacks(raw: Record<string, unknown>): AssurancePacksCatalog {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    packs: Array.isArray(raw.packs)
+      ? (raw.packs as Record<string, unknown>[]).map(packView)
+      : [],
+    summary: { packs: num(rawSummary.packs, 0) },
+  };
+}
+
+/** One compliance framework slice (key, name, controls, summary), snake→camel.
+ *  The same shape mapCompliance builds inline; reused for the pack view, whose
+ *  frameworks are the compliance map's own slices, filtered to the pack. A
+ *  touched control is carried through unchanged — an open gap, never "passed". */
+function complianceFrameworkSlice(f: Record<string, unknown>): ComplianceFramework {
+  const fSummary =
+    f.summary && typeof f.summary === "object" && !Array.isArray(f.summary)
+      ? (f.summary as Record<string, unknown>)
+      : {};
+  return {
+    key: str(f.key),
+    name: str(f.name),
+    controls: Array.isArray(f.controls)
+      ? (f.controls as Record<string, unknown>[]).map(complianceControl)
+      : [],
+    summary: {
+      controlsTouched: num(fSummary.controls_touched, 0),
+      controlsWithActiveFindings: num(fSummary.controls_with_active_findings, 0),
+      worstSeverity: strOrNull(fSummary.worst_severity),
+    },
+  };
+}
+
+function mapAssurancePack(raw: Record<string, unknown>): AssurancePackApplied {
+  const rawPack =
+    raw.pack && typeof raw.pack === "object" && !Array.isArray(raw.pack)
+      ? (raw.pack as Record<string, unknown>)
+      : {};
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    pack: packView(rawPack),
+    frameworks: Array.isArray(raw.frameworks)
+      ? (raw.frameworks as Record<string, unknown>[]).map(complianceFrameworkSlice)
+      : [],
+    // Each regime carries its "not computed coverage" note VERBATIM, so a
+    // consumer never renders it as scored/passing coverage.
+    regulatoryRegimes: Array.isArray(raw.regulatory_regimes)
+      ? (raw.regulatory_regimes as Record<string, unknown>[]).map((r) => ({
+          name: str(r.name),
+          note: str(r.note),
+        }))
+      : [],
+    summary: {
+      frameworksEmphasized: num(rawSummary.frameworks_emphasized, 0),
+      controlsTouched: num(rawSummary.controls_touched, 0),
+      controlsWithActiveFindings: num(rawSummary.controls_with_active_findings, 0),
+      worstSeverity: strOrNull(rawSummary.worst_severity),
+      totalFindings: num(rawSummary.total_findings, 0),
+      activeFindings: num(rawSummary.active_findings, 0),
+      resolvedFindings: num(rawSummary.resolved_findings, 0),
+      unmappedFindingTypes: num(rawSummary.unmapped_finding_types, 0),
     },
   };
 }
@@ -1401,6 +1948,97 @@ export async function businessImpact(uuid: string): Promise<AssuranceBusinessImp
     );
   }
   return mapBusinessImpact((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's Third-Party Vendor Assurance (commercial spine): the posture of
+ * the vendors it depends on — what each asserts, at what evidence strength, which
+ * components depend on it, an honest gap list, the ungoverned dependencies, and an
+ * ordinal posture band. A read (open), so a non-ok answer is genuine
+ * unavailability like the other reads. It never presents a vendor as secure or
+ * compliant: a vendor_asserted claim reads as vendor-asserted, and the band is a
+ * concern signal derived from the weakest evidence, not a grade.
+ */
+export async function vendorAssurance(uuid: string): Promise<AssuranceVendorAssurance> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/vendor-assurance/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapVendorAssurance((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * A deployment's executive summary (commercial spine): the assurance graph rolled
+ * up for a leadership reader — asset coverage, evidence distribution, finding
+ * posture by severity, remediation velocity, the six-state decision, an ordinal
+ * posture and assurance-maturity band, and a headline from each sibling
+ * assessment. A read (open), so a non-ok answer is genuine unavailability like the
+ * other reads. Every value is a real count, a true ratio of real counts, or an
+ * ordinal band — no dollar figure, ROI amount, or realized-loss number anywhere,
+ * and nothing claims the system is secure.
+ */
+export async function executiveSummary(uuid: string): Promise<AssuranceExecutiveSummary> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/executive-summary/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapExecutiveSummary((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * The Vertical Assurance Packs catalog (commercial spine): the static, code-only
+ * catalog of industry packs — each naming the frameworks it emphasizes, the
+ * regulatory regimes it targets, and the evidence a buyer in that vertical
+ * expects. A read (open), so a non-ok answer is genuine unavailability like the
+ * other reads. It does not read the deployment; apply one via `assurancePack`.
+ */
+export async function assurancePacks(uuid: string): Promise<AssurancePacksCatalog> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-packs/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapAssurancePacks((await response.json()) as Record<string, unknown>);
+}
+
+/**
+ * Apply one vertical assurance pack to a deployment (commercial spine): its
+ * compliance coverage read through the lens of that pack, plus the pack's
+ * regulatory regimes carried as context. A read, but with an EXPECTED 4xx: an
+ * unknown pack key is a clean backend 400, which is meaning the caller must see
+ * (it is not "the control plane is down"), so — like the write reads that use
+ * PASSTHROUGH_STATUS — a 400/403/404/409 is returned as `{ok:false}` with its
+ * reason rather than laundered into a 503. Genuine unavailability (5xx, network)
+ * still throws. Coverage is honest: a touched control is an open gap, never
+ * "passed"; the regimes are context, never computed coverage.
+ */
+export async function assurancePack(
+  uuid: string,
+  packKey: string,
+): Promise<{ ok: true; value: AssurancePackApplied } | { ok: false; status: number; detail: string }> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-packs/${encodeURIComponent(packKey)}/`,
+  );
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return { ok: true, value: mapAssurancePack((await response.json()) as Record<string, unknown>) };
 }
 
 /**
