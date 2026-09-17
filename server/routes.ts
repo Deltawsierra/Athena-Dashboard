@@ -1556,6 +1556,17 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's AI-BOM (Phase 1.7): the AI supply-chain bill of materials,
+  // an exportable, tamper-evident inventory. A read, behind requireAuth.
+  app.get("/api/assurance/deployments/:uuid/ai-bom", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.aiBom(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // The deployment's AI data-boundary assessment (Phase 1.4): the approved
   // boundary a human declared reconciled against the deployment's actual data
   // destinations. A read, behind requireAuth like the rest of the reads.
