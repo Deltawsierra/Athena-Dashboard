@@ -395,6 +395,184 @@ interface AssuranceReceipt {
   computedAt: string | null;
 }
 
+// Third-Party Vendor Assurance (commercial spine): the posture of the vendors a
+// deployment leans on. HONEST by construction — a vendor claim reads as a vendor
+// claim (`independentlyEvidenced` is true only for evidence stronger than a bare
+// vendor claim from a non-self-declared source), nothing is claimed secure
+// (`postureBand` is an ordinal concern signal, not a grade), and an ungoverned
+// dependency is surfaced, never dropped.
+interface VendorAssertion {
+  field: string;
+  fieldLabel: string;
+  value: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  source: string;
+  sourceLabel: string;
+  independentlyEvidenced: boolean;
+  gap: boolean;
+}
+interface VendorDependentAsset {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+}
+interface Vendor {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  region: string;
+  assertions: VendorAssertion[];
+  dependentAssets: VendorDependentAsset[];
+  gaps: string[];
+  weakestEvidence: string | null;
+  postureBand: string;
+  summary: {
+    assertionCount: number;
+    independentlyEvidenced: number;
+    vendorAsserted: number;
+    gapCount: number;
+    dependentAssetCount: number;
+    unmanagedDependencies: number;
+  };
+}
+interface UngovernedDependency {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  reason: string;
+}
+interface VendorAssurance {
+  vendors: Vendor[];
+  ungovernedDependencies: UngovernedDependency[];
+  summary: {
+    vendors: number;
+    assertionsTotal: number;
+    assertionsByEvidenceStrength: Record<string, number>;
+    independentlyEvidenced: number;
+    vendorAsserted: number;
+    gaps: number;
+    providerLessDependencies: number;
+    unmanagedDependencies: number;
+    worstPostureBand: string | null;
+  };
+}
+
+// Executive summary (commercial spine): the assurance graph rolled up for a
+// leadership reader. Every value is a real count, a TRUE ratio of two real counts
+// (null when there is no basis to compute — never a fake 0%), or an ordinal band.
+// There is NO dollar figure or ROI amount anywhere, by design.
+interface ExecutiveSummary {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  decision: { decision: string | null; decisionLabel: string | null };
+  assetCoverage: {
+    totalAssets: number;
+    classified: number;
+    managed: number;
+    unknown: number;
+    shadow: number;
+    highRisk: number;
+    byClassification: Record<string, number>;
+    coverageRatio: number | null;
+    managedRatio: number | null;
+  };
+  evidence: {
+    byClass: Record<string, number>;
+    independentlyEvidenced: number;
+    unverified: number;
+    findingCount: number;
+  };
+  findings: {
+    total: number;
+    active: number;
+    resolved: number;
+    activeBySeverity: Record<string, number>;
+    worstActiveSeverity: string | null;
+  };
+  remediation: {
+    open: number;
+    resolved: number;
+    wontFix: number;
+    byState: Record<string, number>;
+    statesReached: string[];
+    eventCount: number;
+    resolutionRatio: number | null;
+  };
+  assessments: {
+    compliance: { controlsWithActiveFindings: number; worstSeverity: string | null };
+    businessImpact: { dimensionsWithActiveExposure: number; worstExposureBand: string | null };
+    capabilities: { highRisk: number; shadow: number };
+    boundary: { declared: boolean; violations: number; unknowns: number; shadowDestinations: number };
+    vendors: {
+      vendors: number;
+      gaps: number;
+      worstPostureBand: string | null;
+      independentlyEvidenced: number;
+      vendorAsserted: number;
+    };
+  };
+  posture: string;
+  assuranceMaturity: string;
+  summary: {
+    totalAssets: number;
+    coverageRatio: number | null;
+    shadowAssets: number;
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    worstActiveSeverity: string | null;
+    openRemediation: number;
+    resolvedRemediation: number;
+    decision: string | null;
+    posture: string;
+    assuranceMaturity: string;
+  };
+}
+
+// Vertical Assurance Packs (commercial spine): the compliance map read through an
+// industry lens. A pack's `frameworks` are computed coverage; its
+// `regulatoryRegimes` are CONTEXT, each carrying a note that Athena holds no
+// control catalog for it — never scored/passing coverage.
+interface Pack {
+  key: string;
+  name: string;
+  vertical: string;
+  description: string;
+  frameworks: string[];
+  frameworkNames: Record<string, string>;
+  regulatoryRegimes: string[];
+  evidenceExpectations: string[];
+}
+interface PacksCatalog {
+  packs: Pack[];
+  summary: { packs: number };
+}
+interface RegulatoryRegime {
+  name: string;
+  note: string;
+}
+interface PackApplied {
+  pack: Pack;
+  frameworks: ComplianceFramework[];
+  regulatoryRegimes: RegulatoryRegime[];
+  summary: {
+    frameworksEmphasized: number;
+    controlsTouched: number;
+    controlsWithActiveFindings: number;
+    worstSeverity: string | null;
+    totalFindings: number;
+    activeFindings: number;
+    resolvedFindings: number;
+    unmappedFindingTypes: number;
+  };
+}
+
 type ViewMode = "graph" | "list";
 
 const UNKNOWN_STATUSES = ["open", "investigating", "resolved", "accepted"] as const;
@@ -2658,6 +2836,723 @@ function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// A vendor's (or a roll-up's) posture band, worn honestly as an ORDINAL concern
+// signal, never a grade or a pass: high leads in red, elevated in amber, baseline
+// in muted. A null band (no vendors to roll up) reads as "no vendors", never a
+// pass. This never says "secure" — a weaker profile is a higher band.
+function PostureBandChip({ band }: { band: string | null }) {
+  if (!band) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-border/50 bg-surface-1/40 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+        No vendors
+      </span>
+    );
+  }
+  const look =
+    band === "high"
+      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "High concern" }
+      : band === "elevated"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Elevated" }
+        : band === "baseline"
+          ? { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: "Baseline" }
+          : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: band };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+      title="An ordinal posture band derived from the vendor's weakest evidence — a concern signal, never a grade or a claim the vendor is secure"
+    >
+      {look.label}
+    </span>
+  );
+}
+
+// A ratio the backend reports as a TRUE ratio of two real counts, or null when
+// there was no basis to compute it (a zero denominator). Rendered as a percent,
+// or an em-dash when null — NEVER a fake 0%, which would read as measured.
+function ratioPct(ratio: number | null): string {
+  return ratio === null ? "—" : `${Math.round(ratio * 100)}%`;
+}
+
+// An ordinal assurance-maturity band, worn honestly: it describes how well-
+// evidenced the picture is, NEVER that the system is secure. Best → weakest.
+function MaturityChip({ maturity }: { maturity: string }) {
+  const look =
+    maturity === "well_evidenced"
+      ? { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", label: "Well evidenced" }
+      : maturity === "partially_evidenced"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Partially evidenced" }
+        : maturity === "sparsely_evidenced"
+          ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Sparsely evidenced" }
+          : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: maturity };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+      title="How well-evidenced the assurance picture is — a coverage read, never a claim the system is secure"
+    >
+      {look.label}
+    </span>
+  );
+}
+
+/**
+ * Third-Party Vendor Assurance (commercial spine) for one deployment: each vendor
+ * its components depend on, what that vendor asserts and at what evidence
+ * strength, which components depend on it, an honest gap list, and an ordinal
+ * posture band — plus the ungoverned dependencies. Self-fetching (mounted only
+ * inside an expanded deployment). HONEST by construction: an assertion is shown as
+ * independently evidenced ONLY when it truly is; a vendor_asserted / self-attested
+ * claim reads as exactly that and is counted a gap, and the posture band is a
+ * concern signal derived from the weakest evidence — never a claim the vendor is
+ * secure or compliant.
+ */
+function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<VendorAssurance>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/vendor-assurance`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Building2 className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Vendor assurance</h3>
+      <span className="text-[11px] text-muted-foreground">third-party posture &amp; gaps</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the vendor assurance view…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the vendor assurance view{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {summary.vendors === 0 && data.ungovernedDependencies.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No vendors resolved for this deployment yet — nothing on record to assess.
+        </p>
+      ) : (
+        <>
+          {/* Honest framing: a vendor claim reads as a vendor claim, and the
+              posture band is a concern signal, never a grade or "secure". */}
+          <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+            A <span className="text-foreground">vendor-asserted</span> claim reads as the vendor&apos;s
+            own word — a gap until independently evidenced. The posture band is an ordinal concern
+            signal from the weakest evidence, never a claim the vendor is secure.
+          </p>
+
+          {/* The scoreboard: vendors, independently-evidenced vs vendor-asserted
+              assertions (shown honestly), gaps, and the worst posture band. */}
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.vendors} vendor{summary.vendors === 1 ? "" : "s"}
+            </span>
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+              {summary.independentlyEvidenced} independently evidenced · {summary.vendorAsserted}{" "}
+              vendor-asserted
+            </span>
+            {summary.gaps > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                <HelpCircle className="h-3.5 w-3.5" /> {summary.gaps} gap{summary.gaps === 1 ? "" : "s"}
+              </span>
+            )}
+            {(summary.providerLessDependencies > 0 || summary.unmanagedDependencies > 0) && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.providerLessDependencies} provider-less ·{" "}
+                {summary.unmanagedDependencies} unmanaged
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              <span className="text-muted-foreground">worst:</span>
+              <PostureBandChip band={summary.worstPostureBand} />
+            </span>
+          </div>
+
+          {/* Each vendor, most-concerning-first (the backend's order). */}
+          <div className="space-y-2.5">
+            {data.vendors.map((v) => (
+              <div
+                key={v.providerUuid}
+                className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5"
+              >
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[12px] font-semibold text-foreground">{v.providerName}</span>
+                  <PostureBandChip band={v.postureBand} />
+                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {v.kindLabel}
+                  </span>
+                  {v.region && (
+                    <span className="text-[10px] text-muted-foreground/80">{v.region}</span>
+                  )}
+                  <span className="ml-auto text-[11px] text-muted-foreground">
+                    {v.summary.independentlyEvidenced}/{v.summary.assertionCount} independently
+                    evidenced
+                  </span>
+                </div>
+
+                {/* The vendor's declared facts, each at its TRUE evidence strength.
+                    A vendor-asserted / self-attested claim wears its gap honestly;
+                    only a genuinely independent one is marked as such. */}
+                {v.assertions.length > 0 && (
+                  <ul className="mt-2 space-y-1.5 border-l border-border/40 pl-2.5">
+                    {v.assertions.map((a) => (
+                      <li
+                        key={a.field}
+                        className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
+                      >
+                        <span className="font-semibold text-foreground">{a.fieldLabel}</span>
+                        {a.value && <span className="text-muted-foreground">{a.value}</span>}
+                        <EvidenceClassChip value={a.evidenceClass} />
+                        {a.independentlyEvidenced ? (
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-medium text-emerald-300">
+                            <ShieldCheck className="h-3 w-3" /> Independently evidenced
+                          </span>
+                        ) : (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
+                            title={`${a.sourceLabel} — the vendor's own word, not independently evidenced`}
+                          >
+                            <ShieldQuestion className="h-3 w-3" /> Vendor-asserted
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {/* The gaps, spelled out — weak/self-attested claims and unmanaged
+                    dependencies, surfaced rather than smoothed. */}
+                {v.gaps.length > 0 && (
+                  <ul className="mt-2 space-y-1 border-l border-amber-500/30 pl-2.5">
+                    {v.gaps.map((g, i) => (
+                      <li key={i} className="text-[10px] leading-relaxed text-amber-400">
+                        {g}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {/* What depends on this vendor. */}
+                {v.dependentAssets.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Depends on it
+                    </span>
+                    {v.dependentAssets.map((d) => (
+                      <span
+                        key={d.assetName}
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px]",
+                          d.managed
+                            ? "border-border/50 bg-surface-1/40 text-muted-foreground"
+                            : "border-sev-high/30 bg-sev-high/5 text-sev-high",
+                        )}
+                      >
+                        <span className={d.managed ? "text-foreground" : "text-sev-high"}>
+                          {d.assetName}
+                        </span>
+                        <span className="text-muted-foreground/80">{d.kindLabel}</span>
+                        {!d.managed && <span>· {d.classificationLabel}</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Ungoverned dependencies: components with no vendor behind them and/or
+              unmanaged (shadow) — surfaced as first-class gaps, never dropped. */}
+          {data.ungovernedDependencies.length > 0 && (
+            <div className="mt-3">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sev-high">
+                Ungoverned dependencies
+              </p>
+              <ul className="flex flex-wrap gap-1.5">
+                {data.ungovernedDependencies.map((u) => (
+                  <li
+                    key={`${u.kind}-${u.assetName}`}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-[11px] text-sev-high"
+                    title={u.reason}
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" />
+                    <span className="text-foreground">{u.assetName}</span>
+                    <span className="text-muted-foreground/80">{u.kindLabel}</span>
+                    <span>· {u.classificationLabel}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Vertical Assurance Packs (commercial spine) for one deployment: the code-only
+ * catalog of industry packs, with a selector; on selecting a pack, the deployment's
+ * compliance coverage read through that pack's lens is fetched and shown. Self-
+ * fetching (mounted only inside an expanded deployment). HONEST by construction: a
+ * pack's FRAMEWORKS are computed coverage (a touched control is an open gap, never
+ * "passed"), while its REGULATORY REGIMES are carried as CONTEXT — each with its
+ * "not computed coverage" note rendered visibly, never as scored/passing coverage.
+ */
+function VerticalPacksPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const catalog = useQuery<PacksCatalog>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-packs`],
+  });
+  const applied = useQuery<PackApplied>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-packs/${selected ?? ""}`],
+    enabled: selected !== null,
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Boxes className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Vertical assurance packs</h3>
+      <span className="text-[11px] text-muted-foreground">compliance through an industry lens</span>
+    </div>
+  );
+
+  if (catalog.isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the assurance packs…</p>
+      </section>
+    );
+  }
+  if (catalog.isError || !catalog.data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the assurance packs
+          {catalog.error instanceof Error ? `: ${catalog.error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const selectedPack = catalog.data.packs.find((p) => p.key === selected) ?? null;
+
+  return (
+    <section>
+      {heading}
+
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        A pack narrows the compliance lens to one vertical. Its{" "}
+        <span className="text-foreground">frameworks</span> carry real coverage — a touched control is
+        a gap, never a control met — while its <span className="text-foreground">regulatory regimes</span>{" "}
+        are context Athena does not score.
+      </p>
+
+      {/* The pack selector — the four packs as a tab row. */}
+      <div className="mb-3 flex flex-wrap gap-1.5">
+        {catalog.data.packs.map((p) => (
+          <button
+            key={p.key}
+            type="button"
+            onClick={() => setSelected((cur) => (cur === p.key ? null : p.key))}
+            aria-pressed={selected === p.key}
+            className={cn(
+              "rounded-md border px-2.5 py-1 text-[11px] transition-colors",
+              selected === p.key
+                ? "border-primary/50 bg-primary/10 text-foreground"
+                : "border-border/50 bg-surface-1/40 text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+
+      {selectedPack === null ? (
+        <p className="text-[12px] text-muted-foreground">
+          Select a pack to read this deployment&apos;s coverage through its lens.
+        </p>
+      ) : (
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="text-[12px] leading-relaxed text-muted-foreground">{selectedPack.description}</p>
+
+          {/* The evidence a buyer in this vertical expects. */}
+          {selectedPack.evidenceExpectations.length > 0 && (
+            <div className="mt-2">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Evidence expectations
+              </p>
+              <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-muted-foreground">
+                {selectedPack.evidenceExpectations.map((e, i) => (
+                  <li key={i}>{e}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* The applied coverage. */}
+          {applied.isLoading && (
+            <p className="mt-2 text-[12px] text-muted-foreground">Reading coverage through this pack…</p>
+          )}
+          {applied.isError && (
+            <p className="mt-2 text-[12px] text-muted-foreground">
+              Could not read coverage through this pack
+              {applied.error instanceof Error ? `: ${applied.error.message}` : "."}
+            </p>
+          )}
+          {applied.data && (
+            <>
+              {/* Emphasized frameworks — real, honest coverage. */}
+              <div className="mt-3">
+                <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Framework coverage
+                  </span>
+                  <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5 text-muted-foreground">
+                    {applied.data.summary.activeFindings} active · {applied.data.summary.resolvedFindings}{" "}
+                    resolved
+                  </span>
+                  {applied.data.summary.controlsWithActiveFindings > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-0.5 text-sev-high">
+                      <ShieldAlert className="h-3.5 w-3.5" />{" "}
+                      {applied.data.summary.controlsWithActiveFindings} control
+                      {applied.data.summary.controlsWithActiveFindings === 1 ? "" : "s"} with active
+                      findings
+                    </span>
+                  )}
+                  {applied.data.summary.worstSeverity && (
+                    <SeverityPill severity={asSeverity(applied.data.summary.worstSeverity)} />
+                  )}
+                </div>
+                <div className="space-y-2">
+                  {applied.data.frameworks.map((fw) => (
+                    <div key={fw.key} className="rounded-md border border-border/40 bg-surface-1/30 p-2">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="text-[12px] font-semibold text-foreground">{fw.name}</span>
+                        {fw.summary.controlsTouched > 0 ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            {fw.summary.controlsTouched} control
+                            {fw.summary.controlsTouched === 1 ? "" : "s"} touched
+                            {fw.summary.controlsWithActiveFindings > 0 &&
+                              ` · ${fw.summary.controlsWithActiveFindings} with active findings`}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground/80">
+                            no findings mapped here
+                          </span>
+                        )}
+                        {fw.summary.worstSeverity && (
+                          <span className="ml-auto">
+                            <SeverityPill severity={asSeverity(fw.summary.worstSeverity)} />
+                          </span>
+                        )}
+                      </div>
+                      {fw.controls.length > 0 && (
+                        <ul className="mt-1.5 space-y-1 border-l border-border/40 pl-2.5">
+                          {fw.controls.map((c) => (
+                            <li
+                              key={c.controlId}
+                              className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
+                            >
+                              <span className="font-mono font-semibold text-foreground">
+                                {c.controlId}
+                              </span>
+                              {c.name && <span className="text-muted-foreground">{c.name}</span>}
+                              {c.activeFindingCount > 0 ? (
+                                <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-sev-high">
+                                  <ShieldAlert className="h-3 w-3" /> {c.activeFindingCount} active
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground/80">
+                                  {c.resolvedFindingCount} resolved
+                                </span>
+                              )}
+                              {c.worstSeverity && <SeverityPill severity={asSeverity(c.worstSeverity)} />}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Regulatory regimes — CONTEXT, never computed coverage. The note is
+                  rendered visibly so a reader never mistakes it for a score. */}
+              {applied.data.regulatoryRegimes.length > 0 && (
+                <div className="mt-3">
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400">
+                    Regulatory context (not computed coverage)
+                  </p>
+                  <ul className="space-y-1.5">
+                    {applied.data.regulatoryRegimes.map((r) => (
+                      <li
+                        key={r.name}
+                        className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-[11px]"
+                      >
+                        <span className="inline-flex items-center gap-1 font-semibold text-amber-400">
+                          <ShieldQuestion className="h-3.5 w-3.5" /> {r.name}
+                        </span>
+                        <p className="mt-0.5 leading-relaxed text-muted-foreground">{r.note}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Executive summary (commercial spine) for one deployment: the assurance graph
+ * rolled up for a leadership reader — asset coverage, evidence distribution,
+ * finding posture by severity, remediation velocity, the six-state decision, an
+ * ordinal risk posture and assurance-maturity band, and a headline from each
+ * sibling assessment. Self-fetching (mounted only inside an expanded deployment).
+ * HONEST by construction: every value is a real count, a TRUE ratio of real counts
+ * (shown as "—" when there is no basis to compute, NEVER a fake 0%), or an ordinal
+ * band. There is NO invented dollar/ROI figure anywhere — the backend emits none,
+ * and none is added here. A resolved remediation is a PROCESS claim, never
+ * security closure; nothing here says the system is secure.
+ */
+function ExecutiveSummaryPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<ExecutiveSummary>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/executive-summary`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <FileText className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Executive summary</h3>
+      <span className="text-[11px] text-muted-foreground">posture &amp; coverage, never money</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the executive summary…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the executive summary{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { assetCoverage, evidence, findings, remediation, assessments } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {/* Honest framing: value is posture, coverage and counts — never money. */}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        Value here is <span className="text-foreground">posture, coverage and counts</span> — never a
+        dollar figure. A ratio with no basis to compute reads as &quot;—&quot;, never a 0%.
+      </p>
+
+      {/* The headline row: the six-state decision, posture, and maturity band. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">decision:</span>
+          <DecisionPill
+            decision={data.decision.decision as never}
+            label={data.decision.decisionLabel || undefined}
+          />
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">posture:</span>
+          <PostureBandChip band={data.posture} />
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">maturity:</span>
+          <MaturityChip maturity={data.assuranceMaturity} />
+        </span>
+      </div>
+
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        {/* Asset coverage: how much of the graph is classified vs unknown/shadow.
+            Ratios shown as "—" when null, never a fake 0%. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Asset coverage
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{ratioPct(assetCoverage.coverageRatio)}</span> classified
+            </span>
+            <span>
+              <span className="text-foreground">{ratioPct(assetCoverage.managedRatio)}</span> managed
+            </span>
+            <span>{assetCoverage.totalAssets} total</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+            {assetCoverage.shadow > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-sev-high">
+                <ShieldAlert className="h-3 w-3" /> {assetCoverage.shadow} shadow
+              </span>
+            )}
+            {assetCoverage.unknown > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-amber-400">
+                {assetCoverage.unknown} unknown
+              </span>
+            )}
+            {assetCoverage.highRisk > 0 && (
+              <span className="rounded-md border border-sev-high/30 bg-sev-high/5 px-1.5 py-0.5 text-sev-high">
+                {assetCoverage.highRisk} high-risk
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Evidence distribution: how much of what is found is independently
+            evidenced vs unverified. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Evidence
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{evidence.independentlyEvidenced}</span> independently
+              evidenced
+            </span>
+            <span>
+              <span className="text-foreground">{evidence.unverified}</span> unverified
+            </span>
+            <span>{evidence.findingCount} findings</span>
+          </div>
+        </div>
+
+        {/* Findings by severity — active vs resolved, worst active severity. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Findings
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{findings.active}</span> active ·{" "}
+              {findings.resolved} resolved
+            </span>
+            {findings.worstActiveSeverity && (
+              <span className="inline-flex items-center gap-1">
+                <span>worst:</span>
+                <SeverityPill severity={asSeverity(findings.worstActiveSeverity)} />
+              </span>
+            )}
+          </div>
+          {Object.keys(findings.activeBySeverity).length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+              {Object.entries(findings.activeBySeverity).map(([sev, count]) => (
+                <span key={sev} className="inline-flex items-center gap-1">
+                  <SeverityPill severity={asSeverity(sev)} />
+                  <span className="text-muted-foreground">×{count}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Remediation velocity — resolution_ratio is a PROCESS claim, labelled as
+            such, never security closure. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Remediation velocity
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{remediation.open}</span> open ·{" "}
+              {remediation.resolved} resolved · {remediation.wontFix} won&apos;t-fix
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            <span className="text-foreground">{ratioPct(remediation.resolutionRatio)}</span>{" "}
+            resolved-in-workflow{" "}
+            <span className="text-muted-foreground/80">
+              — a process claim (work called done), not security closure
+            </span>
+          </p>
+        </div>
+      </div>
+
+      {/* Sibling assessment headlines, rolled up (each owns its own honest read). */}
+      <div className="mt-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Assessment headlines
+        </p>
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5">
+            compliance: {assessments.compliance.controlsWithActiveFindings} control
+            {assessments.compliance.controlsWithActiveFindings === 1 ? "" : "s"} with active findings
+            {assessments.compliance.worstSeverity && (
+              <>
+                {" "}
+                · <SeverityPill severity={asSeverity(assessments.compliance.worstSeverity)} />
+              </>
+            )}
+          </span>
+          <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5">
+            impact: {assessments.businessImpact.dimensionsWithActiveExposure} dimension
+            {assessments.businessImpact.dimensionsWithActiveExposure === 1 ? "" : "s"} exposed
+            {assessments.businessImpact.worstExposureBand && (
+              <> · {assessments.businessImpact.worstExposureBand}</>
+            )}
+          </span>
+          <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5">
+            capabilities: {assessments.capabilities.highRisk} high-risk · {assessments.capabilities.shadow}{" "}
+            shadow
+          </span>
+          <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5">
+            boundary:{" "}
+            {assessments.boundary.declared
+              ? `${assessments.boundary.violations} violation${assessments.boundary.violations === 1 ? "" : "s"} · ${assessments.boundary.unknowns} unknown${assessments.boundary.unknowns === 1 ? "" : "s"}`
+              : "not declared"}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-surface-1/40 px-2 py-0.5">
+            vendors: {assessments.vendors.gaps} gap
+            {assessments.vendors.gaps === 1 ? "" : "s"} · <PostureBandChip band={assessments.vendors.worstPostureBand} />
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -3170,6 +4065,26 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             potential exposure, never a realized loss. Self-fetches,
                             so it loads only for an expanded deployment. */}
                         <BusinessImpactPanel deploymentUuid={d.uuid} />
+
+                        {/* Executive summary (commercial spine): the assurance
+                            graph rolled up for a leadership reader — coverage,
+                            evidence, findings, remediation, decision, posture and
+                            maturity. No dollar/ROI figure. Self-fetches, so it
+                            loads only for an expanded deployment. */}
+                        <ExecutiveSummaryPanel deploymentUuid={d.uuid} />
+
+                        {/* Vendor assurance (commercial spine): the third-party
+                            posture — each vendor's assertions at their true
+                            evidence strength, gaps, and ungoverned dependencies.
+                            Self-fetches, so it loads only for an expanded
+                            deployment. */}
+                        <VendorAssurancePanel deploymentUuid={d.uuid} />
+
+                        {/* Vertical assurance packs (commercial spine): compliance
+                            coverage read through an industry lens, with regulatory
+                            regimes carried as context, never scored coverage. Self-
+                            fetches, so it loads only for an expanded deployment. */}
+                        <VerticalPacksPanel deploymentUuid={d.uuid} />
 
                         {/* Assurance receipt (spine): the full, versioned, signable
                             integrity/provenance record — system, policy, evidence

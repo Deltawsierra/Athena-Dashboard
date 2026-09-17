@@ -1620,6 +1620,69 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's Third-Party Vendor Assurance (commercial spine): the posture
+  // of the vendors it depends on — what each asserts, at what evidence strength,
+  // an honest gap list, and the ungoverned dependencies. It never presents a
+  // vendor as secure: a vendor_asserted claim reads as vendor-asserted. A read,
+  // behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/vendor-assurance", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.vendorAssurance(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The deployment's executive summary (commercial spine): the assurance graph
+  // rolled up for a leadership reader — asset coverage, evidence distribution,
+  // finding posture, remediation velocity, the six-state decision, and ordinal
+  // posture/maturity bands. Every value is a real count, a true ratio, or an
+  // ordinal band — no dollar figure or ROI amount anywhere. A read, behind
+  // requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/executive-summary", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.executiveSummary(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The Vertical Assurance Packs catalog (commercial spine): the static, code-only
+  // catalog of industry packs. A read, behind requireAuth like the rest. Apply one
+  // to the deployment via the pack route below.
+  app.get("/api/assurance/deployments/:uuid/assurance-packs", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.assurancePacks(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // Apply one vertical assurance pack to the deployment (commercial spine): its
+  // compliance coverage read through the pack's lens, with the regulatory regimes
+  // carried as context, never computed coverage. A read, behind requireAuth. An
+  // unknown pack is a meaningful backend 400 (not a control-plane outage), so it
+  // is surfaced to the operator as a 400 with its reason rather than a 503 —
+  // mirroring how the disposition writes pass a backend 4xx through.
+  app.get("/api/assurance/deployments/:uuid/assurance-packs/:pack", asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await assurance.assurancePack(req.params.uuid, req.params.pack);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      // The backend's own refusal (an unknown pack key), verbatim, so the
+      // operator sees why rather than a bare 503.
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    res.json(result.value);
+  }));
+
   // A finding's remediation workflow (Phase 2.3): its current workflow state,
   // assignee, and the audit trail of moves. This is the human process of getting
   // a finding fixed, tracked separately from the security disposition — a read,

@@ -384,6 +384,186 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/vendor-assurance/" && method === "GET") {
+          // Honest by construction: a vendor with one independently-evidenced fact
+          // and one vendor-asserted / self-attested fact (a gap, shown at true
+          // strength, never promoted), plus an ungoverned (shadow) dependency.
+          return json(200, {
+            vendors: [
+              {
+                provider_uuid: "p-1", provider_name: "OpenAI",
+                kind: "model_provider", kind_label: "Model provider", region: "us-east-1",
+                assertions: [
+                  {
+                    field: "logging", field_label: "Logging", value: "30 days",
+                    evidence_class: "partially_verified", evidence_class_label: "Partially verified",
+                    source: "measured", source_label: "Independently measured",
+                    independently_evidenced: true, gap: false,
+                  },
+                  {
+                    field: "trains_on_data", field_label: "Trains on customer data",
+                    value: "No — zero-retention endpoint",
+                    evidence_class: "vendor_asserted", evidence_class_label: "Vendor asserted",
+                    source: "self_declared", source_label: "Self-declared",
+                    independently_evidenced: false, gap: true,
+                  },
+                ],
+                dependent_assets: [
+                  {
+                    asset_name: "gpt-x", kind: "model", kind_label: "Model",
+                    classification: "known", classification_label: "Known", managed: true,
+                  },
+                ],
+                gaps: [
+                  "'Trains on customer data' rests on vendor asserted evidence (self-declared) — vendor-asserted, not independently evidenced",
+                ],
+                weakest_evidence: "vendor_asserted", posture_band: "elevated",
+                summary: {
+                  assertion_count: 2, independently_evidenced: 1, vendor_asserted: 1,
+                  gap_count: 1, dependent_asset_count: 1, unmanaged_dependencies: 0,
+                },
+              },
+            ],
+            ungoverned_dependencies: [
+              {
+                asset_name: "shadow-tool", kind: "tool", kind_label: "Tool",
+                classification: "unmanaged", classification_label: "Unmanaged",
+                reason: "no_provider_and_unmanaged",
+              },
+            ],
+            summary: {
+              vendors: 1, assertions_total: 2,
+              assertions_by_evidence_strength: { partially_verified: 1, vendor_asserted: 1 },
+              independently_evidenced: 1, vendor_asserted: 1, gaps: 1,
+              provider_less_dependencies: 1, unmanaged_dependencies: 1,
+              worst_posture_band: "elevated",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/executive-summary/" && method === "GET") {
+          // A null-ratio case: no assets discovered, so coverage_ratio and
+          // managed_ratio are null (never a fake 0%), and no findings, so
+          // resolution_ratio is null too. The decision is carried at true strength.
+          return json(200, {
+            system: {
+              name: "acme-chatbot", uuid: "dep-1",
+              environment: "production", environment_label: "Production",
+            },
+            decision: { decision: "needs_more_evidence", decision_label: "Needs more evidence" },
+            asset_coverage: {
+              total_assets: 0, classified: 0, managed: 0, unknown: 0, shadow: 0, high_risk: 0,
+              by_classification: {}, coverage_ratio: null, managed_ratio: null,
+            },
+            evidence: { by_class: {}, independently_evidenced: 0, unverified: 0, finding_count: 0 },
+            findings: { total: 0, active: 0, resolved: 0, active_by_severity: {}, worst_active_severity: null },
+            remediation: {
+              open: 0, resolved: 0, wont_fix: 0, by_state: {}, states_reached: [],
+              event_count: 0, resolution_ratio: null,
+            },
+            assessments: {
+              compliance: { controls_with_active_findings: 9, worst_severity: "critical" },
+              business_impact: { dimensions_with_active_exposure: 3, worst_exposure_band: "elevated" },
+              capabilities: { high_risk: 1, shadow: 1 },
+              boundary: { declared: false, violations: 0, unknowns: 1, shadow_destinations: 0 },
+              vendors: {
+                vendors: 1, gaps: 1, worst_posture_band: "elevated",
+                independently_evidenced: 1, vendor_asserted: 1,
+              },
+            },
+            posture: "high",
+            assurance_maturity: "sparsely_evidenced",
+            summary: {
+              total_assets: 0, coverage_ratio: null, shadow_assets: 0,
+              total_findings: 0, active_findings: 0, resolved_findings: 0,
+              worst_active_severity: null, open_remediation: 0, resolved_remediation: 0,
+              decision: "needs_more_evidence", posture: "high", assurance_maturity: "sparsely_evidenced",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/assurance-packs/" && method === "GET") {
+          // The static catalog: two of the four packs is enough to exercise the
+          // mapper (frameworks kept verbatim, framework names, regimes as context).
+          return json(200, {
+            packs: [
+              {
+                key: "healthcare", name: "Healthcare (HIPAA + NIST 800-53)", vertical: "healthcare",
+                description: "For AI systems handling protected health information.",
+                frameworks: ["nist_800_53", "owasp_llm_2025"],
+                framework_names: {
+                  nist_800_53: "NIST SP 800-53 Rev 5",
+                  owasp_llm_2025: "OWASP Top 10 for LLM Applications",
+                },
+                regulatory_regimes: ["HIPAA"],
+                evidence_expectations: ["Access enforcement and least privilege on PHI stores (NIST AC family)."],
+              },
+              {
+                key: "general-ai", name: "General AI (OWASP LLM Top 10, NIST AI RMF)", vertical: "general_ai",
+                description: "The default lens for any AI system.",
+                frameworks: ["owasp_llm_2025", "owasp_2021"],
+                framework_names: {
+                  owasp_llm_2025: "OWASP Top 10 for LLM Applications",
+                  owasp_2021: "OWASP Top 10 (2021)",
+                },
+                regulatory_regimes: ["NIST AI RMF"],
+                evidence_expectations: ["No open prompt-injection findings (OWASP LLM01)."],
+              },
+            ],
+            summary: { packs: 2 },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/assurance-packs/healthcare/" && method === "GET") {
+          // Applying a known pack: the compliance map filtered to its frameworks
+          // (a touched control is an open gap, carried verbatim), and the
+          // regulatory regimes as CONTEXT — each with the "not computed coverage"
+          // note, never scored coverage.
+          return json(200, {
+            pack: {
+              key: "healthcare", name: "Healthcare (HIPAA + NIST 800-53)", vertical: "healthcare",
+              description: "For AI systems handling protected health information.",
+              frameworks: ["nist_800_53", "owasp_llm_2025"],
+              framework_names: {
+                nist_800_53: "NIST SP 800-53 Rev 5",
+                owasp_llm_2025: "OWASP Top 10 for LLM Applications",
+              },
+              regulatory_regimes: ["HIPAA"],
+              evidence_expectations: ["Access enforcement and least privilege on PHI stores (NIST AC family)."],
+            },
+            frameworks: [
+              {
+                key: "nist_800_53", name: "NIST SP 800-53 Rev 5",
+                controls: [
+                  {
+                    control_id: "SI-10", name: "Information Input Validation",
+                    family: "SI", family_name: "System and Information Integrity",
+                    catalogued: true, active_finding_count: 2, resolved_finding_count: 1,
+                    worst_severity: "high", finding_types: ["sql_injection", "xss"],
+                  },
+                ],
+                summary: { controls_touched: 1, controls_with_active_findings: 1, worst_severity: "high" },
+              },
+            ],
+            regulatory_regimes: [
+              {
+                name: "HIPAA",
+                note: "Regulatory context for this vertical. Athena holds no itemised control catalog for this regime, so it is surfaced as context, not computed coverage.",
+              },
+            ],
+            summary: {
+              frameworks_emphasized: 1, controls_touched: 1, controls_with_active_findings: 1,
+              worst_severity: "high", total_findings: 7, active_findings: 5,
+              resolved_findings: 2, unmapped_finding_types: 1,
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/assurance-packs/not-a-pack/" && method === "GET") {
+          // An unknown pack: the backend's clean 400, never a guessed pack.
+          return json(400, { detail: "Unknown assurance pack: 'not-a-pack'. Known packs: ['federal', 'financial-services', 'general-ai', 'healthcare']." });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -936,6 +1116,122 @@ describe("assurance BFF", () => {
 
   it("refuses the business-impact map to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/business-impact");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's vendor-assurance view, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/vendor-assurance");
+    expect(res.status).toBe(200);
+    // The roll-up counts vendors and assertions honestly, camelCased — and the
+    // worst posture band is an ordinal concern signal, never a grade.
+    expect(res.body.summary).toMatchObject({
+      vendors: 1, assertionsTotal: 2, independentlyEvidenced: 1, vendorAsserted: 1,
+      gaps: 1, providerLessDependencies: 1, unmanagedDependencies: 1, worstPostureBand: "elevated",
+    });
+    expect(res.body.summary.assertionsByEvidenceStrength).toMatchObject({
+      partially_verified: 1, vendor_asserted: 1,
+    });
+    const vendor = res.body.vendors[0];
+    expect(vendor).toMatchObject({
+      providerName: "OpenAI", kindLabel: "Model provider", region: "us-east-1",
+      weakestEvidence: "vendor_asserted", postureBand: "elevated",
+    });
+    // An independently-evidenced fact is marked so; a self-attested one is NOT
+    // promoted — it reads as a vendor-asserted gap at its true strength.
+    const independent = vendor.assertions.find((a: { field: string }) => a.field === "logging");
+    expect(independent).toMatchObject({ independentlyEvidenced: true, gap: false, source: "measured" });
+    const asserted = vendor.assertions.find((a: { field: string }) => a.field === "trains_on_data");
+    expect(asserted).toMatchObject({
+      independentlyEvidenced: false, gap: true,
+      source: "self_declared", evidenceClass: "vendor_asserted",
+    });
+    // The ungoverned (shadow) dependency is surfaced, never dropped.
+    expect(res.body.ungovernedDependencies[0]).toMatchObject({
+      assetName: "shadow-tool", kindLabel: "Tool", reason: "no_provider_and_unmanaged",
+    });
+  });
+
+  it("refuses the vendor-assurance view to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/vendor-assurance");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's executive summary, mapped to camelCase, carrying null ratios as null", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/executive-summary");
+    expect(res.status).toBe(200);
+    // The six-state decision is carried at true strength.
+    expect(res.body.decision).toMatchObject({
+      decision: "needs_more_evidence", decisionLabel: "Needs more evidence",
+    });
+    // A ratio the backend could not compute is carried as null — NEVER a fake 0.
+    expect(res.body.assetCoverage.coverageRatio).toBeNull();
+    expect(res.body.assetCoverage.managedRatio).toBeNull();
+    expect(res.body.remediation.resolutionRatio).toBeNull();
+    expect(res.body.summary.coverageRatio).toBeNull();
+    // The ordinal posture and maturity bands come through; no dollar/ROI field.
+    expect(res.body).toMatchObject({ posture: "high", assuranceMaturity: "sparsely_evidenced" });
+    // Sibling headlines are rolled up, camelCased.
+    expect(res.body.assessments.compliance).toMatchObject({
+      controlsWithActiveFindings: 9, worstSeverity: "critical",
+    });
+    expect(res.body.assessments.vendors).toMatchObject({
+      gaps: 1, worstPostureBand: "elevated", independentlyEvidenced: 1, vendorAsserted: 1,
+    });
+    // The whole payload carries no invented money value.
+    expect(JSON.stringify(res.body)).not.toMatch(/roi|dollar|\$/i);
+  });
+
+  it("refuses the executive summary to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/executive-summary");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns the assurance-packs catalog, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/assurance-packs");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ packs: 2 });
+    const healthcare = res.body.packs.find((p: { key: string }) => p.key === "healthcare");
+    expect(healthcare).toMatchObject({
+      name: "Healthcare (HIPAA + NIST 800-53)", vertical: "healthcare",
+    });
+    // Framework identifiers are kept verbatim; regimes ride as context.
+    expect(healthcare.frameworks).toEqual(["nist_800_53", "owasp_llm_2025"]);
+    expect(healthcare.frameworkNames).toMatchObject({ nist_800_53: "NIST SP 800-53 Rev 5" });
+    expect(healthcare.regulatoryRegimes).toEqual(["HIPAA"]);
+  });
+
+  it("refuses the assurance-packs catalog to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/assurance-packs");
+    expect(anon.status).toBe(401);
+  });
+
+  it("applies a known pack, mapped to camelCase, with regimes carried as context", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/assurance-packs/healthcare");
+    expect(res.status).toBe(200);
+    expect(res.body.pack).toMatchObject({ key: "healthcare" });
+    expect(res.body.summary).toMatchObject({
+      frameworksEmphasized: 1, controlsTouched: 1, controlsWithActiveFindings: 1,
+      worstSeverity: "high", totalFindings: 7,
+    });
+    // A framework slice is carried verbatim — a touched control is an open gap.
+    expect(res.body.frameworks[0]).toMatchObject({ key: "nist_800_53", name: "NIST SP 800-53 Rev 5" });
+    expect(res.body.frameworks[0].controls[0]).toMatchObject({
+      controlId: "SI-10", activeFindingCount: 2, resolvedFindingCount: 1, worstSeverity: "high",
+    });
+    // The regulatory regime rides as CONTEXT — its "not computed coverage" note is
+    // carried verbatim, never turned into a score.
+    expect(res.body.regulatoryRegimes[0]).toMatchObject({ name: "HIPAA" });
+    expect(String(res.body.regulatoryRegimes[0].note)).toContain("not computed coverage");
+  });
+
+  it("surfaces an unknown pack as a 400 (not a 503) with the backend's reason", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/assurance-packs/not-a-pack");
+    expect(res.status).toBe(400);
+    expect(String(res.body.error)).toContain("Unknown assurance pack");
+  });
+
+  it("refuses applying a pack to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/assurance-packs/healthcare");
     expect(anon.status).toBe(401);
   });
 
