@@ -832,10 +832,12 @@ function UnknownCard({
   u,
   onDisposition,
   pending,
+  admin = false,
 }: {
   u: Unknown;
   onDisposition: (uuid: string, status: string) => void;
   pending: boolean;
+  admin?: boolean;
 }) {
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
@@ -856,19 +858,27 @@ function UnknownCard({
         <label className="text-[11px] text-muted-foreground" htmlFor={`u-${u.uuid}`}>
           Disposition
         </label>
-        <select
-          id={`u-${u.uuid}`}
-          className="rounded-md border border-border/60 bg-surface-1/60 px-2 py-1 text-[12px] text-foreground"
-          value={u.status}
-          disabled={pending}
-          onChange={(e) => onDisposition(u.uuid, e.target.value)}
-        >
-          {UNKNOWN_STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
+        {/* Changing a disposition mutates the record → admin-only (the control
+            plane enforces it too). A non-admin sees the current status, read-only. */}
+        {admin ? (
+          <select
+            id={`u-${u.uuid}`}
+            className="rounded-md border border-border/60 bg-surface-1/60 px-2 py-1 text-[12px] text-foreground"
+            value={u.status}
+            disabled={pending}
+            onChange={(e) => onDisposition(u.uuid, e.target.value)}
+          >
+            {UNKNOWN_STATUSES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="rounded-md border border-border/60 bg-surface-1/40 px-2 py-1 text-[12px] text-foreground">
+            {u.statusLabel || u.status}
+          </span>
+        )}
         <span className="text-[11px] text-muted-foreground">{u.source}</span>
       </div>
     </li>
@@ -2071,20 +2081,32 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                         {depOpenUnknowns.length} open{" "}
                         {depOpenUnknowns.length === 1 ? "gap" : "gaps"}
                       </span>
-                      <button
-                        className="ml-auto inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-primary disabled:opacity-50"
-                        onClick={() => recompute.mutate(d.uuid)}
-                        disabled={recompute.isPending && recompute.variables === d.uuid}
-                        title="Recompute the decision from current findings"
-                      >
-                        <RefreshCw
-                          className={cn(
-                            "h-3.5 w-3.5",
-                            recompute.isPending && recompute.variables === d.uuid && "animate-spin",
-                          )}
-                        />
-                        Recompute
-                      </button>
+                      {/* Recompute mutates the decision → admin-only. Disabled
+                          while the deployment is paused by the operator failsafe,
+                          so a routine recompute never lifts a pause. */}
+                      {admin && (
+                        <button
+                          className="ml-auto inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-primary disabled:opacity-50"
+                          onClick={() => recompute.mutate(d.uuid)}
+                          disabled={
+                            d.decision === "paused" ||
+                            (recompute.isPending && recompute.variables === d.uuid)
+                          }
+                          title={
+                            d.decision === "paused"
+                              ? "Deployment is paused by the operator failsafe — lift the pause before recomputing"
+                              : "Recompute the decision from current findings"
+                          }
+                        >
+                          <RefreshCw
+                            className={cn(
+                              "h-3.5 w-3.5",
+                              recompute.isPending && recompute.variables === d.uuid && "animate-spin",
+                            )}
+                          />
+                          Recompute
+                        </button>
+                      )}
                     </div>
 
                     {!isCollapsed && (
@@ -2175,6 +2197,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                                   u={u}
                                   onDisposition={onDisposition}
                                   pending={dispositionPending(u.uuid)}
+                                  admin={admin}
                                 />
                               ))}
                             </ul>
@@ -2229,20 +2252,29 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                           </td>
                           <td className="py-2.5 pr-4 text-muted-foreground">{d.findingCount}</td>
                           <td className="py-2.5 pr-4">
-                            <button
-                              className="inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-primary disabled:opacity-50"
-                              onClick={() => recompute.mutate(d.uuid)}
-                              disabled={recompute.isPending && recompute.variables === d.uuid}
-                              title="Recompute the decision from current findings"
-                            >
-                              <RefreshCw
-                                className={cn(
-                                  "h-3.5 w-3.5",
-                                  recompute.isPending && recompute.variables === d.uuid && "animate-spin",
-                                )}
-                              />
-                              Recompute
-                            </button>
+                            {admin && (
+                              <button
+                                className="inline-flex items-center gap-1 text-[12px] text-muted-foreground hover:text-primary disabled:opacity-50"
+                                onClick={() => recompute.mutate(d.uuid)}
+                                disabled={
+                                  d.decision === "paused" ||
+                                  (recompute.isPending && recompute.variables === d.uuid)
+                                }
+                                title={
+                                  d.decision === "paused"
+                                    ? "Deployment is paused by the operator failsafe — lift the pause before recomputing"
+                                    : "Recompute the decision from current findings"
+                                }
+                              >
+                                <RefreshCw
+                                  className={cn(
+                                    "h-3.5 w-3.5",
+                                    recompute.isPending && recompute.variables === d.uuid && "animate-spin",
+                                  )}
+                                />
+                                Recompute
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -2331,6 +2363,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                           u={u}
                           onDisposition={onDisposition}
                           pending={dispositionPending(u.uuid)}
+                          admin={admin}
                         />
                       ))}
                     </ul>
