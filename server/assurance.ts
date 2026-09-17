@@ -87,6 +87,44 @@ export interface AssuranceReceipt {
   computedAt: string | null;
 }
 
+// The full, versioned Assurance Receipt standard (spine): the roadmap tuple —
+// system, receipt version, policy, evidence root, result, per-assessment digests
+// — as one deterministic, portable, signable payload (backend RECEIPT_SCHEMA,
+// mythos.assurance.receipt/1.0). It attests INTEGRITY and PROVENANCE — that this
+// is the assurance state that was recorded, unaltered — never that the
+// conclusions are true or the system is secure. Every field is carried at its
+// true strength; an undeclared policy reads as declared:false, never invented.
+export interface AssuranceReceiptStandard {
+  receiptVersion: string;
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  // A six-state deployment decision, or null when none has been computed yet
+  // (never silently read as ready).
+  result: { decision: string | null; decisionLabel: string | null };
+  // The declared data boundary the receipt is assessed against, honestly: when no
+  // boundary was ever approved this is { declared: false } and nothing else — an
+  // undeclared boundary is a gap, never a policy we invent to look complete.
+  policy:
+    | { declared: false }
+    | {
+        declared: true;
+        allowedRegions: string[];
+        trainingAllowed: boolean;
+        thirdPartySharingAllowed: boolean;
+      };
+  // The evidence set reduced to its Merkle-style root, with the finding count and
+  // hash algorithm alongside.
+  evidence: { algorithm: string; root: string; findingCount: number };
+  // A digest per computed assessment — a digest attests the assessment was
+  // recorded unaltered, never that it passes.
+  assessments: { compliance: string; capabilities: string; boundary: string; bom: string };
+  algorithm: string;
+  // The top-level deterministic digest over the stable content (the value a
+  // signature is taken over). Kept verbatim.
+  digest: string;
+  // Metadata only, OUTSIDE the hash.
+  computedAt: string | null;
+}
+
 // AI System Capability Map (Phase 1.3): the ground truth of what a deployment
 // can *do*, derived from its asset graph and declared tool permissions.
 export interface CapabilitySource {
@@ -922,6 +960,56 @@ function mapBusinessImpact(raw: Record<string, unknown>): AssuranceBusinessImpac
   };
 }
 
+// The full, versioned Assurance Receipt standard, snake→camel. Digests and the
+// version string are kept verbatim — they are the signable content. An
+// undeclared policy is carried honestly as { declared: false } and nothing else,
+// never fleshed out with an invented boundary.
+function mapAssuranceReceipt(raw: Record<string, unknown>): AssuranceReceiptStandard {
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const system = obj(raw.system);
+  const result = obj(raw.result);
+  const rawPolicy = obj(raw.policy);
+  const evidence = obj(raw.evidence);
+  const assessments = obj(raw.assessments);
+  return {
+    receiptVersion: str(raw.receipt_version),
+    system: {
+      name: str(system.name),
+      uuid: str(system.uuid),
+      environment: str(system.environment),
+      environmentLabel: str(system.environment_label),
+    },
+    result: {
+      decision: strOrNull(result.decision),
+      decisionLabel: strOrNull(result.decision_label),
+    },
+    policy:
+      rawPolicy.declared === true
+        ? {
+            declared: true,
+            allowedRegions: strList(rawPolicy.allowed_regions),
+            trainingAllowed: bool(rawPolicy.training_allowed),
+            thirdPartySharingAllowed: bool(rawPolicy.third_party_sharing_allowed),
+          }
+        : { declared: false },
+    evidence: {
+      algorithm: str(evidence.algorithm),
+      root: str(evidence.root),
+      findingCount: num(evidence.finding_count, 0),
+    },
+    assessments: {
+      compliance: str(assessments.compliance),
+      capabilities: str(assessments.capabilities),
+      boundary: str(assessments.boundary),
+      bom: str(assessments.bom),
+    },
+    algorithm: str(raw.algorithm),
+    digest: str(raw.digest),
+    computedAt: strOrNull(raw.computed_at),
+  };
+}
+
 function deployment(raw: Record<string, unknown>): AssuranceDeployment {
   return {
     uuid: str(raw.uuid),
@@ -1185,6 +1273,27 @@ export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt>
     );
   }
   return receipt(await response.json());
+}
+
+/**
+ * A deployment's full, versioned **Assurance Receipt** (spine): the roadmap tuple
+ * — system, receipt version, policy, evidence root, result, per-assessment
+ * digests — as one deterministic, portable, signable payload (the standardised
+ * superset of the bare `receipt` above). A read (open), so a non-ok answer is
+ * genuine unavailability like the other reads. It attests integrity and
+ * provenance — that this is the assurance state that was recorded, unaltered —
+ * never that the conclusions are true or the system is secure.
+ */
+export async function assuranceReceipt(uuid: string): Promise<AssuranceReceiptStandard> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-receipt/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapAssuranceReceipt((await response.json()) as Record<string, unknown>);
 }
 
 /**

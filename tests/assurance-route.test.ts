@@ -87,6 +87,55 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/assurance-receipt/" && method === "GET") {
+          // The full, versioned receipt: honest by construction — a
+          // needs-more-evidence result carried at its true strength, an
+          // undeclared policy as declared:false and nothing invented, and the
+          // digests/version kept verbatim.
+          return json(200, {
+            receipt_version: "mythos.assurance.receipt/1.0",
+            system: {
+              name: "acme-chatbot", uuid: "dep-1",
+              environment: "production", environment_label: "Production",
+            },
+            result: { decision: "needs_more_evidence", decision_label: "Needs more evidence" },
+            policy: { declared: false },
+            evidence: { algorithm: "sha256", root: "b".repeat(64), finding_count: 3 },
+            assessments: {
+              compliance: "c".repeat(64), capabilities: "d".repeat(64),
+              boundary: "e".repeat(64), bom: "f".repeat(64),
+            },
+            algorithm: "sha256",
+            digest: "a".repeat(64),
+            computed_at: "2026-09-17T00:00:00Z",
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-2/assurance-receipt/" && method === "GET") {
+          // A second deployment with a declared boundary, so the declared branch
+          // of the policy mapper is exercised too.
+          return json(200, {
+            receipt_version: "mythos.assurance.receipt/1.0",
+            system: {
+              name: "eu-assistant", uuid: "dep-2",
+              environment: "staging", environment_label: "Staging",
+            },
+            result: { decision: "ready", decision_label: "Ready" },
+            policy: {
+              declared: true, allowed_regions: ["eu"],
+              training_allowed: false, third_party_sharing_allowed: true,
+            },
+            evidence: { algorithm: "sha256", root: "1".repeat(64), finding_count: 0 },
+            assessments: {
+              compliance: "2".repeat(64), capabilities: "3".repeat(64),
+              boundary: "4".repeat(64), bom: "5".repeat(64),
+            },
+            algorithm: "sha256",
+            digest: "9".repeat(64),
+            computed_at: "2026-09-17T02:00:00Z",
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/capabilities/" && method === "GET") {
           return json(200, {
             capabilities: [
@@ -677,6 +726,51 @@ describe("assurance BFF", () => {
 
   it("refuses the deployment receipt to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/receipt");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's full assurance receipt, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/assurance-receipt");
+    expect(res.status).toBe(200);
+    // The version and top-level digest are kept verbatim (the signable content).
+    expect(res.body).toMatchObject({
+      receiptVersion: "mythos.assurance.receipt/1.0",
+      algorithm: "sha256", digest: "a".repeat(64),
+      computedAt: "2026-09-17T00:00:00Z",
+    });
+    // The system identity, camelCased.
+    expect(res.body.system).toMatchObject({
+      name: "acme-chatbot", uuid: "dep-1", environment: "production", environmentLabel: "Production",
+    });
+    // The six-state result is carried faithfully at its true strength.
+    expect(res.body.result).toMatchObject({
+      decision: "needs_more_evidence", decisionLabel: "Needs more evidence",
+    });
+    // An undeclared policy reads as declared:false and nothing invented.
+    expect(res.body.policy).toEqual({ declared: false });
+    // The evidence root, its finding count, and the algorithm come through.
+    expect(res.body.evidence).toMatchObject({
+      algorithm: "sha256", root: "b".repeat(64), findingCount: 3,
+    });
+    // The four per-assessment digests are kept verbatim.
+    expect(res.body.assessments).toMatchObject({
+      compliance: "c".repeat(64), capabilities: "d".repeat(64),
+      boundary: "e".repeat(64), bom: "f".repeat(64),
+    });
+  });
+
+  it("carries a declared data boundary through the receipt policy, camelCased", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-2/assurance-receipt");
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toEqual({
+      declared: true, allowedRegions: ["eu"],
+      trainingAllowed: false, thirdPartySharingAllowed: true,
+    });
+    expect(res.body.result).toMatchObject({ decision: "ready", decisionLabel: "Ready" });
+  });
+
+  it("refuses the assurance receipt to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/assurance-receipt");
     expect(anon.status).toBe(401);
   });
 

@@ -31,6 +31,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Copy,
   Cpu,
   Download,
   FileText,
@@ -41,6 +42,7 @@ import {
   Network,
   Pencil,
   Plus,
+  ReceiptText,
   RefreshCw,
   Route,
   Scale,
@@ -366,6 +368,31 @@ interface BusinessImpact {
     worstSeverity: string | null;
     worstExposureBand: string | null;
   };
+}
+
+// The full, versioned Assurance Receipt (spine): the roadmap tuple — system,
+// receipt version, policy, evidence root, result, per-assessment digests — as one
+// deterministic, portable, signable payload. It attests INTEGRITY and PROVENANCE
+// (this is the assurance state that was recorded, unaltered), never that the
+// conclusions are true or the system is secure. An undeclared policy reads as
+// declared:false, never an invented boundary.
+interface AssuranceReceipt {
+  receiptVersion: string;
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  result: { decision: string | null; decisionLabel: string | null };
+  policy:
+    | { declared: false }
+    | {
+        declared: true;
+        allowedRegions: string[];
+        trainingAllowed: boolean;
+        thirdPartySharingAllowed: boolean;
+      };
+  evidence: { algorithm: string; root: string; findingCount: number };
+  assessments: { compliance: string; capabilities: string; boundary: string; bom: string };
+  algorithm: string;
+  digest: string;
+  computedAt: string | null;
 }
 
 type ViewMode = "graph" | "list";
@@ -2370,6 +2397,267 @@ function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// A single digest, worn honestly: the full value is the load-bearing content (it
+// is what a signature covers and what an auditor recomputes), but it is long, so
+// it is TRUNCATED for display (first 12 + last 8) while the copy button and the
+// title carry the value in FULL. A digest attests integrity — that the recorded
+// content is unaltered — never that it passes.
+function DigestValue({ value }: { value: string }) {
+  const { toast } = useToast();
+  if (!value) {
+    return <span className="text-[11px] text-muted-foreground/70">not computed</span>;
+  }
+  const shown = value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value;
+  return (
+    <span className="inline-flex items-center gap-1">
+      <code className="font-mono text-[11px] text-foreground" title={value}>
+        {shown}
+      </code>
+      <button
+        type="button"
+        aria-label="Copy the full digest"
+        className="text-muted-foreground hover:text-primary"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(value);
+            toast({ title: "Digest copied" });
+          } catch {
+            toast({ title: "Could not copy the digest", variant: "destructive" });
+          }
+        }}
+      >
+        <Copy className="h-3 w-3" />
+      </button>
+    </span>
+  );
+}
+
+/**
+ * The full, versioned Assurance Receipt (spine) for one deployment: the roadmap
+ * tuple — system, receipt version, policy, evidence root, result, per-assessment
+ * digests — as one deterministic, portable, signable payload. Self-fetching
+ * (mounted only inside an expanded deployment, like the other panels).
+ *
+ * Honest by construction: this is an INTEGRITY / PROVENANCE record. It attests
+ * that the recorded evidence and assessment state are unaltered and reproducible
+ * — NOT that the system is secure or that its conclusions are true. The result is
+ * shown faithfully at its true strength (a needs-more-evidence decision reads as
+ * exactly that), an undeclared policy reads as "no data boundary declared" rather
+ * than an invented one, and the digests are truncated for display but copied and
+ * downloaded in full.
+ */
+function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { toast } = useToast();
+  const { data, isLoading, isError, error } = useQuery<AssuranceReceipt>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-receipt`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <ReceiptText className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Assurance receipt</h3>
+      <span className="text-[11px] text-muted-foreground">integrity &amp; provenance record</span>
+      {data && (
+        <div className="ml-auto flex items-center gap-3">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+                toast({ title: "Receipt JSON copied" });
+              } catch {
+                toast({ title: "Could not copy the receipt", variant: "destructive" });
+              }
+            }}
+          >
+            <Copy className="h-3 w-3" />
+            Copy JSON
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+            onClick={() => {
+              try {
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `assurance-receipt-${data.system.name || data.system.uuid}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              } catch {
+                toast({ title: "Could not download the receipt", variant: "destructive" });
+              }
+            }}
+          >
+            <Download className="h-3 w-3" />
+            Download receipt.json
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the assurance receipt…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the assurance receipt{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      {heading}
+
+      {/* Honest framing (critical): this is an integrity / provenance record. It
+          proves the recorded evidence is unaltered and reproducible — never that
+          the system is secure or its conclusions true. */}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        This is an <span className="text-foreground">integrity &amp; provenance</span> record: it
+        attests that the recorded evidence is <span className="text-foreground">unaltered and
+        reproducible</span>, not that the system is secure or that its conclusions are true. The
+        result below is shown at its true strength — a digest proves nothing was altered between
+        record and report, never that anything passed.
+      </p>
+
+      {/* Version + result. The six-state decision reuses the page's decision
+          chip, carried faithfully (a needs-more-evidence result reads as that). */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+        <span
+          className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 font-mono text-muted-foreground"
+          title="The version of the Assurance Receipt standard this payload conforms to"
+        >
+          {data.receiptVersion}
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">result:</span>
+          <DecisionPill
+            decision={data.result.decision as never}
+            label={data.result.decisionLabel || undefined}
+          />
+        </span>
+        {data.system.environmentLabel && (
+          <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+            {data.system.environmentLabel}
+          </span>
+        )}
+      </div>
+
+      {/* Policy: the declared data boundary, honestly. When none was approved we
+          say so plainly — never an invented boundary. */}
+      <div className="mb-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Policy
+        </p>
+        {data.policy.declared ? (
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-emerald-300">
+              <ShieldCheck className="h-3.5 w-3.5" /> Data boundary declared
+            </span>
+            <span>
+              regions:{" "}
+              <span className="text-foreground">
+                {data.policy.allowedRegions.length > 0
+                  ? data.policy.allowedRegions.join(", ")
+                  : "none listed"}
+              </span>
+            </span>
+            <span>
+              training:{" "}
+              <span className="text-foreground">
+                {data.policy.trainingAllowed ? "allowed" : "not allowed"}
+              </span>
+            </span>
+            <span>
+              third-party sharing:{" "}
+              <span className="text-foreground">
+                {data.policy.thirdPartySharingAllowed ? "allowed" : "not allowed"}
+              </span>
+            </span>
+          </div>
+        ) : (
+          <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-400">
+            <ShieldQuestion className="h-3.5 w-3.5" /> No data boundary declared — an undeclared
+            boundary is a gap, never a policy this receipt invents.
+          </p>
+        )}
+      </div>
+
+      {/* Evidence root: the Merkle-style digest over the finding/evidence hashes,
+          with the finding count and hash algorithm. */}
+      <div className="mb-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Evidence root
+        </p>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center gap-1">
+            <Fingerprint className="h-3 w-3" />
+            <span className="uppercase tracking-wide">{data.evidence.algorithm}</span>
+          </span>
+          <DigestValue value={data.evidence.root} />
+          <span>
+            {data.evidence.findingCount}{" "}
+            {data.evidence.findingCount === 1 ? "finding" : "findings"}
+          </span>
+        </div>
+      </div>
+
+      {/* Per-assessment digests. Each attests its assessment was recorded
+          unaltered — never that it passes. */}
+      <div className="mb-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Assessment digests
+        </p>
+        <ul className="space-y-1.5">
+          {(
+            [
+              ["Compliance", data.assessments.compliance],
+              ["Capabilities", data.assessments.capabilities],
+              ["Boundary", data.assessments.boundary],
+              ["AI-BOM", data.assessments.bom],
+            ] as const
+          ).map(([label, value]) => (
+            <li key={label} className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="w-24 text-muted-foreground">{label}</span>
+              <DigestValue value={value} />
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* The top-level deterministic digest (the value a signature covers) and
+          the computed-at metadata that rides OUTSIDE the hash. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="inline-flex items-center gap-1">
+          <Fingerprint className="h-3 w-3" />
+          <span className="uppercase tracking-wide">{data.algorithm}</span>
+          <span className="font-semibold text-foreground">receipt digest</span>
+        </span>
+        <DigestValue value={data.digest} />
+        {data.computedAt && (
+          <span className="inline-flex items-center gap-1 text-muted-foreground/80" title="Metadata only — computed outside the hash">
+            <Clock className="h-3 w-3" />
+            {data.computedAt}
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -2882,6 +3170,12 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             potential exposure, never a realized loss. Self-fetches,
                             so it loads only for an expanded deployment. */}
                         <BusinessImpactPanel deploymentUuid={d.uuid} />
+
+                        {/* Assurance receipt (spine): the full, versioned, signable
+                            integrity/provenance record — system, policy, evidence
+                            root, result, per-assessment digests. Self-fetches, so
+                            it loads only for an expanded deployment. */}
+                        <AssuranceReceiptPanel deploymentUuid={d.uuid} />
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>
