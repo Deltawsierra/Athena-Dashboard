@@ -32,6 +32,12 @@ describe("assurance BFF", () => {
   // When set, the next provider-assertion create is refused with the backend's
   // one-per-field 400, so the BFF's passthrough of that reason can be exercised.
   let refuseAssertionCreate = false;
+  // When set, the next remediation transition is refused with the backend's
+  // illegal-transition 400, so the BFF's passthrough of that reason is exercised.
+  let refuseTransition = false;
+  // When set, the next remediation assign is refused with the backend's
+  // unknown-user 400.
+  let refuseAssign = false;
   const unknowns = new Map<string, Record<string, unknown>>();
 
   beforeAll(async () => {
@@ -341,8 +347,68 @@ describe("assurance BFF", () => {
               change_status: "recurring", change_label: "Recurring", age_days: 3, stale: false,
               receipt: { algorithm: "sha256", digest: "d".repeat(64), evidence_count: 1, computed_at: "2026-09-17T00:00:00Z" },
               first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T01:00:00Z",
+              // Remediation workflow (Phase 2.3): read-only on the finding.
+              assignee: "alice", remediation_state: "triaged",
             },
           ]);
+        }
+
+        const remediationMatch = path.match(/^\/api\/assurance\/findings\/([^/]+)\/remediation\/$/);
+        if (remediationMatch && method === "GET") {
+          return json(200, {
+            state: "triaged", state_label: "Triaged", assignee: "alice",
+            events: [
+              {
+                from_state: null, to_state: "new", actor: null,
+                note: "", created_at: "2026-09-16T00:00:00Z",
+              },
+              {
+                from_state: "new", to_state: "triaged", actor: "admin",
+                note: "looks real", created_at: "2026-09-16T02:00:00Z",
+              },
+            ],
+          });
+        }
+
+        const transitionMatch = path.match(
+          /^\/api\/assurance\/findings\/([^/]+)\/remediation\/transition\/$/,
+        );
+        if (transitionMatch && method === "POST") {
+          if (refuseTransition) {
+            // The backend's illegal-transition refusal, verbatim.
+            return json(400, { detail: "cannot move from 'triaged' to 'resolved'" });
+          }
+          const b = raw ? JSON.parse(raw) : {};
+          return json(200, {
+            state: b.to_state, state_label: String(b.to_state), assignee: "alice",
+            events: [
+              {
+                from_state: "triaged", to_state: b.to_state, actor: "admin",
+                note: b.note ?? "", created_at: "2026-09-17T03:00:00Z",
+              },
+            ],
+          });
+        }
+
+        const assignMatch = path.match(
+          /^\/api\/assurance\/findings\/([^/]+)\/remediation\/assign\/$/,
+        );
+        if (assignMatch && method === "POST") {
+          if (refuseAssign) {
+            // The backend's unknown-user refusal, verbatim.
+            return json(400, { detail: "no user named 'ghost'" });
+          }
+          const b = raw ? JSON.parse(raw) : {};
+          return json(200, {
+            state: "triaged", state_label: "Triaged",
+            assignee: b.assignee ?? null,
+            events: [
+              {
+                from_state: "triaged", to_state: "triaged", actor: "admin",
+                note: b.note ?? "", created_at: "2026-09-17T04:00:00Z",
+              },
+            ],
+          });
         }
 
         if (path === "/api/assurance/assets/" && method === "GET") {
@@ -508,8 +574,96 @@ describe("assurance BFF", () => {
       changeStatus: "recurring", changeLabel: "Recurring", ageDays: 3, stale: false,
       // Assurance receipt surfaced (spine).
       receipt: { algorithm: "sha256", digest: "d".repeat(64), evidenceCount: 1 },
+      // Remediation workflow surfaced, read-only on the finding (Phase 2.3).
+      assignee: "alice", remediationState: "triaged",
     });
     expect(res.body[0].evidence[0]).toMatchObject({ classificationLabel: "Partially verified" });
+  });
+
+  it("returns a finding's remediation workflow, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/findings/f-1/remediation");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ state: "triaged", stateLabel: "Triaged", assignee: "alice" });
+    // The audit trail of moves is surfaced, camelCased.
+    expect(res.body.events).toHaveLength(2);
+    expect(res.body.events[1]).toMatchObject({
+      fromState: "new", toState: "triaged", actor: "admin", note: "looks real",
+      createdAt: "2026-09-16T02:00:00Z",
+    });
+  });
+
+  it("refuses the remediation read to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/findings/f-1/remediation");
+    expect(anon.status).toBe(401);
+  });
+
+  it("an admin moves a finding's remediation state (a legal transition)", async () => {
+    const res = await user
+      .post("/api/assurance/findings/f-1/remediation/transition")
+      .send({ toState: "in_progress" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ state: "in_progress", assignee: "alice" });
+  });
+
+  it("rejects a remediation state the schema will not accept", async () => {
+    const bad = await user
+      .post("/api/assurance/findings/f-1/remediation/transition")
+      .send({ toState: "bogus" });
+    expect(bad.status).toBe(400);
+  });
+
+  it("passes the backend's illegal-transition 400 through with its reason", async () => {
+    refuseTransition = true;
+    const denied = await user
+      .post("/api/assurance/findings/f-1/remediation/transition")
+      .send({ toState: "resolved" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("cannot move from");
+    refuseTransition = false;
+  });
+
+  it("an admin assigns a finding's remediation, and can clear it with null", async () => {
+    const assigned = await user
+      .post("/api/assurance/findings/f-1/remediation/assign")
+      .send({ assignee: "bob" });
+    expect(assigned.status).toBe(200);
+    expect(assigned.body).toMatchObject({ assignee: "bob" });
+
+    const cleared = await user
+      .post("/api/assurance/findings/f-1/remediation/assign")
+      .send({ assignee: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.assignee).toBeNull();
+  });
+
+  it("passes the backend's unknown-user 400 through with its reason", async () => {
+    refuseAssign = true;
+    const denied = await user
+      .post("/api/assurance/findings/f-1/remediation/assign")
+      .send({ assignee: "ghost" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("no user named");
+    refuseAssign = false;
+  });
+
+  it("gates the remediation writes to admins: a non-admin gets 403, the read stays open", async () => {
+    await user.post("/api/users").send({
+      username: "remediation-analyst", password: "analyst-pass", role: "user", isActive: true,
+    });
+    const analyst = await signIn(app, "remediation-analyst", "analyst-pass");
+
+    // The read stays open to any signed-in operator.
+    expect((await analyst.get("/api/assurance/findings/f-1/remediation")).status).toBe(200);
+
+    // Both writes are admin-only, refused at the front door.
+    const deniedTransition = await analyst
+      .post("/api/assurance/findings/f-1/remediation/transition")
+      .send({ toState: "in_progress" });
+    expect(deniedTransition.status).toBe(403);
+    const deniedAssign = await analyst
+      .post("/api/assurance/findings/f-1/remediation/assign")
+      .send({ assignee: "bob" });
+    expect(deniedAssign.status).toBe(403);
   });
 
   it("returns a deployment's assurance receipt, mapped to camelCase", async () => {

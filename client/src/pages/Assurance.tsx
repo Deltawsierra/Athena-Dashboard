@@ -48,7 +48,9 @@ import {
   ShieldCheck,
   ShieldQuestion,
   Trash2,
+  User,
   Waypoints,
+  Wrench,
   Zap,
 } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
@@ -98,6 +100,12 @@ interface Finding {
   stale: boolean;
   // Assurance receipt (spine): a recomputable digest over the finding's evidence.
   receipt: { algorithm: string; digest: string; evidenceCount?: number };
+  // Remediation workflow (Phase 2.3): the human process of getting the finding
+  // fixed — who owns it and where it is in the six-state pipeline. Read-only on
+  // the finding; changed via the dedicated remediation endpoints. NOT the
+  // security disposition (see `status`).
+  assignee: string | null;
+  remediationState: string;
 }
 interface Asset {
   uuid: string;
@@ -870,7 +878,86 @@ function ChangeBadge({ status, label }: { status: string; label: string }) {
   );
 }
 
-function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }) {
+// The remediation workflow vocabulary (Phase 2.3), kept in lockstep with
+// assurance/models.py and the BFF's transition schema. This is the *human
+// process* of getting a finding fixed, distinct from the security disposition:
+// `resolved` here means the workflow ticket was closed, never that the finding
+// is fixed in the security sense — so it takes a calm tone, not the emerald a
+// verified-clean security state would. An unrecognised state degrades to muted.
+const REMEDIATION_LABEL: Record<string, string> = {
+  new: "New",
+  triaged: "Triaged",
+  in_progress: "In progress",
+  in_review: "In review",
+  resolved: "Resolved",
+  wont_fix: "Won't fix",
+};
+const REMEDIATION_TONE: Record<string, string> = {
+  new: "text-sky-400 border-sky-500/30 bg-sky-500/10",
+  triaged: "text-sky-300/90 border-sky-500/25 bg-sky-500/[0.08]",
+  in_progress: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  in_review: "text-amber-300/90 border-amber-500/25 bg-amber-500/[0.08]",
+  resolved: "text-teal-300 border-teal-500/30 bg-teal-500/10",
+  wont_fix: "text-muted-foreground border-dashed border-border/70 bg-surface-1/40",
+};
+// The legal next states from each state (the backend's state machine). Offering
+// only these keeps the console from showing a move the backend would 400.
+const REMEDIATION_TRANSITIONS: Record<string, string[]> = {
+  new: ["triaged", "wont_fix"],
+  triaged: ["in_progress", "wont_fix"],
+  in_progress: ["in_review", "wont_fix"],
+  in_review: ["resolved", "in_progress", "wont_fix"],
+  resolved: ["in_progress"],
+  wont_fix: ["triaged"],
+};
+
+/** The finding's remediation workflow state — a workflow chip, never a security
+ *  clearance. The title spells that out so "Resolved" is not misread as fixed. */
+function RemediationStateChip({ state }: { state: string }) {
+  if (!state) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        REMEDIATION_TONE[state] ?? "text-muted-foreground border-border/60 bg-surface-1/50",
+      )}
+      title="Remediation workflow status — the human process of fixing this, not the finding's security status"
+    >
+      <Wrench className="h-3 w-3" />
+      {REMEDIATION_LABEL[state] || state}
+    </span>
+  );
+}
+
+/**
+ * The remediation controls threaded down to a finding row. Reads (the state
+ * chip, the assignee) render for everyone; the state <select> and assignee
+ * picker render only for an admin, and even then the control plane is the real
+ * gate. A move offers only the LEGAL next states, and a 400 from the backend
+ * (illegal transition, unknown user) surfaces as a toast, never a crash.
+ */
+interface RemediationControls {
+  admin: boolean;
+  assignableUsers: { id: string; username: string }[];
+  onTransition: (uuid: string, toState: string) => void;
+  onAssign: (uuid: string, assignee: string | null) => void;
+  transitionPending: (uuid: string) => boolean;
+  assignPending: (uuid: string) => boolean;
+}
+
+const remedInput =
+  "rounded-md border border-border/60 bg-surface-1/60 px-2 py-1 text-[12px] text-foreground disabled:opacity-50";
+
+function FindingRow({
+  f,
+  showAsset = true,
+  remediation,
+}: {
+  f: Finding;
+  showAsset?: boolean;
+  remediation?: RemediationControls;
+}) {
+  const nextStates = REMEDIATION_TRANSITIONS[f.remediationState] ?? [];
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
       <div className="flex items-start justify-between gap-3">
@@ -889,6 +976,8 @@ function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }
             stale{typeof f.ageDays === "number" ? ` · ${f.ageDays}d` : ""}
           </span>
         )}
+        {/* The security status of the finding (open/closed/...). Distinct from
+            the remediation workflow chip that follows it. */}
         <span className="text-[11px] text-muted-foreground">{f.status}</span>
         {showAsset && f.assetName && (
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
@@ -902,6 +991,60 @@ function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }
             <Fingerprint className="h-3 w-3" />
             {f.receipt.digest.slice(0, 12)}
           </span>
+        )}
+      </div>
+      {/* Remediation workflow (Phase 2.3): the state chip and assignee for
+          everyone; the move/assign controls for an admin. Kept on its own row,
+          and labelled as workflow, so it never reads as the security verdict. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/30 pt-2">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground/80">Remediation</span>
+        <RemediationStateChip state={f.remediationState} />
+        <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+          <User className="h-3 w-3" />
+          {f.assignee ? f.assignee : "unassigned"}
+        </span>
+        {remediation?.admin && (
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {nextStates.length > 0 && (
+              <select
+                className={remedInput}
+                value=""
+                disabled={remediation.transitionPending(f.uuid)}
+                aria-label="Move remediation to"
+                onChange={(e) => {
+                  if (e.target.value) remediation.onTransition(f.uuid, e.target.value);
+                }}
+              >
+                <option value="" disabled>
+                  Move to…
+                </option>
+                {nextStates.map((s) => (
+                  <option key={s} value={s}>
+                    {REMEDIATION_LABEL[s] || s}
+                  </option>
+                ))}
+              </select>
+            )}
+            <select
+              className={remedInput}
+              value={f.assignee ?? ""}
+              disabled={remediation.assignPending(f.uuid)}
+              aria-label="Assign remediation to"
+              onChange={(e) => remediation.onAssign(f.uuid, e.target.value || null)}
+            >
+              <option value="">Unassigned</option>
+              {remediation.assignableUsers.map((u) => (
+                <option key={u.id} value={u.username}>
+                  {u.username}
+                </option>
+              ))}
+              {/* A current assignee no longer in the assignable list still shows,
+                  so the picker never silently misrepresents who owns it. */}
+              {f.assignee && !remediation.assignableUsers.some((u) => u.username === f.assignee) && (
+                <option value={f.assignee}>{f.assignee}</option>
+              )}
+            </select>
+          </div>
         )}
       </div>
     </li>
@@ -981,7 +1124,15 @@ function ProviderRef({ name, provider }: { name: string; provider?: Provider }) 
   );
 }
 
-function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
+function AssetNode({
+  asset,
+  findings,
+  remediation,
+}: {
+  asset: Asset;
+  findings: Finding[];
+  remediation?: RemediationControls;
+}) {
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -998,7 +1149,7 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
       {findings.length > 0 && (
         <ul className="mt-2 space-y-2 border-l border-border/40 pl-3">
           {findings.map((f) => (
-            <FindingRow key={f.uuid} f={f} showAsset={false} />
+            <FindingRow key={f.uuid} f={f} showAsset={false} remediation={remediation} />
           ))}
         </ul>
       )}
@@ -2268,6 +2419,13 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
     queryKey: ["/api/assurance/providers"],
     enabled: reachable,
   });
+  // Who a finding's remediation may be assigned to. Only an admin sees the
+  // picker, so this is fetched only for an admin; the endpoint returns just an
+  // id and username, and the assign write sends the username the backend knows.
+  const { data: assignableUsers = [] } = useQuery<{ id: string; username: string }[]>({
+    queryKey: ["/api/users/assignable"],
+    enabled: reachable && admin,
+  });
 
   const recompute = useMutation({
     mutationFn: async (uuid: string) =>
@@ -2294,6 +2452,59 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const onDisposition = (uuid: string, next: string) => setDisposition.mutate({ uuid, status: next });
   const dispositionPending = (uuid: string) =>
     setDisposition.isPending && setDisposition.variables?.uuid === uuid;
+
+  // ---- Remediation workflow (Phase 2.3; admin-only; the control plane is the
+  // gate). A workflow move never changes the finding's security status or the
+  // deployment's decision, but it does change the finding record, so on success
+  // we refresh the findings query and the per-deployment computed panels
+  // (compliance, business-impact) to keep the whole card fresh. A backend 400
+  // (illegal transition, unknown user) reaches the operator as a toast.
+  const REMEDIATION_PANEL_SUFFIXES = ["/compliance", "/business-impact"];
+  const invalidateRemediation = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/assurance/findings"] });
+    queryClient.invalidateQueries({
+      predicate: (query) => {
+        const key = query.queryKey[0];
+        return typeof key === "string" && REMEDIATION_PANEL_SUFFIXES.some((s) => key.endsWith(s));
+      },
+    });
+  };
+
+  const transitionRemediation = useMutation({
+    mutationFn: async ({ uuid, toState }: { uuid: string; toState: string }) =>
+      (
+        await apiRequest("POST", `/api/assurance/findings/${uuid}/remediation/transition`, { toState })
+      ).json(),
+    onSuccess: () => {
+      invalidateRemediation();
+      toast({ title: "Remediation updated" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not move remediation", description: error.message, variant: "destructive" }),
+  });
+
+  const assignRemediation = useMutation({
+    mutationFn: async ({ uuid, assignee }: { uuid: string; assignee: string | null }) =>
+      (
+        await apiRequest("POST", `/api/assurance/findings/${uuid}/remediation/assign`, { assignee })
+      ).json(),
+    onSuccess: () => {
+      invalidateRemediation();
+      toast({ title: "Assignee updated" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not assign", description: error.message, variant: "destructive" }),
+  });
+
+  const remediationControls: RemediationControls = {
+    admin,
+    assignableUsers,
+    onTransition: (uuid, toState) => transitionRemediation.mutate({ uuid, toState }),
+    onAssign: (uuid, assignee) => assignRemediation.mutate({ uuid, assignee }),
+    transitionPending: (uuid) =>
+      transitionRemediation.isPending && transitionRemediation.variables?.uuid === uuid,
+    assignPending: (uuid) => assignRemediation.isPending && assignRemediation.variables?.uuid === uuid,
+  };
 
   // ---- Provider profile editing (admin-only; the control plane is the gate) ----
 
@@ -2685,7 +2896,12 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                           ) : (
                             <ul className="space-y-2.5">
                               {depAssets.map((a) => (
-                                <AssetNode key={a.uuid} asset={a} findings={findingsForAsset(a.uuid)} />
+                                <AssetNode
+                                  key={a.uuid}
+                                  asset={a}
+                                  findings={findingsForAsset(a.uuid)}
+                                  remediation={remediationControls}
+                                />
                               ))}
                             </ul>
                           )}
@@ -2699,7 +2915,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             </h3>
                             <ul className="space-y-2.5">
                               {unattributed.map((f) => (
-                                <FindingRow key={f.uuid} f={f} />
+                                <FindingRow key={f.uuid} f={f} remediation={remediationControls} />
                               ))}
                             </ul>
                           </section>
@@ -2865,7 +3081,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                   ) : (
                     <ul className="space-y-3">
                       {listFindings.map((f) => (
-                        <FindingRow key={f.uuid} f={f} />
+                        <FindingRow key={f.uuid} f={f} remediation={remediationControls} />
                       ))}
                     </ul>
                   )}

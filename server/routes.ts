@@ -1605,6 +1605,19 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // A finding's remediation workflow (Phase 2.3): its current workflow state,
+  // assignee, and the audit trail of moves. This is the human process of getting
+  // a finding fixed, tracked separately from the security disposition — a read,
+  // behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/findings/:uuid/remediation", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.remediation(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
     try {
       res.json(
@@ -1752,6 +1765,94 @@ export function registerRoutes(app: Express): void {
     });
     res.json(result.unknown);
   }));
+
+  // ==== REMEDIATION WORKFLOW (Phase 2.3; admin-only writes) ====
+  //
+  // A finding's remediation workflow is the human process of getting it fixed:
+  // who owns it and where it is in the six-state pipeline. Moving the state and
+  // (re)assigning it mutate the record, so both are admin-only here and on the
+  // control plane; a non-admin gets a clean 403 at the front door. A workflow
+  // move never touches the finding's security status or the deployment's
+  // decision. The backend refuses an illegal transition or an unknown user with
+  // a 400, returned verbatim so the operator sees why rather than a bare 503.
+
+  // Mirrors assurance/models.py; kept in lockstep so the console never offers a
+  // state the backend will reject.
+  const REMEDIATION_STATES = [
+    "new",
+    "triaged",
+    "in_progress",
+    "in_review",
+    "resolved",
+    "wont_fix",
+  ] as const;
+
+  const remediationTransitionSchema = z.object({
+    toState: z.enum(REMEDIATION_STATES),
+    note: z.string().max(2000).optional(),
+  });
+
+  app.post(
+    "/api/assurance/findings/:uuid/remediation/transition",
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const data = remediationTransitionSchema.parse(req.body ?? {});
+      let result;
+      try {
+        result = await assurance.remediationTransition(req.params.uuid, data.toState, data.note);
+      } catch (cause) {
+        if (assuranceUnavailable(res, cause)) return;
+        throw cause;
+      }
+      if (!result.ok) {
+        // The backend's own refusal (an illegal transition is a 400), verbatim,
+        // so the operator sees why the move did not take.
+        return void res.status(result.status).json({ error: result.detail });
+      }
+      await storage.createActivityLog({
+        action: "remediation_transitioned",
+        entityType: "assurance_finding",
+        entityId: req.params.uuid,
+        details: { toState: result.value.state },
+        ...actor(req),
+      });
+      res.json(result.value);
+    }),
+  );
+
+  const remediationAssignSchema = z.object({
+    // null clears the assignee; a non-empty username assigns it. The backend
+    // refuses an unknown user with a 400.
+    assignee: z.string().trim().min(1).max(150).nullable(),
+    note: z.string().max(2000).optional(),
+  });
+
+  app.post(
+    "/api/assurance/findings/:uuid/remediation/assign",
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const data = remediationAssignSchema.parse(req.body ?? {});
+      let result;
+      try {
+        result = await assurance.remediationAssign(req.params.uuid, data.assignee, data.note);
+      } catch (cause) {
+        if (assuranceUnavailable(res, cause)) return;
+        throw cause;
+      }
+      if (!result.ok) {
+        // The backend's own refusal (an unknown user is a 400), verbatim.
+        return void res.status(result.status).json({ error: result.detail });
+      }
+      await storage.createActivityLog({
+        action: "remediation_assigned",
+        entityType: "assurance_finding",
+        entityId: req.params.uuid,
+        details: { assignee: result.value.assignee },
+        ...actor(req),
+      });
+      res.json(result.value);
+    }),
+  );
 
   // ==== PROVIDER ASSURANCE PROFILE (admin-only writes) ====
   //
