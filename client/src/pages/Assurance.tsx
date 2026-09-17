@@ -38,6 +38,9 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Route,
+  ShieldAlert,
+  ShieldCheck,
   ShieldQuestion,
   Trash2,
 } from "lucide-react";
@@ -132,6 +135,41 @@ interface Unknown {
   statusLabel: string;
   source: string;
   reviewBy: string | null;
+}
+interface BoundaryPosture {
+  value: string;
+  evidenceClass: string;
+}
+interface BoundaryFlow {
+  providerUuid: string;
+  providerName: string;
+  kind: string;
+  kindLabel: string;
+  assets: string[];
+  region: BoundaryPosture | null;
+  training: BoundaryPosture | null;
+  status: string;
+  violations: string[];
+  unknowns: string[];
+}
+interface BoundaryShadow {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  identifier: string;
+}
+interface DataBoundary {
+  declared: boolean;
+  policy: {
+    allowedRegions: string[];
+    trainingAllowed: boolean;
+    thirdPartySharingAllowed: boolean;
+    notes: string;
+    updatedAt: string | null;
+  } | null;
+  flows: BoundaryFlow[];
+  shadowDestinations: BoundaryShadow[];
+  summary: { approved: number; violations: number; unknowns: number; shadowDestinations: number };
 }
 
 type ViewMode = "graph" | "list";
@@ -770,6 +808,347 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
   );
 }
 
+// A flow's reconciliation verdict, worn honestly: a violation (a declared fact
+// breaks a declared rule) leads in red, an unknown (a posture nobody declared —
+// a gap, never a pass) in amber, and only a genuinely within-boundary flow in
+// green. Anything unrecognised falls back to the neutral unknown look.
+function BoundaryStatusChip({ status }: { status: string }) {
+  const look =
+    status === "violation"
+      ? { Icon: ShieldAlert, cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Violation" }
+      : status === "approved"
+        ? { Icon: ShieldCheck, cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", label: "Within boundary" }
+        : { Icon: ShieldQuestion, cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Unknown" };
+  const { Icon, cls, label } = look;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        cls,
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {label}
+    </span>
+  );
+}
+
+/** The approved boundary an admin declares (the PUT body, camelCase). */
+interface BoundaryFormValue {
+  allowedRegions: string;
+  trainingAllowed: boolean;
+  thirdPartySharingAllowed: boolean;
+  notes: string;
+}
+
+/**
+ * The admin form for declaring (or replacing) a deployment's approved data
+ * boundary. Regions are entered as a comma-separated list — an empty list means
+ * "no region restriction declared", which the backend is careful never to read
+ * as "all regions approved". Training / third-party sharing default to forbidden,
+ * the conservative posture the assessment reconciles against.
+ */
+function BoundaryForm({
+  initial,
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  initial: BoundaryFormValue;
+  pending: boolean;
+  onSubmit: (v: BoundaryFormValue) => void;
+  onCancel: () => void;
+}) {
+  const [allowedRegions, setAllowedRegions] = useState(initial.allowedRegions);
+  const [trainingAllowed, setTrainingAllowed] = useState(initial.trainingAllowed);
+  const [thirdPartySharingAllowed, setThirdPartySharingAllowed] = useState(
+    initial.thirdPartySharingAllowed,
+  );
+  const [notes, setNotes] = useState(initial.notes);
+
+  return (
+    <div className="mt-3 space-y-2.5 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
+      <label className="block text-[11px] text-muted-foreground">
+        Approved data regions{" "}
+        <span className="text-muted-foreground/70">(comma-separated, e.g. eu, eu-west-1)</span>
+        <input
+          className={cn(fieldInput, "mt-1 block w-full")}
+          value={allowedRegions}
+          placeholder="Leave blank for no region restriction"
+          onChange={(e) => setAllowedRegions(e.target.value)}
+        />
+      </label>
+      <label className="flex items-center gap-2 text-[12px] text-foreground">
+        <input
+          type="checkbox"
+          checked={trainingAllowed}
+          onChange={(e) => setTrainingAllowed(e.target.checked)}
+        />
+        Training on customer data is permitted
+      </label>
+      <label className="flex items-center gap-2 text-[12px] text-foreground">
+        <input
+          type="checkbox"
+          checked={thirdPartySharingAllowed}
+          onChange={(e) => setThirdPartySharingAllowed(e.target.checked)}
+        />
+        Third-party data sharing is permitted
+      </label>
+      <label className="block text-[11px] text-muted-foreground">
+        Notes
+        <textarea
+          className={cn(fieldInput, "mt-1 block w-full")}
+          rows={2}
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+        />
+      </label>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded-md bg-primary/20 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/30 disabled:opacity-50"
+          disabled={pending}
+          onClick={() =>
+            onSubmit({ allowedRegions, trainingAllowed, thirdPartySharingAllowed, notes })
+          }
+        >
+          {pending ? "Saving…" : "Save boundary"}
+        </button>
+        <button
+          className="text-[12px] text-muted-foreground hover:text-foreground"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The AI Data Boundary Assessment (Phase 1.4) for one deployment: the flagship
+ * reconciliation of the *approved* boundary a human declared against the
+ * deployment's *actual* data destinations. Self-fetching (mounted only inside an
+ * expanded deployment), so the assessment loads on demand. It is scrupulous
+ * about the difference between a violation (a declared fact breaks a declared
+ * rule) and an unknown (a posture nobody declared — a gap, never a pass), and it
+ * never lets an undeclared boundary read as permission.
+ */
+function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+
+  const { data, isLoading, isError, error } = useQuery<DataBoundary>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/data-boundary`],
+  });
+
+  const declare = useMutation({
+    mutationFn: async (v: BoundaryFormValue) =>
+      (
+        await apiRequest("PUT", `/api/assurance/deployments/${deploymentUuid}/data-boundary`, {
+          allowedRegions: v.allowedRegions
+            .split(",")
+            .map((r) => r.trim())
+            .filter(Boolean),
+          trainingAllowed: v.trainingAllowed,
+          thirdPartySharingAllowed: v.thirdPartySharingAllowed,
+          notes: v.notes,
+        })
+      ).json(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: [`/api/assurance/deployments/${deploymentUuid}/data-boundary`],
+      });
+      setEditing(false);
+      toast({ title: "Data boundary saved" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not save boundary", description: e.message, variant: "destructive" }),
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Route className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Data boundary</h3>
+      {admin && !editing && (
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={() => setEditing(true)}
+        >
+          <Pencil className="h-3 w-3" />
+          {data?.declared ? "Edit boundary" : "Declare boundary"}
+        </button>
+      )}
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the data-boundary assessment…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the data-boundary assessment
+          {error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const formInitial: BoundaryFormValue = {
+    allowedRegions: (data.policy?.allowedRegions ?? []).join(", "),
+    trainingAllowed: data.policy?.trainingAllowed ?? false,
+    thirdPartySharingAllowed: data.policy?.thirdPartySharingAllowed ?? false,
+    notes: data.policy?.notes ?? "",
+  };
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {!data.declared && (
+        <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+          No approved data boundary has been declared for this deployment. Until one is, every data
+          flow below reads as an <span className="text-amber-400">unknown</span> — a gap to close,
+          never a pass.
+        </p>
+      )}
+
+      {/* The honest scoreboard: what breaks a rule, what nobody has declared, and
+          the unmanaged sinks that escape the boundary entirely. */}
+      <div className="mb-3 flex flex-wrap gap-2">
+        <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-[11px] text-sev-high">
+          <ShieldAlert className="h-3.5 w-3.5" /> {summary.violations} violation
+          {summary.violations === 1 ? "" : "s"}
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] text-amber-400">
+          <ShieldQuestion className="h-3.5 w-3.5" /> {summary.unknowns} unknown
+          {summary.unknowns === 1 ? "" : "s"}
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-[11px] text-emerald-400">
+          <ShieldCheck className="h-3.5 w-3.5" /> {summary.approved} within boundary
+        </span>
+        {summary.shadowDestinations > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-[11px] text-sev-high">
+            <Network className="h-3.5 w-3.5" /> {summary.shadowDestinations} shadow destination
+            {summary.shadowDestinations === 1 ? "" : "s"}
+          </span>
+        )}
+      </div>
+
+      {/* The declared boundary itself, once a human has set one. */}
+      {data.declared && data.policy && (
+        <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+          <span>
+            Approved regions:{" "}
+            <span className="text-foreground">
+              {data.policy.allowedRegions.length > 0
+                ? data.policy.allowedRegions.join(", ")
+                : "none declared"}
+            </span>
+          </span>
+          <span>
+            Training:{" "}
+            <span className={data.policy.trainingAllowed ? "text-foreground" : "text-emerald-400"}>
+              {data.policy.trainingAllowed ? "permitted" : "forbidden"}
+            </span>
+          </span>
+          <span>
+            Third-party sharing:{" "}
+            <span
+              className={data.policy.thirdPartySharingAllowed ? "text-foreground" : "text-emerald-400"}
+            >
+              {data.policy.thirdPartySharingAllowed ? "permitted" : "forbidden"}
+            </span>
+          </span>
+        </div>
+      )}
+
+      {admin && editing && (
+        <BoundaryForm
+          initial={formInitial}
+          pending={declare.isPending}
+          onSubmit={(v) => declare.mutate(v)}
+          onCancel={() => setEditing(false)}
+        />
+      )}
+
+      {/* Each actual data flow, reconciled against the boundary. */}
+      {data.flows.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No third-party data destinations resolved for this deployment yet.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {data.flows.map((f) => (
+            <li
+              key={f.providerUuid}
+              className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5"
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-[12px] font-semibold text-foreground">{f.providerName}</span>
+                <span className="text-[11px] text-muted-foreground">{f.kindLabel}</span>
+                <BoundaryStatusChip status={f.status} />
+                {f.assets.length > 0 && (
+                  <span className="text-[10px] text-muted-foreground">
+                    via {f.assets.join(", ")}
+                  </span>
+                )}
+              </div>
+              {(f.violations.length > 0 || f.unknowns.length > 0) && (
+                <ul className="mt-1.5 space-y-1 border-l border-border/40 pl-2.5">
+                  {f.violations.map((v, i) => (
+                    <li key={`v${i}`} className="text-[11px] text-sev-high">
+                      {v}
+                    </li>
+                  ))}
+                  {f.unknowns.map((u, i) => (
+                    <li key={`u${i}`} className="text-[11px] text-amber-400/90">
+                      {u}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* Shadow destinations: unmanaged sinks nobody approved — outside the
+          boundary by definition. */}
+      {data.shadowDestinations.length > 0 && (
+        <div className="mt-3">
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sev-high">
+            Shadow destinations
+          </p>
+          <ul className="space-y-1.5">
+            {data.shadowDestinations.map((s) => (
+              <li
+                key={s.identifier || s.assetName}
+                className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-sev-high/30 bg-sev-high/5 p-2 text-[11px]"
+              >
+                <span className="font-semibold text-foreground">{s.assetName}</span>
+                <span className="text-muted-foreground">{s.kindLabel}</span>
+                {s.identifier && (
+                  <span className="text-muted-foreground/80">{s.identifier}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -1148,6 +1527,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             ))}
                           </div>
                         )}
+
+                        {/* AI data boundary (Phase 1.4): approved data flows vs.
+                            actual ones. Self-fetches, so it loads only for an
+                            expanded deployment. */}
+                        <DataBoundaryPanel deploymentUuid={d.uuid} admin={admin} />
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>

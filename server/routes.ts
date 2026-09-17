@@ -1534,6 +1534,18 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's AI data-boundary assessment (Phase 1.4): the approved
+  // boundary a human declared reconciled against the deployment's actual data
+  // destinations. A read, behind requireAuth like the rest of the reads.
+  app.get("/api/assurance/deployments/:uuid/data-boundary", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.dataBoundary(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/findings", asyncHandler(async (req, res) => {
     try {
       res.json(
@@ -1612,6 +1624,42 @@ export function registerRoutes(app: Express): void {
       ...actor(req),
     });
     res.json({ decision: result.decision, decisionLabel: result.decisionLabel });
+  }));
+
+  const dataBoundarySchema = z.object({
+    allowedRegions: z.array(z.string().max(64)).max(64).optional().default([]),
+    trainingAllowed: z.boolean().optional().default(false),
+    thirdPartySharingAllowed: z.boolean().optional().default(false),
+    notes: z.string().max(2000).optional(),
+  });
+
+  // Declare (or replace) a deployment's approved data boundary (Phase 1.4).
+  // Admin-only: this is the human ruling the assessment reconciles against.
+  app.put("/api/assurance/deployments/:uuid/data-boundary", requireAdmin, asyncHandler(async (req, res) => {
+    const data = dataBoundarySchema.parse(req.body ?? {});
+    let result;
+    try {
+      result = await assurance.setDataBoundary(req.params.uuid, data);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) {
+      // The backend's own refusal, verbatim, so the operator sees why.
+      return void res.status(result.status).json({ error: result.detail });
+    }
+    await storage.createActivityLog({
+      action: "declared",
+      entityType: "assurance_data_boundary",
+      entityId: req.params.uuid,
+      details: {
+        allowedRegions: result.value.policy?.allowedRegions ?? [],
+        trainingAllowed: result.value.policy?.trainingAllowed ?? false,
+        violations: result.value.summary.violations,
+      },
+      ...actor(req),
+    });
+    res.json(result.value);
   }));
 
   const unknownPatchSchema = z
