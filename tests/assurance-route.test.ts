@@ -482,6 +482,39 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/operational-assurance/" && method === "GET") {
+          // A null-ratio case: nothing has been assessed, so every ratio is null
+          // (never a fake 0%), the decision is null (unassessed, never read as
+          // ready), and the readiness band lands honestly in its weakest state —
+          // `stale`, never a clean pass. ttl_days is a real number and carries
+          // through.
+          return json(200, {
+            system: {
+              name: "acme-chatbot", uuid: "dep-1",
+              environment: "production", environment_label: "Production",
+            },
+            decision: { decision: null, decision_label: null },
+            evidence_freshness: {
+              total: 0, current: 0, stale: 0, ttl_days: 30, freshness_ratio: null,
+            },
+            change_backlog: {
+              total: 0, new: 0, recurring: 0, cleared: 0,
+              by_status: { new: 0, recurring: 0, cleared: 0 },
+              needs_reassessment: 0, needs_reassessment_ratio: null,
+            },
+            remediation: {
+              open: 0, resolved: 0, wont_fix: 0, by_state: {}, states_reached: [],
+              event_count: 0, resolution_ratio: null,
+            },
+            readiness: "stale",
+            summary: {
+              total_findings: 0, current_evidence: 0, stale_evidence: 0, freshness_ratio: null,
+              needs_reassessment: 0, needs_reassessment_ratio: null,
+              open_remediation: 0, resolved_remediation: 0, decision: null, readiness: "stale",
+            },
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/assurance-packs/" && method === "GET") {
           // The static catalog: two of the four packs is enough to exercise the
           // mapper (frameworks kept verbatim, framework names, regimes as context).
@@ -1509,6 +1542,36 @@ describe("assurance BFF", () => {
 
   it("refuses the executive summary to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/executive-summary");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's operational roll-up, mapped to camelCase, carrying null ratios and a null decision honestly", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/operational-assurance");
+    expect(res.status).toBe(200);
+    // The ordinal readiness band is weakest-wins: an unassessed/empty deployment
+    // reads `stale`, never a clean pass.
+    expect(res.body.readiness).toBe("stale");
+    // The six-state decision is None-safe: an unassessed deployment carries null,
+    // never read as ready.
+    expect(res.body.decision).toMatchObject({ decision: null, decisionLabel: null });
+    // Every ratio the backend could not compute is carried as null — NEVER a fake 0.
+    expect(res.body.evidenceFreshness.freshnessRatio).toBeNull();
+    expect(res.body.changeBacklog.needsReassessmentRatio).toBeNull();
+    expect(res.body.remediation.resolutionRatio).toBeNull();
+    // A real non-ratio number (the evidence TTL) maps through, camelCased.
+    expect(res.body.evidenceFreshness.ttlDays).toBe(30);
+    // The nested count record maps, camelCased.
+    expect(res.body.changeBacklog.byStatus).toMatchObject({ new: 0, recurring: 0, cleared: 0 });
+    // The summary roll-up carries the same honest nulls.
+    expect(res.body.summary).toMatchObject({
+      freshnessRatio: null, needsReassessmentRatio: null, decision: null, readiness: "stale",
+    });
+    // The whole payload carries no invented money value.
+    expect(JSON.stringify(res.body)).not.toMatch(/roi|dollar|\$/i);
+  });
+
+  it("refuses the operational roll-up to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/operational-assurance");
     expect(anon.status).toBe(401);
   });
 

@@ -521,6 +521,56 @@ interface ExecutiveSummary {
   assuranceMaturity: string;
 }
 
+// Operational / continuous-assurance roll-up (commercial spine): where a deployment
+// sits in the continuous-assurance loop, tying the existing signals — evidence
+// freshness/staleness, the change backlog needing reassessment, remediation
+// velocity, and the six-state decision — under one ordinal readiness band. Every
+// value is a real count, a TRUE ratio of real counts (null when there is no basis
+// to compute, NEVER a fake 0%), or an ordinal band. The readiness band is weakest-
+// wins and never green-by-default; a resolved remediation is a PROCESS claim.
+interface OperationalAssurance {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  decision: { decision: string | null; decisionLabel: string | null };
+  evidenceFreshness: {
+    total: number;
+    current: number;
+    stale: number;
+    ttlDays: number;
+    freshnessRatio: number | null;
+  };
+  changeBacklog: {
+    total: number;
+    new: number;
+    recurring: number;
+    cleared: number;
+    byStatus: Record<string, number>;
+    needsReassessment: number;
+    needsReassessmentRatio: number | null;
+  };
+  remediation: {
+    open: number;
+    resolved: number;
+    wontFix: number;
+    byState: Record<string, number>;
+    statesReached: string[];
+    eventCount: number;
+    resolutionRatio: number | null;
+  };
+  readiness: string;
+  summary: {
+    totalFindings: number;
+    currentEvidence: number;
+    staleEvidence: number;
+    freshnessRatio: number | null;
+    needsReassessment: number;
+    needsReassessmentRatio: number | null;
+    openRemediation: number;
+    resolvedRemediation: number;
+    decision: string | null;
+    readiness: string;
+  };
+}
+
 // Vertical Assurance Packs (commercial spine): the compliance map read through an
 // industry lens. A pack's `frameworks` are computed coverage; its
 // `regulatoryRegimes` are CONTEXT, each carrying a note that Athena holds no
@@ -3907,6 +3957,194 @@ function ExecutiveSummaryPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// The ordinal operational-readiness band, worn honestly: a weakest-wins read of how
+// well the continuous-assurance loop is being sustained (evidence freshness, change
+// backlog, open remediation), where the softest signal sets the floor. It describes
+// the state of the loop, never a verdict on the system; `stale` is the honest floor
+// for an unassessed or empty deployment — shown plainly, not as an error and never
+// rounded up. Best → weakest. `steady` is earned (all three real ratios strong), so
+// green never appears by default: an empty deployment reads `stale`.
+function ReadinessChip({ readiness }: { readiness: string }) {
+  const look =
+    readiness === "steady"
+      ? { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", label: "Steady" }
+      : readiness === "attention"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Needs attention" }
+        : readiness === "stale"
+          ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Stale" }
+          : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: readiness };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+      title="An ordinal readiness band from real ratios — evidence freshness, change backlog, and open remediation — where the weakest signal sets the floor. It describes how the continuous-assurance loop is being sustained, never a verdict on the system; 'stale' is the honest floor for an unassessed or empty deployment, not an error."
+    >
+      {look.label}
+    </span>
+  );
+}
+
+/**
+ * The Operational / continuous-assurance roll-up (commercial spine) for one
+ * deployment: where it sits in the continuous-assurance loop — evidence
+ * freshness/staleness, the change backlog needing reassessment, remediation
+ * velocity, the six-state decision, and an ordinal readiness band. Self-fetching
+ * (mounted only inside an expanded deployment). HONEST by construction and never
+ * green-by-default: the readiness band is weakest-wins (an unassessed or empty
+ * deployment reads `stale`, shown plainly), every ratio is shown as "—" when there
+ * is no basis to compute it (NEVER a fake 0%), the decision is None-safe (null reads
+ * "Not assessed", never "ready"), and a resolved remediation is a PROCESS claim
+ * (a human marked the work done), never a security closure.
+ */
+function OperationalAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<OperationalAssurance>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/operational-assurance`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <RefreshCw className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Operational assurance</h3>
+      <span className="text-[11px] text-muted-foreground">continuous-assurance readiness, never green-by-default</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the operational roll-up…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the operational roll-up{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { evidenceFreshness, changeBacklog, remediation } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {/* Honest framing: the band is weakest-wins, and a ratio with no basis reads
+          as "—", never a 0%. An unassessed deployment lands honestly in stale. */}
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        Where this deployment sits in the continuous-assurance loop. The readiness band is{" "}
+        <span className="text-foreground">weakest-wins</span> — the softest of evidence freshness,
+        change backlog and open remediation sets the floor — and a ratio with no basis to compute
+        reads as &quot;—&quot;, never a 0%.
+      </p>
+
+      {/* The headline row: the ordinal readiness band and the six-state decision. */}
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">readiness:</span>
+          <ReadinessChip readiness={data.readiness} />
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span className="text-muted-foreground">decision:</span>
+          <DecisionPill
+            decision={data.decision.decision as never}
+            label={data.decision.decisionLabel || undefined}
+          />
+        </span>
+      </div>
+
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        {/* Evidence freshness: how much evidence is within its TTL vs stale. The
+            ratio is "—" when there are no findings to age, never a fake 100%. The
+            stale count is surfaced, never hidden — a stale finding is a retest due. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Evidence freshness
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{ratioPct(evidenceFreshness.freshnessRatio)}</span> within
+              its {evidenceFreshness.ttlDays}-day TTL
+            </span>
+            <span>{evidenceFreshness.total} findings</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-muted-foreground">
+              {evidenceFreshness.current} within TTL
+            </span>
+            {evidenceFreshness.stale > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-amber-400">
+                <Clock className="h-3 w-3" /> {evidenceFreshness.stale} stale · retest due
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Change backlog: what changed since the last scan and so needs a fresh
+            look. Recurring is steady state, not backlog. Ratio "—" when null. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Change backlog
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{ratioPct(changeBacklog.needsReassessmentRatio)}</span>{" "}
+              needs reassessment
+            </span>
+            <span>
+              <span className="text-foreground">{changeBacklog.needsReassessment}</span> of{" "}
+              {changeBacklog.total} findings changed
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+            {changeBacklog.new > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-amber-400">
+                {changeBacklog.new} new
+              </span>
+            )}
+            {changeBacklog.cleared > 0 && (
+              <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-amber-400">
+                {changeBacklog.cleared} cleared
+              </span>
+            )}
+            <span className="rounded-md border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-muted-foreground">
+              {changeBacklog.recurring} recurring · steady state
+            </span>
+          </div>
+        </div>
+
+        {/* Remediation velocity — resolution_ratio is a PROCESS claim, labelled as
+            such, never a security closure. Mirrors the executive summary. */}
+        <div className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5 sm:col-span-2">
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Remediation velocity
+          </p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+            <span>
+              <span className="text-foreground">{remediation.open}</span> open ·{" "}
+              {remediation.resolved} marked resolved · {remediation.wontFix} won&apos;t-fix
+            </span>
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            <span className="text-foreground">{ratioPct(remediation.resolutionRatio)}</span>{" "}
+            resolved-in-workflow{" "}
+            <span className="text-muted-foreground/80">
+              — a process claim (a human marked the work done), not a security closure
+            </span>
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ==== Access & Blast Radius + Posture + Data & Context (Phase 3 + 2.5) ====
 
 /**
@@ -5576,6 +5814,15 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             maturity. No dollar/ROI figure. Self-fetches, so it
                             loads only for an expanded deployment. */}
                         <ExecutiveSummaryPanel deploymentUuid={d.uuid} />
+
+                        {/* Operational assurance (commercial spine): where the
+                            deployment sits in the continuous-assurance loop —
+                            evidence freshness, the change backlog needing
+                            reassessment, remediation velocity, the decision, and an
+                            ordinal readiness band (weakest-wins, never green-by-
+                            default). Self-fetches, so it loads only for an expanded
+                            deployment. */}
+                        <OperationalAssurancePanel deploymentUuid={d.uuid} />
 
                         {/* Vendor assurance (commercial spine): the third-party
                             posture — each vendor's assertions at their true

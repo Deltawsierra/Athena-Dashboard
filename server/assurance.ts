@@ -695,6 +695,65 @@ export interface AssuranceExecutiveSummary {
   assuranceMaturity: string;
 }
 
+// ==== Operational / continuous-assurance roll-up (commercial spine) ====
+//
+// Where a deployment sits in the continuous-assurance loop (Discover → Assess →
+// Remediate → Retest → Monitor-change → Reassess), tying together the signals the
+// rest of the spine already computes — evidence freshness/staleness, the change
+// backlog needing reassessment, remediation velocity, and the standing six-state
+// decision — under one ordinal readiness band. A REUSE-ONLY read: it re-derives
+// nothing. HONEST by construction and never green-by-default: the readiness band
+// is ordinal and weakest-wins (steady > attention > stale), an unassessed or empty
+// deployment lands honestly in `stale` (never a clean pass), every ratio is `null`
+// when there is no basis to compute it (never a fake 0%), the six-state decision is
+// None-safe, and a resolved remediation is a PROCESS claim, never a security
+// closure. There is no dollar figure or realized-loss number anywhere.
+export interface AssuranceOperationalAssurance {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  /** The standing six-state decision, or null when none has been computed. */
+  decision: { decision: string | null; decisionLabel: string | null };
+  evidenceFreshness: {
+    total: number;
+    /** Findings whose evidence was re-observed within the TTL. */
+    current: number;
+    /** Findings whose evidence has aged past the TTL — a retest is due. */
+    stale: number;
+    ttlDays: number;
+    /** current / total, or null when there are no findings to age (never a fake 0). */
+    freshnessRatio: number | null;
+  };
+  changeBacklog: {
+    total: number;
+    new: number;
+    recurring: number;
+    cleared: number;
+    byStatus: Record<string, number>;
+    /** new + cleared: what moved and so needs a fresh look (recurring is steady state). */
+    needsReassessment: number;
+    /** needsReassessment / total, or null when there are no findings (never a fake 0). */
+    needsReassessmentRatio: number | null;
+  };
+  /** Remediation velocity, reused wholesale from the workflow roll-up — same shape
+   *  as the executive summary's. A resolved state is a PROCESS claim (work called
+   *  done), never a security closure. */
+  remediation: ExecutiveRemediation;
+  /** Ordinal operational-readiness band (steady/attention/stale), weakest-wins.
+   *  Describes the assurance loop, never that the system is healthy or secure. */
+  readiness: string;
+  summary: {
+    totalFindings: number;
+    currentEvidence: number;
+    staleEvidence: number;
+    freshnessRatio: number | null;
+    needsReassessment: number;
+    needsReassessmentRatio: number | null;
+    openRemediation: number;
+    resolvedRemediation: number;
+    decision: string | null;
+    readiness: string;
+  };
+}
+
 // ==== Vertical Assurance Packs (commercial spine) ====
 //
 // A pack is a curated, code-only catalog entry read through an industry lens: the
@@ -1827,6 +1886,72 @@ function mapExecutiveSummary(raw: Record<string, unknown>): AssuranceExecutiveSu
   };
 }
 
+function mapOperationalAssurance(raw: Record<string, unknown>): AssuranceOperationalAssurance {
+  const obj = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const system = obj(raw.system);
+  const decision = obj(raw.decision);
+  const freshness = obj(raw.evidence_freshness);
+  const backlog = obj(raw.change_backlog);
+  const remediation = obj(raw.remediation);
+  const summary = obj(raw.summary);
+  return {
+    system: {
+      name: str(system.name),
+      uuid: str(system.uuid),
+      environment: str(system.environment),
+      environmentLabel: str(system.environment_label),
+    },
+    decision: {
+      // None-safe: an unassessed deployment has no decision; never read as ready.
+      decision: strOrNull(decision.decision),
+      decisionLabel: strOrNull(decision.decision_label),
+    },
+    evidenceFreshness: {
+      total: num(freshness.total, 0),
+      current: num(freshness.current, 0),
+      stale: num(freshness.stale, 0),
+      ttlDays: num(freshness.ttl_days, 0),
+      // Null when there are no findings to age — never a fabricated 0%.
+      freshnessRatio: numOrNull(freshness.freshness_ratio),
+    },
+    changeBacklog: {
+      total: num(backlog.total, 0),
+      new: num(backlog.new, 0),
+      recurring: num(backlog.recurring, 0),
+      cleared: num(backlog.cleared, 0),
+      byStatus: countRecord(backlog.by_status),
+      needsReassessment: num(backlog.needs_reassessment, 0),
+      // Null when there are no findings — never a fabricated 0%.
+      needsReassessmentRatio: numOrNull(backlog.needs_reassessment_ratio),
+    },
+    remediation: {
+      open: num(remediation.open, 0),
+      resolved: num(remediation.resolved, 0),
+      wontFix: num(remediation.wont_fix, 0),
+      byState: countRecord(remediation.by_state),
+      statesReached: strList(remediation.states_reached),
+      eventCount: num(remediation.event_count, 0),
+      // A process claim, null when there are no findings — never a fake rate.
+      resolutionRatio: numOrNull(remediation.resolution_ratio),
+    },
+    readiness: str(raw.readiness),
+    summary: {
+      totalFindings: num(summary.total_findings, 0),
+      currentEvidence: num(summary.current_evidence, 0),
+      staleEvidence: num(summary.stale_evidence, 0),
+      freshnessRatio: numOrNull(summary.freshness_ratio),
+      needsReassessment: num(summary.needs_reassessment, 0),
+      needsReassessmentRatio: numOrNull(summary.needs_reassessment_ratio),
+      openRemediation: num(summary.open_remediation, 0),
+      resolvedRemediation: num(summary.resolved_remediation, 0),
+      // None-safe here too: an unassessed deployment carries a null decision.
+      decision: strOrNull(summary.decision),
+      readiness: str(summary.readiness),
+    },
+  };
+}
+
 /** One pack's catalog view, snake→camel. Framework identifiers and their names
  *  are kept verbatim — they are the compliance map's own identifiers. */
 function packView(raw: Record<string, unknown>): AssurancePack {
@@ -2907,6 +3032,29 @@ export async function executiveSummary(uuid: string): Promise<AssuranceExecutive
     );
   }
   return mapExecutiveSummary(await readObject(response));
+}
+
+/**
+ * A deployment's operational / continuous-assurance roll-up (commercial spine):
+ * where it sits in the continuous-assurance loop — evidence freshness/staleness,
+ * the change backlog needing reassessment, remediation velocity, the six-state
+ * decision, and an ordinal readiness band — tied together from the signals the
+ * rest of the spine already computes. A read (open), so a non-ok answer is genuine
+ * unavailability like the other reads. HONEST by construction: the readiness band
+ * is weakest-wins and never green-by-default (an unassessed deployment reads
+ * `stale`), every ratio is null when there is no basis to compute it, and a
+ * resolved remediation is a process claim, never a security closure.
+ */
+export async function operationalAssurance(uuid: string): Promise<AssuranceOperationalAssurance> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/operational-assurance/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapOperationalAssurance(await readObject(response));
 }
 
 /**
