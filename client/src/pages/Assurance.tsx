@@ -29,6 +29,7 @@ import {
   Building2,
   ChevronDown,
   ChevronRight,
+  Clock,
   GitBranch,
   HelpCircle,
   LayoutList,
@@ -79,6 +80,11 @@ interface Finding {
   location: string;
   assetUuid: string | null;
   assetName: string | null;
+  // Change intelligence (spine): state vs the deployment's latest scan.
+  changeStatus: string;
+  changeLabel: string;
+  ageDays: number | null;
+  stale: boolean;
 }
 interface Asset {
   uuid: string;
@@ -612,6 +618,29 @@ function bannerHeadline(status: AssuranceStatus): string {
 
 /* --- shared presentational parts (used by both views) ------------------- */
 
+// Change intelligence tones. "cleared" (no longer reported) reads reassuring but
+// is not proof of a fix, so it takes a calm tone, not a triumphant one; a
+// recurring finding is the one that has survived a scan and wants attention.
+const CHANGE_TONE: Record<string, string> = {
+  new: "text-sky-400 border-sky-500/30 bg-sky-500/10",
+  recurring: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  cleared: "text-emerald-400/90 border-emerald-500/25 bg-emerald-500/[0.08]",
+};
+function ChangeBadge({ status, label }: { status: string; label: string }) {
+  if (!status) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        CHANGE_TONE[status] ?? "text-muted-foreground border-border/60 bg-surface-1/50",
+      )}
+      title="Since the deployment's latest scan"
+    >
+      {label || status}
+    </span>
+  );
+}
+
 function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }) {
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
@@ -620,7 +649,17 @@ function FindingRow({ f, showAsset = true }: { f: Finding; showAsset?: boolean }
         <SeverityPill severity={asSeverity(f.severity)} />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        <ChangeBadge status={f.changeStatus} label={f.changeLabel} />
         <EvidenceClassChip value={f.evidenceClass} />
+        {f.stale && (
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-amber-500/25 bg-amber-500/[0.08] px-2 py-0.5 text-[11px] font-medium text-amber-300/90"
+            title="Evidence not re-observed within the retest window"
+          >
+            <Clock className="h-3 w-3" />
+            stale{typeof f.ageDays === "number" ? ` · ${f.ageDays}d` : ""}
+          </span>
+        )}
         <span className="text-[11px] text-muted-foreground">{f.status}</span>
         {showAsset && f.assetName && (
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
