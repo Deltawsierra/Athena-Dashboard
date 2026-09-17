@@ -30,6 +30,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Cpu,
   Fingerprint,
   GitBranch,
   HelpCircle,
@@ -43,6 +44,7 @@ import {
   ShieldCheck,
   ShieldQuestion,
   Trash2,
+  Zap,
 } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
@@ -135,6 +137,30 @@ interface Unknown {
   statusLabel: string;
   source: string;
   reviewBy: string | null;
+}
+interface CapabilitySource {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  detail: string;
+}
+interface Capability {
+  key: string;
+  label: string;
+  category: string;
+  description: string;
+  risk: string;
+  declared: boolean;
+  shadow: boolean;
+  sources: CapabilitySource[];
+}
+interface CapabilityMap {
+  capabilities: Capability[];
+  categories: { category: string; count: number; maxRisk: string }[];
+  summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
 }
 interface BoundaryPosture {
   value: string;
@@ -805,6 +831,134 @@ function AssetNode({ asset, findings }: { asset: Asset; findings: Finding[] }) {
         </ul>
       )}
     </li>
+  );
+}
+
+// A capability's risk, worn honestly: a high-risk power (code execution, money
+// movement, a shadow capability nobody approved) leads in red, an elevated one
+// in amber, a baseline one in muted. Anything unrecognised falls back to muted.
+function CapabilityRiskChip({ risk }: { risk: string }) {
+  const look =
+    risk === "high"
+      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "High risk" }
+      : risk === "elevated"
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Elevated" }
+        : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: "Baseline" };
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
+        look.cls,
+      )}
+    >
+      {look.label}
+    </span>
+  );
+}
+
+/**
+ * The AI System Capability Map (Phase 1.3) for one deployment: the ground-truth
+ * inventory of what it can *do*, derived from its asset graph and declared tool
+ * permissions. Self-fetching (mounted only inside an expanded deployment). It is
+ * honest about a shadow capability — a power evidenced only by unmanaged
+ * components, which nobody approved — surfacing it with its risk raised, never
+ * hiding it.
+ */
+function CapabilityPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<CapabilityMap>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/capabilities`],
+  });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Cpu className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Capabilities</h3>
+      <span className="text-[11px] text-muted-foreground">what this system can do</span>
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the capability map…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the capability map{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  const { summary } = data;
+
+  return (
+    <section>
+      {heading}
+
+      {/* The scoreboard: how much power, how concerning, and how much of it is
+          shadow — a power no approved component accounts for. */}
+      <div className="mb-3 flex flex-wrap gap-2">
+        <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-[11px] text-sev-high">
+          <Zap className="h-3.5 w-3.5" /> {summary.highRisk} high-risk
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] text-amber-400">
+          {summary.elevated} elevated
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-[11px] text-muted-foreground">
+          {summary.baseline} baseline
+        </span>
+        {summary.shadow > 0 && (
+          <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-[11px] text-sev-high">
+            <ShieldAlert className="h-3.5 w-3.5" /> {summary.shadow} shadow
+          </span>
+        )}
+      </div>
+
+      {data.capabilities.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No capabilities derived yet — no components discovered for this deployment.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {data.capabilities.map((c) => (
+            <li key={c.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-[12px] font-semibold text-foreground">{c.label}</span>
+                <CapabilityRiskChip risk={c.risk} />
+                {c.shadow && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-sev-high/40 bg-sev-high/10 px-2 py-0.5 text-[10px] font-medium text-sev-high">
+                    Shadow
+                  </span>
+                )}
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {c.category}
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">{c.description}</p>
+              {/* The components that evidence this power, and how. */}
+              <ul className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 border-l border-border/40 pl-2.5">
+                {c.sources.map((s, i) => (
+                  <li key={`${c.key}-${i}`} className="text-[10px] text-muted-foreground">
+                    <span className={s.managed ? "text-foreground" : "text-sev-high"}>
+                      {s.assetName}
+                    </span>{" "}
+                    <span className="text-muted-foreground/80">{s.kindLabel}</span>
+                    {s.detail && <span className="text-muted-foreground/70"> · {s.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1527,6 +1681,11 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             ))}
                           </div>
                         )}
+
+                        {/* AI system capability map (Phase 1.3): what this
+                            deployment can do. Self-fetches, so it loads only for
+                            an expanded deployment. */}
+                        <CapabilityPanel deploymentUuid={d.uuid} />
 
                         {/* AI data boundary (Phase 1.4): approved data flows vs.
                             actual ones. Self-fetches, so it loads only for an

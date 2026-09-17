@@ -77,6 +77,41 @@ export interface AssuranceReceipt {
   computedAt: string | null;
 }
 
+// AI System Capability Map (Phase 1.3): the ground truth of what a deployment
+// can *do*, derived from its asset graph and declared tool permissions.
+export interface CapabilitySource {
+  assetName: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  managed: boolean;
+  detail: string;
+}
+export interface Capability {
+  key: string;
+  label: string;
+  category: string;
+  description: string;
+  /** "high" | "elevated" | "baseline". */
+  risk: string;
+  /** A managed/declared component grants this power. */
+  declared: boolean;
+  /** Only unmanaged components grant it — a power nobody approved. */
+  shadow: boolean;
+  sources: CapabilitySource[];
+}
+export interface CapabilityCategory {
+  category: string;
+  count: number;
+  maxRisk: string;
+}
+export interface AssuranceCapabilityMap {
+  capabilities: Capability[];
+  categories: CapabilityCategory[];
+  summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
+}
+
 export interface AssuranceDeployment {
   uuid: string;
   name: string;
@@ -269,6 +304,56 @@ function receipt(raw: unknown): AssuranceReceipt {
     evidenceCount: typeof r.evidence_count === "number" ? r.evidence_count : undefined,
     findingCount: typeof r.finding_count === "number" ? r.finding_count : undefined,
     computedAt: strOrNull(r.computed_at),
+  };
+}
+
+function capabilitySource(raw: Record<string, unknown>): CapabilitySource {
+  return {
+    assetName: str(raw.asset_name),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    classification: str(raw.classification),
+    classificationLabel: str(raw.classification_label),
+    managed: bool(raw.managed),
+    detail: str(raw.detail),
+  };
+}
+
+function capabilityMap(raw: Record<string, unknown>): AssuranceCapabilityMap {
+  const rawSummary =
+    raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
+      ? (raw.summary as Record<string, unknown>)
+      : {};
+  return {
+    capabilities: Array.isArray(raw.capabilities)
+      ? (raw.capabilities as Record<string, unknown>[]).map((c) => ({
+          key: str(c.key),
+          label: str(c.label),
+          category: str(c.category),
+          description: str(c.description),
+          risk: str(c.risk),
+          declared: bool(c.declared),
+          shadow: bool(c.shadow),
+          sources: Array.isArray(c.sources)
+            ? (c.sources as Record<string, unknown>[]).map(capabilitySource)
+            : [],
+        }))
+      : [],
+    categories: Array.isArray(raw.categories)
+      ? (raw.categories as Record<string, unknown>[]).map((c) => ({
+          category: str(c.category),
+          count: num(c.count, 0),
+          maxRisk: str(c.max_risk),
+        }))
+      : [],
+    summary: {
+      total: num(rawSummary.total, 0),
+      highRisk: num(rawSummary.high_risk, 0),
+      elevated: num(rawSummary.elevated, 0),
+      baseline: num(rawSummary.baseline, 0),
+      declared: num(rawSummary.declared, 0),
+      shadow: num(rawSummary.shadow, 0),
+    },
   };
 }
 
@@ -577,6 +662,22 @@ export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt>
     );
   }
   return receipt(await response.json());
+}
+
+/**
+ * A deployment's AI System Capability Map (Phase 1.3): the ground-truth
+ * inventory of what it can *do*, derived from its asset graph and declared tool
+ * permissions. A read (open), so a non-ok answer is genuine unavailability like
+ * the other reads.
+ */
+export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/capabilities/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return capabilityMap((await response.json()) as Record<string, unknown>);
 }
 
 /**

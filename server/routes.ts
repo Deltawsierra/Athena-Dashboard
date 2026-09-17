@@ -1534,6 +1534,17 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The deployment's AI System Capability Map (Phase 1.3): the ground-truth
+  // inventory of what it can do. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/capabilities", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.capabilities(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // The deployment's AI data-boundary assessment (Phase 1.4): the approved
   // boundary a human declared reconciled against the deployment's actual data
   // destinations. A read, behind requireAuth like the rest of the reads.
