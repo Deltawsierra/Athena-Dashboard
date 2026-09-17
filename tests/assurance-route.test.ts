@@ -29,6 +29,9 @@ describe("assurance BFF", () => {
   // When set, the next PATCH is refused with this status (and a reason), so the
   // BFF's 403/409 passthrough can be exercised without disturbing refusePatch.
   let patchRefusalStatus: number | null = null;
+  // When set, the next provider-assertion create is refused with the backend's
+  // one-per-field 400, so the BFF's passthrough of that reason can be exercised.
+  let refuseAssertionCreate = false;
   const unknowns = new Map<string, Record<string, unknown>>();
 
   beforeAll(async () => {
@@ -120,6 +123,44 @@ describe("assurance BFF", () => {
               profile: { declared_fields: 2, weakest_evidence: "vendor_asserted" },
             },
           ]);
+        }
+
+        if (path === "/api/assurance/providers/" && method === "POST") {
+          const b = raw ? JSON.parse(raw) : {};
+          return json(201, {
+            uuid: "p-new", name: b.name, kind: b.kind, kind_label: "Vector database",
+            region: "", notes: "", evidence_class: "vendor_asserted",
+            assertions: [], profile: { declared_fields: 0, weakest_evidence: null },
+          });
+        }
+
+        if (path === "/api/assurance/provider-assertions/" && method === "POST") {
+          if (refuseAssertionCreate) {
+            // The backend's one-per-field refusal, verbatim.
+            return json(400, { field: "This provider already has a 'region' assertion; edit it instead." });
+          }
+          const b = raw ? JSON.parse(raw) : {};
+          return json(201, {
+            uuid: "as-new", field: b.field, field_label: "Data retention", value: b.value ?? "",
+            evidence_class: b.evidence_class ?? "vendor_asserted", evidence_class_label: "Vendor asserted",
+            source: b.source ?? "self_declared", source_label: "Self-declared",
+            notes: b.notes ?? "", updated_at: "2026-09-17T00:00:00Z",
+          });
+        }
+
+        const assertionMatch = path.match(/^\/api\/assurance\/provider-assertions\/([^/]+)\/$/);
+        if (assertionMatch && method === "PATCH") {
+          const b = raw ? JSON.parse(raw) : {};
+          return json(200, {
+            uuid: assertionMatch[1], field: "logging", field_label: "Logging",
+            value: b.value ?? "30 days", evidence_class: b.evidence_class ?? "document_supported",
+            evidence_class_label: "Document supported", source: b.source ?? "vendor_doc",
+            source_label: "Vendor documentation", notes: b.notes ?? "", updated_at: "2026-09-17T01:00:00Z",
+          });
+        }
+        if (assertionMatch && method === "DELETE") {
+          res.writeHead(204);
+          return res.end();
         }
 
         if (path === "/api/assurance/unknowns/" && method === "GET") {
@@ -335,6 +376,84 @@ describe("assurance BFF", () => {
     expect(okRecompute.status).toBe(200);
     const okPatch = await user.patch("/api/assurance/unknowns/u-1").send({ status: "investigating" });
     expect(okPatch.status).toBe(200);
+  });
+
+  it("refuses provider-profile writes to anyone not signed in", async () => {
+    expect((await request(app).post("/api/assurance/providers").send({ name: "X", kind: "other" })).status).toBe(401);
+    expect(
+      (await request(app).post("/api/assurance/provider-assertions").send({ provider: "p-1", field: "region" })).status,
+    ).toBe(401);
+    expect((await request(app).delete("/api/assurance/provider-assertions/as-1")).status).toBe(401);
+  });
+
+  it("an admin registers a provider, mapped to camelCase", async () => {
+    const res = await user
+      .post("/api/assurance/providers")
+      .send({ name: "Pinecone", kind: "vector_db" });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ uuid: "p-new", name: "Pinecone", kind: "vector_db", kindLabel: "Vector database" });
+    expect(res.body.profile).toMatchObject({ declaredFields: 0, weakestEvidence: null });
+  });
+
+  it("an admin records a graded assertion, mapping the evidence class both ways", async () => {
+    const res = await user.post("/api/assurance/provider-assertions").send({
+      provider: "p-1", field: "data_retention", value: "30 days",
+      evidenceClass: "document_supported", source: "vendor_doc",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      uuid: "as-new", field: "data_retention", value: "30 days",
+      evidenceClass: "document_supported", source: "vendor_doc",
+    });
+  });
+
+  it("rejects an assertion field the schema will not accept", async () => {
+    const bad = await user
+      .post("/api/assurance/provider-assertions")
+      .send({ provider: "p-1", field: "not_a_field", value: "x" });
+    expect(bad.status).toBe(400);
+  });
+
+  it("passes the backend's one-per-field refusal through with its reason", async () => {
+    refuseAssertionCreate = true;
+    const denied = await user
+      .post("/api/assurance/provider-assertions")
+      .send({ provider: "p-1", field: "region", value: "eu-west-1" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("already has a 'region' assertion");
+    refuseAssertionCreate = false;
+  });
+
+  it("an admin edits an assertion in place and deletes one", async () => {
+    const patched = await user
+      .patch("/api/assurance/provider-assertions/as-2")
+      .send({ value: "90 days", evidenceClass: "contractually_stated", source: "contract" });
+    expect(patched.status).toBe(200);
+    expect(patched.body).toMatchObject({ uuid: "as-2", value: "90 days" });
+
+    const removed = await user.delete("/api/assurance/provider-assertions/as-2");
+    expect(removed.status).toBe(204);
+  });
+
+  it("gates provider-profile writes to admins: a non-admin gets 403", async () => {
+    await user.post("/api/users").send({
+      username: "assurance-analyst-2", password: "analyst-pass", role: "user", isActive: true,
+    });
+    const analyst = await signIn(app, "assurance-analyst-2", "analyst-pass");
+
+    // Reads stay open.
+    expect((await analyst.get("/api/assurance/providers")).status).toBe(200);
+
+    // Every write is admin-only, refused at the front door.
+    expect((await analyst.post("/api/assurance/providers").send({ name: "X", kind: "other" })).status).toBe(403);
+    expect(
+      (await analyst.post("/api/assurance/provider-assertions").send({ provider: "p-1", field: "region", value: "x" }))
+        .status,
+    ).toBe(403);
+    expect(
+      (await analyst.patch("/api/assurance/provider-assertions/as-2").send({ value: "y" })).status,
+    ).toBe(403);
+    expect((await analyst.delete("/api/assurance/provider-assertions/as-2")).status).toBe(403);
   });
 });
 
