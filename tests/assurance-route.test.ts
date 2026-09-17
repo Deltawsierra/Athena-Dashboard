@@ -251,6 +251,47 @@ describe("assurance BFF", () => {
           });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/compliance/" && method === "GET") {
+          // An honest gap map: a framework with a touched control, a framework
+          // with nothing mapped (never "passing"), the unmapped types the engine
+          // found, and the raw engine taxonomy references.
+          return json(200, {
+            frameworks: [
+              {
+                key: "nist_800_53", name: "NIST SP 800-53 Rev 5",
+                controls: [
+                  {
+                    control_id: "SI-10", name: "Information Input Validation",
+                    family: "SI", family_name: "System and Information Integrity",
+                    catalogued: true, active_finding_count: 2, resolved_finding_count: 1,
+                    worst_severity: "high", finding_types: ["sql_injection", "xss"],
+                  },
+                ],
+                summary: { controls_touched: 1, controls_with_active_findings: 1, worst_severity: "high" },
+              },
+              {
+                key: "owasp_2021", name: "OWASP Top 10 (2021)",
+                controls: [],
+                summary: { controls_touched: 0, controls_with_active_findings: 0, worst_severity: null },
+              },
+            ],
+            unmapped: [
+              {
+                finding_type: "quantum_teapot_anomaly", active_finding_count: 1,
+                resolved_finding_count: 0, worst_severity: "medium",
+              },
+            ],
+            engine_references: [
+              { taxonomy: "cwe", id: "CWE-89", finding_count: 2, finding_types: ["sql_injection"] },
+            ],
+            summary: {
+              total_findings: 7, active_findings: 5, resolved_findings: 2,
+              mapped_finding_types: 4, unmapped_finding_types: 1, frameworks: 4,
+              controls_touched: 11, controls_with_active_findings: 9, worst_severity: "critical",
+            },
+          });
+        }
+
         if (path === "/api/assurance/findings/" && method === "GET") {
           return json(200, [
             {
@@ -531,6 +572,48 @@ describe("assurance BFF", () => {
 
   it("refuses the data-boundary read to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/data-boundary");
+    expect(anon.status).toBe(401);
+  });
+
+  it("returns a deployment's compliance map, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/compliance");
+    expect(res.status).toBe(200);
+    // The scoreboard counts findings and controls honestly, camelCased.
+    expect(res.body.summary).toMatchObject({
+      totalFindings: 7, activeFindings: 5, resolvedFindings: 2,
+      mappedFindingTypes: 4, unmappedFindingTypes: 1,
+      controlsTouched: 11, controlsWithActiveFindings: 9, worstSeverity: "critical",
+    });
+    // A framework's touched control carries its gap signal, camelCased — the
+    // active-finding count and worst severity, never a "met"/"passed" flag.
+    const nist = res.body.frameworks.find((f: { key: string }) => f.key === "nist_800_53");
+    expect(nist).toMatchObject({ name: "NIST SP 800-53 Rev 5" });
+    expect(nist.summary).toMatchObject({
+      controlsTouched: 1, controlsWithActiveFindings: 1, worstSeverity: "high",
+    });
+    expect(nist.controls[0]).toMatchObject({
+      controlId: "SI-10", name: "Information Input Validation",
+      family: "SI", familyName: "System and Information Integrity",
+      catalogued: true, activeFindingCount: 2, resolvedFindingCount: 1, worstSeverity: "high",
+    });
+    expect(nist.controls[0].findingTypes).toEqual(["sql_injection", "xss"]);
+    // A framework with nothing mapped reads as untouched, never "passing".
+    const owasp = res.body.frameworks.find((f: { key: string }) => f.key === "owasp_2021");
+    expect(owasp.controls).toHaveLength(0);
+    expect(owasp.summary).toMatchObject({ controlsTouched: 0, worstSeverity: null });
+    // The unmapped finding types the engine found are surfaced, not hidden.
+    expect(res.body.unmapped[0]).toMatchObject({
+      findingType: "quantum_teapot_anomaly", activeFindingCount: 1, worstSeverity: "medium",
+    });
+    // The raw engine taxonomy references (CWE/OWASP by id) come through.
+    expect(res.body.engineReferences[0]).toMatchObject({
+      taxonomy: "cwe", id: "CWE-89", findingCount: 2,
+    });
+    expect(res.body.engineReferences[0].findingTypes).toEqual(["sql_injection"]);
+  });
+
+  it("refuses the compliance map to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/deployments/dep-1/compliance");
     expect(anon.status).toBe(401);
   });
 
