@@ -1112,6 +1112,379 @@ describe("assurance BFF", () => {
           });
         }
 
+        // ---- Continuous assurance loop (SPINE Phases 1–3) ----
+
+        if (path === "/api/assurance/claims/" && method === "GET") {
+          // A DRF list; the honest null case rides on the primary claim —
+          // confidence null (no basis, never 0), and every nullable relation and
+          // timestamp null. `all=true` toggles a superseded second row.
+          const rows: Record<string, unknown>[] = [
+            {
+              uuid: "claim-1", deployment_uuid: "dep-1", asset_uuid: null, asset_name: null,
+              claim_type: "data_boundary", claim_type_label: "Data boundary",
+              statement: "All data destinations sit within the approved boundary.",
+              fingerprint: "f".repeat(16), system_fingerprint: "s".repeat(16),
+              policy_version: "policy/1.0", environment: "production", environment_label: "Production",
+              status: "unknown", status_label: "Unknown",
+              evidence_class: "unknown", evidence_class_label: "Unknown",
+              confidence: null, vendor_asserted: false,
+              assessment: null, assessment_label: null,
+              supporting_summary: "", contradicting_summary: "",
+              invalidation_conditions: ["The approved data boundary is changed."],
+              superseded_by: null, human_owner: null, receipt_digest: "",
+              is_stale: false, valid_from: "2026-09-16T00:00:00Z", valid_to: null,
+              verified_at: null, expiration: null,
+              first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T00:00:00Z",
+              created_at: "2026-09-16T00:00:00Z", updated_at: "2026-09-16T00:00:00Z",
+            },
+          ];
+          if (query.includes("all=true")) {
+            rows.push({
+              uuid: "claim-0", deployment_uuid: "dep-1", asset_uuid: "asset-9", asset_name: "gpt-x",
+              claim_type: "data_boundary", claim_type_label: "Data boundary",
+              statement: "Superseded prior version.", fingerprint: "f".repeat(16),
+              system_fingerprint: "0".repeat(16), policy_version: "policy/0.9",
+              environment: "production", environment_label: "Production",
+              status: "superseded", status_label: "Superseded",
+              evidence_class: "configuration_verified", evidence_class_label: "Configuration verified",
+              confidence: 0.9, vendor_asserted: false, assessment: "ready", assessment_label: "Ready",
+              supporting_summary: "", contradicting_summary: "", invalidation_conditions: [],
+              superseded_by: "claim-1", human_owner: "admin", receipt_digest: "a".repeat(64),
+              is_stale: false, valid_from: "2026-09-01T00:00:00Z", valid_to: "2026-09-16T00:00:00Z",
+              verified_at: "2026-09-01T00:00:00Z", expiration: null,
+              first_seen: "2026-09-01T00:00:00Z", last_seen: "2026-09-15T00:00:00Z",
+              created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-16T00:00:00Z",
+            });
+          }
+          return json(200, rows);
+        }
+
+        if (path === "/api/assurance/claims/claim-1/events/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "ev-1", from_status: null, from_status_label: null,
+              to_status: "unknown", to_status_label: "Unknown", actor: null,
+              note: "derived", created_at: "2026-09-16T00:00:00Z",
+            },
+            {
+              uuid: "ev-2", from_status: "unknown", from_status_label: "Unknown",
+              to_status: "supported", to_status_label: "Supported", actor: "admin",
+              note: "boundary reconciled", created_at: "2026-09-16T02:00:00Z",
+            },
+          ]);
+        }
+
+        if (path === "/api/assurance/claims/claim-1/transition/" && method === "POST") {
+          return json(200, {
+            status: "supported", status_label: "Supported",
+            event: {
+              uuid: "ev-3", from_status: "unknown", from_status_label: "Unknown",
+              to_status: "supported", to_status_label: "Supported", actor: "admin",
+              note: JSON.parse(raw || "{}").note ?? "", created_at: "2026-09-16T03:00:00Z",
+            },
+          });
+        }
+        if (path === "/api/assurance/claims/claim-illegal/transition/" && method === "POST") {
+          // The backend's illegal-transition 400, verbatim.
+          return json(400, { detail: "a claim cannot move from unknown to verified" });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/assurance-claims/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "claim-1", deployment_uuid: "dep-1", asset_uuid: null, asset_name: null,
+              claim_type: "data_boundary", claim_type_label: "Data boundary",
+              statement: "All data destinations sit within the approved boundary.",
+              fingerprint: "f".repeat(16), system_fingerprint: "s".repeat(16),
+              policy_version: "policy/1.0", environment: "production", environment_label: "Production",
+              status: "unknown", status_label: "Unknown",
+              evidence_class: "unknown", evidence_class_label: "Unknown",
+              confidence: null, vendor_asserted: false, assessment: null, assessment_label: null,
+              supporting_summary: "", contradicting_summary: "", invalidation_conditions: [],
+              superseded_by: null, human_owner: null, receipt_digest: "", is_stale: false,
+              valid_from: "2026-09-16T00:00:00Z", valid_to: null, verified_at: null, expiration: null,
+              first_seen: "2026-09-16T00:00:00Z", last_seen: "2026-09-16T00:00:00Z",
+              created_at: "2026-09-16T00:00:00Z", updated_at: "2026-09-16T00:00:00Z",
+            },
+          ]);
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/recompute-claims/" && method === "POST") {
+          return json(200, { created: 2, updated: 1, superseded: 0, stale: 1 });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/bom-drift/" && method === "GET") {
+          // The honest no-declaration case: has_declared false, so drift cannot be
+          // computed and is NOT read as a clean bill of materials.
+          return json(200, {
+            deployment_uuid: "dep-1", has_declared: false, drift_detected: false,
+            summary: {
+              declared_count: 0, observed_count: 3, matched: 0,
+              undeclared: 0, undeclared_providers: 0, missing: 0,
+            },
+            undeclared: [], undeclared_providers: [], missing: [],
+            note: "No declared architecture: drift cannot be computed.",
+          });
+        }
+        if (path === "/api/assurance/deployments/dep-2/bom-drift/" && method === "GET") {
+          // A declared baseline with real drift, so the undeclared/missing mappers
+          // are exercised.
+          return json(200, {
+            deployment_uuid: "dep-2", has_declared: true, drift_detected: true,
+            summary: {
+              declared_count: 2, observed_count: 3, matched: 1,
+              undeclared: 1, undeclared_providers: 1, missing: 1,
+            },
+            undeclared: [
+              {
+                asset_uuid: "asset-3", kind: "mcp_server", kind_label: "MCP server",
+                name: "shadow-mcp", identifier: "mcp://shadow", provider_name: null, severity: "high",
+              },
+            ],
+            undeclared_providers: ["fallback-host"],
+            missing: [
+              {
+                declared_uuid: "dc-9", kind: "tool", kind_label: "Tool",
+                name: "retired-tool", identifier: "tool://retired", provider_name: null,
+              },
+            ],
+            note: "Observed architecture drifts from the declaration.",
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/record-bom-drift/" && method === "POST") {
+          return json(200, { created: 1, updated: 0, reopened: 0, resolved: 2, drift_detected: true });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/declared-architecture/" && method === "GET") {
+          return json(200, {
+            declared: [
+              {
+                uuid: "dc-1", kind: "model", kind_label: "Model",
+                name: "gpt-x", identifier: "openai:gpt-x", provider_name: "OpenAI", note: "",
+              },
+            ],
+            drift: {
+              deployment_uuid: "dep-1", has_declared: true, drift_detected: false,
+              summary: {
+                declared_count: 1, observed_count: 1, matched: 1,
+                undeclared: 0, undeclared_providers: 0, missing: 0,
+              },
+              undeclared: [], undeclared_providers: [], missing: [],
+              note: "Observed architecture matches the declaration (1 component(s)).",
+            },
+          });
+        }
+        if (path === "/api/assurance/deployments/dep-1/declared-architecture/" && method === "PUT") {
+          const parsed = JSON.parse(raw || "{}");
+          const comps = Array.isArray(parsed.components) ? parsed.components : [];
+          return json(200, {
+            declared: comps.map((c: Record<string, unknown>, i: number) => ({
+              uuid: `dc-new-${i}`, kind: c.kind, kind_label: "Model",
+              name: c.name, identifier: c.identifier ?? "",
+              provider_name: c.provider_name ?? "", note: c.note ?? "",
+            })),
+            drift: {
+              deployment_uuid: "dep-1", has_declared: comps.length > 0, drift_detected: false,
+              summary: {
+                declared_count: comps.length, observed_count: 1, matched: comps.length ? 1 : 0,
+                undeclared: 0, undeclared_providers: 0, missing: 0,
+              },
+              undeclared: [], undeclared_providers: [], missing: [],
+              note: "declared",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/decision-support/" && method === "GET") {
+          // The honest unassessed case: decision null (never read as ready), and
+          // the claim buckets carried as briefs.
+          return json(200, {
+            decision: null, decision_label: null, from_findings: null, claim_cap: null,
+            paused: false,
+            claims: {
+              has_claims: true, retest_pending: true,
+              contradicted: [],
+              stale: [],
+              unknown: [
+                { uuid: "claim-1", claim_type: "data_boundary", status: "unknown", statement: "Boundary holds." },
+              ],
+              supporting: [],
+            },
+            note: "Held at 'needs more evidence' by an open retest obligation.",
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/revalidation-plan/" && method === "GET") {
+          return json(200, {
+            deployment_uuid: "dep-1", system_fingerprint: "s".repeat(16),
+            summary: { required: 1, still_current: 0, outstanding_unknowns: 1 },
+            recompute_action: "POST deployments/{uuid}/recompute-claims to re-derive after the named retests run.",
+            required: [
+              {
+                claim_uuid: "claim-2", claim_type: "effective_access",
+                statement: "Least privilege holds.", status: "stale",
+                reason: "the bound system state drifted", retest_requirement_uuid: "rr-1",
+                athena_reassessments: ["effective_access"], achilles_capabilities: ["privilege_escalation"],
+              },
+            ],
+            outstanding_unknowns: [
+              { claim_uuid: "claim-1", claim_type: "data_boundary", statement: "Boundary holds.", status: "unknown" },
+            ],
+            still_current: [],
+            note: "1 claim(s) need revalidation because of a change.",
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/check-invalidations/" && method === "POST") {
+          return json(200, { invalidated: 2, retests_opened: 2, retests_resolved: 1 });
+        }
+
+        if (path === "/api/assurance/retest-requirements/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "rr-1", deployment_uuid: "dep-1", claim_uuid: "claim-2",
+              claim_type: "effective_access", claim_type_label: "Effective access",
+              resolving_claim_uuid: null, reason: "the bound system state drifted",
+              triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+              opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+              created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+            },
+          ]);
+        }
+        if (path === "/api/assurance/deployments/dep-1/retest-requirements/" && method === "GET") {
+          return json(200, [
+            {
+              uuid: "rr-1", deployment_uuid: "dep-1", claim_uuid: "claim-2",
+              claim_type: "effective_access", claim_type_label: "Effective access",
+              resolving_claim_uuid: null, reason: "the bound system state drifted",
+              triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+              opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+              created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+            },
+          ]);
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/operational-risk/" && method === "GET") {
+          // An honest register: an observed provider-outage class with a real band,
+          // and an unmapped denial-of-wallet class (risk null, never a fake 0).
+          return json(200, {
+            system: {
+              name: "acme-chatbot", uuid: "dep-1",
+              environment: "production", environment_label: "Production",
+            },
+            classes: [
+              {
+                key: "provider_outage", label: "Provider outage / no fallback",
+                concern: "deployment_trust", concern_label: "Deployment trust",
+                question: "Is there a single model provider with no fallback?",
+                status: "observed", observed: true, risk: "high", basis: ["structural"],
+                active_finding_count: 0,
+                signals: [
+                  {
+                    source: "provider", reference: "prov-1", provider_name: "OpenAI",
+                    kind: "model_provider", kind_label: "Model provider",
+                    detail: "single evidenced model provider — a single point of failure",
+                  },
+                ],
+                runtime_signal: "whether failover is configured is a runtime signal",
+                notes: [],
+              },
+              {
+                key: "denial_of_wallet", label: "Denial-of-wallet / cost runaway",
+                concern: "cost", concern_label: "Cost",
+                question: "Is spend bounded?",
+                status: "unmapped", observed: false, risk: null, basis: [],
+                active_finding_count: 0, signals: [],
+                runtime_signal: "budget / rate-limit caps live in the engine's execution layer",
+                notes: [],
+              },
+            ],
+            summary: {
+              total_classes: 2, observed_classes: 1, unmapped_classes: 1,
+              high: 1, elevated: 0, moderate: 0, worst_risk: "high",
+              unmapped: ["denial_of_wallet"],
+            },
+            overall: {
+              status: "observed", risk: "high", unmapped_classes: 1,
+              note: "Worst observed risk is high; 1 class remains unmapped.",
+            },
+          });
+        }
+
+        if (path === "/api/assurance/findings/f-1/incident-pack/" && method === "GET") {
+          // An honest pack: a null owner and a null decision carried at true
+          // strength, the runtime transcript stated as an explicit gap.
+          return json(200, {
+            pack_version: "mythos.assurance.incident_pack/1.0",
+            attests: "integrity and provenance, never the truth of the conclusion",
+            identity: {
+              deployment: {
+                name: "acme-chatbot", uuid: "dep-1",
+                environment: "production", environment_label: "Production", owner: null,
+              },
+              finding: {
+                uuid: "f-1", fingerprint: "fp".repeat(8), category: "prompt_injection",
+                title: "Prompt injection via tool output", severity: "high", severity_label: "High",
+                status: "open", status_label: "Open",
+              },
+            },
+            surface: {
+              asset: {
+                uuid: "asset-1", name: "assistant", kind: "agent", kind_label: "Agent",
+                classification: "known", classification_label: "Known", identifier: null,
+                provider: { name: "OpenAI", kind: "model_provider", kind_label: "Model provider" },
+              },
+              asset_present: true, location: "tool:web_fetch",
+              control_mapping: { mitre: ["T1059"] },
+            },
+            evidence: {
+              algorithm: "sha256",
+              rows: [["partially_verified", "achilles", "a".repeat(64)]],
+              count: 1, evidence_class: "partially_verified",
+            },
+            receipt: { algorithm: "sha256", digest: "d".repeat(64), evidence_count: 1 },
+            runtime_transcript: {
+              in_assurance_record: false, see: "engine evidence pack",
+              reason: "the turn-by-turn transcript lives in the engine's pack",
+              engine_pack_ref: { available: true, scan_uuid: "scan-1", engine_run_id: null },
+            },
+            ripple: {
+              is_traced_origin: false, origins: [], consequences: [],
+              deployment_summary: {
+                origins: 0, origins_with_reach: 0, consequences: 0, evidenced_consequences: 0,
+                bounded: true, by_category: {}, worst_risk: null,
+              },
+              note: "This finding is not itself a traced origin.",
+            },
+            decision: { decision: null, decision_label: null },
+            algorithm: "sha256", digest: "e".repeat(64), computed_at: "2026-09-18T00:00:00Z",
+          });
+        }
+
+        if (path === "/api/assurance/deployments/dep-1/connectors/" && method === "GET") {
+          return json(200, {
+            connectors: [
+              { name: "github_issues", configured: false },
+              { name: "jira", configured: false },
+              { name: "servicenow", configured: false },
+              { name: "splunk", configured: false },
+              { name: "webhook", configured: false },
+            ],
+          });
+        }
+        if (path === "/api/assurance/deployments/dep-1/connectors/github_issues/push/" && method === "POST") {
+          // The inert case: a normal 200 with ok:false — read ok, not the status.
+          return json(200, {
+            ok: false, external_ref: null, detail: "github_issues not configured",
+            connector: "github_issues",
+          });
+        }
+        if (path === "/api/assurance/deployments/dep-1/connectors/bogus/push/" && method === "POST") {
+          // An unknown connector is a meaningful backend 400, not a 503.
+          return json(400, { detail: "Unknown connector 'bogus'." });
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -2029,6 +2402,314 @@ describe("assurance BFF", () => {
   it("refuses the metadata-logging view to anyone not signed in", async () => {
     const anon = await request(app).get("/api/assurance/deployments/dep-1/metadata-logging");
     expect(anon.status).toBe(401);
+  });
+
+  // ---- Continuous assurance loop (SPINE Phases 1–3) ----
+
+  // A non-admin operator, created once for the write-gating assertions below. The
+  // reads stay open to them; every continuous-assurance write is admin-only.
+  async function nonAdmin() {
+    await user.post("/api/users").send({
+      username: "ca-analyst", password: "analyst-pass", role: "user", isActive: true,
+    });
+    return signIn(app, "ca-analyst", "analyst-pass");
+  }
+
+  it("lists assurance claims, mapped to camelCase, with a null confidence carried as null", async () => {
+    const res = await user.get("/api/assurance/claims?deployment=dep-1");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({
+      uuid: "claim-1", claimType: "data_boundary", claimTypeLabel: "Data boundary",
+      status: "unknown", statusLabel: "Unknown", vendorAsserted: false,
+    });
+    // Honest nulls: no basis for confidence (never 0), no assessment (never ready),
+    // and every nullable relation/timestamp carried as null.
+    expect(res.body[0].confidence).toBeNull();
+    expect(res.body[0].assessment).toBeNull();
+    expect(res.body[0].assessmentLabel).toBeNull();
+    expect(res.body[0].assetUuid).toBeNull();
+    expect(res.body[0].supersededBy).toBeNull();
+    expect(res.body[0].humanOwner).toBeNull();
+    expect(res.body[0].validTo).toBeNull();
+    expect(res.body[0].verifiedAt).toBeNull();
+    expect(res.body[0].invalidationConditions).toEqual(["The approved data boundary is changed."]);
+  });
+
+  it("follows ?all=true through to the claims history", async () => {
+    const res = await user.get("/api/assurance/claims?all=true");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    const superseded = res.body.find((c: { uuid: string }) => c.uuid === "claim-0");
+    expect(superseded).toMatchObject({ status: "superseded", supersededBy: "claim-1", humanOwner: "admin" });
+  });
+
+  it("returns a claim's lifecycle events, mapped to camelCase with a null from-status", async () => {
+    const res = await user.get("/api/assurance/claims/claim-1/events");
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    // The initial derive has no from-status: carried as null, not "".
+    expect(res.body[0]).toMatchObject({ toStatus: "unknown", actor: null });
+    expect(res.body[0].fromStatus).toBeNull();
+    expect(res.body[1]).toMatchObject({ fromStatus: "unknown", toStatus: "supported", actor: "admin" });
+  });
+
+  it("returns a deployment's current assurance claims", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/assurance-claims");
+    expect(res.status).toBe(200);
+    expect(res.body[0]).toMatchObject({ uuid: "claim-1", claimType: "data_boundary" });
+    expect(res.body[0].confidence).toBeNull();
+  });
+
+  it("refuses the claims reads to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/claims")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/claims/claim-1/events")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/deployments/dep-1/assurance-claims")).status).toBe(401);
+  });
+
+  it("an admin transitions a claim; the event is returned camelCased", async () => {
+    const res = await user
+      .post("/api/assurance/claims/claim-1/transition")
+      .send({ toStatus: "supported", note: "boundary reconciled" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "supported", statusLabel: "Supported" });
+    expect(res.body.event).toMatchObject({ toStatus: "supported", actor: "admin", note: "boundary reconciled" });
+  });
+
+  it("rejects a claim transition with an empty target the schema will not accept", async () => {
+    const bad = await user.post("/api/assurance/claims/claim-1/transition").send({ toStatus: "" });
+    expect(bad.status).toBe(400);
+  });
+
+  it("passes the backend's illegal claim-transition 400 through with its reason", async () => {
+    const denied = await user
+      .post("/api/assurance/claims/claim-illegal/transition")
+      .send({ toStatus: "verified" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("cannot move from");
+  });
+
+  it("an admin recomputes a deployment's claims", async () => {
+    const res = await user.post("/api/assurance/deployments/dep-1/recompute-claims").send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ created: 2, updated: 1, superseded: 0, stale: 1 });
+  });
+
+  it("gates the claim writes to admins: a non-admin gets 403, the reads stay open", async () => {
+    const analyst = await nonAdmin();
+    expect((await analyst.get("/api/assurance/claims")).status).toBe(200);
+    const deniedTransition = await analyst
+      .post("/api/assurance/claims/claim-1/transition")
+      .send({ toStatus: "supported" });
+    expect(deniedTransition.status).toBe(403);
+    const deniedRecompute = await analyst.post("/api/assurance/deployments/dep-1/recompute-claims").send({});
+    expect(deniedRecompute.status).toBe(403);
+  });
+
+  it("refuses the claim writes to anyone not signed in", async () => {
+    expect((await request(app).post("/api/assurance/claims/claim-1/transition").send({ toStatus: "supported" })).status).toBe(401);
+    expect((await request(app).post("/api/assurance/deployments/dep-1/recompute-claims").send({})).status).toBe(401);
+  });
+
+  it("returns BOM drift, honest about an absent declaration (never a clean bill)", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/bom-drift");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ hasDeclared: false, driftDetected: false });
+    expect(res.body.summary).toMatchObject({ observedCount: 3, undeclared: 0 });
+  });
+
+  it("returns BOM drift with real drift, mapping undeclared components and providers", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-2/bom-drift");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ hasDeclared: true, driftDetected: true });
+    expect(res.body.undeclared[0]).toMatchObject({ assetUuid: "asset-3", kindLabel: "MCP server", severity: "high" });
+    expect(res.body.undeclaredProviders).toEqual(["fallback-host"]);
+    expect(res.body.missing[0]).toMatchObject({ declaredUuid: "dc-9", name: "retired-tool" });
+  });
+
+  it("an admin records BOM drift as managed findings", async () => {
+    const res = await user.post("/api/assurance/deployments/dep-1/record-bom-drift").send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ created: 1, resolved: 2, driftDetected: true });
+  });
+
+  it("returns the declared architecture plus its drift", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/declared-architecture");
+    expect(res.status).toBe(200);
+    expect(res.body.declared[0]).toMatchObject({ uuid: "dc-1", kind: "model", providerName: "OpenAI" });
+    expect(res.body.drift).toMatchObject({ hasDeclared: true, driftDetected: false });
+  });
+
+  it("an admin replaces the declared architecture, snake-casing the PUT body", async () => {
+    const res = await user
+      .put("/api/assurance/deployments/dep-1/declared-architecture")
+      .send({ components: [{ kind: "model", name: "gpt-x", providerName: "OpenAI", identifier: "openai:gpt-x" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.declared[0]).toMatchObject({ kind: "model", name: "gpt-x", providerName: "OpenAI" });
+  });
+
+  it("rejects a declared component with a kind the schema will not accept", async () => {
+    const bad = await user
+      .put("/api/assurance/deployments/dep-1/declared-architecture")
+      .send({ components: [{ kind: "bogus_kind", name: "x" }] });
+    expect(bad.status).toBe(400);
+  });
+
+  it("gates the BOM-drift + declared-architecture writes to admins, reads stay open", async () => {
+    const analyst = await nonAdmin();
+    expect((await analyst.get("/api/assurance/deployments/dep-1/bom-drift")).status).toBe(200);
+    expect((await analyst.get("/api/assurance/deployments/dep-1/declared-architecture")).status).toBe(200);
+    expect((await analyst.post("/api/assurance/deployments/dep-1/record-bom-drift").send({})).status).toBe(403);
+    const deniedPut = await analyst
+      .put("/api/assurance/deployments/dep-1/declared-architecture")
+      .send({ components: [] });
+    expect(deniedPut.status).toBe(403);
+  });
+
+  it("refuses the BOM-drift + declared-architecture writes to anyone not signed in", async () => {
+    expect((await request(app).post("/api/assurance/deployments/dep-1/record-bom-drift").send({})).status).toBe(401);
+    expect((await request(app).put("/api/assurance/deployments/dep-1/declared-architecture").send({ components: [] })).status).toBe(401);
+  });
+
+  it("returns decision-support, honest that an unassessed decision is null (never ready)", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/decision-support");
+    expect(res.status).toBe(200);
+    expect(res.body.decision).toBeNull();
+    expect(res.body.decisionLabel).toBeNull();
+    expect(res.body.fromFindings).toBeNull();
+    expect(res.body.claimCap).toBeNull();
+    expect(res.body.claims).toMatchObject({ hasClaims: true, retestPending: true });
+    expect(res.body.claims.unknown[0]).toMatchObject({ uuid: "claim-1", claimType: "data_boundary" });
+  });
+
+  it("returns the revalidation plan, mapping the per-claim work", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/revalidation-plan");
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toMatchObject({ required: 1, stillCurrent: 0, outstandingUnknowns: 1 });
+    expect(res.body.required[0]).toMatchObject({
+      claimUuid: "claim-2", retestRequirementUuid: "rr-1",
+    });
+    expect(res.body.required[0].athenaReassessments).toEqual(["effective_access"]);
+    expect(res.body.required[0].achillesCapabilities).toEqual(["privilege_escalation"]);
+  });
+
+  it("an admin runs the invalidation check and sees what got invalidated", async () => {
+    const res = await user.post("/api/assurance/deployments/dep-1/check-invalidations").send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ invalidated: 2, retestsOpened: 2, retestsResolved: 1 });
+  });
+
+  it("gates check-invalidations to admins; decision-support and revalidation reads stay open", async () => {
+    const analyst = await nonAdmin();
+    expect((await analyst.get("/api/assurance/deployments/dep-1/decision-support")).status).toBe(200);
+    expect((await analyst.get("/api/assurance/deployments/dep-1/revalidation-plan")).status).toBe(200);
+    expect((await analyst.post("/api/assurance/deployments/dep-1/check-invalidations").send({})).status).toBe(403);
+  });
+
+  it("refuses the decision-support/revalidation reads and invalidation write to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/deployments/dep-1/decision-support")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/deployments/dep-1/revalidation-plan")).status).toBe(401);
+    expect((await request(app).post("/api/assurance/deployments/dep-1/check-invalidations").send({})).status).toBe(401);
+  });
+
+  it("lists retest obligations, mapped to camelCase with a null resolving claim and machine actor", async () => {
+    const res = await user.get("/api/assurance/retest-requirements?deployment=dep-1");
+    expect(res.status).toBe(200);
+    expect(res.body[0]).toMatchObject({
+      uuid: "rr-1", claimUuid: "claim-2", claimType: "effective_access", isOpen: true,
+    });
+    // A machine-opened obligation has a null actor and no resolving claim yet.
+    expect(res.body[0].actor).toBeNull();
+    expect(res.body[0].resolvingClaimUuid).toBeNull();
+    expect(res.body[0].resolvedAt).toBeNull();
+  });
+
+  it("returns a deployment's retest obligations", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/retest-requirements");
+    expect(res.status).toBe(200);
+    expect(res.body[0]).toMatchObject({ uuid: "rr-1", isOpen: true });
+  });
+
+  it("refuses the retest reads to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/retest-requirements")).status).toBe(401);
+    expect((await request(app).get("/api/assurance/deployments/dep-1/retest-requirements")).status).toBe(401);
+  });
+
+  it("returns operational-risk, carrying an unmapped class as risk null (never a fabricated 0)", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/operational-risk");
+    expect(res.status).toBe(200);
+    const observed = res.body.classes.find((c: { key: string }) => c.key === "provider_outage");
+    const unmapped = res.body.classes.find((c: { key: string }) => c.key === "denial_of_wallet");
+    expect(observed).toMatchObject({ observed: true, risk: "high", concernLabel: "Deployment trust" });
+    expect(observed.signals[0]).toMatchObject({ source: "provider", providerName: "OpenAI" });
+    // The honest core: an unmapped class reads risk null, never 0.
+    expect(unmapped).toMatchObject({ observed: false, status: "unmapped" });
+    expect(unmapped.risk).toBeNull();
+    expect(res.body.summary.worstRisk).toBe("high");
+    expect(res.body.overall).toMatchObject({ status: "observed", risk: "high" });
+  });
+
+  it("refuses the operational-risk view to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/deployments/dep-1/operational-risk")).status).toBe(401);
+  });
+
+  it("returns a finding's incident pack, honest about null owner/decision and the transcript gap", async () => {
+    const res = await user.get("/api/assurance/findings/f-1/incident-pack");
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ packVersion: "mythos.assurance.incident_pack/1.0", digest: "e".repeat(64) });
+    expect(res.body.identity.deployment.owner).toBeNull();
+    expect(res.body.identity.finding).toMatchObject({ uuid: "f-1", severity: "high" });
+    expect(res.body.surface.asset).toMatchObject({ name: "assistant", kindLabel: "Agent" });
+    expect(res.body.evidence).toMatchObject({ evidenceClass: "partially_verified", count: 1 });
+    // The runtime transcript is an explicit gap, never fabricated; a null run id
+    // stays null.
+    expect(res.body.runtimeTranscript.inAssuranceRecord).toBe(false);
+    expect(res.body.runtimeTranscript.enginePackRef).toMatchObject({ available: true, scanUuid: "scan-1" });
+    expect(res.body.runtimeTranscript.enginePackRef.engineRunId).toBeNull();
+    // An uncomputed decision is null, never read as ready.
+    expect(res.body.decision.decision).toBeNull();
+  });
+
+  it("refuses the incident pack to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/findings/f-1/incident-pack")).status).toBe(401);
+  });
+
+  it("lists connectors, honest that an unconfigured connector is not configured", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/connectors");
+    expect(res.status).toBe(200);
+    expect(res.body.connectors).toHaveLength(5);
+    expect(res.body.connectors[0]).toMatchObject({ name: "github_issues", configured: false });
+  });
+
+  it("an admin pushes to an inert connector: a 200 with ok:false (read ok, not the status)", async () => {
+    const res = await user
+      .post("/api/assurance/deployments/dep-1/connectors/github_issues/push")
+      .send({ finding: "f-1" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: false, externalRef: null, connector: "github_issues" });
+    expect(String(res.body.detail)).toContain("not configured");
+  });
+
+  it("passes the backend's unknown-connector 400 through with its reason", async () => {
+    const denied = await user
+      .post("/api/assurance/deployments/dep-1/connectors/bogus/push")
+      .send({ finding: "f-1" });
+    expect(denied.status).toBe(400);
+    expect(String(denied.body.error)).toContain("Unknown connector");
+  });
+
+  it("gates the connector push to admins; the connectors read stays open", async () => {
+    const analyst = await nonAdmin();
+    expect((await analyst.get("/api/assurance/deployments/dep-1/connectors")).status).toBe(200);
+    const denied = await analyst
+      .post("/api/assurance/deployments/dep-1/connectors/github_issues/push")
+      .send({ finding: "f-1" });
+    expect(denied.status).toBe(403);
+  });
+
+  it("refuses the connector read and push to anyone not signed in", async () => {
+    expect((await request(app).get("/api/assurance/deployments/dep-1/connectors")).status).toBe(401);
+    expect((await request(app).post("/api/assurance/deployments/dep-1/connectors/github_issues/push").send({ finding: "f-1" })).status).toBe(401);
   });
 });
 

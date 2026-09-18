@@ -46,6 +46,7 @@ import {
   RefreshCw,
   Route,
   Scale,
+  Send,
   ShieldAlert,
   ShieldCheck,
   ShieldQuestion,
@@ -1540,6 +1541,7 @@ function FindingRow({
   remediation?: RemediationControls;
 }) {
   const nextStates = REMEDIATION_TRANSITIONS[f.remediationState] ?? [];
+  const [showIncidentPack, setShowIncidentPack] = useState(false);
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
       <div className="flex items-start justify-between gap-3">
@@ -1628,6 +1630,20 @@ function FindingRow({
             </select>
           </div>
         )}
+      </div>
+      {/* Incident evidence pack (Phase 3.7): a finding IS the incident. A reader
+          opens the portable, verifiable pack on demand — it attests integrity and
+          provenance, never that the incident is resolved or the system secure. */}
+      <div className="mt-2 border-t border-border/30 pt-2">
+        <button
+          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={() => setShowIncidentPack((v) => !v)}
+          aria-expanded={showIncidentPack}
+        >
+          <FileText className="h-3 w-3" />
+          {showIncidentPack ? "Hide incident pack" : "Incident pack"}
+        </button>
+        {showIncidentPack && <IncidentPackView findingUuid={f.uuid} />}
       </div>
     </li>
   );
@@ -5304,6 +5320,1459 @@ function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+// ============================================================================
+// Continuous-assurance loop (SPINE Phases 1–3): the claims register, BOM drift +
+// declared-architecture baseline, decision-support, revalidation, retest
+// obligations, the invalidation engine, operational-risk, incident packs, and
+// outbound connectors. Each panel is a self-fetching sibling, keyed by the same
+// `/api/assurance/...` query-key convention, so opening the page never blocks on
+// one slow call. Honest by construction: a null ratio/decision/risk renders "—"
+// or "Not assessed", never a fabricated 0; an undeclared baseline reads as a gap,
+// never a clean bill; a resolved obligation is a process claim, not a closure.
+// ============================================================================
+
+// ---- Assurance claims register (SPINE) ----
+
+interface ClaimEvent {
+  uuid: string;
+  fromStatus: string | null;
+  fromStatusLabel: string | null;
+  toStatus: string;
+  toStatusLabel: string;
+  actor: string | null;
+  note: string;
+  createdAt: string | null;
+}
+interface Claim {
+  uuid: string;
+  deploymentUuid: string | null;
+  assetUuid: string | null;
+  assetName: string | null;
+  claimType: string;
+  claimTypeLabel: string;
+  statement: string;
+  fingerprint: string;
+  systemFingerprint: string;
+  policyVersion: string;
+  environment: string;
+  environmentLabel: string;
+  status: string;
+  statusLabel: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  confidence: number | null;
+  vendorAsserted: boolean;
+  assessment: string | null;
+  assessmentLabel: string | null;
+  supportingSummary: string;
+  contradictingSummary: string;
+  invalidationConditions: string[];
+  supersededBy: string | null;
+  humanOwner: string | null;
+  receiptDigest: string;
+  isStale: boolean;
+  validFrom: string | null;
+  validTo: string | null;
+  verifiedAt: string | null;
+  expiration: string | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+// Mirrors assurance/claims.py `_ALLOWED`; kept in lockstep so the console only
+// ever offers a legal claim move. The machine-only targets (stale, superseded)
+// are never offered. The backend still enforces the separate evidence gate on
+// `verified` and returns a 400 the console surfaces as a toast.
+const CLAIM_TRANSITIONS: Record<string, string[]> = {
+  draft: ["supported", "partially_verified", "verified", "contradicted", "unknown", "revoked"],
+  supported: ["verified", "partially_verified", "contradicted", "unknown", "revoked"],
+  partially_verified: ["verified", "supported", "contradicted", "unknown", "revoked"],
+  verified: ["supported", "partially_verified", "contradicted", "unknown", "revoked"],
+  contradicted: ["supported", "partially_verified", "unknown", "revoked"],
+  unknown: ["supported", "partially_verified", "verified", "contradicted", "revoked"],
+  stale: ["supported", "partially_verified", "verified", "contradicted", "unknown", "revoked"],
+};
+const CLAIM_STATUS_LABEL: Record<string, string> = {
+  draft: "Draft",
+  supported: "Supported",
+  verified: "Verified",
+  partially_verified: "Partially verified",
+  contradicted: "Contradicted",
+  unknown: "Unknown",
+  stale: "Stale",
+  superseded: "Superseded",
+  revoked: "Revoked",
+};
+
+/** A claim's status, coloured by how it bears on assurance. A pass reads green
+ *  only when actually supported/verified; contradicted is a mark against, and
+ *  stale/unknown are honest gaps — never green-by-default. */
+function ClaimStatusChip({ status, label }: { status: string; label?: string }) {
+  const cls =
+    status === "verified" || status === "supported"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+      : status === "partially_verified"
+        ? "border-sky-500/40 bg-sky-500/10 text-sky-300"
+        : status === "contradicted"
+          ? "border-sev-high/40 bg-sev-high/10 text-sev-high"
+          : status === "stale" || status === "unknown"
+            ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
+            : "border-border/50 bg-surface-1/50 text-muted-foreground";
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium", cls)}>
+      {label || CLAIM_STATUS_LABEL[status] || status}
+    </span>
+  );
+}
+
+/** One claim's attributed event ledger, self-fetching when the claim is expanded. */
+function ClaimEventLedger({ claimUuid }: { claimUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<ClaimEvent[]>({
+    queryKey: [`/api/assurance/claims/${claimUuid}/events`],
+  });
+  if (isLoading) {
+    return <p className="pl-3 text-[11px] text-muted-foreground">Loading the claim's lifecycle…</p>;
+  }
+  if (isError || !data) {
+    return (
+      <p className="pl-3 text-[11px] text-muted-foreground">
+        Could not load the claim's lifecycle{error instanceof Error ? `: ${error.message}` : "."}
+      </p>
+    );
+  }
+  if (data.length === 0) {
+    return <p className="pl-3 text-[11px] text-muted-foreground">No lifecycle events recorded yet.</p>;
+  }
+  return (
+    <ul className="mt-1.5 space-y-1 border-l border-border/40 pl-3">
+      {data.map((e) => (
+        <li key={e.uuid} className="text-[11px] text-muted-foreground">
+          <span className="text-foreground">
+            {e.fromStatusLabel ? `${e.fromStatusLabel} → ` : ""}
+            {e.toStatusLabel}
+          </span>
+          <span className="ml-1">· {e.actor ?? "machine"}</span>
+          {e.note && <span className="ml-1 text-muted-foreground/80">— {e.note}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * The assurance claims register (SPINE) for one deployment: the version-bound,
+ * falsifiable claims derived from the assessments, each at its honest status and
+ * weakest-evidence strength. A reader drills into a claim's attributed event
+ * ledger; an admin transitions a claim (the backend enforces the state machine
+ * and the verified-evidence gate) or recomputes the whole register. Self-fetching.
+ */
+function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+  const { toast } = useToast();
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [noteFor, setNoteFor] = useState<Record<string, string>>({});
+
+  const { data, isLoading, isError, error } = useQuery<Claim[]>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-claims`],
+  });
+
+  const recompute = useMutation({
+    mutationFn: async () =>
+      (await apiRequest("POST", `/api/assurance/deployments/${deploymentUuid}/recompute-claims`, {})).json(),
+    onSuccess: (counts: { created: number; updated: number; superseded: number; stale: number }) => {
+      invalidateAssuranceComputed(deploymentUuid);
+      toast({
+        title: "Claims recomputed",
+        description: `${counts.created} created · ${counts.updated} updated · ${counts.superseded} superseded · ${counts.stale} stale`,
+      });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not recompute claims", description: e.message, variant: "destructive" }),
+  });
+
+  const transition = useMutation({
+    mutationFn: async ({ uuid, toStatus, note }: { uuid: string; toStatus: string; note: string }) =>
+      (
+        await apiRequest("POST", `/api/assurance/claims/${uuid}/transition`, {
+          toStatus,
+          ...(note ? { note } : {}),
+        })
+      ).json(),
+    onSuccess: () => {
+      invalidateAssuranceComputed(deploymentUuid);
+      toast({ title: "Claim transitioned" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not transition claim", description: e.message, variant: "destructive" }),
+  });
+
+  const toggle = (uuid: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(uuid)) next.delete(uuid);
+      else next.add(uuid);
+      return next;
+    });
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <ReceiptText className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Assurance claims</h3>
+      {admin && (
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary disabled:opacity-50"
+          onClick={() => recompute.mutate()}
+          disabled={recompute.isPending}
+          title="Re-derive the claims from the deployment's current state"
+        >
+          <RefreshCw className={cn("h-3 w-3", recompute.isPending && "animate-spin")} />
+          Recompute claims
+        </button>
+      )}
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the assurance claims…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the assurance claims{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      {heading}
+      {data.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          No assurance claims derived yet. {admin ? "Recompute to derive them from the current state." : "An admin recompute derives them from the current state."}
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {data.map((c) => {
+            const isOpen = expanded.has(c.uuid);
+            const nextStates = CLAIM_TRANSITIONS[c.status] ?? [];
+            return (
+              <li key={c.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <button
+                    className="inline-flex items-center gap-1 text-left"
+                    onClick={() => toggle(c.uuid)}
+                    aria-expanded={isOpen}
+                  >
+                    {isOpen ? (
+                      <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                    ) : (
+                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                    )}
+                    <span className="text-[12px] font-semibold text-foreground">{c.claimTypeLabel}</span>
+                  </button>
+                  <ClaimStatusChip status={c.status} label={c.statusLabel} />
+                  <EvidenceClassChip value={c.evidenceClass} />
+                  {c.vendorAsserted && (
+                    <span className="text-[10px] text-amber-400/90">vendor-asserted</span>
+                  )}
+                  {c.isStale && <span className="text-[10px] text-amber-400/90">stale</span>}
+                  <span className="text-[10px] text-muted-foreground">
+                    conf {c.confidence === null ? "—" : `${Math.round(c.confidence * 100)}%`}
+                  </span>
+                  {c.assetName && <span className="text-[10px] text-muted-foreground">· {c.assetName}</span>}
+                  {c.receiptDigest && (
+                    <span
+                      className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+                      title={c.receiptDigest}
+                    >
+                      <Fingerprint className="h-3 w-3" />
+                      {c.receiptDigest.slice(0, 12)}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{c.statement}</p>
+                {c.contradictingSummary && (
+                  <p className="mt-1 text-[11px] text-sev-high">{c.contradictingSummary}</p>
+                )}
+                {isOpen && (
+                  <div className="mt-2">
+                    {c.invalidationConditions.length > 0 && (
+                      <div className="mb-1.5 text-[10px] text-muted-foreground">
+                        <span className="uppercase tracking-wide">Invalidated when</span>
+                        <ul className="mt-0.5 list-disc pl-4">
+                          {c.invalidationConditions.map((cond, i) => (
+                            <li key={i}>{cond}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <ClaimEventLedger claimUuid={c.uuid} />
+                    {admin && nextStates.length > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border/30 pt-2">
+                        <input
+                          className={cn(fieldInput, "w-40")}
+                          placeholder="Note (optional)"
+                          value={noteFor[c.uuid] ?? ""}
+                          onChange={(e) => setNoteFor((p) => ({ ...p, [c.uuid]: e.target.value }))}
+                        />
+                        <select
+                          className={fieldInput}
+                          value=""
+                          disabled={transition.isPending}
+                          aria-label="Move claim to"
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              transition.mutate({ uuid: c.uuid, toStatus: e.target.value, note: noteFor[c.uuid] ?? "" });
+                            }
+                          }}
+                        >
+                          <option value="" disabled>
+                            Move to…
+                          </option>
+                          {nextStates.map((s) => (
+                            <option key={s} value={s}>
+                              {CLAIM_STATUS_LABEL[s] || s}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ---- Decision support (SPINE Stage 1C) ----
+
+interface ClaimBrief {
+  uuid: string;
+  claimType: string;
+  status: string;
+  statement: string;
+}
+interface DecisionSupport {
+  decision: string | null;
+  decisionLabel: string | null;
+  fromFindings: string | null;
+  claimCap: string | null;
+  paused: boolean;
+  claims: {
+    hasClaims: boolean;
+    retestPending: boolean;
+    contradicted: ClaimBrief[];
+    stale: ClaimBrief[];
+    unknown: ClaimBrief[];
+    supporting: ClaimBrief[];
+  };
+  note: string;
+}
+
+/**
+ * A deployment's six-state decision WITH why (SPINE Stage 1C): the finding-based
+ * signal, the claim cap, and exactly which current claims support or undermine
+ * it. A READY decision is shown to stand only while its supporting claims stay
+ * current; an unassessed deployment reads "Not assessed", never ready. Self-fetching.
+ */
+function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<DecisionSupport>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/decision-support`],
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Scale className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Decision support</h3>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the decision rationale…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the decision rationale{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  const bucket = (title: string, claims: ClaimBrief[], tone: string) =>
+    claims.length === 0 ? null : (
+      <div>
+        <p className={cn("text-[10px] uppercase tracking-wide", tone)}>{title}</p>
+        <ul className="mt-0.5 space-y-0.5">
+          {claims.map((c) => (
+            <li key={c.uuid} className="text-[11px] text-muted-foreground">
+              <span className="text-foreground">{c.claimType}</span> — {c.statement}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  return (
+    <section>
+      {heading}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        {data.decision ? (
+          <DecisionPill decision={data.decision as never} label={data.decisionLabel || undefined} />
+        ) : (
+          <span className="inline-flex items-center rounded-full border border-border/50 bg-surface-1/50 px-2 py-0.5 text-[11px] text-muted-foreground">
+            Not assessed
+          </span>
+        )}
+        {data.paused && <span className="text-[11px] text-amber-400">operator failsafe paused</span>}
+        <span className="text-[11px] text-muted-foreground">
+          from findings: <span className="text-foreground">{data.fromFindings ?? "—"}</span>
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          claim cap: <span className="text-foreground">{data.claimCap ?? "none"}</span>
+        </span>
+        {data.claims.retestPending && <span className="text-[11px] text-amber-400">retest pending</span>}
+      </div>
+      <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">{data.note}</p>
+      <div className="space-y-2">
+        {bucket("Contradicted (holds at needs remediation)", data.claims.contradicted, "text-sev-high")}
+        {bucket("Stale", data.claims.stale, "text-amber-400")}
+        {bucket("Unknown", data.claims.unknown, "text-amber-400")}
+        {bucket("Supporting", data.claims.supporting, "text-emerald-400")}
+        {!data.claims.hasClaims && (
+          <p className="text-[11px] text-muted-foreground">
+            No current assurance claims bear on this decision; the finding-based signal governs.
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---- Revalidation plan (SPINE Stage 1D) ----
+
+interface RevalidationWork {
+  claimUuid: string;
+  claimType: string;
+  statement: string;
+  status: string;
+  reason: string;
+  retestRequirementUuid: string | null;
+  athenaReassessments: string[];
+  achillesCapabilities: string[];
+}
+interface RevalidationPlan {
+  deploymentUuid: string;
+  systemFingerprint: string;
+  summary: { required: number; stillCurrent: number; outstandingUnknowns: number };
+  recomputeAction: string;
+  required: RevalidationWork[];
+  outstandingUnknowns: { claimUuid: string; claimType: string; statement: string; status: string }[];
+  stillCurrent: { claimUuid: string; claimType: string; status: string }[];
+  note: string;
+}
+
+/**
+ * The minimal revalidation plan (SPINE Stage 1D): for each claim a change
+ * invalidated, expired, or contradicted, the exact Athena reassessment and
+ * Achilles capability areas to re-run — and everything that stays current and
+ * need not be re-run. This is "what must re-run because of this change", not "run
+ * it all again". Self-fetching.
+ */
+function RevalidationPlanPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<RevalidationPlan>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/revalidation-plan`],
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Waypoints className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Revalidation plan</h3>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the revalidation plan…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the revalidation plan{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section>
+      {heading}
+      <div className="mb-2 flex flex-wrap gap-2 text-[11px]">
+        <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+          {data.summary.required} need revalidation
+        </span>
+        <span className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-emerald-400">
+          {data.summary.stillCurrent} still current
+        </span>
+        <span className="rounded-md border border-border/40 bg-surface-1/40 px-2 py-1 text-muted-foreground">
+          {data.summary.outstandingUnknowns} outstanding unknowns
+        </span>
+      </div>
+      <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">{data.note}</p>
+      {data.required.length > 0 && (
+        <ul className="space-y-2">
+          {data.required.map((w) => (
+            <li key={w.claimUuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[12px] font-semibold text-foreground">{w.claimType}</span>
+                <ClaimStatusChip status={w.status} />
+                <span className="text-[10px] text-muted-foreground">{w.reason}</span>
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">{w.statement}</p>
+              {(w.athenaReassessments.length > 0 || w.achillesCapabilities.length > 0) && (
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                  {w.athenaReassessments.length > 0 && (
+                    <span>Athena: <span className="text-foreground">{w.athenaReassessments.join(", ")}</span></span>
+                  )}
+                  {w.achillesCapabilities.length > 0 && (
+                    <span>Achilles: <span className="text-foreground">{w.achillesCapabilities.join(", ")}</span></span>
+                  )}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ---- Retest obligations (SPINE Phase 2) ----
+
+interface RetestRequirement {
+  uuid: string;
+  deploymentUuid: string | null;
+  claimUuid: string | null;
+  claimType: string;
+  claimTypeLabel: string;
+  resolvingClaimUuid: string | null;
+  reason: string;
+  triggeringSystemFingerprint: string;
+  actor: string | null;
+  isOpen: boolean;
+  openedAt: string | null;
+  resolvedAt: string | null;
+}
+
+/**
+ * The deployment's retest obligations (SPINE Phase 2): the durable, attributed
+ * duties to re-test a claim whose bound system state changed. Open by default;
+ * a resolved obligation is a process fact, not a security closure. Self-fetching.
+ */
+function RetestRequirementsPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const { data, isLoading, isError, error } = useQuery<RetestRequirement[]>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/retest-requirements`, { all: showAll ? "true" : undefined }],
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Clock className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Retest obligations</h3>
+      <button
+        className="ml-auto text-[11px] text-muted-foreground hover:text-primary"
+        onClick={() => setShowAll((v) => !v)}
+      >
+        {showAll ? "Open only" : "Include resolved"}
+      </button>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the retest obligations…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the retest obligations{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section>
+      {heading}
+      {data.length === 0 ? (
+        <p className="text-[12px] text-muted-foreground">
+          {showAll ? "No retest obligations recorded." : "No open retest obligations."}
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {data.map((r) => (
+            <li key={r.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[12px] font-semibold text-foreground">{r.claimTypeLabel || r.claimType}</span>
+                {r.isOpen ? (
+                  <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-400">
+                    Open
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">
+                    Resolved
+                  </span>
+                )}
+                <span className="text-[10px] text-muted-foreground">{r.actor ? `by ${r.actor}` : "machine"}</span>
+              </div>
+              <p className="mt-1 text-[11px] text-muted-foreground">{r.reason}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ---- Invalidation engine (SPINE Phase 2) ----
+
+/**
+ * An admin control that runs the invalidation engine over the deployment and
+ * shows what it changed (SPINE Phase 2). Idempotent — a re-run opens no duplicate
+ * obligation. It reports counts; it does not, by itself, assert a system is fixed.
+ */
+function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+  const { toast } = useToast();
+  const [last, setLast] = useState<{ invalidated: number; retestsOpened: number; retestsResolved: number } | null>(null);
+  const check = useMutation({
+    mutationFn: async () =>
+      (await apiRequest("POST", `/api/assurance/deployments/${deploymentUuid}/check-invalidations`, {})).json(),
+    onSuccess: (counts: { invalidated: number; retestsOpened: number; retestsResolved: number }) => {
+      setLast(counts);
+      invalidateAssuranceComputed(deploymentUuid);
+      toast({ title: "Invalidation check complete" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not run the invalidation check", description: e.message, variant: "destructive" }),
+  });
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-2">
+        <RefreshCw className="h-4 w-4 text-primary" />
+        <h3 className="text-[13px] font-semibold text-foreground">Invalidation check</h3>
+        {admin && (
+          <button
+            className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary disabled:opacity-50"
+            onClick={() => check.mutate()}
+            disabled={check.isPending}
+          >
+            <RefreshCw className={cn("h-3 w-3", check.isPending && "animate-spin")} />
+            Run check
+          </button>
+        )}
+      </div>
+      <p className="text-[12px] leading-relaxed text-muted-foreground">
+        Re-derives which current claims a change has invalidated: it opens an attributed retest obligation for
+        each drifted claim and moves it off a pass, and resolves any obligation a rebinding re-derivation has
+        satisfied. {admin ? "" : "An admin runs it."}
+      </p>
+      {last && (
+        <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+          <span className="rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+            {last.invalidated} invalidated
+          </span>
+          <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+            {last.retestsOpened} retests opened
+          </span>
+          <span className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-emerald-400">
+            {last.retestsResolved} retests resolved
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---- Operational-risk register (Phase 3.9) ----
+
+interface OperationalRiskSignal {
+  source: string;
+  reference: string;
+  detail: string;
+  assetName?: string;
+  providerName?: string;
+  findingType?: string;
+  title?: string;
+  severity?: string;
+}
+interface OperationalRiskClass {
+  key: string;
+  label: string;
+  concern: string;
+  concernLabel: string;
+  question: string;
+  status: string;
+  observed: boolean;
+  risk: string | null;
+  basis: string[];
+  activeFindingCount: number;
+  signals: OperationalRiskSignal[];
+  runtimeSignal: string;
+  notes: string[];
+}
+interface OperationalRisk {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  classes: OperationalRiskClass[];
+  summary: {
+    totalClasses: number;
+    observedClasses: number;
+    unmappedClasses: number;
+    high: number;
+    elevated: number;
+    moderate: number;
+    worstRisk: string | null;
+    unmapped: string[];
+  };
+  overall: { status: string; risk: string | null; unmappedClasses: number; note: string };
+}
+
+/** An operational-risk band, or "unmapped" when there is no basis — never a
+ *  fabricated 0. */
+function RiskBandChip({ risk }: { risk: string | null }) {
+  if (risk === null) {
+    return (
+      <span className="inline-flex items-center rounded-full border border-border/50 bg-surface-1/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+        unmapped
+      </span>
+    );
+  }
+  const cls =
+    risk === "high"
+      ? "border-sev-high/40 bg-sev-high/10 text-sev-high"
+      : risk === "elevated"
+        ? "border-amber-500/40 bg-amber-500/10 text-amber-400"
+        : "border-sky-500/40 bg-sky-500/10 text-sky-300";
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium", cls)}>
+      {risk}
+    </span>
+  );
+}
+
+/**
+ * The deployment's narrow operational-risk register (Phase 3.9): the four
+ * operational-risk classes (retry-storm, denial-of-wallet, token-storm, provider-
+ * outage), each an ordinal band with a real basis or honestly `unmapped` (risk
+ * null, never a fabricated 0). Distinct from operational-ASSURANCE. Self-fetching.
+ */
+function OperationalRiskPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<OperationalRisk>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/operational-risk`],
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Zap className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Operational risk</h3>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the operational-risk register…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the operational-risk register{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section>
+      {heading}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <span className="text-[11px] text-muted-foreground">Overall:</span>
+        <RiskBandChip risk={data.overall.risk} />
+        <span className="text-[11px] text-muted-foreground">
+          {data.summary.observedClasses}/{data.summary.totalClasses} observed · {data.summary.unmappedClasses} unmapped
+        </span>
+      </div>
+      <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">{data.overall.note}</p>
+      <ul className="space-y-2">
+        {data.classes.map((c) => (
+          <li key={c.key} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[12px] font-semibold text-foreground">{c.label}</span>
+              <RiskBandChip risk={c.risk} />
+              <span className="text-[10px] text-muted-foreground">{c.concernLabel}</span>
+              {c.activeFindingCount > 0 && (
+                <span className="text-[10px] text-sev-high">{c.activeFindingCount} active finding{c.activeFindingCount === 1 ? "" : "s"}</span>
+              )}
+            </div>
+            {!c.observed ? (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Unmapped — no basis in the stored graph. {c.runtimeSignal}. Read as a gap, never a clean pass.
+              </p>
+            ) : (
+              c.signals.length > 0 && (
+                <ul className="mt-1 space-y-0.5 border-l border-border/40 pl-2.5">
+                  {c.signals.map((s, i) => (
+                    <li key={i} className="text-[11px] text-muted-foreground">
+                      {s.detail}
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+// ---- BOM drift + declared architecture (SPINE Stage 3) ----
+
+interface BomDrift {
+  deploymentUuid: string;
+  hasDeclared: boolean;
+  driftDetected: boolean;
+  summary: {
+    declaredCount: number;
+    observedCount: number;
+    matched: number;
+    undeclared: number;
+    undeclaredProviders: number;
+    missing: number;
+  };
+  undeclared: { assetUuid: string; kind: string; kindLabel: string; name: string; identifier: string; providerName: string | null; severity: string }[];
+  undeclaredProviders: string[];
+  missing: { declaredUuid: string; kind: string; kindLabel: string; name: string; identifier: string; providerName: string | null }[];
+  note: string;
+}
+interface DeclaredComponent {
+  uuid: string;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  providerName: string;
+  note: string;
+}
+interface DeclaredArchitecture {
+  declared: DeclaredComponent[];
+  drift: BomDrift;
+}
+
+const DECLARED_KINDS: { value: string; label: string }[] = [
+  { value: "model", label: "Model" },
+  { value: "agent", label: "Agent" },
+  { value: "tool", label: "Tool" },
+  { value: "api", label: "API" },
+  { value: "gateway", label: "AI gateway" },
+  { value: "vector_db", label: "Vector database" },
+  { value: "service_account", label: "Service account" },
+  { value: "data_store", label: "Data store" },
+  { value: "mcp_server", label: "MCP server" },
+  { value: "skill", label: "Agent skill" },
+  { value: "other", label: "Other" },
+];
+
+function DriftBody({ drift }: { drift: BomDrift }) {
+  if (!drift.hasDeclared) {
+    return (
+      <p className="text-[12px] leading-relaxed text-muted-foreground">
+        No declared architecture: drift cannot be computed. Declare the expected components to assess whether the
+        observed BOM matches — an absent declaration is <span className="text-amber-400">not</span> a clean bill of
+        materials.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2 text-[11px]">
+        <span className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-emerald-400">
+          {drift.summary.matched} matched
+        </span>
+        <span className={cn("rounded-md border px-2 py-1", drift.summary.undeclared > 0 ? "border-sev-high/30 bg-sev-high/5 text-sev-high" : "border-border/40 bg-surface-1/40 text-muted-foreground")}>
+          {drift.summary.undeclared} undeclared
+        </span>
+        <span className={cn("rounded-md border px-2 py-1", drift.summary.undeclaredProviders > 0 ? "border-sev-high/30 bg-sev-high/5 text-sev-high" : "border-border/40 bg-surface-1/40 text-muted-foreground")}>
+          {drift.summary.undeclaredProviders} undeclared providers
+        </span>
+        <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+          {drift.summary.missing} declared-not-observed
+        </span>
+      </div>
+      {drift.undeclared.length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-sev-high">Undeclared (shadow) components</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {drift.undeclared.map((c) => (
+              <li key={c.assetUuid} className="text-[11px] text-muted-foreground">
+                <span className="text-foreground">{c.name}</span> · {c.kindLabel} · {c.severity}
+                {c.providerName ? ` · ${c.providerName}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {drift.undeclaredProviders.length > 0 && (
+        <p className="text-[11px] text-sev-high">
+          Undeclared providers: <span className="text-foreground">{drift.undeclaredProviders.join(", ")}</span>
+        </p>
+      )}
+      {drift.missing.length > 0 && (
+        <div>
+          <p className="text-[10px] uppercase tracking-wide text-amber-400">Declared but not observed</p>
+          <ul className="mt-0.5 space-y-0.5">
+            {drift.missing.map((c) => (
+              <li key={c.declaredUuid} className="text-[11px] text-muted-foreground">
+                <span className="text-foreground">{c.name}</span> · {c.kindLabel}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{drift.note}</p>
+    </div>
+  );
+}
+
+/**
+ * Declared-vs-observed AI-BOM drift (SPINE Stage 3), shown beside the AI-BOM. An
+ * absent declaration reads as a gap, never a clean bill. An admin can record the
+ * current drift as managed findings (idempotent, non-destructive). Self-fetching.
+ */
+function BomDriftPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+  const { toast } = useToast();
+  const { data, isLoading, isError, error } = useQuery<BomDrift>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/bom-drift`],
+  });
+  const record = useMutation({
+    mutationFn: async () =>
+      (await apiRequest("POST", `/api/assurance/deployments/${deploymentUuid}/record-bom-drift`, {})).json(),
+    onSuccess: (counts: { created: number; updated: number; reopened: number; resolved: number }) => {
+      invalidateAssuranceComputed(deploymentUuid);
+      toast({
+        title: "BOM drift recorded",
+        description: `${counts.created} created · ${counts.updated} updated · ${counts.reopened} reopened · ${counts.resolved} resolved`,
+      });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not record BOM drift", description: e.message, variant: "destructive" }),
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <GitBranch className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">BOM drift</h3>
+      {admin && (
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary disabled:opacity-50"
+          onClick={() => record.mutate()}
+          disabled={record.isPending}
+          title="Record the current drift as managed findings"
+        >
+          <RefreshCw className={cn("h-3 w-3", record.isPending && "animate-spin")} />
+          Record drift
+        </button>
+      )}
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the BOM drift…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the BOM drift{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section>
+      {heading}
+      <DriftBody drift={data} />
+    </section>
+  );
+}
+
+/** A working row in the declared-architecture editor. */
+interface DeclaredRow {
+  kind: string;
+  name: string;
+  identifier: string;
+  providerName: string;
+  note: string;
+}
+
+/**
+ * The admin-editable declared architecture (SPINE Stage 3): the baseline BOM
+ * drift compares against. Mirrors the data-boundary GET+PUT editor. A PUT REPLACES
+ * the whole declared set, so the editor loads the current declaration and submits
+ * the full list. Self-fetching.
+ */
+function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [rows, setRows] = useState<DeclaredRow[]>([]);
+
+  const { data, isLoading, isError, error } = useQuery<DeclaredArchitecture>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/declared-architecture`],
+  });
+
+  const save = useMutation({
+    mutationFn: async (components: DeclaredRow[]) =>
+      (
+        await apiRequest("PUT", `/api/assurance/deployments/${deploymentUuid}/declared-architecture`, {
+          components: components
+            .filter((r) => r.name.trim())
+            .map((r) => ({
+              kind: r.kind,
+              name: r.name.trim(),
+              identifier: r.identifier.trim(),
+              providerName: r.providerName.trim(),
+              note: r.note.trim(),
+            })),
+        })
+      ).json(),
+    onSuccess: () => {
+      invalidateAssuranceComputed(deploymentUuid);
+      setEditing(false);
+      toast({ title: "Declared architecture saved" });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not save declared architecture", description: e.message, variant: "destructive" }),
+  });
+
+  const startEditing = () => {
+    setRows(
+      (data?.declared ?? []).map((c) => ({
+        kind: c.kind || "other",
+        name: c.name,
+        identifier: c.identifier,
+        providerName: c.providerName,
+        note: c.note,
+      })),
+    );
+    setEditing(true);
+  };
+
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Wrench className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Declared architecture</h3>
+      {admin && !editing && (
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={startEditing}
+        >
+          <Pencil className="h-3 w-3" />
+          {data && data.declared.length > 0 ? "Edit declaration" : "Declare architecture"}
+        </button>
+      )}
+    </div>
+  );
+
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the declared architecture…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the declared architecture{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section>
+      {heading}
+      {editing ? (
+        <div className="space-y-2 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
+          <p className="text-[11px] text-muted-foreground">
+            The full declared set is replaced on save. Declaring an architecture is a separate axis from what is
+            running — it does not move the system fingerprint.
+          </p>
+          {rows.map((r, i) => (
+            <div key={i} className="flex flex-wrap items-center gap-2">
+              <select
+                className={fieldInput}
+                value={r.kind}
+                onChange={(e) => setRows((p) => p.map((row, j) => (j === i ? { ...row, kind: e.target.value } : row)))}
+                aria-label="Component kind"
+              >
+                {DECLARED_KINDS.map((k) => (
+                  <option key={k.value} value={k.value}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                className={cn(fieldInput, "w-32")}
+                placeholder="Name"
+                value={r.name}
+                onChange={(e) => setRows((p) => p.map((row, j) => (j === i ? { ...row, name: e.target.value } : row)))}
+              />
+              <input
+                className={cn(fieldInput, "w-36")}
+                placeholder="Identifier (optional)"
+                value={r.identifier}
+                onChange={(e) => setRows((p) => p.map((row, j) => (j === i ? { ...row, identifier: e.target.value } : row)))}
+              />
+              <input
+                className={cn(fieldInput, "w-28")}
+                placeholder="Provider (optional)"
+                value={r.providerName}
+                onChange={(e) => setRows((p) => p.map((row, j) => (j === i ? { ...row, providerName: e.target.value } : row)))}
+              />
+              <button
+                className="text-muted-foreground hover:text-sev-high"
+                aria-label="Remove component"
+                onClick={() => setRows((p) => p.filter((_, j) => j !== i))}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          <button
+            className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+            onClick={() =>
+              setRows((p) => [...p, { kind: "model", name: "", identifier: "", providerName: "", note: "" }])
+            }
+          >
+            <Plus className="h-3 w-3" />
+            Add component
+          </button>
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              className="rounded-md bg-primary/20 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/30 disabled:opacity-50"
+              disabled={save.isPending}
+              onClick={() => save.mutate(rows)}
+            >
+              {save.isPending ? "Saving…" : "Save declaration"}
+            </button>
+            <button className="text-[12px] text-muted-foreground hover:text-foreground" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : data.declared.length === 0 ? (
+        <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+          No architecture declared. Until one is, BOM drift cannot be computed and the observed supply chain reads
+          as an <span className="text-amber-400">unassessed gap</span>, never a clean bill.
+        </p>
+      ) : (
+        <ul className="mb-3 space-y-1">
+          {data.declared.map((c) => (
+            <li key={c.uuid} className="text-[12px] text-muted-foreground">
+              <span className="text-foreground">{c.name}</span> · {c.kindLabel}
+              {c.providerName ? ` · ${c.providerName}` : ""}
+              {c.identifier ? <span className="ml-1 font-mono text-[10px]">{c.identifier}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+// ---- Outbound connectors (commercial spine) ----
+
+interface ConnectorRef {
+  name: string;
+  configured: boolean;
+}
+interface ConnectorsView {
+  connectors: ConnectorRef[];
+}
+
+/**
+ * The deployment's outbound connectors and whether each is configured (commercial
+ * spine). A connector with no credentials reads as not configured, never as live.
+ * An admin can push one of the deployment's findings out to a connector; an inert
+ * connector reports not-configured and makes no network call. Self-fetching.
+ */
+function ConnectorsPanel({
+  deploymentUuid,
+  admin,
+  findings,
+}: {
+  deploymentUuid: string;
+  admin: boolean;
+  findings: Finding[];
+}) {
+  const { toast } = useToast();
+  const [findingUuid, setFindingUuid] = useState("");
+  const { data, isLoading, isError, error } = useQuery<ConnectorsView>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/connectors`],
+  });
+  const push = useMutation({
+    mutationFn: async ({ connector, finding }: { connector: string; finding: string }) =>
+      (
+        await apiRequest("POST", `/api/assurance/deployments/${deploymentUuid}/connectors/${connector}/push`, {
+          finding,
+        })
+      ).json(),
+    onSuccess: (result: { ok: boolean; detail: string; externalRef: string | null }) => {
+      toast({
+        title: result.ok ? "Pushed to connector" : "Connector did not accept",
+        description: result.ok ? (result.externalRef ? `Reference: ${result.externalRef}` : undefined) : result.detail,
+        variant: result.ok ? undefined : "destructive",
+      });
+    },
+    onError: (e: Error) =>
+      toast({ title: "Could not push to connector", description: e.message, variant: "destructive" }),
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <Send className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Outbound connectors</h3>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the connectors…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the connectors{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section>
+      {heading}
+      <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">
+        The integrations this deployment can push evidence to. A connector with no credentials configured is inert —
+        it reads as not configured, never as a live integration, and a push against it makes no network call.
+      </p>
+      <ul className="space-y-1.5">
+        {data.connectors.map((c) => (
+          <li key={c.name} className="flex flex-wrap items-center gap-2 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
+            <Building2 className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-[12px] font-semibold text-foreground">{c.name}</span>
+            {c.configured ? (
+              <span className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">
+                configured
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded-full border border-border/50 bg-surface-1/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                not configured
+              </span>
+            )}
+            {admin && (
+              <button
+                className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary disabled:opacity-50"
+                onClick={() => {
+                  if (!findingUuid) {
+                    toast({ title: "Pick a finding to push", variant: "destructive" });
+                    return;
+                  }
+                  push.mutate({ connector: c.name, finding: findingUuid });
+                }}
+                disabled={push.isPending}
+              >
+                <Send className="h-3 w-3" />
+                Push finding
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {admin && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-muted-foreground">Finding to push:</span>
+          <select
+            className={cn(fieldInput, "max-w-[18rem]")}
+            value={findingUuid}
+            onChange={(e) => setFindingUuid(e.target.value)}
+            aria-label="Finding to push to a connector"
+          >
+            <option value="">Select a finding…</option>
+            {findings.map((f) => (
+              <option key={f.uuid} value={f.uuid}>
+                {f.title.length > 60 ? `${f.title.slice(0, 60)}…` : f.title}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---- Incident evidence pack (Phase 3.7) ----
+
+interface IncidentPack {
+  packVersion: string;
+  attests: string;
+  identity: {
+    deployment: { name: string; uuid: string; environment: string; environmentLabel: string; owner: string | null };
+    finding: {
+      uuid: string;
+      fingerprint: string;
+      category: string;
+      title: string;
+      severity: string;
+      severityLabel: string;
+      status: string;
+      statusLabel: string;
+    };
+  };
+  surface: {
+    asset: { name: string; kindLabel: string; classificationLabel: string } | null;
+    assetPresent: boolean;
+    location: string | null;
+    controlMapping: Record<string, unknown>;
+  };
+  evidence: { algorithm: string; rows: string[][]; count: number; evidenceClass: string };
+  receipt: { algorithm: string; digest: string; evidenceCount: number };
+  runtimeTranscript: {
+    inAssuranceRecord: boolean;
+    see: string;
+    reason: string;
+    enginePackRef: { available: boolean; scanUuid: string | null; engineRunId: string | null };
+  };
+  decision: { decision: string | null; decisionLabel: string | null };
+  algorithm: string;
+  digest: string;
+  computedAt: string | null;
+}
+
+/**
+ * A finding's AI Incident Evidence Pack (Phase 3.7), self-fetching when a reader
+ * opens it from the finding. Attests integrity and provenance, never that the
+ * conclusion is true or the system fixed: the runtime transcript is an explicit
+ * gap, a null decision reads "Not assessed", and a downloadable copy is offered.
+ */
+function IncidentPackView({ findingUuid }: { findingUuid: string }) {
+  const { toast } = useToast();
+  const { data, isLoading, isError, error } = useQuery<IncidentPack>({
+    queryKey: [`/api/assurance/findings/${findingUuid}/incident-pack`],
+  });
+  if (isLoading) {
+    return <p className="mt-2 text-[11px] text-muted-foreground">Loading the incident pack…</p>;
+  }
+  if (isError || !data) {
+    return (
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Could not load the incident pack{error instanceof Error ? `: ${error.message}` : "."}
+      </p>
+    );
+  }
+  const download = () => {
+    try {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `incident-pack-${data.identity.finding.uuid}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast({ title: "Could not download the incident pack", variant: "destructive" });
+    }
+  };
+  return (
+    <div className="mt-2 space-y-1.5 rounded-lg border border-border/40 bg-surface-1/30 p-2.5 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2">
+        <FileText className="h-3.5 w-3.5 text-primary" />
+        <span className="text-[11px] font-semibold text-foreground">Incident evidence pack</span>
+        <span className="text-[10px] text-muted-foreground">{data.packVersion}</span>
+        <button
+          className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={download}
+        >
+          <Download className="h-3 w-3" />
+          Download JSON
+        </button>
+      </div>
+      <p className="text-[10px] text-muted-foreground/80">
+        Attests {data.attests}.
+      </p>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+        <span>Category: <span className="text-foreground">{data.identity.finding.category}</span></span>
+        <span>Evidence: <span className="text-foreground">{data.evidence.evidenceClass || "—"}</span> ({data.evidence.count})</span>
+        <span>
+          Decision:{" "}
+          <span className="text-foreground">{data.decision.decisionLabel ?? data.decision.decision ?? "Not assessed"}</span>
+        </span>
+      </div>
+      {data.surface.asset && (
+        <p>
+          Surface: <span className="text-foreground">{data.surface.asset.name}</span> · {data.surface.asset.kindLabel}
+          {data.surface.location ? ` · ${data.surface.location}` : ""}
+        </p>
+      )}
+      <p className="text-amber-400/90">
+        Runtime transcript: not in the assurance record ({data.runtimeTranscript.reason}) — an explicit gap, never
+        fabricated. Engine pack {data.runtimeTranscript.enginePackRef.available ? "available for replay" : "not linked"}.
+      </p>
+      {data.receipt.digest && (
+        <p className="font-mono text-[10px]" title={data.receipt.digest}>
+          receipt {data.receipt.algorithm}: {data.receipt.digest.slice(0, 24)}…
+        </p>
+      )}
+      <p className="font-mono text-[10px]" title={data.digest}>
+        pack {data.algorithm}: {data.digest.slice(0, 24)}…
+      </p>
+    </div>
+  );
+}
+
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
   const [view, setView] = useState<ViewMode>("graph");
@@ -5787,6 +7256,14 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             expanded deployment. */}
                         <AiBomPanel deploymentUuid={d.uuid} />
 
+                        {/* Declared architecture + BOM drift (SPINE Stage 3): the
+                            admin-declared baseline and where the observed supply
+                            chain diverges from it. Placed beside the AI-BOM they
+                            compare against; an absent declaration reads as a gap,
+                            never a clean bill. Self-fetch. */}
+                        <DeclaredArchitecturePanel deploymentUuid={d.uuid} admin={admin} />
+                        <BomDriftPanel deploymentUuid={d.uuid} admin={admin} />
+
                         {/* AI system capability map (Phase 1.3): what this
                             deployment can do. Self-fetches, so it loads only for
                             an expanded deployment. */}
@@ -5823,6 +7300,30 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             default). Self-fetches, so it loads only for an expanded
                             deployment. */}
                         <OperationalAssurancePanel deploymentUuid={d.uuid} />
+
+                        {/* ---- Continuous assurance (SPINE Phases 1–3) ----
+                            The falsifiable claims register and how it caps the
+                            six-state decision, the minimal revalidation plan a
+                            change forces, the outstanding retest obligations, the
+                            invalidation engine, and the narrow operational-risk
+                            register. Honest by construction: an unassessed decision
+                            reads "Not assessed", an unmapped risk class reads
+                            "unmapped" (never a fabricated 0), and a resolved
+                            obligation is a process fact, never a security closure.
+                            Self-fetch, so they load only for an expanded deployment. */}
+                        <div className="space-y-5">
+                          <SectionHeading
+                            icon={ReceiptText}
+                            title="Continuous assurance"
+                            blurb="The version-bound assurance claims, the decision they cap and why, the minimal revalidation a change forces, the outstanding retest obligations, the invalidation engine, and the narrow operational-risk register. A pass stands only while its claims stay current; an unassessed or unmapped state reads honestly, never green-by-default."
+                          />
+                          <ClaimsPanel deploymentUuid={d.uuid} admin={admin} />
+                          <DecisionSupportPanel deploymentUuid={d.uuid} />
+                          <RevalidationPlanPanel deploymentUuid={d.uuid} />
+                          <RetestRequirementsPanel deploymentUuid={d.uuid} />
+                          <InvalidationPanel deploymentUuid={d.uuid} admin={admin} />
+                          <OperationalRiskPanel deploymentUuid={d.uuid} />
+                        </div>
 
                         {/* Vendor assurance (commercial spine): the third-party
                             posture — each vendor's assertions at their true
@@ -5883,6 +7384,12 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                           <TrainingReusePanel deploymentUuid={d.uuid} />
                           <MetadataLoggingPanel deploymentUuid={d.uuid} />
                         </div>
+
+                        {/* Outbound connectors (commercial spine): the integrations
+                            this deployment can push evidence to, honest about which
+                            are inert for lack of credentials. An admin pushes one of
+                            the deployment's findings out. Self-fetch. */}
+                        <ConnectorsPanel deploymentUuid={d.uuid} admin={admin} findings={depFindings} />
 
                         {/* Assets, each with the findings attributed to it. */}
                         <section>

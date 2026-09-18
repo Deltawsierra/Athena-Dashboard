@@ -3595,3 +3595,1174 @@ export async function remediationAssign(uuid: string, assignee: string | null, n
     mapRemediation,
   );
 }
+
+// ============================================================================
+// Continuous-assurance loop (SPINE Phases 1–3): claims, drift, decision-support,
+// revalidation, retest, invalidation, operational-risk, incident packs,
+// connectors. The system of record's continuous-assurance capabilities, mapped
+// to camelCase here once, exactly like the reads above. Honest by construction:
+// a null ratio/decision stays null (never a fabricated 0), an undeclared
+// baseline reads as undeclared (never a clean bill), a resolved remediation is a
+// process claim, and nothing reads green-by-default.
+// ============================================================================
+
+// ---- Assurance claims register (SPINE) ----
+
+/** A version-bound, falsifiable assurance claim (backend AssuranceClaimSerializer).
+ *  Every field is machine-derived or moved through the attributed transition
+ *  action; the API never lets a claim be hand-edited into a dishonest state. */
+export interface AssuranceClaim {
+  uuid: string;
+  deploymentUuid: string | null;
+  assetUuid: string | null;
+  assetName: string | null;
+  claimType: string;
+  claimTypeLabel: string;
+  statement: string;
+  fingerprint: string;
+  systemFingerprint: string;
+  policyVersion: string;
+  environment: string;
+  environmentLabel: string;
+  status: string;
+  statusLabel: string;
+  evidenceClass: string;
+  evidenceClassLabel: string;
+  // Null when the backend recorded no confidence (never laundered into 0).
+  confidence: number | null;
+  vendorAsserted: boolean;
+  // The six-state decision the claim reflects, or null when unassessed (never
+  // silently read as ready).
+  assessment: string | null;
+  assessmentLabel: string | null;
+  supportingSummary: string;
+  contradictingSummary: string;
+  invalidationConditions: string[];
+  supersededBy: string | null;
+  humanOwner: string | null;
+  receiptDigest: string;
+  isStale: boolean;
+  validFrom: string | null;
+  validTo: string | null;
+  verifiedAt: string | null;
+  expiration: string | null;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** One attributed step in a claim's lifecycle (backend ClaimEventSerializer). */
+export interface ClaimEvent {
+  uuid: string;
+  fromStatus: string | null;
+  fromStatusLabel: string | null;
+  toStatus: string;
+  toStatusLabel: string;
+  actor: string | null;
+  note: string;
+  createdAt: string | null;
+}
+
+/** What a claim transition did: the claim's new status and the event it wrote. */
+export interface ClaimTransitionResult {
+  status: string;
+  statusLabel: string;
+  event: ClaimEvent;
+}
+
+/** The reconciliation counts a claims recompute returns (SPINE Phase 1). */
+export interface ClaimRecomputeCounts {
+  created: number;
+  updated: number;
+  superseded: number;
+  stale: number;
+}
+
+function claim(raw: Record<string, unknown>): AssuranceClaim {
+  return {
+    uuid: str(raw.uuid),
+    deploymentUuid: strOrNull(raw.deployment_uuid),
+    assetUuid: strOrNull(raw.asset_uuid),
+    assetName: strOrNull(raw.asset_name),
+    claimType: str(raw.claim_type),
+    claimTypeLabel: str(raw.claim_type_label),
+    statement: str(raw.statement),
+    fingerprint: str(raw.fingerprint),
+    systemFingerprint: str(raw.system_fingerprint),
+    policyVersion: str(raw.policy_version),
+    environment: str(raw.environment),
+    environmentLabel: str(raw.environment_label),
+    status: str(raw.status),
+    statusLabel: str(raw.status_label),
+    evidenceClass: str(raw.evidence_class),
+    evidenceClassLabel: str(raw.evidence_class_label),
+    confidence: numOrNull(raw.confidence),
+    vendorAsserted: bool(raw.vendor_asserted),
+    assessment: strOrNull(raw.assessment),
+    assessmentLabel: strOrNull(raw.assessment_label),
+    supportingSummary: str(raw.supporting_summary),
+    contradictingSummary: str(raw.contradicting_summary),
+    invalidationConditions: strList(raw.invalidation_conditions),
+    supersededBy: strOrNull(raw.superseded_by),
+    humanOwner: strOrNull(raw.human_owner),
+    receiptDigest: str(raw.receipt_digest),
+    isStale: bool(raw.is_stale),
+    validFrom: strOrNull(raw.valid_from),
+    validTo: strOrNull(raw.valid_to),
+    verifiedAt: strOrNull(raw.verified_at),
+    expiration: strOrNull(raw.expiration),
+    firstSeen: strOrNull(raw.first_seen),
+    lastSeen: strOrNull(raw.last_seen),
+    createdAt: strOrNull(raw.created_at),
+    updatedAt: strOrNull(raw.updated_at),
+  };
+}
+
+function claimEvent(raw: Record<string, unknown>): ClaimEvent {
+  return {
+    uuid: str(raw.uuid),
+    fromStatus: strOrNull(raw.from_status),
+    fromStatusLabel: strOrNull(raw.from_status_label),
+    toStatus: str(raw.to_status),
+    toStatusLabel: str(raw.to_status_label),
+    actor: strOrNull(raw.actor),
+    note: str(raw.note),
+    createdAt: strOrNull(raw.created_at),
+  };
+}
+
+/**
+ * The assurance claims register (SPINE), scoped like findings on the backend. A
+ * read (open); a non-ok answer is genuine unavailability like the other reads.
+ * DRF-paginated, so every page is followed. Filters ride along.
+ */
+export async function listClaims(
+  opts: { deployment?: string; claimType?: string; status?: string; all?: string } = {},
+): Promise<AssuranceClaim[]> {
+  const query = queryString({
+    deployment: opts.deployment,
+    claim_type: opts.claimType,
+    status: opts.status,
+    all: opts.all,
+  });
+  return (await pagedRows(`/api/assurance/claims/${query}`)).map(claim);
+}
+
+/**
+ * One claim's attributed lifecycle history (SPINE). A read (open); a non-ok
+ * answer is genuine unavailability like the other reads.
+ */
+export async function claimEvents(uuid: string): Promise<ClaimEvent[]> {
+  const response = await call(`/api/assurance/claims/${encodeURIComponent(uuid)}/events/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  const payload = await response.json().catch(() => null);
+  return rows(payload).map(claimEvent);
+}
+
+/**
+ * Move a claim along its lifecycle (SPINE). Admin-only on the control plane; the
+ * BFF route gates it too. The backend refuses an unknown status, an illegal jump,
+ * or a verify without verified evidence with a 400, passed back with its reason
+ * rather than laundered into a 503.
+ */
+export async function transitionClaim(uuid: string, toStatus: string, note?: string) {
+  const wire: Record<string, unknown> = { to_status: toStatus };
+  if (note !== undefined) wire.note = note;
+  return writeJson(
+    `/api/assurance/claims/${encodeURIComponent(uuid)}/transition/`,
+    "POST",
+    wire,
+    (raw): ClaimTransitionResult => ({
+      status: str(raw.status),
+      statusLabel: str(raw.status_label),
+      event: claimEvent(objOf(raw.event)),
+    }),
+  );
+}
+
+/**
+ * A deployment's CURRENT assurance claims (SPINE Phase 1): only the current
+ * version of each claim. A read (open); a non-ok answer is genuine unavailability.
+ */
+export async function deploymentClaims(uuid: string): Promise<AssuranceClaim[]> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-claims/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  const payload = await response.json().catch(() => null);
+  return rows(payload).map(claim);
+}
+
+/**
+ * Re-derive a deployment's assurance claims from its current state (SPINE Phase
+ * 1). Admin-only on the control plane; the BFF route gates it too. Returns the
+ * reconciliation counts. A backend refusal is passed back with its reason.
+ */
+export async function recomputeClaims(uuid: string) {
+  return writeJson(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/recompute-claims/`,
+    "POST",
+    {},
+    (raw): ClaimRecomputeCounts => ({
+      created: num(raw.created, 0),
+      updated: num(raw.updated, 0),
+      superseded: num(raw.superseded, 0),
+      stale: num(raw.stale, 0),
+    }),
+  );
+}
+
+// ---- BOM drift + declared architecture (SPINE Stage 3) ----
+
+export interface BomDriftUndeclared {
+  assetUuid: string;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  providerName: string | null;
+  severity: string;
+}
+export interface BomDriftMissing {
+  declaredUuid: string;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  providerName: string | null;
+}
+/** Declared-vs-observed AI-BOM drift (SPINE Stage 3). `hasDeclared` is false when
+ *  no declaration exists — there is then no drift to compute, and that is NOT a
+ *  pass (it reads as an explicit gap, never a clean bill of materials). */
+export interface BomDrift {
+  deploymentUuid: string;
+  hasDeclared: boolean;
+  driftDetected: boolean;
+  summary: {
+    declaredCount: number;
+    observedCount: number;
+    matched: number;
+    undeclared: number;
+    undeclaredProviders: number;
+    missing: number;
+  };
+  undeclared: BomDriftUndeclared[];
+  undeclaredProviders: string[];
+  missing: BomDriftMissing[];
+  note: string;
+}
+/** The counts a record-bom-drift write returns (SPINE Stage 3). */
+export interface BomDriftRecordCounts {
+  created: number;
+  updated: number;
+  reopened: number;
+  resolved: number;
+  driftDetected: boolean;
+}
+
+function mapBomDrift(raw: Record<string, unknown>): BomDrift {
+  const summary = objOf(raw.summary);
+  return {
+    deploymentUuid: str(raw.deployment_uuid),
+    hasDeclared: bool(raw.has_declared),
+    driftDetected: bool(raw.drift_detected),
+    summary: {
+      declaredCount: num(summary.declared_count, 0),
+      observedCount: num(summary.observed_count, 0),
+      matched: num(summary.matched, 0),
+      undeclared: num(summary.undeclared, 0),
+      undeclaredProviders: num(summary.undeclared_providers, 0),
+      missing: num(summary.missing, 0),
+    },
+    undeclared: Array.isArray(raw.undeclared)
+      ? (raw.undeclared as Record<string, unknown>[]).map((c) => ({
+          assetUuid: str(c.asset_uuid),
+          kind: str(c.kind),
+          kindLabel: str(c.kind_label),
+          name: str(c.name),
+          identifier: str(c.identifier),
+          providerName: strOrNull(c.provider_name),
+          severity: str(c.severity),
+        }))
+      : [],
+    undeclaredProviders: strList(raw.undeclared_providers),
+    missing: Array.isArray(raw.missing)
+      ? (raw.missing as Record<string, unknown>[]).map((c) => ({
+          declaredUuid: str(c.declared_uuid),
+          kind: str(c.kind),
+          kindLabel: str(c.kind_label),
+          name: str(c.name),
+          identifier: str(c.identifier),
+          providerName: strOrNull(c.provider_name),
+        }))
+      : [],
+    note: str(raw.note),
+  };
+}
+
+/** One component the customer declares (backend DeclaredComponentSerializer). */
+export interface DeclaredComponent {
+  uuid: string;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  providerName: string;
+  note: string;
+}
+/** The declared architecture plus its live drift (SPINE Stage 3). */
+export interface DeclaredArchitecture {
+  declared: DeclaredComponent[];
+  drift: BomDrift;
+}
+/** One component in the PUT body that replaces the declared set. */
+export interface DeclaredComponentInput {
+  kind: string;
+  name: string;
+  identifier?: string;
+  providerName?: string;
+  note?: string;
+}
+
+function declaredComponent(raw: Record<string, unknown>): DeclaredComponent {
+  return {
+    uuid: str(raw.uuid),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    name: str(raw.name),
+    identifier: str(raw.identifier),
+    providerName: str(raw.provider_name),
+    note: str(raw.note),
+  };
+}
+
+function mapDeclaredArchitecture(raw: Record<string, unknown>): DeclaredArchitecture {
+  return {
+    declared: Array.isArray(raw.declared)
+      ? (raw.declared as Record<string, unknown>[]).map(declaredComponent)
+      : [],
+    drift: mapBomDrift(objOf(raw.drift)),
+  };
+}
+
+/**
+ * A deployment's declared-vs-observed AI-BOM drift (SPINE Stage 3). A read (open);
+ * a non-ok answer is genuine unavailability. Without a declared baseline there is
+ * no drift to compute, and that is surfaced (hasDeclared:false), never a pass.
+ */
+export async function bomDrift(uuid: string): Promise<BomDrift> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/bom-drift/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapBomDrift(await readObject(response));
+}
+
+/**
+ * Turn a deployment's current BOM drift into managed findings (SPINE Stage 3).
+ * Admin-only on the control plane; the BFF route gates it too. Idempotent and
+ * non-destructive. Returns the reconciliation counts. Backend refusals pass back.
+ */
+export async function recordBomDrift(uuid: string) {
+  return writeJson(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/record-bom-drift/`,
+    "POST",
+    {},
+    (raw): BomDriftRecordCounts => ({
+      created: num(raw.created, 0),
+      updated: num(raw.updated, 0),
+      reopened: num(raw.reopened, 0),
+      resolved: num(raw.resolved, 0),
+      driftDetected: bool(raw.drift_detected),
+    }),
+  );
+}
+
+/**
+ * A deployment's declared architecture plus its live drift (SPINE Stage 3). A
+ * read (open); a non-ok answer is genuine unavailability.
+ */
+export async function declaredArchitecture(uuid: string): Promise<DeclaredArchitecture> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/declared-architecture/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapDeclaredArchitecture(await readObject(response));
+}
+
+/**
+ * Replace a deployment's declared architecture (SPINE Stage 3). A PUT: admin-only
+ * on the control plane, gated again on the BFF route. The response is the fresh
+ * declaration and drift. A backend refusal (a validation error) is passed back
+ * with its reason rather than laundered into a 503.
+ */
+export async function setDeclaredArchitecture(
+  uuid: string,
+  components: DeclaredComponentInput[],
+): Promise<
+  | { ok: true; value: DeclaredArchitecture }
+  | { ok: false; status: number; detail: string }
+> {
+  const wire = {
+    components: components.map((c) => {
+      const row: Record<string, unknown> = { kind: c.kind, name: c.name };
+      if (c.identifier !== undefined) row.identifier = c.identifier;
+      if (c.providerName !== undefined) row.provider_name = c.providerName;
+      if (c.note !== undefined) row.note = c.note;
+      return row;
+    }),
+  };
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/declared-architecture/`,
+    { method: "PUT", body: JSON.stringify(wire) },
+  );
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return { ok: true, value: mapDeclaredArchitecture(await readObject(response)) };
+}
+
+// ---- Decision support + revalidation plan (SPINE Stage 1C / 1D) ----
+
+/** The minimal identity of a claim in a decision-support / revalidation view. */
+export interface ClaimBrief {
+  uuid: string;
+  claimType: string;
+  status: string;
+  statement: string;
+}
+/** A deployment's six-state decision WITH why (SPINE Stage 1C). */
+export interface DecisionSupport {
+  // Null when unassessed (never silently read as ready).
+  decision: string | null;
+  decisionLabel: string | null;
+  // The finding-based signal before the claim cap; null when paused/unassessed.
+  fromFindings: string | null;
+  // The cap current claims impose, or null when no claim holds the decision back.
+  claimCap: string | null;
+  paused: boolean;
+  claims: {
+    hasClaims: boolean;
+    retestPending: boolean;
+    contradicted: ClaimBrief[];
+    stale: ClaimBrief[];
+    unknown: ClaimBrief[];
+    supporting: ClaimBrief[];
+  };
+  note: string;
+}
+
+function claimBrief(raw: Record<string, unknown>): ClaimBrief {
+  return {
+    uuid: str(raw.uuid),
+    claimType: str(raw.claim_type),
+    status: str(raw.status),
+    statement: str(raw.statement),
+  };
+}
+function claimBriefs(raw: unknown): ClaimBrief[] {
+  return Array.isArray(raw) ? (raw as Record<string, unknown>[]).map(claimBrief) : [];
+}
+
+function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
+  const claims = objOf(raw.claims);
+  return {
+    decision: strOrNull(raw.decision),
+    decisionLabel: strOrNull(raw.decision_label),
+    fromFindings: strOrNull(raw.from_findings),
+    claimCap: strOrNull(raw.claim_cap),
+    paused: bool(raw.paused),
+    claims: {
+      hasClaims: bool(claims.has_claims),
+      retestPending: bool(claims.retest_pending),
+      contradicted: claimBriefs(claims.contradicted),
+      stale: claimBriefs(claims.stale),
+      unknown: claimBriefs(claims.unknown),
+      supporting: claimBriefs(claims.supporting),
+    },
+    note: str(raw.note),
+  };
+}
+
+/**
+ * A deployment's six-state decision with its supporting rationale (SPINE Stage
+ * 1C). A read (open); a non-ok answer is genuine unavailability. A READY decision
+ * stands only while its supporting claims stay current — a contradicted claim
+ * holds it at 'needs remediation', a stale/unknown claim or open retest at 'needs
+ * more evidence'; an unassessed deployment reads null, never ready.
+ */
+export async function decisionSupport(uuid: string): Promise<DecisionSupport> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/decision-support/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapDecisionSupport(await readObject(response));
+}
+
+/** The revalidation work for one drifted/stale/contradicted claim (SPINE 1D). */
+export interface RevalidationWork {
+  claimUuid: string;
+  claimType: string;
+  statement: string;
+  status: string;
+  reason: string;
+  retestRequirementUuid: string | null;
+  athenaReassessments: string[];
+  achillesCapabilities: string[];
+}
+export interface RevalidationUnknown {
+  claimUuid: string;
+  claimType: string;
+  statement: string;
+  status: string;
+}
+export interface RevalidationCurrent {
+  claimUuid: string;
+  claimType: string;
+  status: string;
+}
+/** The minimal revalidation plan (SPINE Stage 1D): what must re-run because of a
+ *  change, not "run the whole assessment again". */
+export interface RevalidationPlan {
+  deploymentUuid: string;
+  systemFingerprint: string;
+  summary: { required: number; stillCurrent: number; outstandingUnknowns: number };
+  recomputeAction: string;
+  required: RevalidationWork[];
+  outstandingUnknowns: RevalidationUnknown[];
+  stillCurrent: RevalidationCurrent[];
+  note: string;
+}
+
+function mapRevalidationPlan(raw: Record<string, unknown>): RevalidationPlan {
+  const summary = objOf(raw.summary);
+  return {
+    deploymentUuid: str(raw.deployment_uuid),
+    systemFingerprint: str(raw.system_fingerprint),
+    summary: {
+      required: num(summary.required, 0),
+      stillCurrent: num(summary.still_current, 0),
+      outstandingUnknowns: num(summary.outstanding_unknowns, 0),
+    },
+    recomputeAction: str(raw.recompute_action),
+    required: Array.isArray(raw.required)
+      ? (raw.required as Record<string, unknown>[]).map((w) => ({
+          claimUuid: str(w.claim_uuid),
+          claimType: str(w.claim_type),
+          statement: str(w.statement),
+          status: str(w.status),
+          reason: str(w.reason),
+          retestRequirementUuid: strOrNull(w.retest_requirement_uuid),
+          athenaReassessments: strList(w.athena_reassessments),
+          achillesCapabilities: strList(w.achilles_capabilities),
+        }))
+      : [],
+    outstandingUnknowns: Array.isArray(raw.outstanding_unknowns)
+      ? (raw.outstanding_unknowns as Record<string, unknown>[]).map((w) => ({
+          claimUuid: str(w.claim_uuid),
+          claimType: str(w.claim_type),
+          statement: str(w.statement),
+          status: str(w.status),
+        }))
+      : [],
+    stillCurrent: Array.isArray(raw.still_current)
+      ? (raw.still_current as Record<string, unknown>[]).map((w) => ({
+          claimUuid: str(w.claim_uuid),
+          claimType: str(w.claim_type),
+          status: str(w.status),
+        }))
+      : [],
+    note: str(raw.note),
+  };
+}
+
+/**
+ * A deployment's minimal revalidation plan (SPINE Stage 1D). A read (open); a
+ * non-ok answer is genuine unavailability. It names exactly what a change
+ * invalidated and must re-run, and everything that stays current and need not be.
+ */
+export async function revalidationPlan(uuid: string): Promise<RevalidationPlan> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/revalidation-plan/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapRevalidationPlan(await readObject(response));
+}
+
+/** The counts a check-invalidations write returns (SPINE Phase 2). */
+export interface InvalidationCounts {
+  invalidated: number;
+  retestsOpened: number;
+  retestsResolved: number;
+}
+
+/**
+ * Run the invalidation engine over a deployment (SPINE Phase 2). Admin-only on
+ * the control plane; the BFF route gates it too. Idempotent and transactional —
+ * a re-run opens no duplicate obligation. Returns the counts. Backend refusals
+ * pass back with their reason.
+ */
+export async function checkInvalidations(uuid: string) {
+  return writeJson(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/check-invalidations/`,
+    "POST",
+    {},
+    (raw): InvalidationCounts => ({
+      invalidated: num(raw.invalidated, 0),
+      retestsOpened: num(raw.retests_opened, 0),
+      retestsResolved: num(raw.retests_resolved, 0),
+    }),
+  );
+}
+
+// ---- Retest requirements (SPINE Phase 2) ----
+
+/** An open/closed retest obligation on a claim (backend RetestRequirementSerializer). */
+export interface RetestRequirement {
+  uuid: string;
+  deploymentUuid: string | null;
+  claimUuid: string | null;
+  claimType: string;
+  claimTypeLabel: string;
+  resolvingClaimUuid: string | null;
+  reason: string;
+  triggeringSystemFingerprint: string;
+  actor: string | null;
+  isOpen: boolean;
+  openedAt: string | null;
+  resolvedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+function retestRequirement(raw: Record<string, unknown>): RetestRequirement {
+  return {
+    uuid: str(raw.uuid),
+    deploymentUuid: strOrNull(raw.deployment_uuid),
+    claimUuid: strOrNull(raw.claim_uuid),
+    claimType: str(raw.claim_type),
+    claimTypeLabel: str(raw.claim_type_label),
+    resolvingClaimUuid: strOrNull(raw.resolving_claim_uuid),
+    reason: str(raw.reason),
+    triggeringSystemFingerprint: str(raw.triggering_system_fingerprint),
+    actor: strOrNull(raw.actor),
+    isOpen: bool(raw.is_open),
+    openedAt: strOrNull(raw.opened_at),
+    resolvedAt: strOrNull(raw.resolved_at),
+    createdAt: strOrNull(raw.created_at),
+    updatedAt: strOrNull(raw.updated_at),
+  };
+}
+
+/**
+ * The retest-obligation register (SPINE Phase 2), scoped like claims on the
+ * backend. A read (open); a non-ok answer is genuine unavailability. DRF-
+ * paginated, so every page is followed. Defaults to open; `all=true` includes
+ * resolved history, `status=open|resolved` asks explicitly.
+ */
+export async function listRetestRequirements(
+  opts: { deployment?: string; claim?: string; status?: string; all?: string } = {},
+): Promise<RetestRequirement[]> {
+  const query = queryString({
+    deployment: opts.deployment,
+    claim: opts.claim,
+    status: opts.status,
+    all: opts.all,
+  });
+  return (await pagedRows(`/api/assurance/retest-requirements/${query}`)).map(retestRequirement);
+}
+
+/**
+ * A deployment's retest obligations (SPINE Phase 2). A read (open); a non-ok
+ * answer is genuine unavailability. Defaults to open; `all=true` includes the
+ * resolved history.
+ */
+export async function deploymentRetestRequirements(
+  uuid: string,
+  all = false,
+): Promise<RetestRequirement[]> {
+  const query = all ? "?all=true" : "";
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/retest-requirements/${query}`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  const payload = await response.json().catch(() => null);
+  return rows(payload).map(retestRequirement);
+}
+
+// ---- Operational-risk register (Phase 3.9) ----
+
+/** One cited signal behind an operational-risk class (asset / provider / finding).
+ *  Heterogeneous by source; the common fields are carried and the source-specific
+ *  ones ride along when present, never invented. */
+export interface OperationalRiskSignal {
+  source: string;
+  reference: string;
+  detail: string;
+  assetName?: string;
+  providerName?: string;
+  findingType?: string;
+  title?: string;
+  severity?: string;
+  kind?: string;
+  kindLabel?: string;
+  classification?: string;
+  classificationLabel?: string;
+  managed?: boolean;
+}
+/** One operational-risk class, honest: a real ordinal `risk` band ONLY with a
+ *  basis, else `null` (unmapped) — never a fabricated 0. */
+export interface OperationalRiskClass {
+  key: string;
+  label: string;
+  concern: string;
+  concernLabel: string;
+  question: string;
+  status: string;
+  observed: boolean;
+  risk: string | null;
+  basis: string[];
+  activeFindingCount: number;
+  signals: OperationalRiskSignal[];
+  runtimeSignal: string;
+  notes: string[];
+}
+export interface OperationalRisk {
+  system: { name: string; uuid: string; environment: string; environmentLabel: string };
+  classes: OperationalRiskClass[];
+  summary: {
+    totalClasses: number;
+    observedClasses: number;
+    unmappedClasses: number;
+    high: number;
+    elevated: number;
+    moderate: number;
+    // Worst OBSERVED band; null (not 0) when nothing is observed.
+    worstRisk: string | null;
+    unmapped: string[];
+  };
+  overall: { status: string; risk: string | null; unmappedClasses: number; note: string };
+}
+
+function operationalRiskSignal(raw: Record<string, unknown>): OperationalRiskSignal {
+  const out: OperationalRiskSignal = {
+    source: str(raw.source),
+    reference: str(raw.reference),
+    detail: str(raw.detail),
+  };
+  if (typeof raw.asset_name === "string") out.assetName = raw.asset_name;
+  if (typeof raw.provider_name === "string") out.providerName = raw.provider_name;
+  if (typeof raw.finding_type === "string") out.findingType = raw.finding_type;
+  if (typeof raw.title === "string") out.title = raw.title;
+  if (typeof raw.severity === "string") out.severity = raw.severity;
+  if (typeof raw.kind === "string") out.kind = raw.kind;
+  if (typeof raw.kind_label === "string") out.kindLabel = raw.kind_label;
+  if (typeof raw.classification === "string") out.classification = raw.classification;
+  if (typeof raw.classification_label === "string") out.classificationLabel = raw.classification_label;
+  if (typeof raw.managed === "boolean") out.managed = raw.managed;
+  return out;
+}
+
+function operationalRiskClass(raw: Record<string, unknown>): OperationalRiskClass {
+  return {
+    key: str(raw.key),
+    label: str(raw.label),
+    concern: str(raw.concern),
+    concernLabel: str(raw.concern_label),
+    question: str(raw.question),
+    status: str(raw.status),
+    observed: bool(raw.observed),
+    risk: strOrNull(raw.risk),
+    basis: strList(raw.basis),
+    activeFindingCount: num(raw.active_finding_count, 0),
+    signals: Array.isArray(raw.signals)
+      ? (raw.signals as Record<string, unknown>[]).map(operationalRiskSignal)
+      : [],
+    runtimeSignal: str(raw.runtime_signal),
+    notes: strList(raw.notes),
+  };
+}
+
+function mapOperationalRisk(raw: Record<string, unknown>): OperationalRisk {
+  const system = objOf(raw.system);
+  const summary = objOf(raw.summary);
+  const overall = objOf(raw.overall);
+  return {
+    system: {
+      name: str(system.name),
+      uuid: str(system.uuid),
+      environment: str(system.environment),
+      environmentLabel: str(system.environment_label),
+    },
+    classes: Array.isArray(raw.classes)
+      ? (raw.classes as Record<string, unknown>[]).map(operationalRiskClass)
+      : [],
+    summary: {
+      totalClasses: num(summary.total_classes, 0),
+      observedClasses: num(summary.observed_classes, 0),
+      unmappedClasses: num(summary.unmapped_classes, 0),
+      high: num(summary.high, 0),
+      elevated: num(summary.elevated, 0),
+      moderate: num(summary.moderate, 0),
+      worstRisk: strOrNull(summary.worst_risk),
+      unmapped: strList(summary.unmapped),
+    },
+    overall: {
+      status: str(overall.status),
+      risk: strOrNull(overall.risk),
+      unmappedClasses: num(overall.unmapped_classes, 0),
+      note: str(overall.note),
+    },
+  };
+}
+
+/**
+ * A deployment's narrow operational-risk register (Phase 3.9). A read (open); a
+ * non-ok answer is genuine unavailability. An honest register, not a green
+ * dashboard: an unmapped class reads `unmapped` (risk null, never a fabricated
+ * 0/0%), and the overall roll-up is weakest-honest, never a clean pass.
+ */
+export async function operationalRisk(uuid: string): Promise<OperationalRisk> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/operational-risk/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapOperationalRisk(await readObject(response));
+}
+
+// ---- Incident evidence pack (Phase 3.7) ----
+
+export interface IncidentPackAssetProvider {
+  name: string;
+  kind: string;
+  kindLabel: string;
+}
+export interface IncidentPackAsset {
+  uuid: string;
+  name: string;
+  kind: string;
+  kindLabel: string;
+  classification: string;
+  classificationLabel: string;
+  identifier: string | null;
+  provider: IncidentPackAssetProvider | null;
+}
+/** A finding's AI Incident Evidence Pack (Phase 3.7): a portable, verifiable pack
+ *  reconstructed from the stored graph. Attests integrity and provenance, never
+ *  that the conclusion is true or the system secure/fixed. */
+export interface IncidentPack {
+  packVersion: string;
+  attests: string;
+  identity: {
+    deployment: {
+      name: string;
+      uuid: string;
+      environment: string;
+      environmentLabel: string;
+      owner: string | null;
+    };
+    finding: {
+      uuid: string;
+      fingerprint: string;
+      category: string;
+      title: string;
+      severity: string;
+      severityLabel: string;
+      status: string;
+      statusLabel: string;
+    };
+  };
+  surface: {
+    asset: IncidentPackAsset | null;
+    assetPresent: boolean;
+    location: string | null;
+    controlMapping: Record<string, unknown>;
+  };
+  evidence: { algorithm: string; rows: string[][]; count: number; evidenceClass: string };
+  receipt: { algorithm: string; digest: string; evidenceCount: number };
+  runtimeTranscript: {
+    inAssuranceRecord: boolean;
+    see: string;
+    reason: string;
+    enginePackRef: { available: boolean; scanUuid: string | null; engineRunId: string | null };
+  };
+  ripple: {
+    isTracedOrigin: boolean;
+    origins: RippleOrigin[];
+    consequences: RippleConsequence[];
+    deploymentSummary: {
+      origins: number;
+      originsWithReach: number;
+      consequences: number;
+      evidencedConsequences: number;
+      bounded: boolean;
+      byCategory: Record<string, number>;
+      worstRisk: string | null;
+    };
+    note: string | null;
+  };
+  decision: { decision: string | null; decisionLabel: string | null };
+  algorithm: string;
+  digest: string;
+  computedAt: string | null;
+}
+
+function incidentPackAsset(raw: unknown): IncidentPackAsset | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const a = raw as Record<string, unknown>;
+  const provider = a.provider;
+  return {
+    uuid: str(a.uuid),
+    name: str(a.name),
+    kind: str(a.kind),
+    kindLabel: str(a.kind_label),
+    classification: str(a.classification),
+    classificationLabel: str(a.classification_label),
+    identifier: strOrNull(a.identifier),
+    provider:
+      provider && typeof provider === "object" && !Array.isArray(provider)
+        ? {
+            name: str((provider as Record<string, unknown>).name),
+            kind: str((provider as Record<string, unknown>).kind),
+            kindLabel: str((provider as Record<string, unknown>).kind_label),
+          }
+        : null,
+  };
+}
+
+function evidenceRows(raw: unknown): string[][] {
+  return Array.isArray(raw)
+    ? raw.map((row) => (Array.isArray(row) ? row.filter((v): v is string => typeof v === "string") : []))
+    : [];
+}
+
+function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
+  const identity = objOf(raw.identity);
+  const dep = objOf(identity.deployment);
+  const find = objOf(identity.finding);
+  const surface = objOf(raw.surface);
+  const evidence = objOf(raw.evidence);
+  const receipt = objOf(raw.receipt);
+  const transcript = objOf(raw.runtime_transcript);
+  const enginePackRef = objOf(transcript.engine_pack_ref);
+  const ripple = objOf(raw.ripple);
+  const rippleSummary = objOf(ripple.deployment_summary);
+  const decision = objOf(raw.decision);
+  return {
+    packVersion: str(raw.pack_version),
+    attests: str(raw.attests),
+    identity: {
+      deployment: {
+        name: str(dep.name),
+        uuid: str(dep.uuid),
+        environment: str(dep.environment),
+        environmentLabel: str(dep.environment_label),
+        owner: strOrNull(dep.owner),
+      },
+      finding: {
+        uuid: str(find.uuid),
+        fingerprint: str(find.fingerprint),
+        category: str(find.category),
+        title: str(find.title),
+        severity: str(find.severity),
+        severityLabel: str(find.severity_label),
+        status: str(find.status),
+        statusLabel: str(find.status_label),
+      },
+    },
+    surface: {
+      asset: incidentPackAsset(surface.asset),
+      assetPresent: bool(surface.asset_present),
+      location: strOrNull(surface.location),
+      controlMapping: objOf(surface.control_mapping),
+    },
+    evidence: {
+      algorithm: str(evidence.algorithm),
+      rows: evidenceRows(evidence.rows),
+      count: num(evidence.count, 0),
+      evidenceClass: str(evidence.evidence_class),
+    },
+    receipt: {
+      algorithm: str(receipt.algorithm),
+      digest: str(receipt.digest),
+      evidenceCount: num(receipt.evidence_count, 0),
+    },
+    runtimeTranscript: {
+      inAssuranceRecord: bool(transcript.in_assurance_record),
+      see: str(transcript.see),
+      reason: str(transcript.reason),
+      enginePackRef: {
+        available: bool(enginePackRef.available),
+        scanUuid: strOrNull(enginePackRef.scan_uuid),
+        engineRunId: strOrNull(enginePackRef.engine_run_id),
+      },
+    },
+    ripple: {
+      isTracedOrigin: bool(ripple.is_traced_origin),
+      origins: Array.isArray(ripple.origins)
+        ? (ripple.origins as Record<string, unknown>[]).map(rippleOrigin)
+        : [],
+      consequences: Array.isArray(ripple.consequences)
+        ? (ripple.consequences as Record<string, unknown>[]).map(rippleConsequence)
+        : [],
+      deploymentSummary: {
+        origins: num(rippleSummary.origins, 0),
+        originsWithReach: num(rippleSummary.origins_with_reach, 0),
+        consequences: num(rippleSummary.consequences, 0),
+        evidencedConsequences: num(rippleSummary.evidenced_consequences, 0),
+        bounded: bool(rippleSummary.bounded),
+        byCategory: numRecord(rippleSummary.by_category),
+        worstRisk: strOrNull(rippleSummary.worst_risk),
+      },
+      note: strOrNull(ripple.note),
+    },
+    decision: {
+      decision: strOrNull(decision.decision),
+      decisionLabel: strOrNull(decision.decision_label),
+    },
+    algorithm: str(raw.algorithm),
+    digest: str(raw.digest),
+    computedAt: strOrNull(raw.computed_at),
+  };
+}
+
+/**
+ * A finding's AI Incident Evidence Pack (Phase 3.7). A read (open); a non-ok
+ * answer is genuine unavailability. Computed, never stored; it attests integrity
+ * and provenance, never that the incident conclusion is true or the system fixed.
+ * The runtime transcript is stated as an explicit gap, never fabricated.
+ */
+export async function incidentPack(uuid: string): Promise<IncidentPack> {
+  const response = await call(
+    `/api/assurance/findings/${encodeURIComponent(uuid)}/incident-pack/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapIncidentPack(await readObject(response));
+}
+
+// ---- Outbound connectors (commercial spine) ----
+
+/** One outbound connector and whether it is configured. */
+export interface ConnectorRef {
+  name: string;
+  configured: boolean;
+}
+export interface ConnectorsView {
+  connectors: ConnectorRef[];
+}
+/** What an outbound push did, reported honestly. `ok` is whether the external
+ *  system accepted it; an unconfigured connector is inert (`ok:false`). */
+export interface ConnectorPushResult {
+  ok: boolean;
+  externalRef: string | null;
+  detail: string;
+  connector: string;
+}
+
+function mapConnectors(raw: Record<string, unknown>): ConnectorsView {
+  return {
+    connectors: Array.isArray(raw.connectors)
+      ? (raw.connectors as Record<string, unknown>[]).map((c) => ({
+          name: str(c.name),
+          configured: bool(c.configured),
+        }))
+      : [],
+  };
+}
+
+/**
+ * A deployment's outbound connectors and whether each is configured (commercial
+ * spine). A read (open); a non-ok answer is genuine unavailability. It triggers
+ * nothing — it just says which integrations exist and which are inert for lack
+ * of credentials.
+ */
+export async function connectors(uuid: string): Promise<ConnectorsView> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/connectors/`);
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapConnectors(await readObject(response));
+}
+
+/**
+ * Push one of a deployment's findings out to an external system (commercial
+ * spine). Admin-only on the control plane; the BFF route gates it too. The
+ * connector's result is always HTTP 200 — read `ok`, not the status (the house
+ * idiom): with no credentials the connector is inert and returns `{ok:false,
+ * detail:"<name> not configured"}` making no network call. A backend refusal (an
+ * unknown connector or a finding not in this deployment, a 400/404) is passed
+ * back with its reason rather than laundered into a 503.
+ */
+export async function pushConnector(
+  uuid: string,
+  connector: string,
+  finding: string,
+): Promise<
+  | { ok: true; value: ConnectorPushResult }
+  | { ok: false; status: number; detail: string }
+> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/connectors/${encodeURIComponent(connector)}/push/`,
+    { method: "POST", body: JSON.stringify({ finding }) },
+  );
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  const payload = await readObject(response);
+  return {
+    ok: true,
+    value: {
+      ok: bool(payload.ok),
+      externalRef: strOrNull(payload.external_ref),
+      detail: str(payload.detail),
+      connector: str(payload.connector),
+    },
+  };
+}
