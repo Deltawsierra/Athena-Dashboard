@@ -2226,6 +2226,358 @@ export function registerRoutes(app: Express): void {
     res.status(204).end();
   }));
 
+  // ==== CONTINUOUS ASSURANCE LOOP (SPINE Phases 1–3) ====
+  //
+  // The system of record's continuous-assurance capabilities, surfaced end-to-
+  // end: the assurance claims register and its lifecycle, declared-vs-observed
+  // BOM drift and the declared-architecture baseline it compares against, the
+  // decision-support and revalidation views, the retest-obligation register,
+  // the invalidation engine, the operational-risk register, per-finding incident
+  // packs, and the outbound connectors. Reads stay open to any signed-in operator
+  // (behind the `/api` requireAuth guard above); every write is admin-only here
+  // and on the control plane, so a non-admin gets a clean 403 at the front door.
+  // A backend refusal (a 400/403/404/409 that carries meaning — an illegal claim
+  // transition, an unknown connector, a validation error) is returned verbatim so
+  // the operator sees why, rather than a bare 503.
+
+  // The assurance claims register (SPINE): the version-bound, falsifiable claims
+  // derived from the assessments, each at its honest status and weakest-evidence
+  // strength. A read, behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/claims", asyncHandler(async (req, res) => {
+    try {
+      res.json(
+        await assurance.listClaims({
+          deployment: qp(req, "deployment"),
+          claimType: qp(req, "claimType"),
+          status: qp(req, "status"),
+          all: qp(req, "all"),
+        }),
+      );
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // One claim's attributed lifecycle history (SPINE): every status change, who
+  // made it, from where to where, and why. A read, behind requireAuth.
+  app.get("/api/assurance/claims/:uuid/events", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.claimEvents(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's CURRENT assurance claims (SPINE Phase 1): only the current
+  // version of each claim. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/assurance-claims", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.deploymentClaims(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's declared-vs-observed AI-BOM drift (SPINE Stage 3): the shadow
+  // components/providers and the declared components no longer observed. Without a
+  // declared baseline there is no drift to compute, and that is surfaced rather
+  // than read as a clean bill of materials. A read, behind requireAuth.
+  app.get("/api/assurance/deployments/:uuid/bom-drift", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.bomDrift(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's declared architecture plus its live drift (SPINE Stage 3): the
+  // admin-editable baseline BOM drift compares against. A read, behind requireAuth.
+  app.get("/api/assurance/deployments/:uuid/declared-architecture", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.declaredArchitecture(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's six-state decision WITH why (SPINE Stage 1C): the finding-based
+  // signal, the claim cap, and exactly which current claims support or undermine
+  // it. A READY decision stands only while its supporting claims stay current; an
+  // unassessed deployment reads null, never ready. A read, behind requireAuth.
+  app.get("/api/assurance/deployments/:uuid/decision-support", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.decisionSupport(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change
+  // invalidated and must re-run, and everything that stays current and need not
+  // be re-run. A read, behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/deployments/:uuid/revalidation-plan", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.revalidationPlan(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // The retest-obligation register (SPINE Phase 2): the durable, attributed
+  // obligations to re-test a claim whose bound system state changed. Defaults to
+  // open; `all=true`/`status=` widen it. A read, behind requireAuth.
+  app.get("/api/assurance/retest-requirements", asyncHandler(async (req, res) => {
+    try {
+      res.json(
+        await assurance.listRetestRequirements({
+          deployment: qp(req, "deployment"),
+          claim: qp(req, "claim"),
+          status: qp(req, "status"),
+          all: qp(req, "all"),
+        }),
+      );
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's retest obligations (SPINE Phase 2). Defaults to open; `all=true`
+  // includes the resolved history. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/retest-requirements", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.deploymentRetestRequirements(req.params.uuid, qp(req, "all") === "true"));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's narrow operational-risk register (Phase 3.9): the four
+  // operational-risk classes, each an ordinal band with a real basis or honestly
+  // `unmapped` (risk null, never a fabricated 0). Distinct from operational-
+  // ASSURANCE above. A read, behind requireAuth like the rest.
+  app.get("/api/assurance/deployments/:uuid/operational-risk", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.operationalRisk(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A finding's AI Incident Evidence Pack (Phase 3.7): a portable, verifiable pack
+  // reconstructed from the stored graph. It attests integrity and provenance,
+  // never that the incident conclusion is true or the system fixed. A read,
+  // behind requireAuth like the rest of the assurance reads.
+  app.get("/api/assurance/findings/:uuid/incident-pack", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.incidentPack(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // A deployment's outbound connectors and whether each is configured (commercial
+  // spine). A read, behind requireAuth. It triggers nothing — a connector with no
+  // credentials reads as not configured, never as a live integration.
+  app.get("/api/assurance/deployments/:uuid/connectors", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.connectors(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // ---- Continuous-assurance writes (admin-only; the control plane is the gate too) ----
+
+  const claimTransitionSchema = z.object({
+    // The backend validates the target against AssuranceClaim.ClaimStatus and the
+    // legal-move / evidence-gate rules; the BFF requires a non-empty string and
+    // lets the backend's 400 carry the exact reason.
+    toStatus: z.string().trim().min(1).max(40),
+    note: z.string().max(2000).optional(),
+  });
+
+  // Move a claim along its lifecycle (SPINE). Admin-only: it mutates the shared
+  // record. A backend refusal (unknown status, illegal jump, verify without
+  // verified evidence — all 400s) is returned verbatim so the operator sees why.
+  app.post("/api/assurance/claims/:uuid/transition", requireAdmin, asyncHandler(async (req, res) => {
+    const data = claimTransitionSchema.parse(req.body ?? {});
+    let result;
+    try {
+      result = await assurance.transitionClaim(req.params.uuid, data.toStatus, data.note);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "claim_transitioned",
+      entityType: "assurance_claim",
+      entityId: req.params.uuid,
+      details: { status: result.value.status },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  // Re-derive a deployment's assurance claims from its current state (SPINE Phase
+  // 1). Admin-only: it mutates the shared record. Idempotent and transactional.
+  app.post("/api/assurance/deployments/:uuid/recompute-claims", requireAdmin, asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await assurance.recomputeClaims(req.params.uuid);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "claims_recomputed",
+      entityType: "assurance_deployment",
+      entityId: req.params.uuid,
+      details: { ...result.value },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  // Turn a deployment's current BOM drift into managed findings (SPINE Stage 3).
+  // Admin-only: it mutates the shared record. Idempotent and non-destructive.
+  app.post("/api/assurance/deployments/:uuid/record-bom-drift", requireAdmin, asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await assurance.recordBomDrift(req.params.uuid);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "bom_drift_recorded",
+      entityType: "assurance_deployment",
+      entityId: req.params.uuid,
+      details: { ...result.value },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  const declaredComponentSchema = z.object({
+    // Mirrors DeclaredComponent.Kind on the backend; kept in lockstep so the
+    // console never offers a kind the backend will reject.
+    kind: z.enum([
+      "model",
+      "gateway",
+      "tool",
+      "skill",
+      "api",
+      "mcp_server",
+      "vector_db",
+      "data_store",
+      "service_account",
+      "agent",
+      "other",
+    ]),
+    name: z.string().trim().min(1).max(200),
+    identifier: z.string().max(500).optional(),
+    providerName: z.string().max(200).optional(),
+    note: z.string().max(2000).optional(),
+  });
+  const declaredArchitectureSchema = z.object({
+    components: z.array(declaredComponentSchema).max(500),
+  });
+
+  // Replace a deployment's declared architecture (SPINE Stage 3). Admin-only: it
+  // is the human-declared baseline BOM drift compares against. Mirrors the data-
+  // boundary editor. A backend validation refusal is returned verbatim.
+  app.put("/api/assurance/deployments/:uuid/declared-architecture", requireAdmin, asyncHandler(async (req, res) => {
+    const data = declaredArchitectureSchema.parse(req.body ?? {});
+    let result;
+    try {
+      result = await assurance.setDeclaredArchitecture(req.params.uuid, data.components);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "declared",
+      entityType: "assurance_declared_architecture",
+      entityId: req.params.uuid,
+      details: { declaredCount: result.value.declared.length, driftDetected: result.value.drift.driftDetected },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  // Run the invalidation engine over a deployment (SPINE Phase 2). Admin-only: it
+  // opens/resolves obligations and marks drifted claims stale. Idempotent.
+  app.post("/api/assurance/deployments/:uuid/check-invalidations", requireAdmin, asyncHandler(async (req, res) => {
+    let result;
+    try {
+      result = await assurance.checkInvalidations(req.params.uuid);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "invalidations_checked",
+      entityType: "assurance_deployment",
+      entityId: req.params.uuid,
+      details: { ...result.value },
+      ...actor(req),
+    });
+    res.json(result.value);
+  }));
+
+  const connectorPushSchema = z.object({
+    // The connector name is in the path; the finding to push is the body. The
+    // backend validates the finding belongs to the deployment (404 otherwise).
+    finding: z.string().trim().min(1),
+  });
+
+  // Push one of a deployment's findings out to an external system (commercial
+  // spine). Admin-only: it is an outbound action against a customer's live GRC /
+  // CI-CD / SIEM. Always HTTP 200 on a reached connector — read `ok`; an
+  // unconfigured connector is inert (`ok:false`, no network call). A backend
+  // refusal (unknown connector, finding not in this deployment) is returned
+  // verbatim so the operator sees why.
+  app.post(
+    "/api/assurance/deployments/:uuid/connectors/:connector/push",
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      const data = connectorPushSchema.parse(req.body ?? {});
+      let result;
+      try {
+        result = await assurance.pushConnector(req.params.uuid, req.params.connector, data.finding);
+      } catch (cause) {
+        if (assuranceUnavailable(res, cause)) return;
+        throw cause;
+      }
+      if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+      await storage.createActivityLog({
+        action: "connector_pushed",
+        entityType: "assurance_deployment",
+        entityId: req.params.uuid,
+        details: { connector: req.params.connector, finding: data.finding, ok: result.value.ok },
+        ...actor(req),
+      });
+      res.json(result.value);
+    }),
+  );
+
   // ==== FINDING LIFECYCLE ====
   //
   // A finding as a thing with a life: an identity that survives a rescan, an
