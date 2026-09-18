@@ -346,6 +346,28 @@ export const classifiers = sqliteTable("classifiers", {
   description: text("description"),
 });
 
+/**
+ * Programmatic access credentials for this dashboard's own API.
+ *
+ * The plaintext key is shown to its creator exactly once, at creation, and is
+ * never stored: only a SHA-256 hash of it lives here, so a leaked database
+ * cannot yield a working key, and there is nothing to log. `prefix` is a short,
+ * non-secret head of the key kept for display, so the list can tell one key from
+ * another without holding the secret. A key authenticates as the account that
+ * created it (its role and all). Revoking sets `revokedAt`; a revoked key is
+ * kept for the audit trail and never authenticates again.
+ */
+export const apiKeys = sqliteTable("api_keys", {
+  id: id(),
+  name: text("name").notNull(),
+  prefix: text("prefix").notNull(),
+  keyHash: text("key_hash").notNull().unique(),
+  createdBy: text("created_by"),
+  createdAt: timestamp("created_at").notNull(),
+  lastUsedAt: timestamp("last_used_at"),
+  revokedAt: timestamp("revoked_at"),
+});
+
 // ---------------------------------------------------------------------------
 // Insert schemas. Dates arrive over JSON as ISO strings, so date fields that a
 // client may set are coerced. Server-managed timestamps are omitted.
@@ -450,6 +472,15 @@ export const insertClassifierSchema = createInsertSchema(classifiers, {
   lastTrainedAt: optionalDate,
 }).omit({ id: true, createdAt: true });
 
+/**
+ * What a caller may set when minting an API key: a name to tell it apart later.
+ * The secret, its hash, its prefix and every timestamp are the server's to set —
+ * a caller cannot choose the key, and the key never comes back over this schema.
+ */
+export const createApiKeySchema = z.object({
+  name: z.string().trim().min(1).max(120),
+});
+
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 export type PublicUser = Omit<User, "password">;
@@ -488,6 +519,10 @@ export type ConnectionSetting = typeof connectionSettings.$inferSelect;
 export type UpdateConnectionSettings = z.infer<typeof updateConnectionSettingsSchema>;
 export type InsertClassifier = z.infer<typeof insertClassifierSchema>;
 export type Classifier = typeof classifiers.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
+/** An API key as it is safe to return: never its hash. */
+export type PublicApiKey = Omit<ApiKey, "keyHash">;
+export type CreateApiKey = z.infer<typeof createApiKeySchema>;
 
 /**
  * How many seeded rows are still in the database, per table.

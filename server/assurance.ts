@@ -2142,13 +2142,25 @@ function remediationEvent(raw: Record<string, unknown>): RemediationEvent {
 }
 
 function mapRemediation(raw: Record<string, unknown>): AssuranceRemediation {
+  // The Django remediation endpoints name the workflow field `remediation_state`
+  // /`remediation_state_label` (see assurance/views.py `remediation`,
+  // `remediation_transition`, `remediation_assign` — a finding has both a
+  // security `status` and a remediation state, so the field is qualified). The
+  // GET read returns the full history under `events` (an array); the
+  // transition/assign actions return the one move they made under `event` (a
+  // single object) and omit the fields they did not touch — transition returns no
+  // `assignee`, assign returns no state. This maps whichever fields are present,
+  // so each response is surfaced honestly rather than crashing or fabricating.
+  const events = Array.isArray(raw.events)
+    ? (raw.events as Record<string, unknown>[])
+    : raw.event && typeof raw.event === "object" && !Array.isArray(raw.event)
+      ? [raw.event as Record<string, unknown>]
+      : [];
   return {
-    state: str(raw.state),
-    stateLabel: str(raw.state_label),
+    state: str(raw.remediation_state),
+    stateLabel: str(raw.remediation_state_label),
     assignee: raw.assignee == null ? null : String(raw.assignee),
-    events: Array.isArray(raw.events)
-      ? (raw.events as Record<string, unknown>[]).map(remediationEvent)
-      : [],
+    events: events.map(remediationEvent),
   };
 }
 
@@ -3487,6 +3499,15 @@ export interface ProviderInput {
   kind: string;
 }
 
+/** The identity fields a human may edit on an existing provider. Every field is
+ *  optional so a form saves what it changed and leaves the rest alone. */
+export interface ProviderPatch {
+  name?: string;
+  kind?: string;
+  region?: string;
+  notes?: string;
+}
+
 /**
  * Register a provider a deployment relies on (a vector DB, a gateway) — one that
  * asset discovery did not auto-register from an LLM target. Admin-only on the
@@ -3494,6 +3515,28 @@ export interface ProviderInput {
  */
 export async function createProvider(input: ProviderInput) {
   return writeJson("/api/assurance/providers/", "POST", { name: input.name, kind: input.kind }, provider);
+}
+
+/**
+ * Edit an existing provider's declared identity in place (Django ProviderViewSet
+ * supports PATCH — see assurance/views.py `update`, admin-only). A backend
+ * refusal (400/403/404) is returned with its reason rather than laundered into a
+ * 503. NOTE: the ProviderViewSet does NOT expose destroy (no DestroyModelMixin,
+ * and "delete" is absent from its http_method_names), so there is no remove
+ * counterpart — a provider is a global registry other records point at.
+ */
+export async function updateProvider(uuid: string, patch: ProviderPatch) {
+  const wire: Record<string, unknown> = {};
+  if (patch.name !== undefined) wire.name = patch.name;
+  if (patch.kind !== undefined) wire.kind = patch.kind;
+  if (patch.region !== undefined) wire.region = patch.region;
+  if (patch.notes !== undefined) wire.notes = patch.notes;
+  return writeJson(
+    `/api/assurance/providers/${encodeURIComponent(uuid)}/`,
+    "PATCH",
+    wire,
+    provider,
+  );
 }
 
 /** The fields a human sets when recording or editing a provider assertion. */
