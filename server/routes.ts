@@ -18,6 +18,7 @@ import {
   insertClassifierSchema, USER_ROLES,
   type User, type PublicUser,
   SETTABLE_FINDING_STATUS,
+  createApiKeySchema, type ApiKey, type PublicApiKey,
 } from "@shared/schema";
 
 /**
@@ -366,6 +367,12 @@ export function resetLoginThrottle(): void {
 
 function publicUser(user: User): PublicUser {
   const { password: _password, ...rest } = user;
+  return rest;
+}
+
+/** An API key as it is safe to return: the hash never leaves the server. */
+function publicApiKey(key: ApiKey): PublicApiKey {
+  const { keyHash: _keyHash, ...rest } = key;
   return rest;
 }
 
@@ -1150,6 +1157,45 @@ export function registerRoutes(app: Express): void {
     if (!success) return notFound(res, "User");
     await storage.createActivityLog({ action: "deleted", entityType: "user", entityId: req.params.id, details: null, ...actor(req) });
     res.json({ success: true });
+  }));
+
+  // ==== API KEYS ====
+  //
+  // Programmatic credentials for this dashboard's own API, owned by the same
+  // server that owns auth. Minting, listing and revoking are all admin-only: an
+  // API key is a standing grant of a real account's access, so handing one out is
+  // an administrator's act. The plaintext secret is returned exactly once, at
+  // creation, and is never stored or logged — only its SHA-256 hash is kept, so a
+  // leaked database yields no working key. A key authenticates as the account
+  // that created it (see auth.ts), and revoking retires it permanently.
+
+  app.get("/api/api-keys", requireAdmin, asyncHandler(async (_req, res) => {
+    const keys = await storage.getAllApiKeys();
+    res.json(keys.map(publicApiKey));
+  }));
+
+  app.post("/api/api-keys", requireAdmin, asyncHandler(async (req, res) => {
+    const { name } = createApiKeySchema.parse(req.body);
+    const { key, secret } = await storage.createApiKey({ name, createdBy: req.session.userId ?? null });
+    // The name and prefix are recorded; the secret is not — an audit log that
+    // held the key would be a second place the credential lives.
+    await storage.createActivityLog({
+      action: "created", entityType: "api_key", entityId: key.id,
+      details: { name: key.name, prefix: key.prefix }, ...actor(req),
+    });
+    // The one and only time the plaintext is on the wire. The client shows it
+    // once and cannot ask for it again.
+    res.status(201).json({ key: publicApiKey(key), secret });
+  }));
+
+  app.delete("/api/api-keys/:id", requireAdmin, asyncHandler(async (req, res) => {
+    const revoked = await storage.revokeApiKey(req.params.id);
+    if (!revoked) return notFound(res, "API key");
+    await storage.createActivityLog({
+      action: "revoked", entityType: "api_key", entityId: revoked.id,
+      details: { name: revoked.name, prefix: revoked.prefix }, ...actor(req),
+    });
+    res.json(publicApiKey(revoked));
   }));
 
   // ==== AI CONTROL ====
@@ -2147,6 +2193,40 @@ export function registerRoutes(app: Express): void {
       ...actor(req),
     });
     res.status(201).json(result.value);
+  }));
+
+  // Edit a provider's declared identity in place. Admin-only here and on the
+  // control plane (Django ProviderViewSet.update). At least one editable field
+  // must be named. There is deliberately no DELETE counterpart: the Django
+  // ProviderViewSet exposes no destroy (a provider is a global registry other
+  // records point at), so a remove route could only ever answer 405.
+  const providerPatchSchema = z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      kind: z.enum(PROVIDER_KINDS).optional(),
+      region: z.string().max(200).optional(),
+      notes: z.string().max(4000).optional(),
+    })
+    .refine((v) => Object.keys(v).length > 0, { message: "name at least one field to change" });
+
+  app.patch("/api/assurance/providers/:uuid", requireAdmin, asyncHandler(async (req, res) => {
+    const patch = providerPatchSchema.parse(req.body);
+    let result;
+    try {
+      result = await assurance.updateProvider(req.params.uuid, patch);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+    await storage.createActivityLog({
+      action: "updated",
+      entityType: "assurance_provider",
+      entityId: req.params.uuid,
+      details: { name: result.value.name, kind: result.value.kind },
+      ...actor(req),
+    });
+    res.json(result.value);
   }));
 
   const assertionCreateSchema = z.object({

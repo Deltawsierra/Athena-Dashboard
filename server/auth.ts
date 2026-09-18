@@ -2,6 +2,7 @@ import type { Request, RequestHandler } from "express";
 import "express-session";
 import { storage } from "./storage-unified";
 import type { User } from "@shared/schema";
+import { hashApiKey, API_KEY_PREFIX } from "./api-keys";
 
 declare module "express-session" {
   interface SessionData {
@@ -32,11 +33,56 @@ declare global {
  */
 async function loadSessionUser(req: Request): Promise<User | undefined> {
   const id = req.session?.userId;
-  if (!id) return undefined;
+  if (!id) return loadApiKeyUser(req);
 
   const user = await storage.getUser(id);
   if (!user || !user.isActive) return undefined;
 
+  req.currentUser = user;
+  return user;
+}
+
+/**
+ * The presented API key, from `X-API-Key` or an `Authorization: Bearer` header.
+ * Only a value carrying this server's key marker is treated as a key, so an
+ * ordinary bearer token (a session, a third party's token) is never mistaken for
+ * one.
+ */
+function presentedApiKey(req: Request): string | undefined {
+  const header = req.headers["x-api-key"];
+  const fromHeader = Array.isArray(header) ? header[0] : header;
+  if (typeof fromHeader === "string" && fromHeader.startsWith(API_KEY_PREFIX)) {
+    return fromHeader.trim();
+  }
+  const auth = req.headers.authorization;
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
+    const token = auth.slice("Bearer ".length).trim();
+    if (token.startsWith(API_KEY_PREFIX)) return token;
+  }
+  return undefined;
+}
+
+/**
+ * Authenticate a request by API key when there is no session behind it.
+ *
+ * The key is hashed and matched against the stored hashes; a revoked key never
+ * matches (the lookup excludes them). A match authenticates as the account that
+ * created the key — with its current role and active state, re-read every time,
+ * so revoking or demoting that account takes effect at once. The plaintext is
+ * never compared or stored; only its hash is looked up.
+ */
+async function loadApiKeyUser(req: Request): Promise<User | undefined> {
+  const presented = presentedApiKey(req);
+  if (!presented) return undefined;
+
+  const record = await storage.findActiveApiKeyByHash(hashApiKey(presented));
+  if (!record || !record.createdBy) return undefined;
+
+  const user = await storage.getUser(record.createdBy);
+  if (!user || !user.isActive) return undefined;
+
+  // Best-effort usage stamp; a failure here must not fail the request.
+  await storage.touchApiKey(record.id).catch(() => {});
   req.currentUser = user;
   return user;
 }
@@ -72,10 +118,12 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     .catch(next);
 };
 
-/** Who is acting, for activity-log attribution. */
+/** Who is acting, for activity-log attribution. Prefers the account a guard
+ *  loaded (which covers API-key requests, where there is no session) and falls
+ *  back to the session's own id. */
 export function actor(req: Request): { userId: string | null; ipAddress: string | null } {
   return {
-    userId: req.session?.userId ?? null,
+    userId: req.currentUser?.id ?? req.session?.userId ?? null,
     ipAddress: req.ip ?? null,
   };
 }

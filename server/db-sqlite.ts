@@ -301,6 +301,17 @@ function createSchema(handle: DatabaseType): void {
       created_at INTEGER NOT NULL,
       description TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE,
+      created_by TEXT,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      revoked_at INTEGER
+    );
   `);
   addMissingColumns(handle);
   relaxHealthMetricColumns(handle);

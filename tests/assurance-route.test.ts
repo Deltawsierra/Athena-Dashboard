@@ -617,8 +617,11 @@ describe("assurance BFF", () => {
 
         const remediationMatch = path.match(/^\/api\/assurance\/findings\/([^/]+)\/remediation\/$/);
         if (remediationMatch && method === "GET") {
+          // The real Django read shape: the workflow field is `remediation_state`
+          // /`remediation_state_label`, and the history is an `events` array
+          // (assurance/views.py FindingViewSet.remediation).
           return json(200, {
-            state: "triaged", state_label: "Triaged", assignee: "alice",
+            remediation_state: "triaged", remediation_state_label: "Triaged", assignee: "alice",
             events: [
               {
                 from_state: null, to_state: "new", actor: null,
@@ -641,14 +644,15 @@ describe("assurance BFF", () => {
             return json(400, { detail: "cannot move from 'triaged' to 'resolved'" });
           }
           const b = raw ? JSON.parse(raw) : {};
+          // The real Django transition shape: `remediation_state`
+          // /`remediation_state_label` and the single `event` it wrote. It does
+          // NOT echo the assignee (assurance/views.py remediation_transition).
           return json(200, {
-            state: b.to_state, state_label: String(b.to_state), assignee: "alice",
-            events: [
-              {
-                from_state: "triaged", to_state: b.to_state, actor: "admin",
-                note: b.note ?? "", created_at: "2026-09-17T03:00:00Z",
-              },
-            ],
+            remediation_state: b.to_state, remediation_state_label: String(b.to_state),
+            event: {
+              from_state: "triaged", to_state: b.to_state, actor: "admin",
+              note: b.note ?? "", created_at: "2026-09-17T03:00:00Z",
+            },
           });
         }
 
@@ -661,15 +665,15 @@ describe("assurance BFF", () => {
             return json(400, { detail: "no user named 'ghost'" });
           }
           const b = raw ? JSON.parse(raw) : {};
+          // The real Django assign shape: the `assignee` and the single `event` it
+          // wrote. It does NOT return a workflow state (assurance/views.py
+          // remediation_assign — assigning does not move the workflow).
           return json(200, {
-            state: "triaged", state_label: "Triaged",
             assignee: b.assignee ?? null,
-            events: [
-              {
-                from_state: "triaged", to_state: "triaged", actor: "admin",
-                note: b.note ?? "", created_at: "2026-09-17T04:00:00Z",
-              },
-            ],
+            event: {
+              from_state: "triaged", to_state: "triaged", actor: "admin",
+              note: b.note ?? "", created_at: "2026-09-17T04:00:00Z",
+            },
           });
         }
 
@@ -716,6 +720,22 @@ describe("assurance BFF", () => {
             uuid: "p-new", name: b.name, kind: b.kind, kind_label: "Vector database",
             region: "", notes: "", evidence_class: "vendor_asserted",
             assertions: [], profile: { declared_fields: 0, weakest_evidence: null },
+          });
+        }
+
+        const providerMatch = path.match(/^\/api\/assurance\/providers\/([^/]+)\/$/);
+        if (providerMatch && method === "PATCH") {
+          if (patchRefusalStatus !== null) {
+            const status = patchRefusalStatus;
+            patchRefusalStatus = null;
+            return json(status, { detail: "no such provider" });
+          }
+          const b = raw ? JSON.parse(raw) : {};
+          return json(200, {
+            uuid: providerMatch[1], name: b.name ?? "OpenAI", kind: b.kind ?? "model_provider",
+            kind_label: "Model provider", region: b.region ?? "us", notes: b.notes ?? "",
+            evidence_class: "vendor_asserted", assertions: [],
+            profile: { declared_fields: 0, weakest_evidence: null },
           });
         }
 
@@ -1564,7 +1584,11 @@ describe("assurance BFF", () => {
       .post("/api/assurance/findings/f-1/remediation/transition")
       .send({ toState: "in_progress" });
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ state: "in_progress", assignee: "alice" });
+    // The transition response carries the new state and the single move it wrote.
+    // It does not echo the assignee — the mapper surfaces that as null, not a lie.
+    expect(res.body).toMatchObject({ state: "in_progress", stateLabel: "in_progress", assignee: null });
+    expect(res.body.events).toHaveLength(1);
+    expect(res.body.events[0]).toMatchObject({ fromState: "triaged", toState: "in_progress" });
   });
 
   it("rejects a remediation state the schema will not accept", async () => {
@@ -2155,6 +2179,7 @@ describe("assurance BFF", () => {
 
   it("refuses provider-profile writes to anyone not signed in", async () => {
     expect((await request(app).post("/api/assurance/providers").send({ name: "X", kind: "other" })).status).toBe(401);
+    expect((await request(app).patch("/api/assurance/providers/p-1").send({ name: "Y" })).status).toBe(401);
     expect(
       (await request(app).post("/api/assurance/provider-assertions").send({ provider: "p-1", field: "region" })).status,
     ).toBe(401);
@@ -2168,6 +2193,28 @@ describe("assurance BFF", () => {
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ uuid: "p-new", name: "Pinecone", kind: "vector_db", kindLabel: "Vector database" });
     expect(res.body.profile).toMatchObject({ declaredFields: 0, weakestEvidence: null });
+  });
+
+  it("an admin edits a provider's identity in place, mapped to camelCase", async () => {
+    const res = await user
+      .patch("/api/assurance/providers/p-1")
+      .send({ name: "OpenAI Inc.", kind: "model_provider", region: "eu" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      uuid: "p-1", name: "OpenAI Inc.", kind: "model_provider", kindLabel: "Model provider",
+    });
+  });
+
+  it("rejects a provider edit that names no field to change", async () => {
+    const res = await user.patch("/api/assurance/providers/p-1").send({});
+    expect(res.status).toBe(400);
+  });
+
+  it("passes a provider edit's backend 404 through with its reason", async () => {
+    patchRefusalStatus = 404;
+    const denied = await user.patch("/api/assurance/providers/ghost").send({ name: "X" });
+    expect(denied.status).toBe(404);
+    expect(String(denied.body.error)).toContain("no such provider");
   });
 
   it("an admin records a graded assertion, mapping the evidence class both ways", async () => {
@@ -2221,6 +2268,7 @@ describe("assurance BFF", () => {
 
     // Every write is admin-only, refused at the front door.
     expect((await analyst.post("/api/assurance/providers").send({ name: "X", kind: "other" })).status).toBe(403);
+    expect((await analyst.patch("/api/assurance/providers/p-1").send({ name: "Y" })).status).toBe(403);
     expect(
       (await analyst.post("/api/assurance/provider-assertions").send({ provider: "p-1", field: "region", value: "x" }))
         .status,

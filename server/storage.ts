@@ -13,9 +13,11 @@ import {
   type Classifier, type InsertClassifier,
   type ConnectionSetting, type UpdateConnectionSettings,
   type SampleDataCounts,
+  type ApiKey,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
+import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 
 /**
  * The single storage contract. Both the SQLite backend (production) and the
@@ -121,6 +123,19 @@ export interface IStorage {
   createClassifier(classifier: InsertClassifier): Promise<Classifier>;
   updateClassifier(id: string, classifier: Partial<InsertClassifier>): Promise<Classifier | undefined>;
   deleteClassifier(id: string): Promise<boolean>;
+
+  // API keys. The plaintext secret is generated here and returned exactly once,
+  // by createApiKey; only its hash is ever stored. Every other method deals in
+  // the stored record, never the secret.
+  getAllApiKeys(): Promise<ApiKey[]>;
+  /** Mint a key: returns the stored record AND the one-time plaintext secret. */
+  createApiKey(input: { name: string; createdBy: string | null }): Promise<{ key: ApiKey; secret: string }>;
+  /** The live (not revoked) key whose secret hashes to this, if any. */
+  findActiveApiKeyByHash(keyHash: string): Promise<ApiKey | undefined>;
+  /** Record that a key was just used to authenticate a request. */
+  touchApiKey(id: string): Promise<void>;
+  /** Revoke a key: it is kept for the audit trail but never authenticates again. */
+  revokeApiKey(id: string): Promise<ApiKey | undefined>;
 }
 
 function defaultControlSettings(): AIControlSetting {
@@ -175,6 +190,7 @@ export class MemStorage implements IStorage {
   private connectionSettings: ConnectionSetting | undefined;
   private chatMessages = new Map<string, AIChatMessage>();
   private classifiers = new Map<string, Classifier>();
+  private apiKeys = new Map<string, ApiKey>();
 
   // Users
   async getUser(id: string) { return this.users.get(id); }
@@ -593,6 +609,41 @@ export class MemStorage implements IStorage {
     return updated;
   }
   async deleteClassifier(id: string) { return this.classifiers.delete(id); }
+
+  // API keys
+  async getAllApiKeys() { return Array.from(this.apiKeys.values()); }
+  async createApiKey(input: { name: string; createdBy: string | null }): Promise<{ key: ApiKey; secret: string }> {
+    const secret = generateApiKey();
+    const key: ApiKey = {
+      id: randomUUID(),
+      name: input.name,
+      prefix: apiKeyPrefix(secret),
+      keyHash: hashApiKey(secret),
+      createdBy: input.createdBy,
+      createdAt: new Date(),
+      lastUsedAt: null,
+      revokedAt: null,
+    };
+    this.apiKeys.set(key.id, key);
+    return { key, secret };
+  }
+  async findActiveApiKeyByHash(keyHash: string) {
+    return Array.from(this.apiKeys.values()).find(
+      (k) => k.keyHash === keyHash && k.revokedAt == null,
+    );
+  }
+  async touchApiKey(id: string) {
+    const key = this.apiKeys.get(id);
+    if (key) this.apiKeys.set(id, { ...key, lastUsedAt: new Date() });
+  }
+  async revokeApiKey(id: string) {
+    const key = this.apiKeys.get(id);
+    if (!key) return undefined;
+    if (key.revokedAt != null) return key;
+    const revoked: ApiKey = { ...key, revokedAt: new Date() };
+    this.apiKeys.set(id, revoked);
+    return revoked;
+  }
 }
 
 export const storage = new MemStorage();

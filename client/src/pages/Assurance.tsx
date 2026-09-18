@@ -25,6 +25,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  ArrowRight,
   Boxes,
   Briefcase,
   Building2,
@@ -38,6 +39,7 @@ import {
   Fingerprint,
   GitBranch,
   HelpCircle,
+  History,
   LayoutList,
   Network,
   Pencil,
@@ -109,6 +111,23 @@ interface Finding {
   // security disposition (see `status`).
   assignee: string | null;
   remediationState: string;
+}
+// The full remediation workflow for one finding, read from
+// `/api/assurance/findings/:uuid/remediation` (Phase 2.3). The `events` are the
+// attributed audit trail of moves; `state` is the current workflow state, which
+// is the human process of getting the finding fixed — NOT its security status.
+interface RemediationEvent {
+  fromState: string | null;
+  toState: string;
+  actor: string | null;
+  note: string;
+  createdAt: string | null;
+}
+interface RemediationDetail {
+  state: string;
+  stateLabel: string;
+  assignee: string | null;
+  events: RemediationEvent[];
 }
 interface Asset {
   uuid: string;
@@ -1154,13 +1173,17 @@ function ProviderForm({
   pending,
   onSubmit,
   onCancel,
+  initial,
+  submitLabel = "Add provider",
 }: {
   pending: boolean;
   onSubmit: (v: { name: string; kind: string }) => void;
   onCancel: () => void;
+  initial?: { name: string; kind: string };
+  submitLabel?: string;
 }) {
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState("model_provider");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [kind, setKind] = useState(initial?.kind ?? "model_provider");
   return (
     <div className="mb-3 space-y-2 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -1184,7 +1207,7 @@ function ProviderForm({
           disabled={pending || !name.trim()}
           onClick={() => onSubmit({ name: name.trim(), kind })}
         >
-          Add provider
+          {submitLabel}
         </button>
         <button
           className="text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
@@ -1201,6 +1224,8 @@ function ProviderForm({
 interface ProviderMutations {
   createProvider: (v: { name: string; kind: string }) => Promise<unknown>;
   creatingProvider: boolean;
+  updateProvider: (uuid: string, patch: { name: string; kind: string }) => Promise<unknown>;
+  updatingProviderUuid: string | null;
   createAssertion: (v: {
     provider: string;
     field: string;
@@ -1236,6 +1261,7 @@ function ProvidersRegistry({
   m: ProviderMutations;
 }) {
   const [addingProvider, setAddingProvider] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [addingAssertionFor, setAddingAssertionFor] = useState<string | null>(null);
   const [editingAssertion, setEditingAssertion] = useState<string | null>(null);
 
@@ -1287,10 +1313,41 @@ function ProvidersRegistry({
             const availableFields = FIELD_OPTIONS.filter(([v]) => !declaredFields.has(v));
             return (
               <li key={p.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                  <span className="text-[13px] font-semibold text-foreground">{p.name}</span>
-                  <span className="text-[12px] text-muted-foreground">{p.kindLabel}</span>
-                </div>
+                {admin && editingProvider === p.uuid ? (
+                  <ProviderForm
+                    initial={{ name: p.name, kind: p.kind }}
+                    submitLabel="Save"
+                    pending={m.updatingProviderUuid === p.uuid}
+                    onSubmit={async (v) => {
+                      try {
+                        await m.updateProvider(p.uuid, v);
+                        setEditingProvider(null);
+                      } catch {
+                        /* keep the form open; the reason is toasted */
+                      }
+                    }}
+                    onCancel={() => setEditingProvider(null)}
+                  />
+                ) : (
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <span className="text-[13px] font-semibold text-foreground">{p.name}</span>
+                    <span className="text-[12px] text-muted-foreground">{p.kindLabel}</span>
+                    {admin && (
+                      <button
+                        className="ml-auto text-muted-foreground hover:text-primary disabled:opacity-50"
+                        disabled={m.updatingProviderUuid === p.uuid}
+                        onClick={() => {
+                          setAddingAssertionFor(null);
+                          setEditingAssertion(null);
+                          setEditingProvider(p.uuid);
+                        }}
+                        title="Edit this provider"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
                   <span>
                     {p.profile.declaredFields} {p.profile.declaredFields === 1 ? "fact" : "facts"}
@@ -1542,6 +1599,7 @@ function FindingRow({
 }) {
   const nextStates = REMEDIATION_TRANSITIONS[f.remediationState] ?? [];
   const [showIncidentPack, setShowIncidentPack] = useState(false);
+  const [showRemediation, setShowRemediation] = useState(false);
   return (
     <li className="rounded-lg border border-border/40 bg-surface-0/40 p-3">
       <div className="flex items-start justify-between gap-3">
@@ -1587,6 +1645,14 @@ function FindingRow({
           <User className="h-3 w-3" />
           {f.assignee ? f.assignee : "unassigned"}
         </span>
+        <button
+          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={() => setShowRemediation((v) => !v)}
+          aria-expanded={showRemediation}
+        >
+          <History className="h-3 w-3" />
+          {showRemediation ? "Hide history" : "History"}
+        </button>
         {remediation?.admin && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {nextStates.length > 0 && (
@@ -1631,6 +1697,9 @@ function FindingRow({
           </div>
         )}
       </div>
+      {/* The remediation audit trail (Phase 2.3), read from the dedicated
+          endpoint on demand: the attributed history of every workflow move. */}
+      {showRemediation && <RemediationDetailView findingUuid={f.uuid} />}
       {/* Incident evidence pack (Phase 3.7): a finding IS the incident. A reader
           opens the portable, verifiable pack on demand — it attests integrity and
           provenance, never that the incident is resolved or the system secure. */}
@@ -6698,6 +6767,82 @@ interface IncidentPack {
  * conclusion is true or the system fixed: the runtime transcript is an explicit
  * gap, a null decision reads "Not assessed", and a downloadable copy is offered.
  */
+/** A timestamp rendered in the reader's locale, or an em dash when there is none
+ *  or it cannot be parsed — never a fabricated or misleading date. */
+function whenLabel(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
+}
+
+/**
+ * The read side of the remediation workflow (Phase 2.3), self-fetching from
+ * `/api/assurance/findings/:uuid/remediation` — the current state, who the work
+ * is assigned to, and the full attributed audit trail of moves. Open to any
+ * signed-in operator (a read), rendered on demand next to the transition/assign
+ * controls. Honest by construction: a workflow `resolved` is labelled as the
+ * ticket being closed, never as the finding being securely fixed; a missing
+ * actor or timestamp reads as a dash, never an invented value.
+ */
+function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<RemediationDetail>({
+    queryKey: [`/api/assurance/findings/${findingUuid}/remediation`],
+  });
+  if (isLoading) {
+    return <p className="mt-2 text-[11px] text-muted-foreground">Loading the remediation history…</p>;
+  }
+  if (isError || !data) {
+    return (
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Could not load the remediation history{error instanceof Error ? `: ${error.message}` : "."}
+      </p>
+    );
+  }
+  // Newest first, so the latest move is at the top of the trail.
+  const events = data.events.slice().reverse();
+  return (
+    <div className="mt-2 space-y-2 rounded-lg border border-border/40 bg-surface-1/30 p-2.5 text-[11px] text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2">
+        <History className="h-3.5 w-3.5 text-primary" />
+        <span className="text-[11px] font-semibold text-foreground">Remediation workflow</span>
+        <RemediationStateChip state={data.state} />
+        <span className="inline-flex items-center gap-1">
+          <User className="h-3 w-3" />
+          {data.assignee ? data.assignee : "unassigned"}
+        </span>
+      </div>
+      <p className="text-[10px] text-muted-foreground/80">
+        The human process of getting this finding fixed — not its security status.
+      </p>
+      {events.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground">No workflow history recorded yet.</p>
+      ) : (
+        <ol className="space-y-1.5">
+          {events.map((ev, i) => (
+            <li
+              key={i}
+              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border/30 pt-1.5 first:border-t-0 first:pt-0"
+            >
+              <span className="inline-flex items-center gap-1 text-foreground">
+                {ev.fromState ? (
+                  <>
+                    {REMEDIATION_LABEL[ev.fromState] || ev.fromState}
+                    <ArrowRight className="h-3 w-3 text-muted-foreground" />
+                  </>
+                ) : null}
+                {REMEDIATION_LABEL[ev.toState] || ev.toState}
+              </span>
+              <span className="text-muted-foreground">· {ev.actor ? ev.actor : "system"}</span>
+              <span className="text-muted-foreground/70">· {whenLabel(ev.createdAt)}</span>
+              {ev.note && <span className="w-full text-muted-foreground/90">“{ev.note}”</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 function IncidentPackView({ findingUuid }: { findingUuid: string }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<IncidentPack>({
@@ -6931,6 +7076,17 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
       toast({ title: "Could not add provider", description: error.message, variant: "destructive" }),
   });
 
+  const updateProvider = useMutation({
+    mutationFn: async ({ uuid, patch }: { uuid: string; patch: { name: string; kind: string } }) =>
+      (await apiRequest("PATCH", `/api/assurance/providers/${uuid}`, patch)).json(),
+    onSuccess: () => {
+      invalidateProviders();
+      toast({ title: "Provider updated" });
+    },
+    onError: (error: Error) =>
+      toast({ title: "Could not update provider", description: error.message, variant: "destructive" }),
+  });
+
   const createAssertion = useMutation({
     mutationFn: async (input: {
       provider: string;
@@ -6978,6 +7134,8 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const providerMutations: ProviderMutations = {
     createProvider: (v) => createProvider.mutateAsync(v),
     creatingProvider: createProvider.isPending,
+    updateProvider: (uuid, patch) => updateProvider.mutateAsync({ uuid, patch }),
+    updatingProviderUuid: updateProvider.isPending ? updateProvider.variables?.uuid ?? null : null,
     createAssertion: (v) => createAssertion.mutateAsync(v),
     creatingAssertion: createAssertion.isPending,
     updateAssertion: (uuid, patch) => updateAssertion.mutateAsync({ uuid, patch }),

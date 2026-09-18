@@ -55,13 +55,63 @@ function readinessLabel(status: string): string {
   return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
-const READINESS_STEPS: TimelineStep[] = [
-  { title: "Discover", detail: "Identify system, use case, and data flows.", state: "done" },
-  { title: "Scan", detail: "Analyze risks, test behavior, find gaps.", state: "done" },
-  { title: "Review Evidence", detail: "Validate findings and mitigation plans.", state: "active" },
-  { title: "Human Approval", detail: "Security, legal, and business sign-off.", state: "todo" },
-  { title: "Deploy", detail: "Release with monitoring and guardrails.", state: "todo" },
-];
+/**
+ * The release-readiness pipeline, derived from the real fleet rather than a
+ * fixed script: each step's state and detail come from actual counts of
+ * registered systems, completed scans, systems carrying findings, and systems
+ * live in production. Nothing here claims progress that the data does not show —
+ * an empty fleet reads as "todo" at every step, and each detail states the count
+ * it is based on.
+ */
+function readinessSteps(
+  registered: number,
+  scanned: number,
+  pendingScans: number,
+  withFindings: number,
+  live: number,
+): TimelineStep[] {
+  const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
+  const discover: TimelineStep = {
+    title: "Discover",
+    detail: `${registered} ${plural(registered, "system")} registered.`,
+    state: registered > 0 ? "done" : "todo",
+  };
+  const scan: TimelineStep = {
+    title: "Scan",
+    detail: registered === 0
+      ? "No systems to scan yet."
+      : `${scanned} of ${registered} scanned${pendingScans > 0 ? ` · ${pendingScans} in flight` : ""}.`,
+    state: registered === 0
+      ? "todo"
+      : scanned >= registered
+        ? "done"
+        : scanned > 0 || pendingScans > 0
+          ? "active"
+          : "todo",
+  };
+  const review: TimelineStep = {
+    title: "Review Evidence",
+    detail: scanned === 0
+      ? "Awaiting the first scan."
+      : withFindings > 0
+        ? `${withFindings} ${plural(withFindings, "system")} with findings to review.`
+        : "No open findings on scanned systems.",
+    state: scanned === 0 ? "todo" : withFindings > 0 ? "active" : "done",
+  };
+  const approval: TimelineStep = {
+    title: "Human Approval",
+    detail: registered === 0
+      ? "No systems awaiting sign-off."
+      : `${live} of ${registered} approved for production.`,
+    state: registered === 0 ? "todo" : live >= registered ? "done" : live > 0 ? "active" : "todo",
+  };
+  const deploy: TimelineStep = {
+    title: "Deploy",
+    detail: `${live} ${plural(live, "system")} live in production.`,
+    state: live > 0 ? "done" : "todo",
+  };
+  return [discover, scan, review, approval, deploy];
+}
 
 
 export default function Deployments() {
@@ -95,6 +145,13 @@ export default function Deployments() {
   const paused = clients.filter((c) => c.status === "paused" || c.status === "inactive").length;
   const scored = rows.filter((r) => r.band !== "none");
   const avgScore = scored.length ? Math.round(scored.reduce((s, r) => s + r.score, 0) / scored.length) : 0;
+
+  // The release-readiness pipeline, derived from the same live fleet as the rest
+  // of the page: registered systems, how many have a scan, how many carry
+  // findings to review, and how many are live in production.
+  const scannedCount = rows.filter((r) => r.readiness !== "Not scanned").length;
+  const withFindings = rows.filter((r) => r.band !== "none").length;
+  const readiness = readinessSteps(clients.length, scannedCount, pending, withFindings, production);
 
   // filters
   const [, navigate] = useLocation();
@@ -218,7 +275,7 @@ export default function Deployments() {
               <p className="athena-label">Release Readiness</p>
               <span className="flex items-center gap-1 text-[11px] text-gold">View pipeline <ChevronRight className="h-3 w-3" /></span>
             </div>
-            <Timeline steps={READINESS_STEPS} />
+            <Timeline steps={readiness} />
             <p className="mt-4 border-t border-border/40 pt-3 font-serif text-[13px] italic text-muted-foreground">
               "Trust is earned in the details before it reaches the world."
               <span className="mt-1 block text-[10px] uppercase tracking-[0.2em] text-gold-dim">— Mythos</span>

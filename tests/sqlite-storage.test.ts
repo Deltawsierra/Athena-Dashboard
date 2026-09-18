@@ -199,4 +199,28 @@ describe("SQLite storage", () => {
     expect(row?.engineKey).toBeNull();
     expect(row?.assistantModel).toBe("a-model");
   });
+
+  it("mints an API key hash-only, finds it by hash, and revokes it durably", async () => {
+    const { key, secret } = await storage.createApiKey({ name: "sqlite-key", createdBy: "admin-id" });
+    expect(secret.startsWith("athena_")).toBe(true);
+    // The stored record carries the display prefix and a hash — never the secret.
+    expect(key.prefix.startsWith("athena_")).toBe(true);
+    expect(key.keyHash).not.toBe(secret);
+    expect(key.revokedAt).toBeNull();
+    expect(key.createdAt).toBeInstanceOf(Date);
+
+    // Re-hashing the plaintext locates the live record (what auth does).
+    const { hashApiKey } = await import("../server/api-keys");
+    const found = await storage.findActiveApiKeyByHash(hashApiKey(secret));
+    expect(found?.id).toBe(key.id);
+
+    await storage.touchApiKey(key.id);
+    const touched = (await storage.getAllApiKeys()).find((k) => k.id === key.id);
+    expect(touched?.lastUsedAt).toBeInstanceOf(Date);
+
+    const revoked = await storage.revokeApiKey(key.id);
+    expect(revoked?.revokedAt).toBeInstanceOf(Date);
+    // A revoked key is no longer found by the live-key lookup.
+    expect(await storage.findActiveApiKeyByHash(hashApiKey(secret))).toBeUndefined();
+  });
 });

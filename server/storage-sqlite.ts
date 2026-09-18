@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { randomUUID } from "crypto";
 import type { IStorage } from "./storage";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
+import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 import type {
   User, InsertUser,
   Client, InsertClient,
@@ -20,6 +21,7 @@ import type {
   Classifier, InsertClassifier,
   ConnectionSetting, UpdateConnectionSettings,
   SampleDataCounts,
+  ApiKey,
 } from "@shared/schema";
 
 /**
@@ -552,6 +554,47 @@ export class SqliteStorage implements IStorage {
   }
   async deleteClassifier(id: string): Promise<boolean> {
     return db.delete(schema.classifiers).where(eq(schema.classifiers.id, id)).run().changes > 0;
+  }
+
+  // API keys
+  async getAllApiKeys(): Promise<ApiKey[]> {
+    return db.select().from(schema.apiKeys).orderBy(desc(schema.apiKeys.createdAt)).all();
+  }
+  async getApiKey(id: string): Promise<ApiKey | undefined> {
+    return db.select().from(schema.apiKeys).where(eq(schema.apiKeys.id, id)).get();
+  }
+  async createApiKey(input: { name: string; createdBy: string | null }): Promise<{ key: ApiKey; secret: string }> {
+    const secret = generateApiKey();
+    const row: ApiKey = {
+      id: crypto.randomUUID(),
+      name: input.name,
+      prefix: apiKeyPrefix(secret),
+      keyHash: hashApiKey(secret),
+      createdBy: input.createdBy,
+      createdAt: new Date(),
+      lastUsedAt: null,
+      revokedAt: null,
+    };
+    db.insert(schema.apiKeys).values(row).run();
+    return { key: (await this.getApiKey(row.id))!, secret };
+  }
+  async findActiveApiKeyByHash(keyHash: string): Promise<ApiKey | undefined> {
+    return db
+      .select()
+      .from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.keyHash, keyHash), isNull(schema.apiKeys.revokedAt)))
+      .get();
+  }
+  async touchApiKey(id: string): Promise<void> {
+    db.update(schema.apiKeys).set({ lastUsedAt: new Date() }).where(eq(schema.apiKeys.id, id)).run();
+  }
+  async revokeApiKey(id: string): Promise<ApiKey | undefined> {
+    const existing = await this.getApiKey(id);
+    if (!existing) return undefined;
+    if (existing.revokedAt == null) {
+      db.update(schema.apiKeys).set({ revokedAt: new Date() }).where(eq(schema.apiKeys.id, id)).run();
+    }
+    return this.getApiKey(id);
   }
 }
 
