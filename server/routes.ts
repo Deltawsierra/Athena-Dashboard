@@ -2129,6 +2129,29 @@ export function registerRoutes(app: Express): void {
     }),
   );
 
+  // The users a remediation assignment may target, for a picker instead of
+  // free-text entry (Phase 2.3). Admin-only — the SAME guard as the assign route
+  // above — since it enumerates operator accounts. The backend scopes this to
+  // active users only, exactly the set the assign route accepts. A backend
+  // refusal (403/404) is passed back verbatim.
+  app.get(
+    "/api/assurance/findings/:uuid/assignable",
+    requireAdmin,
+    asyncHandler(async (req, res) => {
+      let result;
+      try {
+        result = await assurance.getAssignable(req.params.uuid);
+      } catch (cause) {
+        if (assuranceUnavailable(res, cause)) return;
+        throw cause;
+      }
+      if (!result.ok) {
+        return void res.status(result.status).json({ error: result.detail });
+      }
+      res.json(result.value);
+    }),
+  );
+
   // ==== PROVIDER ASSURANCE PROFILE (admin-only writes) ====
   //
   // A provider's profile is declared, not measured, so a human records it: an

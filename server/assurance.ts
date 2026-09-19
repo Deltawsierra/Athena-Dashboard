@@ -366,6 +366,20 @@ export interface AssuranceRemediation {
   events: RemediationEvent[];
 }
 
+/** One user a remediation assignment may target (Phase 2.3 assignable-users
+ *  picker). `display` is the user's full name when set, the username otherwise. */
+export interface AssuranceAssignableUser {
+  username: string;
+  display: string;
+}
+/** The scoped set of users a finding's remediation work may be assigned to,
+ *  plus the current assignee. Mirrors the backend `assignable` action: active
+ *  users only, ordered by username — the exact set the assign action accepts. */
+export interface AssuranceAssignable {
+  assignable: AssuranceAssignableUser[];
+  current: string | null;
+}
+
 export interface AssuranceStatus {
   configured: boolean;
   reachable: boolean;
@@ -2164,6 +2178,23 @@ function mapRemediation(raw: Record<string, unknown>): AssuranceRemediation {
   };
 }
 
+function mapAssignable(raw: Record<string, unknown>): AssuranceAssignable {
+  // The backend `assignable` action (assurance/views.py) returns
+  // `{assignable: [{username, display}], current: <username|null>}`. Map each
+  // row defensively so a malformed entry surfaces as empty strings rather than
+  // crashing the picker.
+  const rows = Array.isArray(raw.assignable)
+    ? (raw.assignable as Record<string, unknown>[])
+    : [];
+  return {
+    assignable: rows.map((row) => ({
+      username: str(row.username),
+      display: str(row.display),
+    })),
+    current: strOrNull(raw.current),
+  };
+}
+
 function asset(raw: Record<string, unknown>): AssuranceAsset {
   return {
     uuid: str(raw.uuid),
@@ -3637,6 +3668,36 @@ export async function remediationAssign(uuid: string, assignee: string | null, n
     wire,
     mapRemediation,
   );
+}
+
+/**
+ * The users a finding's remediation work may be assigned to (Phase 2.3), for a
+ * picker instead of free-text entry. Admin-only on the control plane and the BFF
+ * route — the same guard as {@link remediationAssign}. It returns the same
+ * `{ok:true, value} | {ok:false, status, detail}` shape and error mapping as the
+ * assign proxy: an EXPECTED backend 4xx (403/404) is passed back with its reason
+ * rather than laundered into a 503, while genuine unavailability (5xx, network)
+ * throws. The set is active users only, ordered by username — exactly what the
+ * assign action will accept, so a picked user is never rejected.
+ */
+export async function getAssignable(
+  uuid: string,
+): Promise<
+  | { ok: true; value: AssuranceAssignable }
+  | { ok: false; status: number; detail: string }
+> {
+  const response = await call(
+    `/api/assurance/findings/${encodeURIComponent(uuid)}/assignable/`,
+  );
+  if (PASSTHROUGH_STATUS.has(response.status)) {
+    return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return { ok: true, value: mapAssignable(await readObject(response)) };
 }
 
 // ============================================================================
