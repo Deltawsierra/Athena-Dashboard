@@ -38,6 +38,9 @@ describe("assurance BFF", () => {
   // When set, the next remediation assign is refused with the backend's
   // unknown-user 400.
   let refuseAssign = false;
+  // When set, the next assignable-users read is refused with a backend 404, so
+  // the BFF's passthrough of that reason can be exercised.
+  let refuseAssignable = false;
   const unknowns = new Map<string, Record<string, unknown>>();
 
   beforeAll(async () => {
@@ -674,6 +677,26 @@ describe("assurance BFF", () => {
               from_state: "triaged", to_state: "triaged", actor: "admin",
               note: b.note ?? "", created_at: "2026-09-17T04:00:00Z",
             },
+          });
+        }
+
+        const assignableMatch = path.match(
+          /^\/api\/assurance\/findings\/([^/]+)\/assignable\/$/,
+        );
+        if (assignableMatch && method === "GET") {
+          if (refuseAssignable) {
+            return json(404, { detail: "not found" });
+          }
+          // The real Django assignable shape (assurance/views.py
+          // FindingViewSet.assignable): active users only, ordered by username,
+          // with `display` the full name or the username, plus the current
+          // assignee. Inactive users never appear.
+          return json(200, {
+            assignable: [
+              { username: "alice", display: "Alice Analyst" },
+              { username: "bob", display: "bob" },
+            ],
+            current: "alice",
           });
         }
 
@@ -1650,6 +1673,39 @@ describe("assurance BFF", () => {
       .post("/api/assurance/findings/f-1/remediation/assign")
       .send({ assignee: "bob" });
     expect(deniedAssign.status).toBe(403);
+  });
+
+  it("an admin reads the assignable users for a finding, mapped to camelCase", async () => {
+    const res = await user.get("/api/assurance/findings/f-1/assignable");
+    expect(res.status).toBe(200);
+    // The scoped set (active users, ordered by username) and the current assignee.
+    expect(res.body).toMatchObject({ current: "alice" });
+    expect(res.body.assignable).toEqual([
+      { username: "alice", display: "Alice Analyst" },
+      { username: "bob", display: "bob" },
+    ]);
+  });
+
+  it("gates the assignable read to admins: a non-admin gets 403", async () => {
+    await user.post("/api/users").send({
+      username: "assignable-analyst", password: "analyst-pass", role: "user", isActive: true,
+    });
+    const analyst = await signIn(app, "assignable-analyst", "analyst-pass");
+    const denied = await analyst.get("/api/assurance/findings/f-1/assignable");
+    expect(denied.status).toBe(403);
+  });
+
+  it("refuses the assignable read to anyone not signed in", async () => {
+    const anon = await request(app).get("/api/assurance/findings/f-1/assignable");
+    expect(anon.status).toBe(401);
+  });
+
+  it("passes the backend's assignable refusal through with its reason", async () => {
+    refuseAssignable = true;
+    const denied = await user.get("/api/assurance/findings/f-1/assignable");
+    expect(denied.status).toBe(404);
+    expect(String(denied.body.error)).toContain("not found");
+    refuseAssignable = false;
   });
 
   it("returns a deployment's assurance receipt, mapped to camelCase", async () => {
