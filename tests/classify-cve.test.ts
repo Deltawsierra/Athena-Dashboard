@@ -87,15 +87,45 @@ describe("classifying a vulnerability description", () => {
     expect(res.body.confidence).toBe(res.body.baseline);
   });
 
-  it("treats a missing informative flag as not informative", async () => {
-    // An older engine that does not send the field has not told us the answer
-    // was informative, and assuming it was is how the floor case gets rendered
-    // as a finding.
+  it("reports a missing informative flag as unknown, not as not-informative", async () => {
+    // Absent is its own answer. Reading it as `true` renders a floor answer as a
+    // finding; reading it as `false` asserts "the model scored every one of its
+    // classes equally, so it has expressed no preference" -- a claim ABOUT THE
+    // MODEL that an engine which omitted the field never made. Null declines
+    // both, and the page has a branch for it.
     reply = { label: "rce", confidence: 0.2, engine_version: "ml-v1" };
     const res = await agent.post("/api/classify-cve").send({ text: "anything" });
 
     expect(res.status).toBe(200);
+    expect(res.body.informative).toBeNull();
+    // Still fail-safe, which was the whole point of the old `false`: nothing
+    // here says the answer WAS informative either.
+    expect(res.body.informative).not.toBe(true);
+  });
+
+  it("carries a false informative flag the engine did send", async () => {
+    // The control: null is the ABSENT case only. An engine that says "no
+    // preference" is making a real statement and it survives the round trip.
+    reply = {
+      label: "rce", confidence: 0.2, informative: false,
+      baseline: 0.2, engine_version: "ml-v1",
+    };
+    const res = await agent.post("/api/classify-cve").send({ text: "csrf" });
+
+    expect(res.status).toBe(200);
     expect(res.body.informative).toBe(false);
+    expect(res.body.informative).not.toBeNull();
+  });
+
+  it("does not let a non-boolean informative field read as a verdict", async () => {
+    // "false", 0 and null are all things an engine or a proxy might send. None
+    // of them is a boolean, so none of them is a statement about the model.
+    for (const sent of ["false", 0, null, "true", 1]) {
+      reply = { label: "rce", confidence: 0.2, informative: sent, engine_version: "ml-v1" };
+      const res = await agent.post("/api/classify-cve").send({ text: "anything" });
+      expect(res.status).toBe(200);
+      expect(res.body.informative).toBeNull();
+    }
   });
 
   it("reports an absent confidence as unknown, not as zero", async () => {

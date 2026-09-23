@@ -67,13 +67,64 @@ describe("a confidence the engine never sent", () => {
     expect(screen.queryByTestId("text-no-confidence")).toBeNull();
   });
 
-  it("leaves the uninformative verdict alone", () => {
-    // The floor case has its own panel and its own words; a null confidence
-    // must not be routed into it, because "the model expressed no preference"
-    // is a claim about the model that an absent field does not support.
+  it("leaves an engine-stated uninformative verdict alone", () => {
+    // A real `informative: false` is the engine's own statement and keeps its
+    // own panel. This is a control for the branch below, not for the confidence
+    // routing: it supplies informative: false, so it would pass whatever the
+    // confidence branch did. Test 1 is what pins the confidence routing.
     render(<Verdict result={result({ informative: false, confidence: null })} />);
 
     expect(screen.getByTestId("verdict-uninformative")).toBeTruthy();
     expect(screen.queryByTestId("verdict-classified")).toBeNull();
+    expect(screen.queryByTestId("verdict-unstated")).toBeNull();
+  });
+});
+
+describe("an informative flag the engine never sent", () => {
+  it("does not claim the model expressed no preference", () => {
+    // The sentence in the uninformative panel is a claim ABOUT THE MODEL. An
+    // engine that omitted the field made no such claim. Reading absent as false
+    // published it anyway -- and with a measured 0.9 against a 0.2 floor in the
+    // same response, the page told the reader every class scored 20.0%.
+    render(<Verdict result={result({ informative: null, confidence: 0.9 })} />);
+
+    expect(screen.getByTestId("verdict-unstated")).toBeTruthy();
+    expect(screen.queryByTestId("verdict-uninformative")).toBeNull();
+    expect(screen.queryByTestId("verdict-classified")).toBeNull();
+    expect(screen.queryByText(/scored every one of its classes equally/)).toBeNull();
+    expect(screen.queryByText(/because something/)).toBeNull();
+    // The label and the measured number both still show: hiding them would be
+    // its own dishonesty, and 0.9 IS what the engine reported.
+    expect(screen.getByTestId("text-label").textContent).toBe("sql_injection");
+    expect(screen.getByTestId("text-confidence").textContent).toBe("90.0%");
+  });
+
+  it("does not present it as a classification either", () => {
+    // Fail-safe in both directions -- which is what the old `false` default was
+    // for. Absent must not become "this is a finding".
+    render(<Verdict result={result({ informative: null, confidence: 0.9 })} />);
+    expect(screen.queryByTestId("verdict-classified")).toBeNull();
+    expect(screen.getByText(/not presented as a classification/)).toBeTruthy();
+  });
+
+  it("carries an unsent confidence through the unstated branch too", () => {
+    render(<Verdict result={result({ informative: null, confidence: null })} />);
+    expect(screen.getByTestId("text-confidence").textContent).toBe(
+      "confidence not reported",
+    );
+  });
+
+  it("still routes a stated flag to its own panel, either way", () => {
+    // Two controls in one: null must be the ONLY state that reaches the new
+    // branch. If it swallowed `true` or `false` the page would stop saying
+    // anything at all, which is the same defect wearing the opposite sign.
+    render(<Verdict result={result({ informative: true })} />);
+    expect(screen.getByTestId("verdict-classified")).toBeTruthy();
+    expect(screen.queryByTestId("verdict-unstated")).toBeNull();
+    cleanup();
+
+    render(<Verdict result={result({ informative: false })} />);
+    expect(screen.getByTestId("verdict-uninformative")).toBeTruthy();
+    expect(screen.queryByTestId("verdict-unstated")).toBeNull();
   });
 });
