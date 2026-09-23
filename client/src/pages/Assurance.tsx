@@ -574,7 +574,7 @@ interface OperationalAssurance {
     total: number;
     current: number;
     stale: number;
-    ttlDays: number;
+    ttlDays: number | null;
     freshnessRatio: number | null;
   };
   changeBacklog: {
@@ -751,7 +751,7 @@ interface RippleEffect {
     originsWithReach: number;
     consequences: number;
     evidencedConsequences: number;
-    bounded: boolean;
+    bounded: boolean | null;
     byCategory: Record<string, number>;
     worstRisk: string | null;
   };
@@ -871,7 +871,7 @@ interface LifecycleStage {
   components: LifecycleComponent[];
   weakestEvidence: string | null;
   weakestEvidenceLabel: string | null;
-  gap: boolean;
+  gap: boolean | null;
   gapDetail: string | null;
   risk: string;
 }
@@ -885,8 +885,8 @@ interface DataLifecycle {
   stages: LifecycleStage[];
   gaps: LifecycleGap[];
   summary: {
-    stagesTotal: number;
-    evidenced: number;
+    stagesTotal: number | null;
+    evidenced: number | null;
     notEvidenced: number;
     controlGaps: number;
     worstRisk: string | null;
@@ -4274,7 +4274,7 @@ function ReadinessChip({ readiness }: { readiness: string }) {
  * "Not assessed", never "ready"), and a resolved remediation is a PROCESS claim
  * (a human marked the work done), never a security closure.
  */
-function OperationalAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function OperationalAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<OperationalAssurance>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/operational-assurance`],
   });
@@ -4346,8 +4346,13 @@ function OperationalAssurancePanel({ deploymentUuid }: { deploymentUuid: string 
           </p>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
             <span>
-              <span className="text-foreground">{ratioPct(evidenceFreshness.freshnessRatio)}</span> within
-              its {evidenceFreshness.ttlDays}-day TTL
+              <span className="text-foreground">{ratioPct(evidenceFreshness.freshnessRatio)}</span>{" "}
+              {/* "0-day TTL" was a default leaking into a sentence: it claimed this
+                  deployment's evidence expires the instant it is written. When the
+                  backend reports no TTL the sentence says so and stops. */}
+              {evidenceFreshness.ttlDays === null
+                ? "within its TTL (length not reported)"
+                : `within its ${evidenceFreshness.ttlDays}-day TTL`}
             </span>
             <span>{evidenceFreshness.total} findings</span>
           </div>
@@ -4724,7 +4729,7 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
  * evidenced count shown so the bounding is visible), and an origin with no evidenced
  * downstream reach reads as exactly that, never as safe or contained.
  */
-function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<RippleEffect>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/ripple-effect`],
   });
@@ -4782,8 +4787,14 @@ function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </span>
             <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
               {summary.consequences} shown
-              {summary.bounded && (
+              {summary.bounded === true && (
                 <span className="text-amber-400"> · {summary.evidencedConsequences} evidenced (bounded)</span>
+              )}
+              {/* Absent is not "not bounded". Without this, a backend that said
+                  nothing about bounding looked exactly like one that said the
+                  list is complete. */}
+              {summary.bounded === null && (
+                <span className="text-muted-foreground"> · bounding not reported</span>
               )}
             </span>
             <span className="inline-flex items-center gap-1">
@@ -5220,7 +5231,7 @@ function PersonalContextPanel({ deploymentUuid }: { deploymentUuid: string }) {
  * unevidenced stage reads "not evidenced", never "compliant"; a weakly-evidenced
  * control is still a gap.
  */
-function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<DataLifecycle>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/data-lifecycle`],
   });
@@ -5264,7 +5275,12 @@ function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
 
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
         <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
-          {summary.evidenced}/{summary.stagesTotal} stages evidenced
+          {/* "0/0 stages evidenced" read as a measurement -- we looked at every
+              stage and none was evidenced -- when the backend had sent no
+              summary at all. Those are different facts. */}
+          {summary.evidenced === null || summary.stagesTotal === null
+            ? "stage coverage not reported"
+            : `${summary.evidenced}/${summary.stagesTotal} stages evidenced`}
         </span>
         {summary.controlGaps > 0 && (
           <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
@@ -5300,7 +5316,14 @@ function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
                   Not evidenced
                 </span>
               )}
-              {st.gap && <CapabilityRiskChip risk={st.risk} />}
+              {st.gap === true && <CapabilityRiskChip risk={st.risk} />}
+              {/* An unreported gap is not a clean stage. `bool()` made the two
+                  render identically; this says which one it is. */}
+              {st.gap === null && (
+                <span className="rounded-md border border-border/50 bg-surface-1/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  gap not reported
+                </span>
+              )}
             </div>
             {st.components.length > 0 && (
               <ul className="mt-1 flex flex-wrap gap-1">
@@ -5316,7 +5339,7 @@ function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
                 ))}
               </ul>
             )}
-            {st.gap && st.gapDetail && (
+            {st.gap === true && st.gapDetail && (
               <p className="mt-1 text-[10px] leading-relaxed text-amber-400">{st.gapDetail}</p>
             )}
           </div>

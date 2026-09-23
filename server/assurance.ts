@@ -766,7 +766,7 @@ export interface AssuranceOperationalAssurance {
     current: number;
     /** Findings whose evidence has aged past the TTL — a retest is due. */
     stale: number;
-    ttlDays: number;
+    ttlDays: number | null;
     /** current / total, or null when there are no findings to age (never a fake 0). */
     freshnessRatio: number | null;
   };
@@ -1014,7 +1014,7 @@ export interface AssuranceRippleEffect {
     consequences: number;
     /** The full evidenced count before bounding — the bounding is visible. */
     evidencedConsequences: number;
-    bounded: boolean;
+    bounded: boolean | null;
     byCategory: Record<string, number>;
     worstRisk: string | null;
   };
@@ -1171,7 +1171,7 @@ export interface LifecycleStage {
   /** The weakest evidence behind the stage, or null when unevidenced. */
   weakestEvidence: string | null;
   weakestEvidenceLabel: string | null;
-  gap: boolean;
+  gap: boolean | null;
   gapDetail: string | null;
   risk: string;
 }
@@ -1185,8 +1185,8 @@ export interface AssuranceDataLifecycle {
   stages: LifecycleStage[];
   gaps: LifecycleGap[];
   summary: {
-    stagesTotal: number;
-    evidenced: number;
+    stagesTotal: number | null;
+    evidenced: number | null;
     notEvidenced: number;
     controlGaps: number;
     worstRisk: string | null;
@@ -1323,6 +1323,15 @@ const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : f
  */
 const numOrNull = (v: unknown): number | null => (typeof v === "number" ? v : null);
 const bool = (v: unknown): boolean => v === true;
+/**
+ * A boolean carried as a boolean, or null when the backend said nothing.
+ * Distinct from `bool`, which answers "did the backend say true" -- the right
+ * question for a flag meaningful only when set, and the wrong one for a
+ * finding. An absent `gap` is not "no gap", it is "we were not told", and
+ * collapsing the two is the silent zero this console exists to refuse.
+ */
+const boolOrNull = (v: unknown): boolean | null =>
+  typeof v === "boolean" ? v : null;
 
 function evidence(raw: Record<string, unknown>): AssuranceEvidence {
   return {
@@ -2009,7 +2018,11 @@ function mapOperationalAssurance(raw: Record<string, unknown>): AssuranceOperati
       total: num(freshness.total, 0),
       current: num(freshness.current, 0),
       stale: num(freshness.stale, 0),
-      ttlDays: num(freshness.ttl_days, 0),
+      // `numOrNull`, not `num(..., 0)`. A backend that does not report a TTL
+      // became a 0, and the console rendered "0-day TTL" -- a claim that this
+      // deployment's evidence expires the instant it is written. Nobody
+      // measured that; it is a default leaking into a sentence.
+      ttlDays: numOrNull(freshness.ttl_days),
       // Null when there are no findings to age — never a fabricated 0%.
       freshnessRatio: numOrNull(freshness.freshness_ratio),
     },
@@ -2596,7 +2609,10 @@ function mapRippleEffect(raw: Record<string, unknown>): AssuranceRippleEffect {
       originsWithReach: num(summary.origins_with_reach, 0),
       consequences: num(summary.consequences, 0),
       evidencedConsequences: num(summary.evidenced_consequences, 0),
-      bounded: bool(summary.bounded),
+      // Nullable: `bool()` made "the backend did not say whether this list is
+      // bounded" render identically to "it is not bounded". The first is a gap
+      // in what we know about the list; the second is a fact about it.
+      bounded: boolOrNull(summary.bounded),
       byCategory: numRecord(summary.by_category),
       worstRisk: strOrNull(summary.worst_risk),
     },
@@ -2762,7 +2778,10 @@ function lifecycleStage(raw: Record<string, unknown>): LifecycleStage {
     // Null when the stage is unevidenced — a chain is as strong as its weakest link.
     weakestEvidence: strOrNull(raw.weakest_evidence),
     weakestEvidenceLabel: strOrNull(raw.weakest_evidence_label),
-    gap: bool(raw.gap),
+    // `boolOrNull`. `bool()` turned an absent `gap` into false -- "this stage
+    // has no gap" -- which is the silent zero this page exists to refuse. An
+    // unreported gap is unknown, and unknown is not clean.
+    gap: boolOrNull(raw.gap),
     gapDetail: strOrNull(raw.gap_detail),
     risk: str(raw.risk),
   };
@@ -2783,8 +2802,13 @@ function mapDataLifecycle(raw: Record<string, unknown>): AssuranceDataLifecycle 
         }))
       : [],
     summary: {
-      stagesTotal: num(summary.stages_total, 0),
-      evidenced: num(summary.evidenced, 0),
+      // Both nullable. `num(..., 0)` rendered "0/0 stages evidenced", which
+      // reads as a measurement -- we looked at every stage and none was
+      // evidenced -- when what happened is that the backend sent no summary.
+      // "Nobody said" and "we measured zero" are different facts, and this
+      // panel is where an operator tells them apart.
+      stagesTotal: numOrNull(summary.stages_total),
+      evidenced: numOrNull(summary.evidenced),
       notEvidenced: num(summary.not_evidenced, 0),
       controlGaps: num(summary.control_gaps, 0),
       worstRisk: strOrNull(summary.worst_risk),
