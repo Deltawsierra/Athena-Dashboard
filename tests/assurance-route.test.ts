@@ -209,10 +209,15 @@ describe("assurance BFF", () => {
               { source: "n-agent", target: "n-tool", kind: "invokes", label: "invokes", declared: true },
               { source: "n-agent", target: "n-model", kind: "prompts", label: "prompts", declared: false },
             ],
-            unresolved: [{ agent: "assistant", tool_identifier: "ghost-tool" }],
+            unresolved: [{
+              source: "assistant", source_kind: "agent",
+              reference: "ghost-tool", mechanism: "tools",
+            }],
             summary: {
               node_count: 3, edge_count: 2, declared_edges: 1, inferred_edges: 1,
-              shadow_nodes: 1, unresolved_edges: 1, layers_present: ["app", "model", "tools"],
+              shadow_nodes: 1, unresolved_edges: 1,
+              unresolved_tool_references: 1, unresolved_server_references: 0,
+              layers_present: ["app", "model", "tools"],
               logs_observed: false,
             },
           });
@@ -1857,7 +1862,9 @@ describe("assurance BFF", () => {
     expect(inferred.declared).toBe(false);
     // The shadow node and the dangling reference come through.
     expect(res.body.nodes.find((n: { uuid: string }) => n.uuid === "n-tool").shadow).toBe(true);
-    expect(res.body.unresolved[0]).toMatchObject({ agent: "assistant", toolIdentifier: "ghost-tool" });
+    expect(res.body.unresolved[0]).toEqual({
+      source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools",
+    });
   });
 
   it("refuses the route map to anyone not signed in", async () => {
