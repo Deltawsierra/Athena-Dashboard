@@ -236,16 +236,16 @@ interface RouteMap {
   layers: { key: string; label: string; nodes: RouteNode[] }[];
   nodes: RouteNode[];
   edges: RouteEdge[];
-  unresolved: UnresolvedReference[];
+  unresolved: UnresolvedReference[] | null;
   summary: {
     nodeCount: number;
     edgeCount: number;
     declaredEdges: number;
     inferredEdges: number;
     shadowNodes: number;
-    unresolvedEdges: number;
-    unresolvedToolReferences: number;
-    unresolvedServerReferences: number;
+    unresolvedEdges: number | null;
+    unresolvedToolReferences: number | null;
+    unresolvedServerReferences: number | null;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -698,7 +698,7 @@ interface AccessPrincipal {
 }
 interface EffectiveAccess {
   principals: AccessPrincipal[];
-  unresolved: UnresolvedReference[];
+  unresolved: UnresolvedReference[] | null;
   summary: {
     principals: number;
     privileged: number;
@@ -706,7 +706,7 @@ interface EffectiveAccess {
     orphaned: number;
     overBroad: number;
     highRiskReach: number;
-    unresolvedReferences: number;
+    unresolvedReferences: number | null;
     worstRisk: string | null;
   };
 }
@@ -2157,7 +2157,7 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
                 <ShieldAlert className="h-3.5 w-3.5" /> {summary.shadowNodes} shadow
               </span>
             )}
-            {summary.unresolvedEdges > 0 && (
+            {summary.unresolvedEdges !== null && summary.unresolvedEdges > 0 && (
               <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
                 <HelpCircle className="h-3.5 w-3.5" /> {summary.unresolvedEdges} unresolved
               </span>
@@ -2231,7 +2231,11 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </ul>
           )}
 
-          <UnresolvedReferences rows={data.unresolved} what="this map" />
+          <UnresolvedReferences
+            rows={data.unresolved}
+            reported={summary.unresolvedEdges}
+            what="this map"
+          />
         </>
       )}
     </section>
@@ -2250,29 +2254,87 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
 // agent naming a tool it cannot reach is a question about the agent's declared
 // toolset; a component naming a backend that is not there is a question about the
 // inventory's wiring. Saying "names" for both would flatten them.
+// How each declared-reference mechanism reads in a sentence. An agent naming a
+// tool it cannot reach is a question about the agent's declared toolset; a
+// component naming a backend that is not there is a question about the
+// inventory's wiring. A mechanism this console has never been taught gets
+// NEITHER phrasing: it is named as itself, because asserting it is one of the two
+// we know would send an operator to audit the wrong thing.
+const MECHANISM_PHRASING: Record<string, string> = {
+  tools: "names",
+  server: "is wired to",
+};
+
+// The references the inventory declares and discovery could not place, said
+// plainly. This is not decoration: an unresolvable reference means part of the
+// graph every assessment on this page is computed over could not be placed, so a
+// clean reading of that assessment is a reading of a graph we do not have.
+//
+// `rows` is null when the control plane has no channel for this question at all
+// (it predates the field), and that is said out loud rather than rendered as
+// nothing — a console that stays silent about a control plane that cannot answer
+// is indistinguishable from one reporting a graph that resolved cleanly.
+//
+// `reported` is the control plane's own total. When it disagrees with the rows
+// this console can name, BOTH numbers are shown. Deriving the sentence from the
+// list alone would hide a row the backend counted and did not send; printing the
+// backend's total alone would claim to have named rows that are not on screen.
 function UnresolvedReferences({
   rows,
+  reported,
   what,
 }: {
-  rows: UnresolvedReference[];
+  rows: UnresolvedReference[] | null;
+  reported: number | null;
   what: string;
 }) {
-  if (rows.length === 0) return null;
+  if (rows === null) {
+    return (
+      <div className="mt-3 rounded-lg border border-border/40 bg-surface-1/30 p-2.5">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          This control plane does not report whether every declared reference could be placed, so
+          whether {what} was built over a complete graph is <span className="text-foreground">not
+          known from here</span> — it is not a statement that nothing was missing.
+        </p>
+      </div>
+    );
+  }
+  if (rows.length === 0 && (reported === null || reported === 0)) return null;
+  const undercount = reported !== null && reported > rows.length;
   return (
     <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
         Unresolved references
       </p>
       <p className="mb-1.5 text-[11px] leading-relaxed text-muted-foreground">
-        {rows.length} declared reference{rows.length === 1 ? "" : "s"} could not be placed against
-        this deployment&apos;s inventory, so {what} was built over an incomplete graph. These are
-        gaps to chase, not components to assume away.
+        {undercount ? (
+          <>
+            {reported} declared reference{reported === 1 ? "" : "s"} could not be placed against this
+            deployment&apos;s inventory, and{" "}
+            <span className="text-foreground">
+              {rows.length === 0 ? "none of them" : `only ${rows.length} of them`}
+            </span>{" "}
+            arrived with a reference this console can name.
+          </>
+        ) : (
+          <>
+            {rows.length} declared reference{rows.length === 1 ? "" : "s"} could not be placed against
+            this deployment&apos;s inventory.
+          </>
+        )}{" "}
+        So {what} was built over an incomplete graph. These are gaps to chase, not components to
+        assume away.
       </p>
       <ul className="space-y-1">
         {rows.map((u, i) => (
           <li key={`${u.source}-${u.mechanism}-${u.reference}-${i}`} className="text-[11px] text-muted-foreground">
-            <span className="text-foreground">{u.source}</span>{" "}
-            {u.mechanism === "server" ? "is wired to" : "names"}{" "}
+            <span className="text-foreground">{u.source || "An unnamed component"}</span>{" "}
+            {MECHANISM_PHRASING[u.mechanism] ?? (
+              <>
+                declares (as{" "}
+                <span className="text-foreground">{u.mechanism || "an unnamed mechanism"}</span>)
+              </>
+            )}{" "}
             <span className="text-amber-400/90">{u.reference}</span>, which discovery could not
             place.
           </li>
@@ -2282,13 +2344,24 @@ function UnresolvedReferences({
   );
 }
 
-function CapabilityRiskChip({ risk }: { risk: string }) {
+// The risk bands this console has been taught. A band it has NOT been taught is
+// not "baseline": the closed three-way ternary this replaces rendered a backend
+// `critical` as a muted grey "Baseline" chip, which inverts the severity rather
+// than merely losing it. Same treatment as DispositionChip: the tone degrades to
+// neutral, and the backend's own word is printed. `null` (the backend declined to
+// say) is said as such, because the lowest measured band is a measurement.
+const RISK_TONE: Record<string, { cls: string; label: string }> = {
+  high: { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "High risk" },
+  elevated: { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Elevated" },
+  baseline: { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: "Baseline" },
+};
+const RISK_UNKNOWN = "border-violet-400/40 bg-violet-500/[0.08] text-violet-300";
+
+function CapabilityRiskChip({ risk }: { risk: string | null }) {
   const look =
-    risk === "high"
-      ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "High risk" }
-      : risk === "elevated"
-        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Elevated" }
-        : { cls: "border-border/50 bg-surface-1/40 text-muted-foreground", label: "Baseline" };
+    risk === null || risk === ""
+      ? { cls: RISK_UNKNOWN, label: "risk not stated" }
+      : (RISK_TONE[risk] ?? { cls: RISK_UNKNOWN, label: risk });
   return (
     <span
       className={cn(
@@ -4472,7 +4545,11 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
           {/* An empty inventory and an inventory we could not read are different
               answers. If references went unplaced, "nothing on record" is not the
               honest end of the sentence. */}
-          <UnresolvedReferences rows={data.unresolved} what="this assessment" />
+          <UnresolvedReferences
+            rows={data.unresolved}
+            reported={summary.unresolvedReferences}
+            what="this assessment"
+          />
         </>
       ) : (
         <>
@@ -4486,7 +4563,11 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
               it: a reach computed over a graph with dangling references is a
               reach over an incomplete graph. */}
           <div className="mb-3">
-            <UnresolvedReferences rows={data.unresolved} what="this assessment" />
+            <UnresolvedReferences
+            rows={data.unresolved}
+            reported={summary.unresolvedReferences}
+            what="this assessment"
+          />
           </div>
 
           <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
@@ -4513,14 +4594,24 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
                 {summary.orphaned} orphaned
               </span>
             )}
-            {summary.unresolvedReferences > 0 && (
+            {/* The one roll-up that says some identity can transitively reach
+                something high-risk. The BFF has always mapped it and this page
+                rendered it nowhere -- a fact the control plane states plainly,
+                dropped one hop before the operator, while every other field in
+                the same summary object has a chip. */}
+            {summary.highRiskReach > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-sev-high/30 bg-sev-high/5 px-2 py-1 text-sev-high">
+                <ShieldAlert className="h-3.5 w-3.5" /> {summary.highRiskReach} high-risk reach
+              </span>
+            )}
+            {summary.unresolvedReferences !== null && summary.unresolvedReferences > 0 && (
               <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
                 <HelpCircle className="h-3.5 w-3.5" /> {summary.unresolvedReferences} unresolved
               </span>
             )}
             <span className="inline-flex items-center gap-1">
               <span className="text-muted-foreground">worst:</span>
-              <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+              <CapabilityRiskChip risk={summary.worstRisk} />
             </span>
           </div>
 
@@ -4697,7 +4788,7 @@ function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </span>
             <span className="inline-flex items-center gap-1">
               <span className="text-muted-foreground">worst:</span>
-              <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+              <CapabilityRiskChip risk={summary.worstRisk} />
             </span>
           </div>
 
@@ -5183,7 +5274,7 @@ function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string }) {
         )}
         <span className="inline-flex items-center gap-1">
           <span className="text-muted-foreground">worst:</span>
-          <CapabilityRiskChip risk={summary.worstRisk ?? "baseline"} />
+          <CapabilityRiskChip risk={summary.worstRisk} />
         </span>
       </div>
 

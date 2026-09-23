@@ -124,6 +124,48 @@ describe("an unresolved reference survives the BFF", () => {
           summary: { ...EFFECTIVE_ACCESS.summary, unresolved_references: 0 },
         });
       }
+      // A control plane that predates the field entirely: it sends no `unresolved`
+      // and no count. It has not said the graph resolved cleanly; it has said
+      // nothing. This console ships independently of the control plane, so this
+      // is the ordinary skew case, not a hypothetical.
+      if (path === "/api/assurance/deployments/dep-old/route-map/" && method === "GET") {
+        const { unresolved: _u, summary, ...rest } = ROUTE_MAP;
+        const {
+          unresolved_edges: _e,
+          unresolved_tool_references: _t,
+          unresolved_server_references: _s,
+          ...summaryRest
+        } = summary;
+        return json(200, { ...rest, summary: summaryRest });
+      }
+      if (path === "/api/assurance/deployments/dep-old/effective-access/" && method === "GET") {
+        const { unresolved: _u, summary, ...rest } = EFFECTIVE_ACCESS;
+        const { unresolved_references: _r, ...summaryRest } = summary;
+        return json(200, { ...rest, summary: summaryRest });
+      }
+      // A control plane that counts two and can only name one. The count is its
+      // own; the row it dropped is still a gap.
+      if (path === "/api/assurance/deployments/dep-undercount/route-map/" && method === "GET") {
+        return json(200, {
+          ...ROUTE_MAP,
+          unresolved: [ROUTE_MAP.unresolved[0], { ...ROUTE_MAP.unresolved[1], reference: "  " }],
+        });
+      }
+      // A mechanism this console has never been taught.
+      if (path === "/api/assurance/deployments/dep-mechanism/route-map/" && method === "GET") {
+        return json(200, {
+          ...ROUTE_MAP,
+          unresolved: [
+            { source: "assistant", source_kind: "agent", reference: "vault-prod", mechanism: "credential" },
+          ],
+          summary: {
+            ...ROUTE_MAP.summary,
+            unresolved_edges: 1,
+            unresolved_tool_references: 0,
+            unresolved_server_references: 0,
+          },
+        });
+      }
       // A backend that sends a row with nothing in it. Not a gap an operator can
       // chase; counting it would be a manufactured finding.
       if (path === "/api/assurance/deployments/dep-blank/route-map/" && method === "GET") {
@@ -193,6 +235,51 @@ describe("an unresolved reference survives the BFF", () => {
     expect(res.body.unresolved).toEqual([]);
   });
 
+  it("does not let a control plane that cannot answer look like a clean graph", async () => {
+    // The defect this closes: with `[]` and `0` as the fallbacks, a control plane
+    // predating the field produced a response byte-identical to one reporting a
+    // graph that resolved cleanly -- so the negative control below passed for
+    // both, and the page rendered no caveat at all beside its unqualified
+    // "every path is evidenced" claim. Null is the answer "nobody said".
+    const oldMap = await user.get("/api/assurance/deployments/dep-old/route-map");
+    expect(oldMap.body.unresolved).toBeNull();
+    expect(oldMap.body.summary.unresolvedEdges).toBeNull();
+    expect(oldMap.body.summary.unresolvedToolReferences).toBeNull();
+
+    const oldAccess = await user.get("/api/assurance/deployments/dep-old/effective-access");
+    expect(oldAccess.body.unresolved).toBeNull();
+    expect(oldAccess.body.summary.unresolvedReferences).toBeNull();
+
+    // And the two are distinguishable, which is the whole point.
+    const cleanMap = await user.get("/api/assurance/deployments/dep-clean/route-map");
+    expect(cleanMap.body.unresolved).toEqual([]);
+    expect(cleanMap.body.summary.unresolvedEdges).toBe(0);
+    expect(JSON.stringify(oldMap.body)).not.toBe(JSON.stringify(cleanMap.body));
+  });
+
+  it("keeps the control plane's own count when it can name fewer rows than it counted", async () => {
+    // The count is the control plane's; the list is what survived mapping. They
+    // can disagree, and both numbers have to reach the operator: deriving the
+    // sentence from the list alone hides a row the backend counted and did not
+    // send, and printing the total alone claims to have named rows that are not
+    // on screen.
+    const res = await user.get("/api/assurance/deployments/dep-undercount/route-map");
+    expect(res.body.unresolved).toHaveLength(1);
+    expect(res.body.summary.unresolvedEdges).toBe(2);
+  });
+
+  it("does not give an unknown mechanism the wording reserved for a known one", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-mechanism/route-map");
+    expect(res.body.unresolved).toEqual([
+      { source: "assistant", sourceKind: "agent", reference: "vault-prod", mechanism: "credential" },
+    ]);
+    // The mechanism reaches the page as itself, so the page can decline to word
+    // it as either of the two it knows.
+    expect(res.body.summary.unresolvedEdges).toBe(1);
+    expect(res.body.summary.unresolvedToolReferences).toBe(0);
+    expect(res.body.summary.unresolvedServerReferences).toBe(0);
+  });
+
   it("refuses either assessment to anyone not signed in", async () => {
     const request = (await import("supertest")).default;
     expect((await request(app).get("/api/assurance/deployments/dep-1/route-map")).status).toBe(401);
@@ -213,11 +300,19 @@ describe("the Assurance page says where the graph had holes", () => {
     "utf8",
   );
 
-  it("words a dangling server reference differently from a dangling tool reference", () => {
+  it("words each mechanism it knows differently, and refuses to word one it does not", () => {
     // "assistant names ghost-tool" and "report-builder is wired to mcp-ghost"
     // are different problems. Flattening them to one verb would lose which kind
     // of declaration to go and fix.
-    expect(source).toContain('u.mechanism === "server" ? "is wired to" : "names"');
+    expect(source).toContain('tools: "names"');
+    expect(source).toContain('server: "is wired to"');
+    // And the lookup must be a MAP with an explicit unknown branch, not a
+    // two-way ternary. A ternary's else-arm hands every future mechanism the
+    // wording reserved for one of these two: a dangling credential binding would
+    // read as an agent's tool declaration and send an operator to audit the
+    // wrong manifest.
+    expect(source).toContain("MECHANISM_PHRASING[u.mechanism] ??");
+    expect(source).not.toContain('u.mechanism === "server" ?');
   });
 
   it("renders the reach assessment's holes under its evidenced-paths claim", () => {
@@ -225,10 +320,7 @@ describe("the Assurance page says where the graph had holes", () => {
     // graph those paths were traced through was incomplete. It has to sit with
     // the claim, not at the bottom of the panel.
     const claim = source.indexOf("Every path is");
-    const caveat = source.indexOf(
-      '<UnresolvedReferences rows={data.unresolved} what="this assessment" />',
-      claim,
-    );
+    const caveat = source.indexOf("<UnresolvedReferences", claim);
     const chips = source.indexOf("principal{summary.principals === 1", claim);
     expect(claim).toBeGreaterThan(-1);
     expect(caveat).toBeGreaterThan(claim);
@@ -242,6 +334,26 @@ describe("the Assurance page says where the graph had holes", () => {
     expect(empty).toBeGreaterThan(-1);
     const after = source.slice(empty, empty + 600);
     expect(after).toContain("<UnresolvedReferences");
+  });
+
+  it("gives an unknown risk band its own tone and the backend's own word", () => {
+    // The chip this replaces was a closed three-way ternary whose final arm was
+    // an unconditional "Baseline" in muted grey, so a backend `critical`
+    // rendered as the LOWEST band. That inverts the severity rather than losing
+    // it. Same treatment the disposition chip already has.
+    expect(source).toContain("const RISK_TONE");
+    expect(source).toContain("RISK_TONE[risk] ?? { cls: RISK_UNKNOWN, label: risk }");
+    expect(source).toContain('label: "risk not stated"');
+    // And no call site may launder a missing risk into the lowest band.
+    expect(source).not.toContain('worstRisk ?? "baseline"');
+  });
+
+  it("renders the high-risk-reach roll-up the BFF maps", () => {
+    // It was mapped by the server and referenced exactly once on this page: in
+    // the interface declaration. Every other field in the same summary object
+    // had a chip.
+    expect(source.split("summary.highRiskReach").length - 1).toBeGreaterThan(1);
+    expect(source).toContain("high-risk reach");
   });
 
   it("keeps one component for both readers rather than two renderings of one fact", () => {

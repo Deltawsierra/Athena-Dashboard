@@ -223,16 +223,19 @@ export interface AssuranceRouteMap {
   layers: RouteLayer[];
   nodes: RouteNode[];
   edges: RouteEdge[];
-  unresolved: UnresolvedReference[];
+  unresolved: UnresolvedReference[] | null;
   summary: {
     nodeCount: number;
     edgeCount: number;
     declaredEdges: number;
     inferredEdges: number;
     shadowNodes: number;
-    unresolvedEdges: number;
-    unresolvedToolReferences: number;
-    unresolvedServerReferences: number;
+    // Nullable for the same reason as the list. Counted by the control plane, so
+    // a 0 here is its statement that it placed everything -- not this console's
+    // guess when it was told nothing.
+    unresolvedEdges: number | null;
+    unresolvedToolReferences: number | null;
+    unresolvedServerReferences: number | null;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -939,7 +942,7 @@ export interface AssuranceEffectiveAccess {
    * reader is entitled to know that before treating "no high-risk reach" as
    * reassurance.
    */
-  unresolved: UnresolvedReference[];
+  unresolved: UnresolvedReference[] | null;
   summary: {
     principals: number;
     privileged: number;
@@ -947,7 +950,7 @@ export interface AssuranceEffectiveAccess {
     orphaned: number;
     overBroad: number;
     highRiskReach: number;
-    unresolvedReferences: number;
+    unresolvedReferences: number | null;
     /** Most concerning risk across principals, or null when there are none. */
     worstRisk: string | null;
   };
@@ -1470,9 +1473,9 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
       declaredEdges: num(rawSummary.declared_edges, 0),
       inferredEdges: num(rawSummary.inferred_edges, 0),
       shadowNodes: num(rawSummary.shadow_nodes, 0),
-      unresolvedEdges: num(rawSummary.unresolved_edges, 0),
-      unresolvedToolReferences: num(rawSummary.unresolved_tool_references, 0),
-      unresolvedServerReferences: num(rawSummary.unresolved_server_references, 0),
+      unresolvedEdges: numOrNull(rawSummary.unresolved_edges),
+      unresolvedToolReferences: numOrNull(rawSummary.unresolved_tool_references),
+      unresolvedServerReferences: numOrNull(rawSummary.unresolved_server_references),
       layersPresent: strList(rawSummary.layers_present),
       logsObserved: bool(rawSummary.logs_observed),
     },
@@ -1489,8 +1492,15 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
  * from whatever wrote the metadata, and counting it would inflate the gap list
  * with nothing anybody can act on.
  */
-function unresolvedReferences(raw: unknown): UnresolvedReference[] {
-  if (!Array.isArray(raw)) return [];
+function unresolvedReferences(raw: unknown): UnresolvedReference[] | null {
+  // NULL, not []. A backend with no channel for this question and a backend
+  // reporting a graph that resolved cleanly are different answers, and an empty
+  // array says the second. This console ships independently of the control
+  // plane, so a deployment where one is ahead of the other is the ordinary case
+  // -- and the whole point of the change this reads is that an unplaceable
+  // reference stops being invisible, which it would not if a control plane
+  // that cannot answer produced a response identical to a clean one.
+  if (!Array.isArray(raw)) return null;
   return (raw as Record<string, unknown>[])
     .map((u) => ({
       source: str(u.source),
@@ -2523,7 +2533,7 @@ function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAcc
       orphaned: num(summary.orphaned, 0),
       overBroad: num(summary.over_broad, 0),
       highRiskReach: num(summary.high_risk_reach, 0),
-      unresolvedReferences: num(summary.unresolved_references, 0),
+      unresolvedReferences: numOrNull(summary.unresolved_references),
       worstRisk: strOrNull(summary.worst_risk),
     },
   };
