@@ -35,8 +35,24 @@ export interface AssuranceFinding {
   findingType: string;
   title: string;
   severity: string;
-  confidence: number;
+  /**
+   * The finding's confidence, or null when the backend has none. A backend null
+   * means nothing computed a confidence for this finding -- it must never be
+   * laundered into a number, because a fabricated 0.5 is indistinguishable on
+   * screen from a measured 0.5. `Finding.confidence` is nullable with no default
+   * for exactly this reason (athena-backend migration 0016).
+   */
+  confidence: number | null;
+  /**
+   * The finding's security disposition: its slug, the backend's own label for it,
+   * and what that disposition must NOT be read as, where it has a wrong reading
+   * worth naming. All three are served rather than derived here: the backend
+   * carries the caveat as data (assurance/models.py MUST_NOT_IMPLY) precisely so
+   * the API and this console cannot each invent their own wording for it.
+   */
   status: string;
+  statusLabel: string;
+  statusMustNotImply: string | null;
   owner: string | null;
   impact: string;
   businessImpact: string;
@@ -1298,8 +1314,10 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     findingType: str(raw.finding_type),
     title: str(raw.title),
     severity: str(raw.severity),
-    confidence: num(raw.confidence, 0.5),
+    confidence: numOrNull(raw.confidence),
     status: str(raw.status),
+    statusLabel: str(raw.status_label),
+    statusMustNotImply: strOrNull(raw.status_must_not_imply),
     owner: raw.owner == null ? null : String(raw.owner),
     impact: str(raw.impact),
     businessImpact: str(raw.business_impact),
@@ -4802,6 +4820,7 @@ export interface IncidentPack {
       severityLabel: string;
       status: string;
       statusLabel: string;
+      statusMustNotImply: string | null;
     };
   };
   surface: {
@@ -4900,6 +4919,10 @@ function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
         severityLabel: str(find.severity_label),
         status: str(find.status),
         statusLabel: str(find.status_label),
+        // What this disposition must not be read as. The pack is a report, and
+        // P2.8's claim is "in any report" -- a pack that carries the state but not
+        // its caveat leaves the caveat to whoever is reading under pressure.
+        statusMustNotImply: strOrNull(find.status_must_not_imply),
       },
     },
     surface: {
