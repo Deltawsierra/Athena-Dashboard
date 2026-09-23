@@ -221,11 +221,22 @@ interface RouteEdge {
   label: string;
   declared: boolean;
 }
+// A reference the inventory declares and discovery could not place. The backend
+// resolves every asset-to-asset edge at read time from strings in the asset's
+// metadata; both readers of that graph — the reach assessment and the route map —
+// report a miss in this one shape, so the console describes the same gap the same
+// way wherever it appears.
+interface UnresolvedReference {
+  source: string;
+  sourceKind: string;
+  reference: string;
+  mechanism: string;
+}
 interface RouteMap {
   layers: { key: string; label: string; nodes: RouteNode[] }[];
   nodes: RouteNode[];
   edges: RouteEdge[];
-  unresolved: { agent: string; toolIdentifier: string }[];
+  unresolved: UnresolvedReference[];
   summary: {
     nodeCount: number;
     edgeCount: number;
@@ -233,6 +244,8 @@ interface RouteMap {
     inferredEdges: number;
     shadowNodes: number;
     unresolvedEdges: number;
+    unresolvedToolReferences: number;
+    unresolvedServerReferences: number;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -685,6 +698,7 @@ interface AccessPrincipal {
 }
 interface EffectiveAccess {
   principals: AccessPrincipal[];
+  unresolved: UnresolvedReference[];
   summary: {
     principals: number;
     privileged: number;
@@ -692,6 +706,7 @@ interface EffectiveAccess {
     orphaned: number;
     overBroad: number;
     highRiskReach: number;
+    unresolvedReferences: number;
     worstRisk: string | null;
   };
 }
@@ -2216,24 +2231,7 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </ul>
           )}
 
-          {/* Dangling tool references: an agent names a tool discovery could not
-              place — a gap to chase, not a silent drop. */}
-          {data.unresolved.length > 0 && (
-            <div className="mt-3">
-              <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
-                Unresolved references
-              </p>
-              <ul className="space-y-1">
-                {data.unresolved.map((u, i) => (
-                  <li key={i} className="text-[11px] text-muted-foreground">
-                    <span className="text-foreground">{u.agent}</span> names{" "}
-                    <span className="text-amber-400/90">{u.toolIdentifier}</span>, which discovery could
-                    not place.
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <UnresolvedReferences rows={data.unresolved} what="this map" />
         </>
       )}
     </section>
@@ -2243,6 +2241,47 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
 // A capability's risk, worn honestly: a high-risk power (code execution, money
 // movement, a shadow capability nobody approved) leads in red, an elevated one
 // in amber, a baseline one in muted. Anything unrecognised falls back to muted.
+// The references the inventory declares and discovery could not place, said
+// plainly. This is not decoration: an unresolvable reference means part of the
+// graph every assessment on this page is computed over could not be placed, so a
+// clean reading of that assessment is a reading of a graph we do not have.
+//
+// The wording follows the mechanism, because the two are different problems. An
+// agent naming a tool it cannot reach is a question about the agent's declared
+// toolset; a component naming a backend that is not there is a question about the
+// inventory's wiring. Saying "names" for both would flatten them.
+function UnresolvedReferences({
+  rows,
+  what,
+}: {
+  rows: UnresolvedReference[];
+  what: string;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
+      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
+        Unresolved references
+      </p>
+      <p className="mb-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        {rows.length} declared reference{rows.length === 1 ? "" : "s"} could not be placed against
+        this deployment&apos;s inventory, so {what} was built over an incomplete graph. These are
+        gaps to chase, not components to assume away.
+      </p>
+      <ul className="space-y-1">
+        {rows.map((u, i) => (
+          <li key={`${u.source}-${u.mechanism}-${u.reference}-${i}`} className="text-[11px] text-muted-foreground">
+            <span className="text-foreground">{u.source}</span>{" "}
+            {u.mechanism === "server" ? "is wired to" : "names"}{" "}
+            <span className="text-amber-400/90">{u.reference}</span>, which discovery could not
+            place.
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function CapabilityRiskChip({ risk }: { risk: string }) {
   const look =
     risk === "high"
@@ -4426,9 +4465,15 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
     <section>
       {heading}
       {data.principals.length === 0 ? (
-        <p className="text-[12px] text-muted-foreground">
-          No principals resolved for this deployment yet — no identity that can act is on record.
-        </p>
+        <>
+          <p className="text-[12px] text-muted-foreground">
+            No principals resolved for this deployment yet — no identity that can act is on record.
+          </p>
+          {/* An empty inventory and an inventory we could not read are different
+              answers. If references went unplaced, "nothing on record" is not the
+              honest end of the sentence. */}
+          <UnresolvedReferences rows={data.unresolved} what="this assessment" />
+        </>
       ) : (
         <>
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
@@ -4436,6 +4481,13 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
             where a declared edge attests each hop. This never says least privilege is satisfied or an
             identity is secure; it surfaces powers, transitive reach, and gaps.
           </p>
+
+          {/* Sits directly under the evidenced-paths claim because it qualifies
+              it: a reach computed over a graph with dangling references is a
+              reach over an incomplete graph. */}
+          <div className="mb-3">
+            <UnresolvedReferences rows={data.unresolved} what="this assessment" />
+          </div>
 
           <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
             <span className="rounded-md border border-border/50 bg-surface-1/40 px-2 py-1 text-muted-foreground">
@@ -4459,6 +4511,11 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
             {summary.orphaned > 0 && (
               <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
                 {summary.orphaned} orphaned
+              </span>
+            )}
+            {summary.unresolvedReferences > 0 && (
+              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
+                <HelpCircle className="h-3.5 w-3.5" /> {summary.unresolvedReferences} unresolved
               </span>
             )}
             <span className="inline-flex items-center gap-1">

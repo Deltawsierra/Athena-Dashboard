@@ -202,15 +202,28 @@ export interface RouteLayer {
   label: string;
   nodes: RouteNode[];
 }
-export interface RouteUnresolved {
-  agent: string;
-  toolIdentifier: string;
+/**
+ * A reference the inventory declares and discovery could not place. The backend
+ * resolves every asset-to-asset edge at read time from strings in the asset's
+ * metadata, and BOTH readers of that graph -- the reach assessment and the route
+ * map -- now report a miss in this one shape, so the console describes the same
+ * gap the same way wherever it surfaces it.
+ *
+ * `mechanism` says which kind of declaration failed: "tools" is an agent naming a
+ * tool it cannot reach, "server" is a component naming a backend that is not
+ * there. They are different conversations and the wording follows the mechanism.
+ */
+export interface UnresolvedReference {
+  source: string;
+  sourceKind: string;
+  reference: string;
+  mechanism: string;
 }
 export interface AssuranceRouteMap {
   layers: RouteLayer[];
   nodes: RouteNode[];
   edges: RouteEdge[];
-  unresolved: RouteUnresolved[];
+  unresolved: UnresolvedReference[];
   summary: {
     nodeCount: number;
     edgeCount: number;
@@ -218,6 +231,8 @@ export interface AssuranceRouteMap {
     inferredEdges: number;
     shadowNodes: number;
     unresolvedEdges: number;
+    unresolvedToolReferences: number;
+    unresolvedServerReferences: number;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -918,6 +933,13 @@ export interface AccessPrincipal {
 }
 export interface AssuranceEffectiveAccess {
   principals: AccessPrincipal[];
+  /**
+   * Declared references this assessment could not place. A reach computed over a
+   * graph with dangling references is a reach over an incomplete graph, and a
+   * reader is entitled to know that before treating "no high-risk reach" as
+   * reassurance.
+   */
+  unresolved: UnresolvedReference[];
   summary: {
     principals: number;
     privileged: number;
@@ -925,6 +947,7 @@ export interface AssuranceEffectiveAccess {
     orphaned: number;
     overBroad: number;
     highRiskReach: number;
+    unresolvedReferences: number;
     /** Most concerning risk across principals, or null when there are none. */
     worstRisk: string | null;
   };
@@ -1440,12 +1463,7 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
           declared: bool(e.declared),
         }))
       : [],
-    unresolved: Array.isArray(raw.unresolved)
-      ? (raw.unresolved as Record<string, unknown>[]).map((u) => ({
-          agent: str(u.agent),
-          toolIdentifier: str(u.tool_identifier),
-        }))
-      : [],
+    unresolved: unresolvedReferences(raw.unresolved),
     summary: {
       nodeCount: num(rawSummary.node_count, 0),
       edgeCount: num(rawSummary.edge_count, 0),
@@ -1453,10 +1471,37 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
       inferredEdges: num(rawSummary.inferred_edges, 0),
       shadowNodes: num(rawSummary.shadow_nodes, 0),
       unresolvedEdges: num(rawSummary.unresolved_edges, 0),
+      unresolvedToolReferences: num(rawSummary.unresolved_tool_references, 0),
+      unresolvedServerReferences: num(rawSummary.unresolved_server_references, 0),
       layersPresent: strList(rawSummary.layers_present),
       logsObserved: bool(rawSummary.logs_observed),
     },
   };
+}
+
+/**
+ * The backend's unresolved-reference rows, mapped. One function for both readers
+ * of the asset graph: they emit the same shape on purpose, and mapping them in
+ * two places is how the two ends drift apart again.
+ *
+ * A row whose `reference` is empty is dropped. An unresolved reference is
+ * supposed to be a string an operator can go and look for; a blank one is noise
+ * from whatever wrote the metadata, and counting it would inflate the gap list
+ * with nothing anybody can act on.
+ */
+function unresolvedReferences(raw: unknown): UnresolvedReference[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as Record<string, unknown>[])
+    .map((u) => ({
+      source: str(u.source),
+      sourceKind: str(u.source_kind),
+      // Trimmed here rather than trusted: the backend strips these before it
+      // sends them, but this console is a separate deployable and a whitespace
+      // reference renders as a gap with no name.
+      reference: str(u.reference).trim(),
+      mechanism: str(u.mechanism),
+    }))
+    .filter((u) => u.reference !== "");
 }
 
 /** A passthrough object of {string: number}, filtered to numeric values. */
@@ -2470,6 +2515,7 @@ function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAcc
     principals: Array.isArray(raw.principals)
       ? (raw.principals as Record<string, unknown>[]).map(accessPrincipal)
       : [],
+    unresolved: unresolvedReferences(raw.unresolved),
     summary: {
       principals: num(summary.principals, 0),
       privileged: num(summary.privileged, 0),
@@ -2477,6 +2523,7 @@ function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAcc
       orphaned: num(summary.orphaned, 0),
       overBroad: num(summary.over_broad, 0),
       highRiskReach: num(summary.high_risk_reach, 0),
+      unresolvedReferences: num(summary.unresolved_references, 0),
       worstRisk: strOrNull(summary.worst_risk),
     },
   };
