@@ -1256,6 +1256,62 @@ describe("assurance BFF", () => {
           return json(200, { created: 2, updated: 1, superseded: 0, stale: 1 });
         }
 
+        if (path === "/api/assurance/deployments/dep-1/coverage-manifest/" && method === "GET") {
+          // Every declared component assessed -- and the engine never ran two
+          // checks, which is the case the asset counts alone cannot show.
+          return json(200, {
+            expected: 1, observed: 1, assessed: 1,
+            verdict: "incomplete", complete: false, critical_gap: true,
+            has_declared_baseline: true,
+            checks: {
+              reported: true, complete: false, total: 27, performed: 24,
+              not_performed: [
+                {
+                  check: "tls", team: "blue", state: "not_performed",
+                  reason: "precondition",
+                  detail: "The target is http, not https, so there is no TLS configuration to inspect.",
+                },
+                {
+                  check: "idor", team: "blue", state: "not_performed",
+                  reason: "precondition",
+                  detail: "Authenticated scanning was not configured.",
+                },
+              ],
+              degraded: [
+                {
+                  check: "subdomain_scanner", team: "blue", state: "degraded",
+                  probes_attempted: 6, probes_failed: 6,
+                },
+              ],
+              unmeasured: [],
+              limitations: { header_injection: ["Raw CRLF header injection is not probed."] },
+              notes: ["Surface discovery incomplete: every probe failed."],
+              reported_at: "2026-09-23T00:00:00Z",
+              summary: "24 of 27 checks performed; 2 never ran; 1 degraded",
+            },
+            never_observed: [], declared_but_unassessed: [], high_risk_unassessed: [],
+            unassessed: [],
+            summary: "Expected 1 / Observed 1 / Assessed 1 / Checks 24/27 -> INCOMPLETE",
+          });
+        }
+        if (path === "/api/assurance/deployments/dep-2/coverage-manifest/" && method === "GET") {
+          // No engine said which checks it ran. Must NOT read as "all of them".
+          return json(200, {
+            expected: 0, observed: 2, assessed: 0,
+            verdict: "undeclared", complete: false, critical_gap: false,
+            has_declared_baseline: false,
+            checks: {
+              reported: false, complete: null, total: null, performed: null,
+              not_performed: [], degraded: [], unmeasured: [],
+              limitations: {}, notes: [], reported_at: null,
+              summary: "No engine reported which checks it ran.",
+            },
+            never_observed: [], declared_but_unassessed: [], high_risk_unassessed: [],
+            unassessed: [],
+            summary: "Expected 0 / Observed 2 / Assessed 0 -> UNDECLARED",
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/bom-drift/" && method === "GET") {
           // The honest no-declaration case: has_declared false, so drift cannot be
           // computed and is NOT read as a clean bill of materials.
@@ -2814,6 +2870,61 @@ describe("assurance BFF", () => {
   it("refuses the connector read and push to anyone not signed in", async () => {
     expect((await request(app).get("/api/assurance/deployments/dep-1/connectors")).status).toBe(401);
     expect((await request(app).post("/api/assurance/deployments/dep-1/connectors/github_issues/push").send({ finding: "f-1" })).status).toBe(401);
+  });
+  // ---- the Coverage Manifest, both axes -----------------------------------
+  //
+  // The distinction the whole feature turns on is in the last test here: an
+  // unreported check axis must not reach the browser looking like a complete one.
+
+  it("maps both coverage axes into camelCase", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/coverage-manifest");
+    expect(res.status).toBe(200);
+    expect(res.body.verdict).toBe("incomplete");
+    expect(res.body.criticalGap).toBe(true);
+    expect(res.body.hasDeclaredBaseline).toBe(true);
+    expect(res.body.checks.reported).toBe(true);
+    expect(res.body.checks.total).toBe(27);
+    expect(res.body.checks.performed).toBe(24);
+  });
+
+  it("carries each skipped check's reason and detail, not just its name", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/coverage-manifest");
+    const names = res.body.checks.notPerformed.map((c: { check: string }) => c.check);
+    expect(names).toEqual(["tls", "idor"]);
+    const tls = res.body.checks.notPerformed[0];
+    expect(tls.reason).toBe("precondition");
+    expect(tls.detail).toContain("http, not https");
+  });
+
+  it("carries a degraded check's probe arithmetic", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/coverage-manifest");
+    const [sub] = res.body.checks.degraded;
+    expect(sub.check).toBe("subdomain_scanner");
+    expect(sub.probesAttempted).toBe(6);
+    expect(sub.probesFailed).toBe(6);
+  });
+
+  it("carries declared limitations and whole-scan notes", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/coverage-manifest");
+    expect(res.body.checks.limitations.header_injection[0]).toContain("CRLF");
+    expect(res.body.checks.notes[0]).toContain("Surface discovery");
+  });
+
+  it("keeps an unreported check axis null rather than complete or zero", async () => {
+    // `false` would read as "the checks fell short"; `0` would read as "none
+    // ran". Both are claims nobody made, and rendering either is the failure the
+    // manifest exists to prevent.
+    const res = await user.get("/api/assurance/deployments/dep-2/coverage-manifest");
+    expect(res.status).toBe(200);
+    expect(res.body.checks.reported).toBe(false);
+    expect(res.body.checks.complete).toBeNull();
+    expect(res.body.checks.total).toBeNull();
+    expect(res.body.checks.performed).toBeNull();
+  });
+
+  it("puts the coverage manifest behind auth", async () => {
+    const res = await request(app).get("/api/assurance/deployments/dep-1/coverage-manifest");
+    expect(res.status).toBe(401);
   });
 });
 

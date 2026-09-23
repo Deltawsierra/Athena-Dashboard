@@ -1538,6 +1538,17 @@ function posture(raw: unknown): DataBoundaryPosture | null {
   return { value: str(p.value), evidenceClass: str(p.evidence_class) };
 }
 
+/** A map of name -> string list, dropping anything that is not one. */
+function strListRecord(raw: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const list = strList(value);
+    if (list.length > 0) out[key] = list;
+  }
+  return out;
+}
+
 function strList(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
 }
@@ -4056,6 +4067,187 @@ function mapDeclaredArchitecture(raw: Record<string, unknown>): DeclaredArchitec
       : [],
     drift: mapBomDrift(objOf(raw.drift)),
   };
+}
+
+/** One check the engine can run, and what became of it on the latest scan. */
+export interface CoverageCheck {
+  check: string;
+  team: string;
+  /** `performed` | `degraded` | `not_performed` | `unmeasured`. Carried through
+   * verbatim: an unrecognised state must reach the reader as itself, never be
+   * folded into one of the four this client happens to know. */
+  state: string;
+  /** Why it did not run, when it did not. Null for a check that ran. */
+  reason: string | null;
+  /** The sentence a human reads. A state with no detail is the thing the
+   * manifest replaced, so it is surfaced as null rather than as "". */
+  detail: string | null;
+  probesAttempted: number | null;
+  probesFailed: number | null;
+}
+
+/**
+ * The check axis of the coverage manifest: which questions the latest scan asked.
+ *
+ * `reported: false` is the load-bearing value and the reason `complete` is
+ * nullable. It means no engine said which checks it ran — which is distinct in
+ * both directions from "every check ran", and rendering the two the same way is
+ * the failure the whole manifest exists to prevent. When it is false every count
+ * is null, so a template cannot accidentally print a reassuring zero.
+ */
+export interface CoverageChecks {
+  reported: boolean;
+  complete: boolean | null;
+  total: number | null;
+  performed: number | null;
+  notPerformed: CoverageCheck[];
+  degraded: CoverageCheck[];
+  unmeasured: CoverageCheck[];
+  /** Declared gaps in checks that DID run, keyed by check name. */
+  limitations: Record<string, string[]>;
+  /** What limited the scan as a whole rather than any one check. */
+  notes: string[];
+  reportedAt: string | null;
+  summary: string;
+}
+
+/** A component named in one of the coverage manifest's gap lists. */
+export interface CoverageEntity {
+  assetUuid: string | null;
+  declaredUuid: string | null;
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+  classification: string | null;
+  assessedAt: string | null;
+  assessedBy: string | null;
+}
+
+/**
+ * The Coverage Manifest — what was assessed and what was not, on both axes.
+ *
+ * Breadth over the inventory (expected / observed / assessed) and depth over the
+ * question set (`checks`). Neither implies the other: an engine can assess every
+ * declared component while never running whole checks against them, and the asset
+ * counts cannot show that.
+ *
+ * `verdict` is `complete` | `incomplete` | `undeclared`, and `undeclared` is its
+ * own answer rather than a weak `complete` — with no declared architecture there
+ * is nothing to be short of. The check axis is the exception that can still make
+ * the verdict `incomplete`, because the engine brings its own baseline.
+ */
+export interface CoverageManifest {
+  expected: number;
+  observed: number;
+  assessed: number;
+  verdict: string;
+  complete: boolean;
+  /** The gap that holds a decision, as distinct from one merely reported. */
+  criticalGap: boolean;
+  hasDeclaredBaseline: boolean;
+  checks: CoverageChecks;
+  neverObserved: CoverageEntity[];
+  declaredButUnassessed: CoverageEntity[];
+  highRiskUnassessed: CoverageEntity[];
+  unassessed: CoverageEntity[];
+  summary: string;
+}
+
+function coverageCheck(raw: Record<string, unknown>): CoverageCheck {
+  return {
+    check: str(raw.check),
+    team: str(raw.team),
+    state: str(raw.state),
+    reason: strOrNull(raw.reason),
+    detail: strOrNull(raw.detail),
+    probesAttempted: numOrNull(raw.probes_attempted),
+    probesFailed: numOrNull(raw.probes_failed),
+  };
+}
+
+function checkList(raw: unknown): CoverageCheck[] {
+  return Array.isArray(raw)
+    ? (raw as Record<string, unknown>[]).map((r) => coverageCheck(objOf(r)))
+    : [];
+}
+
+function coverageEntity(raw: Record<string, unknown>): CoverageEntity {
+  return {
+    assetUuid: strOrNull(raw.asset_uuid),
+    declaredUuid: strOrNull(raw.declared_uuid),
+    kind: str(raw.kind),
+    kindLabel: str(raw.kind_label),
+    name: str(raw.name),
+    identifier: str(raw.identifier),
+    classification: strOrNull(raw.classification),
+    assessedAt: strOrNull(raw.assessed_at),
+    assessedBy: strOrNull(raw.assessed_by),
+  };
+}
+
+function entityList(raw: unknown): CoverageEntity[] {
+  return Array.isArray(raw)
+    ? (raw as Record<string, unknown>[]).map((r) => coverageEntity(objOf(r)))
+    : [];
+}
+
+function mapCoverageChecks(raw: Record<string, unknown>): CoverageChecks {
+  const reported = bool(raw.reported);
+  return {
+    reported,
+    // Null, not false, when nothing was reported -- and forced null here rather
+    // than trusted, so a backend that ever sent `complete: false` alongside
+    // `reported: false` still reaches the reader as "did not say".
+    complete: reported ? (typeof raw.complete === "boolean" ? raw.complete : null) : null,
+    total: reported ? numOrNull(raw.total) : null,
+    performed: reported ? numOrNull(raw.performed) : null,
+    notPerformed: checkList(raw.not_performed),
+    degraded: checkList(raw.degraded),
+    unmeasured: checkList(raw.unmeasured),
+    limitations: strListRecord(raw.limitations),
+    notes: strList(raw.notes),
+    reportedAt: strOrNull(raw.reported_at),
+    summary: str(raw.summary),
+  };
+}
+
+function mapCoverageManifest(raw: Record<string, unknown>): CoverageManifest {
+  return {
+    expected: num(raw.expected, 0),
+    observed: num(raw.observed, 0),
+    assessed: num(raw.assessed, 0),
+    verdict: str(raw.verdict),
+    complete: bool(raw.complete),
+    criticalGap: bool(raw.critical_gap),
+    hasDeclaredBaseline: bool(raw.has_declared_baseline),
+    checks: mapCoverageChecks(objOf(raw.checks)),
+    neverObserved: entityList(raw.never_observed),
+    declaredButUnassessed: entityList(raw.declared_but_unassessed),
+    highRiskUnassessed: entityList(raw.high_risk_unassessed),
+    unassessed: entityList(raw.unassessed),
+    summary: str(raw.summary),
+  };
+}
+
+/**
+ * A deployment's Coverage Manifest: what was assessed, what was not, and which
+ * checks the latest scan actually ran. A read (open); a non-ok answer is genuine
+ * unavailability.
+ *
+ * Nothing here infers coverage. An absent check axis is surfaced as
+ * `reported: false`, never as a complete one.
+ */
+export async function coverageManifest(uuid: string): Promise<CoverageManifest> {
+  const response = await call(
+    `/api/assurance/deployments/${encodeURIComponent(uuid)}/coverage-manifest/`,
+  );
+  if (!response.ok) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  return mapCoverageManifest(await readObject(response));
 }
 
 /**

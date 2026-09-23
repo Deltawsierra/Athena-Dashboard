@@ -6341,6 +6341,254 @@ function DriftBody({ drift }: { drift: BomDrift }) {
  * absent declaration reads as a gap, never a clean bill. An admin can record the
  * current drift as managed findings (idempotent, non-destructive). Self-fetching.
  */
+/* ==== Coverage Manifest (Phase 2.1 + the check axis) ====================== */
+
+/** One check the engine can run, and what became of it. */
+interface CoverageCheckRow {
+  check: string;
+  team: string;
+  state: string;
+  reason: string | null;
+  detail: string | null;
+  probesAttempted: number | null;
+  probesFailed: number | null;
+}
+interface CoverageChecks {
+  /** False means no engine said. Distinct in BOTH directions from "all ran",
+   *  which is why every count below is nullable. */
+  reported: boolean;
+  complete: boolean | null;
+  total: number | null;
+  performed: number | null;
+  notPerformed: CoverageCheckRow[];
+  degraded: CoverageCheckRow[];
+  unmeasured: CoverageCheckRow[];
+  limitations: Record<string, string[]>;
+  notes: string[];
+  reportedAt: string | null;
+  summary: string;
+}
+interface CoverageEntityRow {
+  kind: string;
+  kindLabel: string;
+  name: string;
+  identifier: string;
+}
+interface CoverageManifest {
+  expected: number;
+  observed: number;
+  assessed: number;
+  verdict: string;
+  complete: boolean;
+  criticalGap: boolean;
+  hasDeclaredBaseline: boolean;
+  checks: CoverageChecks;
+  neverObserved: CoverageEntityRow[];
+  declaredButUnassessed: CoverageEntityRow[];
+  highRiskUnassessed: CoverageEntityRow[];
+  unassessed: CoverageEntityRow[];
+  summary: string;
+}
+
+const COVERAGE_VERDICT: Record<string, { cls: string; label: string }> = {
+  complete: { cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400", label: "Complete" },
+  incomplete: { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Incomplete" },
+  undeclared: { cls: "border-slate-500/40 bg-slate-500/10 text-slate-300", label: "Undeclared" },
+};
+
+/** Why a check did not run, in the reader's words rather than the enum's. */
+const CHECK_REASON: Record<string, string> = {
+  disabled: "switched off in configuration",
+  failed: "the check errored",
+  not_selected: "chaining did not select it",
+  not_reached: "the scan ended first",
+  interrupted: "the scan was stopped during it",
+  precondition: "a precondition was not met",
+};
+
+function CheckRows({ rows, tone }: { rows: CoverageCheckRow[]; tone: string }) {
+  return (
+    <ul className="mt-1 space-y-1">
+      {rows.map((row) => (
+        <li key={row.check} className="text-[11px] leading-snug">
+          <span className={cn("font-medium", tone)}>{row.check}</span>
+          {row.reason && (
+            <span className="text-muted-foreground"> — {CHECK_REASON[row.reason] ?? row.reason}</span>
+          )}
+          {row.probesAttempted !== null && row.probesFailed !== null && (
+            <span className="text-muted-foreground">
+              {" "}
+              ({row.probesFailed} of {row.probesAttempted} probes lost)
+            </span>
+          )}
+          {row.detail && <p className="text-muted-foreground">{row.detail}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * What was assessed and what was not, on both axes.
+ *
+ * Breadth over the inventory (expected / observed / assessed) and depth over the
+ * question set (which checks the latest scan actually ran). Neither implies the
+ * other: an engine can assess every declared component while never running whole
+ * checks against them, and the asset counts cannot show that.
+ *
+ * The one rendering rule that matters: when no engine reported its checks, this
+ * says so in words and prints no counts. A zero or a "0/0" there would read as a
+ * measurement, and nobody measured anything.
+ */
+function CoverageManifestPanel({ deploymentUuid }: { deploymentUuid: string }) {
+  const { data, isLoading, isError, error } = useQuery<CoverageManifest>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/coverage-manifest`],
+  });
+  const heading = (
+    <div className="mb-2 flex items-center gap-2">
+      <ShieldQuestion className="h-4 w-4 text-primary" />
+      <h3 className="text-[13px] font-semibold text-foreground">Coverage — what was not checked</h3>
+    </div>
+  );
+  if (isLoading) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">Loading the coverage manifest…</p>
+      </section>
+    );
+  }
+  if (isError || !data) {
+    return (
+      <section>
+        {heading}
+        <p className="text-[12px] text-muted-foreground">
+          Could not load the coverage manifest{error instanceof Error ? `: ${error.message}` : "."}
+        </p>
+      </section>
+    );
+  }
+  const verdict = COVERAGE_VERDICT[data.verdict] ?? {
+    cls: "border-slate-500/40 bg-slate-500/10 text-slate-300",
+    label: data.verdict || "unknown",
+  };
+  const checks = data.checks;
+  return (
+    <section>
+      {heading}
+      <p className="text-[11px] text-muted-foreground">
+        A findings list is only as good as the list of questions behind it. This is the second
+        list: which components were assessed, and which checks actually ran.
+      </p>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+            verdict.cls,
+          )}
+        >
+          {verdict.label}
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          Expected {data.expected} · Observed {data.observed} · Assessed {data.assessed}
+        </span>
+        {!data.hasDeclaredBaseline && (
+          <span className="text-[11px] text-muted-foreground">
+            (no declared architecture, so there is nothing to be short of on this axis)
+          </span>
+        )}
+      </div>
+
+      {/* The check axis. */}
+      <div className="mt-3 rounded border border-border/60 p-2">
+        {!checks.reported ? (
+          // No counts here, deliberately. "0 of 0" would read as a measurement.
+          <p className="text-[11px] text-amber-400">
+            No engine reported which checks it ran. That is not the same as every check having
+            run — this deployment has no coverage statement on the question set at all.
+          </p>
+        ) : (
+          <>
+            <p className="text-[11px]">
+              <span
+                className={cn(
+                  "font-semibold",
+                  checks.complete ? "text-emerald-400" : "text-amber-400",
+                )}
+              >
+                {checks.performed} of {checks.total} checks performed
+              </span>
+              {checks.reportedAt && (
+                <span className="text-muted-foreground"> · reported {checks.reportedAt}</span>
+              )}
+            </p>
+            {checks.notPerformed.length > 0 && (
+              <div className="mt-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-400">
+                  Never ran
+                </p>
+                <CheckRows rows={checks.notPerformed} tone="text-amber-400" />
+              </div>
+            )}
+            {checks.degraded.length > 0 && (
+              <div className="mt-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-400">
+                  Ran, lost probes
+                </p>
+                <CheckRows rows={checks.degraded} tone="text-amber-400" />
+              </div>
+            )}
+            {checks.unmeasured.length > 0 && (
+              <div className="mt-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Ran, cannot say what it looked at
+                </p>
+                <CheckRows rows={checks.unmeasured} tone="text-foreground" />
+              </div>
+            )}
+            {Object.keys(checks.limitations).length > 0 && (
+              <div className="mt-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Declared limits of checks that DID run
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {Object.entries(checks.limitations).map(([check, texts]) => (
+                    <li key={check} className="text-[11px] leading-snug">
+                      <span className="font-medium text-foreground">{check}</span>
+                      {texts.map((text) => (
+                        <p key={text} className="text-muted-foreground">
+                          {text}
+                        </p>
+                      ))}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {checks.notes.length > 0 && (
+              <ul className="mt-2 space-y-1">
+                {checks.notes.map((note) => (
+                  <li key={note} className="text-[11px] text-muted-foreground">
+                    {note}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+
+      {data.criticalGap && (
+        <p className="mt-2 text-[11px] text-amber-400">
+          This gap holds the deployment decision at <span className="font-semibold">audit
+          incomplete</span>: it cannot read ready while something was never looked at.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function BomDriftPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<BomDrift>({
@@ -7421,6 +7669,14 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                             never a clean bill. Self-fetch. */}
                         <DeclaredArchitecturePanel deploymentUuid={d.uuid} admin={admin} />
                         <BomDriftPanel deploymentUuid={d.uuid} admin={admin} />
+
+                        {/* Coverage manifest: what was assessed and what was not,
+                            on both axes. Placed beside BOM drift because both
+                            answer "what is missing from this picture" — drift on
+                            the inventory, this on the inventory AND the question
+                            set. An unreported check axis says so in words and
+                            prints no counts. Self-fetch. */}
+                        <CoverageManifestPanel deploymentUuid={d.uuid} />
 
                         {/* AI system capability map (Phase 1.3): what this
                             deployment can do. Self-fetches, so it loads only for

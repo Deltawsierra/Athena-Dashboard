@@ -2388,6 +2388,20 @@ export function registerRoutes(app: Express): void {
   // components/providers and the declared components no longer observed. Without a
   // declared baseline there is no drift to compute, and that is surfaced rather
   // than read as a clean bill of materials. A read, behind requireAuth.
+  // The Coverage Manifest: what was assessed and what was not, on both axes --
+  // breadth over the inventory (expected/observed/assessed) and depth over the
+  // question set (which checks the latest scan ran). Neither implies the other,
+  // and an absent check axis reaches the client as `reported: false` rather than
+  // as a complete one. A read, behind requireAuth.
+  app.get("/api/assurance/deployments/:uuid/coverage-manifest", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.coverageManifest(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   app.get("/api/assurance/deployments/:uuid/bom-drift", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.bomDrift(req.params.uuid));
