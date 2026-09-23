@@ -59,7 +59,8 @@ function accuracyColour(accuracy: number): string {
 
 interface Classification {
   label: string | null;
-  confidence: number;
+  /** Null when the engine sent none. Rendered as "not reported", never as 0%. */
+  confidence: number | null;
   informative: boolean;
   baseline: number | null;
   classes: string[];
@@ -73,7 +74,7 @@ interface Classification {
  * but at the floor it is presented as what it is: the model expressing no
  * preference, with the tie-break winner attached.
  */
-function Verdict({ result }: { result: Classification }) {
+export function Verdict({ result }: { result: Classification }) {
   const floor = result.baseline;
   const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
 
@@ -117,14 +118,22 @@ function Verdict({ result }: { result: Classification }) {
           {result.label}
         </span>
         <span className="athena-mono text-sm text-muted-foreground" data-testid="text-confidence">
-          {pct(result.confidence)}
+          {result.confidence === null ? "confidence not reported" : pct(result.confidence)}
         </span>
       </div>
-      {floor !== null && (
+      {floor !== null && result.confidence !== null && (
         <p className="text-xs text-muted-foreground">
           Against a {pct(floor)} floor — what every class scores when the model
           has no signal. This model separates weakly; the number is the model's,
           not a presentation of it.
+        </p>
+      )}
+      {result.confidence === null && (
+        <p className="text-xs text-muted-foreground" data-testid="text-no-confidence">
+          The engine returned this label without a confidence figure, so there is
+          nothing to read it against. The label is shown because the engine sent
+          it; how strongly it was held is not known — and an unsent number is
+          not a zero.
         </p>
       )}
       {result.engineVersion && (

@@ -98,6 +98,30 @@ describe("classifying a vulnerability description", () => {
     expect(res.body.informative).toBe(false);
   });
 
+  it("reports an absent confidence as unknown, not as zero", async () => {
+    // Zero is a measurement -- "the model scored this class at nothing". An
+    // engine that sent no confidence has not measured anything, and rendering
+    // 0.0% for it states a result nobody reached. Same defect as the 92% this
+    // screen used to invent, with a more modest number.
+    reply = { label: "sql_injection", informative: true, baseline: 0.2, engine_version: "ml-v1" };
+    const res = await agent.post("/api/classify-cve").send({ text: "union select" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.confidence).toBeNull();
+    // The label still travels: hiding it would be its own dishonesty.
+    expect(res.body.label).toBe("sql_injection");
+  });
+
+  it("carries a confidence of zero the engine did send", async () => {
+    // The control: null is the ABSENT case only. A real zero is a real answer.
+    reply = { label: "rce", confidence: 0, informative: false, baseline: 0.2, engine_version: "ml-v1" };
+    const res = await agent.post("/api/classify-cve").send({ text: "zzzz" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.confidence).toBe(0);
+    expect(res.body.confidence).not.toBeNull();
+  });
+
   it("refuses an empty description before the engine is asked", async () => {
     seen = [];
     for (const text of ["", "   ", "\n\t"]) {

@@ -339,7 +339,15 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
  */
 export interface CveClassification {
   label: string | null;
-  confidence: number;
+  /**
+   * Null when the engine did not send one. NOT zero.
+   *
+   * Zero is a measurement -- "the model scored this class at nothing" -- and
+   * printing it for a field the engine never sent states a result nobody
+   * reached. It is the same defect as the 92% this screen used to invent,
+   * with a more modest number.
+   */
+  confidence: number | null;
   /** False when the model expressed no preference and the label is a tie-break. */
   informative: boolean;
   /** The no-information floor, 1/classes, as the engine computed it. */
@@ -377,7 +385,7 @@ export async function classifyCve(text: string): Promise<CveClassification> {
 
   return {
     label: typeof payload.label === "string" ? payload.label : null,
-    confidence: typeof payload.confidence === "number" ? payload.confidence : 0,
+    confidence: typeof payload.confidence === "number" ? payload.confidence : null,
     // Absent means false. An older engine that does not send this field has
     // not told us the answer was informative, and assuming it was is how the
     // floor case gets rendered as a finding.
@@ -403,7 +411,15 @@ export interface EvidenceSource {
   source: string;
   status: string;
   reason: string | null;
-  records: number;
+  /**
+   * Null when the engine did not report a count. NOT zero.
+   *
+   * A source carrying `status: "included"` and `records: 0` says the pack
+   * looked and found nothing there -- a claim about the customer's data. An
+   * absent count says only that the engine did not tell us. A pack handed to a
+   * third party must not turn the second into the first.
+   */
+  records: number | null;
   chainOk: boolean;
   chainDetail: string;
   chainPartial: boolean;
@@ -446,7 +462,16 @@ export interface EvidencePack {
   tenant: string | null;
   reason: string | null;
   merkleRoot: string | null;
-  leafCount: number;
+  /**
+   * Null when the manifest did not carry one. NOT zero.
+   *
+   * `merkleRoot` is already nullable, so defaulting this to 0 produced the one
+   * combination that cannot be true: a root over an empty tree. A pack is
+   * proof of what it commits to, and a leaf count nobody sent is not a count
+   * of zero leaves -- it is a pack whose extent is unknown, which is what the
+   * reader and the activity log both need to be told.
+   */
+  leafCount: number | null;
   signed: boolean;
   signature: EvidenceSignature | null;
   unsignedReason: string | null;
@@ -482,7 +507,7 @@ function evidenceSource(raw: Record<string, unknown>): EvidenceSource {
     source: String(raw.source ?? "unknown"),
     status: String(raw.status ?? "unknown"),
     reason: typeof raw.reason === "string" ? raw.reason : null,
-    records: typeof raw.records === "number" ? raw.records : 0,
+    records: typeof raw.records === "number" ? raw.records : null,
     chainOk: raw.chain_ok === true,
     chainDetail: typeof raw.chain_detail === "string" ? raw.chain_detail : "",
     chainPartial: raw.chain_partial === true,
@@ -561,7 +586,7 @@ export async function buildEvidencePack(request: EvidenceRequest): Promise<Evide
     tenant: typeof manifest.tenant === "string" ? manifest.tenant : null,
     reason: typeof manifest.reason === "string" ? manifest.reason : null,
     merkleRoot: typeof manifest.merkle_root === "string" ? manifest.merkle_root : null,
-    leafCount: typeof manifest.leaf_count === "number" ? manifest.leaf_count : 0,
+    leafCount: typeof manifest.leaf_count === "number" ? manifest.leaf_count : null,
     // Absent means unsigned. An engine that does not say it signed the pack
     // has not signed it, and defaulting the other way is how an unsigned pack
     // gets handed to a customer as proof.

@@ -202,6 +202,71 @@ describe("issuing an evidence pack", () => {
     expect(entry.details).toMatchObject({ reason: "incident 2026-114", signed: true });
   });
 
+  /**
+   * A count nobody sent is not a count of zero.
+   *
+   * `merkleRoot` was already nullable while `leafCount` defaulted to 0, so a
+   * manifest missing the field produced the one combination that cannot be
+   * true: a root over an empty tree. The activity log records this pack, so
+   * the invented zero was not only displayed -- it was written into the
+   * tamper-evident record of what left the machine.
+   */
+  it("reports an absent leaf count as unknown, not as an empty tree", async () => {
+    const pack = packWith();
+    delete (pack.manifest as Record<string, unknown>).leaf_count;
+    reply = pack;
+    const { clientId } = await anEngagement();
+
+    const res = await agent.post("/api/evidence-pack")
+      .send({ clientId, reason: "manifest with no leaf count" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.leafCount).toBeNull();
+    // Still a root. That is the point: the pack commits to something, and how
+    // much is what the engine did not say.
+    expect(res.body.merkleRoot).toBe("sha256:abc123");
+
+    const logs = await agent.get("/api/logs");
+    const entry = logs.body.find(
+      (one: { details?: { reason?: string } }) =>
+        one.details?.reason === "manifest with no leaf count",
+    );
+    expect(entry).toBeDefined();
+    expect(entry.details.leafCount).toBeNull();
+  });
+
+  it("carries a leaf count the engine did send, unchanged", async () => {
+    // The control beside the test above: the null is the ABSENT case only.
+    reply = packWith();
+    const { clientId } = await anEngagement();
+
+    const res = await agent.post("/api/evidence-pack").send({ clientId, reason: "audit" });
+    expect(res.body.leafCount).toBe(4);
+  });
+
+  it("tells an unreported record count apart from a reported zero", async () => {
+    const pack = packWith();
+    (pack.manifest as Record<string, unknown>).sources = [
+      // The engine looked and there was nothing. A claim about the data.
+      { source: "effects", status: "included", reason: null, records: 0,
+        chain_ok: true, chain_detail: "no effects in range", chain_partial: false },
+      // The engine did not say. A claim about nothing at all.
+      { source: "scans", status: "included", reason: null,
+        chain_ok: true, chain_detail: "every chained row matches", chain_partial: false },
+    ];
+    reply = pack;
+    const { clientId } = await anEngagement();
+
+    const res = await agent.post("/api/evidence-pack").send({ clientId, reason: "counts" });
+    const bySource = Object.fromEntries(
+      res.body.sources.map((one: { source: string }) => [one.source, one]),
+    );
+
+    expect(bySource.effects.records).toBe(0);
+    expect(bySource.scans.records).toBeNull();
+    expect(bySource.effects.records).not.toBe(bySource.scans.records);
+  });
+
   it("refuses a site belonging to another client, and needs an admin", async () => {
     reply = packWith();
     const mine = await anEngagement();
