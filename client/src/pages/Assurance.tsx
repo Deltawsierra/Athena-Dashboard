@@ -93,7 +93,13 @@ interface Finding {
   deploymentUuid: string | null;
   title: string;
   severity: string;
+  // The security disposition: the slug, the backend's own label for it, and what
+  // it must NOT be read as. All three are served (assurance/models.py carries the
+  // caveat as data) so this console cannot invent its own wording for a state
+  // whose wrong reading is the reason the state exists.
   status: string;
+  statusLabel: string;
+  statusMustNotImply: string | null;
   evidenceClass: string;
   location: string;
   assetUuid: string | null;
@@ -1518,6 +1524,77 @@ function ChangeBadge({ status, label }: { status: string; label: string }) {
   );
 }
 
+/**
+ * Tone for a security disposition. Presentation only -- the WORDS come from the
+ * backend's `statusLabel`, never from a table here, because two of these states
+ * (contained, invalidated) exist precisely because the others were being stretched
+ * to cover them, and a console that spelled them itself could drift from the
+ * caveat the API serves. An unrecognised disposition takes the muted tone: a state
+ * this console has not been taught must never arrive wearing a reassuring colour.
+ *
+ * `contained` and `invalidated` are deliberately NOT the amber that `remediating`
+ * wears. Contained says a path is blocked and the defect is still there with no
+ * fix implied; remediating says a fix is under way. Rendering them alike is the
+ * exact failure P2.8 names.
+ */
+const DISPOSITION_TONE: Record<string, string> = {
+  open: "text-rose-400 border-rose-500/30 bg-rose-500/10",
+  triaged: "text-sky-300/90 border-sky-500/25 bg-sky-500/[0.08]",
+  remediating: "text-amber-400 border-amber-500/30 bg-amber-500/10",
+  retesting: "text-amber-300/90 border-amber-500/25 bg-amber-500/[0.08]",
+  // A limited path, not a lessened defect: a hard, cool outline rather than the
+  // in-progress amber, so it does not read as work under way.
+  contained: "text-indigo-300 border-indigo-400/40 bg-indigo-500/[0.10]",
+  // The ground moved: nothing is asserted about exploitation or a fix, so it
+  // reads as a question, not as a clean or a confirmed case.
+  invalidated: "text-fuchsia-300 border-fuchsia-400/40 border-dashed bg-fuchsia-500/[0.08]",
+  closed: "text-emerald-400/90 border-emerald-500/25 bg-emerald-500/[0.08]",
+  accepted: "text-muted-foreground border-dashed border-border/70 bg-surface-1/40",
+  false_positive: "text-muted-foreground border-border/60 bg-surface-1/50",
+};
+
+/** The finding's security disposition, worn in the backend's own words. */
+function DispositionChip({
+  status,
+  label,
+  mustNotImply,
+}: {
+  status: string;
+  label?: string;
+  mustNotImply?: string | null;
+}) {
+  if (!status) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        DISPOSITION_TONE[status] ?? "text-muted-foreground border-border/60 bg-surface-1/50",
+      )}
+      title={
+        mustNotImply
+          ? `Security disposition. ${mustNotImply}`
+          : "The finding's security disposition — not the remediation workflow state"
+      }
+    >
+      {label || status}
+    </span>
+  );
+}
+
+/**
+ * The caveat the backend attaches to a disposition with a wrong reading worth
+ * naming. Rendered as its own line, not only as a tooltip: a caveat that needs a
+ * hover to find is a caveat a report screenshot does not carry.
+ */
+function DispositionCaveat({ text }: { text: string | null }) {
+  if (!text) return null;
+  return (
+    <p className="mt-1.5 text-[10px] leading-snug text-amber-300/80">
+      <span className="font-semibold">Must not be read as:</span> {text}
+    </p>
+  );
+}
+
 // The remediation workflow vocabulary (Phase 2.3), kept in lockstep with
 // assurance/models.py and the BFF's transition schema. This is the *human
 // process* of getting a finding fixed, distinct from the security disposition:
@@ -1618,9 +1695,10 @@ function FindingRow({
             stale{typeof f.ageDays === "number" ? ` · ${f.ageDays}d` : ""}
           </span>
         )}
-        {/* The security status of the finding (open/closed/...). Distinct from
-            the remediation workflow chip that follows it. */}
-        <span className="text-[11px] text-muted-foreground">{f.status}</span>
+        {/* The security disposition of the finding (open/contained/...). Distinct
+            from the remediation workflow chip that follows it, and toned so that
+            `contained` and `invalidated` cannot be mistaken for `remediating`. */}
+        <DispositionChip status={f.status} label={f.statusLabel} mustNotImply={f.statusMustNotImply} />
         {showAsset && f.assetName && (
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
         )}
@@ -1635,6 +1713,7 @@ function FindingRow({
           </span>
         )}
       </div>
+      <DispositionCaveat text={f.statusMustNotImply} />
       {/* Remediation workflow (Phase 2.3): the state chip and assignee for
           everyone; the move/assign controls for an admin. Kept on its own row,
           and labelled as workflow, so it never reads as the security verdict. */}
@@ -6987,6 +7066,7 @@ interface IncidentPack {
       severityLabel: string;
       status: string;
       statusLabel: string;
+      statusMustNotImply: string | null;
     };
   };
   surface: {
@@ -7136,6 +7216,18 @@ function IncidentPackView({ findingUuid }: { findingUuid: string }) {
       <p className="text-[10px] text-muted-foreground/80">
         Attests {data.attests}.
       </p>
+      {/* The finding's disposition, on the pack itself. A pack headed "Incident
+          evidence pack" that shows no disposition reads as a confirmed incident
+          whatever the finding's actual state -- which for an INVALIDATED finding
+          is exactly the reading that state exists to prevent. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <DispositionChip
+          status={data.identity.finding.status}
+          label={data.identity.finding.statusLabel}
+          mustNotImply={data.identity.finding.statusMustNotImply}
+        />
+      </div>
+      <DispositionCaveat text={data.identity.finding.statusMustNotImply} />
       <div className="flex flex-wrap gap-x-3 gap-y-0.5">
         <span>Category: <span className="text-foreground">{data.identity.finding.category}</span></span>
         <span>Evidence: <span className="text-foreground">{data.evidence.evidenceClass || "—"}</span> ({data.evidence.count})</span>
