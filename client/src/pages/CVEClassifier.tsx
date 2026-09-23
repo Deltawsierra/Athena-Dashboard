@@ -61,7 +61,8 @@ interface Classification {
   label: string | null;
   /** Null when the engine sent none. Rendered as "not reported", never as 0%. */
   confidence: number | null;
-  informative: boolean;
+  /** Null when the engine did not send the field. Its own branch, not `false`. */
+  informative: boolean | null;
   baseline: number | null;
   classes: string[];
   engineVersion: string | null;
@@ -77,6 +78,50 @@ interface Classification {
 export function Verdict({ result }: { result: Classification }) {
   const floor = result.baseline;
   const pct = (value: number) => `${(value * 100).toFixed(1)}%`;
+
+  if (result.informative === null) {
+    // The engine did not say. Neither of the panels below applies: one presents
+    // the label as a classification, the other states that the model scored
+    // every class equally -- and that is a claim about the model, which an
+    // absent field does not support. Rendering it anyway produced a page that
+    // contradicted its own numbers, announcing a 20.0% tie beside a measured
+    // 0.9. So this says what is actually known and stops.
+    return (
+      <div
+        className="rounded-lg border p-4 space-y-2"
+        style={{ borderColor: "hsl(var(--muted-foreground) / 0.35)" }}
+        data-testid="verdict-unstated"
+      >
+        <div className="athena-label">Not characterised</div>
+        <div className="flex items-baseline gap-3">
+          <span className="athena-figure text-2xl" data-testid="text-label">
+            {result.label}
+          </span>
+          <span
+            className="athena-mono text-sm text-muted-foreground"
+            data-testid="text-confidence"
+          >
+            {result.confidence === null
+              ? "confidence not reported"
+              : pct(result.confidence)}
+          </span>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          The engine returned this label without saying whether the model
+          actually separated it from the alternatives. So this is not presented
+          as a classification, and it is not presented as a tie either — both
+          would be claims the engine did not make.
+          {floor !== null && (
+            <>
+              {" "}
+              Its no-information floor is {pct(floor)}; a score at the floor
+              means the model had no signal.
+            </>
+          )}
+        </p>
+      </div>
+    );
+  }
 
   if (!result.informative) {
     return (

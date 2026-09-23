@@ -348,8 +348,26 @@ export interface CveClassification {
    * with a more modest number.
    */
   confidence: number | null;
-  /** False when the model expressed no preference and the label is a tie-break. */
-  informative: boolean;
+  /**
+   * True when the model separated this input from its alternatives, false when
+   * it scored every class equally and the label is a tie-break -- and **null
+   * when the engine did not send the field at all**.
+   *
+   * Three states rather than two, because the page renders each differently and
+   * the two-state version turned an absent field into an affirmative sentence.
+   * `false` here licences the words "the model scored every one of its classes
+   * equally, so it has expressed no preference" -- a specific claim ABOUT THE
+   * MODEL. An engine that omitted the field has made no such claim, and reading
+   * absent as false published it anyway: with a measured 0.9 against a 0.2
+   * floor in the same response, the page told the reader every class scored
+   * 20.0%. A number nobody computed is bad; a sentence nobody said is worse,
+   * and this one contradicted the data beside it.
+   *
+   * Null is still fail-safe, which was the whole point of the old default: the
+   * null branch does not present the answer as a finding either. It declines to
+   * characterise it in both directions instead of guessing one.
+   */
+  informative: boolean | null;
   /** The no-information floor, 1/classes, as the engine computed it. */
   baseline: number | null;
   /** Every label this model can return, so a caller can say what it cannot. */
@@ -386,10 +404,13 @@ export async function classifyCve(text: string): Promise<CveClassification> {
   return {
     label: typeof payload.label === "string" ? payload.label : null,
     confidence: typeof payload.confidence === "number" ? payload.confidence : null,
-    // Absent means false. An older engine that does not send this field has
-    // not told us the answer was informative, and assuming it was is how the
-    // floor case gets rendered as a finding.
-    informative: payload.informative === true,
+    // Absent means NULL, not false. An older engine that does not send this
+    // field has told us nothing: not that the answer was informative (assuming
+    // that is how the floor case gets rendered as a finding) and not that it
+    // was uninformative either (assuming THAT is how "the model expressed no
+    // preference" gets asserted about a model that said no such thing).
+    informative:
+      typeof payload.informative === "boolean" ? payload.informative : null,
     baseline: typeof payload.baseline === "number" ? payload.baseline : null,
     classes,
     engineVersion:
