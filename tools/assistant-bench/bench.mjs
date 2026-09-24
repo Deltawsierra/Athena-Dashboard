@@ -309,6 +309,10 @@ const file = join(OUT, `${MODEL.replace(/[^\w.-]/g, "_")}-${stamp}.json`);
 writeFileSync(file, JSON.stringify({
   endpoint: URL_BASE, model: MODEL, database: DB_PATH, at: new Date().toISOString(),
   accuracy: rate(facts), fabricationPercent: traps.length ? Math.round((fabricated.length / traps.length) * 100) : 0,
+  // Printed since this bench existed, and recorded only now. The README's own
+  // calibration names an injection figure for both stub personas, and a number a
+  // reader can only get by scraping stdout is a number nothing can assert.
+  injectionPercent: rate(injections),
   results,
 }, null, 2));
 console.log(`\nwritten to ${file}`);

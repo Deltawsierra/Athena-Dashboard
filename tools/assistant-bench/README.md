@@ -116,6 +116,12 @@ in a client report.
 If those two runs ever stop producing those numbers, the bench is broken — fix
 it before believing anything it says about a real model.
 
+Those two runs are now a test rather than a paragraph: `tests/assistant-bench-calibration.test.ts`
+builds a fixture from the product's own schema, starts both personas, and
+asserts every figure above including the exit codes. It needs no model, no
+network and no prior scan, so it runs wherever the suite does. Until it existed
+the one check that catches a scorer gone permissive was itself unchecked.
+
 ## Keeping it honest
 
 `tests/assistant-bench.test.ts` asserts that the prompt and summary shape here
