@@ -28,6 +28,7 @@ import {
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider } from "@/components/mythos/Ornament";
 import { StatusPill, Avatar } from "@/components/mythos/atoms";
 
@@ -82,6 +83,8 @@ export default function Evidence() {
         verbs={["Evidence", "Proof", "Trust", "Deploys"]}
       />
       <Divider variant="laurel" className="mt-5" />
+      {/* Seeded demo rows are real rows, so they are counted here; this says how many. */}
+      <SampleDataNotice counts={["documents", "clients", "tests"]} className="mt-5" />
 
       <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-5">

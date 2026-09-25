@@ -1,11 +1,11 @@
 /**
  * "Some of what you are looking at was written by the installer."
  *
- * A fresh install seeds three clients, four sites and three tests so the app
- * has something to show. Two of those tests carry severity counts, and the
- * dashboard adds them into its totals -- so out of the box it reported
- * twenty-three findings and three criticals against an estate nobody had
- * scanned. Every one of those figures was derived from a real database row,
+ * A demo install (ATHENA_SEED_SAMPLE_DATA=1; a default install writes none)
+ * seeds three clients, four sites and three tests so the app has something to
+ * show. Two of those tests carry severity counts, and the dashboard adds them
+ * into its totals -- so it reported twenty-three findings and three criticals
+ * against an estate nobody had scanned. Every one of those figures was derived from a real database row,
  * which is exactly what made it convincing and exactly why it had to stop.
  *
  * So the notice states the numbers rather than hedging. "Some of this is
@@ -122,7 +122,8 @@ export default function SampleDataNotice({
           <div className="athena-label athena-gold">Sample data</div>
           <p className="mt-1 text-sm text-muted-foreground">
             {said} on this screen {plural ? "were" : "was"} written by the
-            installer, so that a fresh install has something to show.
+            installer for a demo (ATHENA_SEED_SAMPLE_DATA), not recorded
+            from any system.
             {/* Only where it is true and load-bearing. A scan does not
                 produce a client, so saying so on the clients screen is
                 filler; on a screen showing severity counts it is the

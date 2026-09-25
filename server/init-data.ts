@@ -7,15 +7,35 @@ import type { InsertUser, InsertClient, InsertTest, InsertDocument, InsertSite }
  * Default credentials (change them after first login):
  *   admin      / admin123     (admin)
  *   testadmin  / testpass123  (admin)
- * Set ATHENA_SKIP_SAMPLE_DATA=true to seed users only, without sample clients.
+ * Sample clients, sites, tests and documents are written only when
+ * ATHENA_SEED_SAMPLE_DATA=1 (see sampleSeedingRequested). A default install
+ * gets the users and nothing else.
  *
  * Everything below the users carries isSample: true. These rows exist so a
- * fresh install has something to look at, and three of them carry severity
+ * demo install has something to look at, and two of the tests carry severity
  * counts that no scan produced. A dashboard that adds those up next to real
  * findings is presenting invented numbers as measurements, which is precisely
- * what this product exists to stop other people doing. So the rows say what
- * they are, the screens that count them say so, and Settings removes them.
+ * what this product exists to stop other people doing. So they are off unless
+ * asked for, the rows say what they are, every screen that counts them says
+ * so, and Settings removes them.
  */
+/**
+ * Whether this start was asked to write the sample records.
+ *
+ * Off unless ATHENA_SEED_SAMPLE_DATA=1. The rows below are fabricated -- a
+ * client nobody engaged, a penetration test nobody ran, fifteen findings no
+ * scan produced -- and they are stored as real rows, so every screen that
+ * reads clients, tests or documents counts them. A customer install must not
+ * open onto that, so a demo has to ask for it by name.
+ *
+ * ATHENA_SKIP_SAMPLE_DATA=true, the old opt-out, still means off and still
+ * wins: a deployment that set it keeps exactly the behaviour it asked for.
+ */
+export function sampleSeedingRequested(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.ATHENA_SKIP_SAMPLE_DATA === "true") return false;
+  return env.ATHENA_SEED_SAMPLE_DATA === "1";
+}
+
 export async function initializeDefaultData(): Promise<void> {
   const existing = await storage.getAllUsers();
   if (existing.length > 0) {
@@ -52,8 +72,11 @@ export async function initializeDefaultData(): Promise<void> {
     lastModifiedBy: admin.id,
   });
 
-  if (process.env.ATHENA_SKIP_SAMPLE_DATA === "true") {
-    console.log("[init] Default users created. Sample data skipped.");
+  if (!sampleSeedingRequested()) {
+    console.log(
+      "[init] Default users created. No sample records written " +
+        "(set ATHENA_SEED_SAMPLE_DATA=1 to seed them for a demo).",
+    );
     return;
   }
 

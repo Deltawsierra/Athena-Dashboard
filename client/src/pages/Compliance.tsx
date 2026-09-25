@@ -19,6 +19,7 @@ import { Layers, FileCheck2, AlertTriangle, CircleSlash, Box, Search, ChevronDow
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Corners } from "@/components/mythos/Ornament";
 import { cn } from "@/lib/utils";
 import { ASVS_CURRENT_RELEASE, ASVS_MAPPED_VERSION } from "@shared/asvs-edition";
@@ -124,6 +125,8 @@ export default function Compliance() {
         verbs={["Trust", "Govern", "Demonstrate", "Advance"]}
       />
       <Divider variant="key" className="mt-5" />
+      {/* Seeded demo clients and tests feed the mapping like any other; this says how many. */}
+      <SampleDataNotice counts={["clients", "tests"]} className="mt-5" />
 
       {/* stats -- live from the ASVS mapping */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">

@@ -14,14 +14,22 @@ import { makeApp, signIn } from "./helpers";
  */
 async function freshApp(): Promise<Express> {
   vi.resetModules();
-  return makeApp();
+  // The seed is opt-in (a default install writes none of it; see
+  // seeded-sample-rows-are-opt-in.test.ts), and these tests are about the
+  // seeded rows, so they ask for them the way a demo install does.
+  process.env.ATHENA_SEED_SAMPLE_DATA = "1";
+  try {
+    return await makeApp();
+  } finally {
+    delete process.env.ATHENA_SEED_SAMPLE_DATA;
+  }
 }
 
 /**
  * The installer's rows, and the fact that they say so.
  *
- * A fresh install seeds three clients, four sites, three tests and three
- * documents. Two of those tests carry severity counts adding to twenty-three,
+ * A demo install (ATHENA_SEED_SAMPLE_DATA=1) seeds three clients, four sites,
+ * three tests and three documents. Two of those tests carry severity counts adding to twenty-three,
  * and the dashboard sums exactly those columns -- so out of the box the app
  * reported twenty-three findings and three criticals against an estate nobody
  * had scanned. Every figure came from a real database row, which is what made

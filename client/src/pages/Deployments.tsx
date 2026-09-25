@@ -22,6 +22,7 @@ import { useLocation } from "wouter";
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Emblem } from "@/components/mythos/Ornament";
 import { StatusPill, Timeline, type StatusTone, type TimelineStep } from "@/components/mythos/atoms";
 import { cn } from "@/lib/utils";
@@ -186,6 +187,9 @@ export default function Deployments() {
         verbs={["Scan", "Analyze", "Evidence", "Deploy"]}
       />
       <Divider variant="key" className="mt-5" />
+      {/* Seeded demo rows are real rows, so they are counted here; this says
+          how many, and that no scan produced their severity counts. */}
+      <SampleDataNotice counts={["clients", "tests", "findings"]} className="mt-5" />
 
       {/* stats -- live */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">

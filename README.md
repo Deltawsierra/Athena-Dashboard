@@ -29,9 +29,12 @@ On first start the database is created and seeded with two admin accounts:
 | `testadmin` | `testpass123`  |
 
 **Change both passwords after your first sign-in.** They exist so a fresh
-checkout can be opened; they are not meant to survive into any real use. Set
-`ATHENA_SKIP_SAMPLE_DATA=true` to seed the accounts without the sample clients,
-tests and documents.
+checkout can be opened; they are not meant to survive into any real use.
+
+Nothing else is written. A default install starts with no clients, tests or
+documents, so every figure on every screen comes from something you recorded.
+For a demo, `ATHENA_SEED_SAMPLE_DATA=1` also writes sample clients, sites,
+tests and documents on the first start (see "Seeded sample rows" below).
 
 ## Building
 
@@ -70,7 +73,8 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_DB_PATH`          | see below                      | SQLite file, or `:memory:` |
 | `ATHENA_USER_DATA`        | Electron user-data directory   | Where the database and session secret live |
 | `ATHENA_STORAGE`          | `sqlite`                       | Set to `memory` for tests; nothing persists |
-| `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Seed users only, no sample records |
+| `ATHENA_SEED_SAMPLE_DATA` | unset (off)                    | `1` writes the sample clients, sites, tests and documents on the first start, for a demo. Any other value, or unset, writes none. |
+| `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Older opt-out. `true` still means no sample records, and wins over `ATHENA_SEED_SAMPLE_DATA`. |
 | `COOKIE_SECURE`           | `false`                        | Set to `true` when serving over HTTPS |
 | `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console. |
 | `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
@@ -98,9 +102,16 @@ every affected panel carries the label "Sample data — not from your
 environment". The sample figures live only in `client/src/sample/`; pages reach
 them through `@/sample`, whose accessors refuse when sample mode is off.
 
-This is not the same thing as the installer's seeded rows
-(`ATHENA_SKIP_SAMPLE_DATA`): those are real database rows, counted like any
-other, with a notice on each screen that shows them and a button to remove them.
+### Seeded sample rows (demo installs only)
+
+This is not the same thing as sample mode. `ATHENA_SEED_SAMPLE_DATA=1` makes
+the first start write three sample clients, four sites, three tests and three
+documents into the database. Two of those tests carry severity counts (fifteen
+and eight findings) that no scan produced. They are real database rows, so they
+are counted like any other; each row is marked as sample data, and Overview,
+Deployments, Evidence, Risks, Compliance, Tests and Documents show a notice
+saying how many seeded rows are on the screen, with a button (admins only) that
+removes them. A default install writes none of them.
 
 ## Architecture
 

@@ -24,6 +24,7 @@ import {
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Corners } from "@/components/mythos/Ornament";
 import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/components/mythos/atoms";
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
@@ -204,6 +205,8 @@ export default function Risks() {
         verbs={["Analyze", "Evidence", "Mitigate", "Strengthen"]}
       />
       <Divider variant="astrolabe" className="mt-5" />
+      {/* The engagement picker lists seeded demo clients like any other; this says how many. */}
+      <SampleDataNotice counts={["clients"]} className="mt-5" />
 
       {/* stats -- all live from the findings ledger */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
