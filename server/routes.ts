@@ -173,54 +173,166 @@ interface ScanStop {
   detail: string;
 }
 
-/**
- * Send the engine a stop for every engine scan that may still be running.
- *
- * Engaging the kill switch used to store a flag and nothing else: the scan it
- * was engaged over went on running against the customer's system while the
- * AI Control page said every operation had been terminated. Every test with
- * an engine run that has not finished is sent the same abort its own Stop
- * sends, all at once, and each outcome is recorded against its test. A stop
- * the engine refused or could not be reached for is reported as exactly that
- * -- the page says which scans could not be stopped and why -- never folded
- * into a success.
- */
-async function stopRunningScans(req: Request): Promise<ScanStop[]> {
-  const running = (await storage.getAllTests())
-    .map((test) => ({ test, runId: runIdOf(test) }))
-    .filter((one): one is { test: (typeof one)["test"]; runId: string } =>
-      one.runId !== null && !FINISHED_RUN_STATES.has(one.test.status));
+/** A cause, as the sentence a page can show. */
+function causeOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
 
-  return Promise.all(running.map(async ({ test, runId }): Promise<ScanStop> => {
-    const recorded = test.findings as Record<string, unknown>;
-    const target = typeof recorded.target === "string" ? recorded.target : null;
-    let outcome: ScanStop;
-    try {
-      const accepted = await engine.abort(runId);
-      outcome = {
-        testId: test.id, runId, target, stopped: accepted,
-        detail: accepted ? "" : "the engine did not accept the stop; the scan may still be running",
-      };
-    } catch (cause) {
-      outcome = {
-        testId: test.id, runId, target, stopped: false,
-        detail: cause instanceof Error ? cause.message : String(cause),
-      };
+/** The run of a test whose engine run may still be running, or null. */
+function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
+  const runId = runIdOf(test);
+  return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
+}
+
+/**
+ * Send one run the abort its own Stop sends, and record what came of it.
+ *
+ * A stop the engine refused or could not be reached for is reported as
+ * exactly that, never folded into a success. The record is written after the
+ * stop and may fail: a log write that failed does not unsend the stop or hide
+ * its outcome.
+ */
+async function sendStop(
+  req: Request,
+  run: { runId: string; target: string | null; testId: string | null },
+  via: "kill_switch" | "delete",
+): Promise<{ stopped: boolean; detail: string }> {
+  let outcome: { stopped: boolean; detail: string };
+  try {
+    const accepted = await engine.abort(run.runId);
+    outcome = { stopped: accepted, detail: accepted ? "" : "the engine did not accept the stop; the scan may still be running" };
+  } catch (cause) {
+    outcome = { stopped: false, detail: causeOf(cause) };
+  }
+  try {
+    await storage.createActivityLog({
+      action: outcome.stopped ? "aborted" : "abort_failed",
+      // Against its test when one records it; against the run when none does.
+      entityType: run.testId !== null ? "test" : "engine_run",
+      entityId: run.testId ?? run.runId,
+      details: {
+        runId: run.runId, via,
+        ...(run.testId === null ? { target: run.target } : {}),
+        ...(outcome.stopped ? {} : { detail: outcome.detail }),
+      },
+      ...actor(req),
+    });
+  } catch {
+    // The stop was sent either way.
+  }
+  return outcome;
+}
+
+/** Stop a test's engine run, reported against the test. */
+async function stopScan(req: Request, test: { id: string; findings: unknown }, runId: string, via: "kill_switch" | "delete"): Promise<ScanStop> {
+  const recorded = test.findings as Record<string, unknown>;
+  const target = typeof recorded.target === "string" ? recorded.target : null;
+  return { testId: test.id, runId, target, ...(await sendStop(req, { runId, target, testId: test.id }, via)) };
+}
+
+/** A run the engine listed as live that no running test here recorded, and what its stop came to. */
+interface EngineRunStop {
+  runId: string;
+  target: string | null;
+  /** The test that records this run, when one does (its status says it ended); null when no row does. */
+  testId: string | null;
+  stopped: boolean;
+  detail: string;
+}
+
+/** The stops sent to the scans recorded here as running, or why they could not be listed. */
+type RecordedStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
+/** The stops sent to the other runs the engine listed as live, or why its list could not be read. */
+type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+
+type Settled<T> = { ok: true; value: T } | { ok: false; detail: string };
+function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
+  return pending.then((value) => ({ ok: true as const, value }), (cause) => ({ ok: false as const, detail: causeOf(cause) }));
+}
+
+/**
+ * Send a stop to everything that may still be running: every engine scan
+ * recorded here as running, and every run the ENGINE lists as live.
+ *
+ * Engaging the kill switch used to store a flag and nothing else; then it
+ * stopped the scans this app had rows for -- and only those. A run whose row
+ * was deleted, or never written, was scanning the customer's system with
+ * nothing here able to see it, and the page said no scan was running. So the
+ * engine's own list is read too, and each run on it that no running row
+ * covers is sent the same stop. The two reads start together and neither
+ * waits on the other: the rows' stops go as soon as the rows are read, and a
+ * list that could not be read holds back no stop from the other. Each outcome
+ * is reported, and one that could not be listed is said to be exactly that.
+ */
+async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedStops; engineRuns: EngineSweep }> {
+  const rowsRead = settle(storage.getAllTests());
+  const engineRead = settle(engine.activeRuns());
+
+  const rows = await rowsRead;
+  const running = rows.ok
+    ? rows.value
+      .map((test) => ({ test, runId: unfinishedRunOf(test) }))
+      .filter((one): one is { test: (typeof one)["test"]; runId: string } => one.runId !== null)
+    : [];
+  const scansStopped = Promise.all(running.map(({ test, runId }) => stopScan(req, test, runId, "kill_switch")));
+
+  const listed = await engineRead;
+  let engineRuns: EngineSweep;
+  if (!listed.ok) {
+    engineRuns = { listed: false, detail: listed.detail };
+  } else {
+    const covered = new Set(running.map((one) => one.runId));
+    const recordedBy = new Map<string, string>();
+    for (const test of rows.ok ? rows.value : []) {
+      const runId = runIdOf(test);
+      if (runId !== null) recordedBy.set(runId, test.id);
     }
-    try {
-      await storage.createActivityLog({
-        action: outcome.stopped ? "aborted" : "abort_failed",
-        entityType: "test",
-        entityId: test.id,
-        details: { runId, via: "kill_switch", ...(outcome.stopped ? {} : { detail: outcome.detail }) },
-        ...actor(req),
-      });
-    } catch {
-      // The stop was sent either way; a log write that failed does not unsend it
-      // or hide its outcome from the page.
-    }
-    return outcome;
+    engineRuns = {
+      listed: true,
+      runs: await Promise.all(listed.value
+        .filter((run) => !covered.has(run.runId))
+        .map(async (run): Promise<EngineRunStop> => {
+          const testId = recordedBy.get(run.runId) ?? null;
+          return { runId: run.runId, target: run.target, testId, ...(await sendStop(req, { ...run, testId }, "kill_switch")) };
+        })),
+    };
+  }
+
+  const stops: RecordedStops = rows.ok ? { listed: true, scans: await scansStopped } : { listed: false, detail: rows.detail };
+  return { stops, engineRuns };
+}
+
+/**
+ * Stop the unfinished engine runs of tests about to be deleted, before they go.
+ *
+ * Deleting a running scan's row -- directly, or by deleting its client --
+ * told the engine nothing. The run went on against the customer's system,
+ * and with the row went its Stop (the abort route answered 404) and the kill
+ * switch's view of it. So each run is sent a stop first, and a row is deleted
+ * only once the engine has accepted its stop.
+ */
+function stopBeforeDeleting(req: Request, tests: Array<{ id: string; findings: unknown; status: string }>): Promise<ScanStop[]> {
+  return Promise.all(tests.flatMap((test) => {
+    const runId = unfinishedRunOf(test);
+    return runId === null ? [] : [stopScan(req, test, runId, "delete")];
   }));
+}
+
+/** Refuse a delete while any of its runs could not be stopped: nothing is deleted, and the stops are reported. */
+function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): boolean {
+  const failed = stops.filter((one) => !one.stopped);
+  if (failed.length === 0) return false;
+  const accepted = stops.length - failed.length;
+  res.status(409).json({
+    message:
+      `Nothing was deleted. ${failed.map((one) => `Engine run ${one.runId}${one.target ? ` (${one.target})` : ""} ` +
+        `may still be running and could not be stopped: ${one.detail}.`).join(" ")} ` +
+      `Stop ${failed.length === 1 ? "it" : "them"} first -- the scan's Stop on the Tests screen, the kill switch, ` +
+      `or a failsafe pause -- then delete ${what}.` +
+      (accepted > 0 ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} stopped: the engine accepted the stop.` : ""),
+    stops,
+  });
+  return true;
 }
 const createDocumentSchema = insertDocumentSchema.omit({ createdBy: true, isSample: true });
 
@@ -806,23 +918,45 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.delete("/api/clients/:id", asyncHandler(async (req, res) => {
+    if (!(await storage.getClient(req.params.id))) return notFound(res, "Client");
     // Deleting a client removes its tests, sites and documents. Those rows
     // used to disappear with no audit trace at all, so the log recorded one
     // deletion where ten had happened. Count them before they are gone.
+    const tests = await storage.getTestsByClient(req.params.id);
     const cascaded = {
-      tests: (await storage.getTestsByClient(req.params.id)).map((t) => t.id),
+      tests: tests.map((t) => t.id),
       sites: (await storage.getSitesByClient(req.params.id)).map((s) => s.id),
       documents: (await storage.getDocumentsByClient(req.params.id)).map((d) => d.id),
     };
 
-    const success = await storage.deleteClient(req.params.id);
+    // Its tests' running engine runs are stopped first; nothing is deleted
+    // while one of them could not be (stopBeforeDeleting).
+    const stops = await stopBeforeDeleting(req, tests);
+    if (refuseUnstoppedDelete(res, "the client", stops)) return;
+
+    let success: boolean;
+    try {
+      success = await storage.deleteClient(req.params.id);
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+      // The stops were accepted; that is not to be reported as a failure.
+      return void res.status(500).json({
+        message: `Every running scan of this client was stopped (the engine accepted each stop), but the client ` +
+          `could not be deleted: ${causeOf(cause)}`,
+        stops,
+      });
+    }
     if (!success) return notFound(res, "Client");
 
-    await storage.createActivityLog({
-      action: "deleted", entityType: "client", entityId: req.params.id,
-      details: { cascaded }, ...actor(req),
-    });
-    res.json({ success: true });
+    try {
+      await storage.createActivityLog({
+        action: "deleted", entityType: "client", entityId: req.params.id,
+        details: { cascaded, ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}) }, ...actor(req),
+      });
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+    }
+    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
   }));
 
   // ==== SITES ====
@@ -911,10 +1045,34 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.delete("/api/tests/:id", asyncHandler(async (req, res) => {
-    const success = await storage.deleteTest(req.params.id);
+    const test = await storage.getTest(req.params.id);
+    if (!test) return notFound(res, "Test");
+    // A running engine scan is stopped first, and deleted only once the engine
+    // accepted the stop (stopBeforeDeleting): its row is its Stop.
+    const stops = await stopBeforeDeleting(req, [test]);
+    if (refuseUnstoppedDelete(res, "the test", stops)) return;
+
+    let success: boolean;
+    try {
+      success = await storage.deleteTest(req.params.id);
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+      return void res.status(500).json({
+        message: `Engine run ${stops[0].runId} was stopped (the engine accepted the stop), but the test could not ` +
+          `be deleted: ${causeOf(cause)}`,
+        stops,
+      });
+    }
     if (!success) return notFound(res, "Test");
-    await storage.createActivityLog({ action: "deleted", entityType: "test", entityId: req.params.id, details: null, ...actor(req) });
-    res.json({ success: true });
+    try {
+      await storage.createActivityLog({
+        action: "deleted", entityType: "test", entityId: req.params.id,
+        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : null, ...actor(req),
+      });
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+    }
+    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
   }));
 
   // ==== SCANS: the engine, and what it found ====
@@ -1492,24 +1650,24 @@ export function registerRoutes(app: Express): void {
   app.patch("/api/ai-control", requireAdmin, asyncHandler(async (req, res) => {
     const data = updateAIControlSettingSchema.parse(req.body);
     // The flag first, so every other write is refused from here on; then the
-    // stops (stopRunningScans). Sent again each time the switch is sent on, so
-    // an operator can retry the scans that could not be reached.
+    // stops (stopEverythingRunning). Sent again each time the switch is sent
+    // on, so an operator can retry the scans that could not be reached.
     const settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
-    let stops: { listed: true; scans: ScanStop[] } | { listed: false; detail: string } | null = null;
+    let stops: RecordedStops | null = null;
+    let engineRuns: EngineSweep | null = null;
     if (data.killSwitchEnabled === true) {
-      try {
-        stops = { listed: true, scans: await stopRunningScans(req) };
-      } catch (cause) {
-        // Not a 500: the switch is engaged, and what the page must say is that
-        // the scans to stop could not be listed -- not that there were none.
-        stops = { listed: false, detail: cause instanceof Error ? cause.message : String(cause) };
-      }
+      // Neither list failing is a 500: the switch is engaged, and what the page
+      // must say is which list could not be read -- not that nothing ran.
+      ({ stops, engineRuns } = await stopEverythingRunning(req));
     }
-    const logged = stops === null ? data : {
+    const logged = stops === null || engineRuns === null ? data : {
       ...data,
       stops: stops.listed
         ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
         : { listed: false, detail: stops.detail },
+      engineRuns: engineRuns.listed
+        ? { sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length }
+        : { listed: false, detail: engineRuns.detail },
     };
     try {
       await storage.createActivityLog({ action: "updated", entityType: "ai_control", entityId: settings.id, details: logged, ...actor(req) });
@@ -1517,7 +1675,7 @@ export function registerRoutes(app: Express): void {
       // Once stops were sent, their outcome reaches the page whatever the log did.
       if (stops === null) throw cause;
     }
-    res.json(stops === null ? settings : { ...settings, stops });
+    res.json(stops === null ? settings : { ...settings, stops, engineRuns });
   }));
 
   // ==== AI CHAT ====

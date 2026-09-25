@@ -59,6 +59,15 @@ function engineRunOf(findings: unknown): string | null {
   return typeof runId === "string" && runId !== "" ? runId : null;
 }
 
+/** Engine run states after which nothing more happens (server/routes.ts FINISHED_RUN_STATES). */
+const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+
+/** The engine run of a test that may still be running, or null. */
+function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
+  const runId = engineRunOf(test.findings);
+  return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
+}
+
 /** A person's notes on a test: the `details` of its findings, when there are any. */
 function notesOf(findings: unknown): string | null {
   if (!findings || typeof findings !== "object") return null;
@@ -136,10 +145,20 @@ export default function Tests() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: string) => apiRequest("DELETE", `/api/tests/${id}`),
-    onSuccess: () => {
+    mutationFn: async (id: string) => {
+      const response = await apiRequest("DELETE", `/api/tests/${id}`);
+      return (await response.json().catch(() => ({}))) as { stops?: Array<{ runId: string; stopped: boolean }> };
+    },
+    onSuccess: (result) => {
       void invalidateTestsAndFindings();
-      toast({ title: "Test deleted successfully" });
+      // A running scan is deleted only after the engine accepted its stop; say that it was stopped.
+      const stopped = (result.stops ?? []).filter((one) => one.stopped).map((one) => one.runId);
+      toast({
+        title: "Test deleted successfully",
+        ...(stopped.length > 0
+          ? { description: `Its engine run ${stopped.join(", ")} was sent a stop first, and the engine accepted it.` }
+          : {}),
+      });
     },
     onError: (error) => {
       toast({ title: "Failed to delete test", description: error.message, variant: "destructive" });
@@ -604,8 +623,13 @@ export default function Tests() {
                               <AlertDialogContent>
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>Delete Test</AlertDialogTitle>
-                                  <AlertDialogDescription>
-                                    Are you sure you want to delete this test? This action cannot be undone.
+                                  <AlertDialogDescription data-testid={`text-delete-warning-${test.id}`}>
+                                    {unfinishedRunOf(test)
+                                      ? `This scan's engine run ${unfinishedRunOf(test)} may still be running. Deleting ` +
+                                        "it sends the engine a stop first, and deletes the test only once the engine " +
+                                        "accepts the stop; if it does not, nothing is deleted and the scan keeps its " +
+                                        "Stop. This action cannot be undone."
+                                      : "Are you sure you want to delete this test? This action cannot be undone."}
                                   </AlertDialogDescription>
                                 </AlertDialogHeader>
                                 <AlertDialogFooter>

@@ -27,6 +27,26 @@ interface ScanStop {
 /** What the server did about running scans when the switch was sent on. */
 type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
 
+/** A run the engine listed as live that no running scan here recorded (server/routes.ts EngineRunStop). */
+interface EngineRunStop {
+  runId: string;
+  target: string | null;
+  /** The test that records it, when one does; null when nothing here records it. */
+  testId: string | null;
+  stopped: boolean;
+  detail: string;
+}
+
+/** What the server did about the other runs the engine itself listed as live. */
+type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+
+/** The server's whole account of one engagement of the switch. */
+interface StopReport {
+  stops: KillSwitchStops;
+  /** Absent when the server said nothing about the engine's own list; then nothing is said of it. */
+  engineRuns?: EngineSweep;
+}
+
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /**
@@ -52,6 +72,38 @@ function stopSentence(report: KillSwitchStops): string {
   const why = failed.map((one) => `${one.target ?? one.testId}: ${one.detail}`).join("; ");
   return `${sent}; ${took}; ${failed.length} could not be stopped (${why}). ` +
     "They may still be running: stop them from the scan screens, or pause the engine from the Failsafe console.";
+}
+
+/**
+ * What the kill switch did about the runs the engine itself listed as live
+ * that no running scan here recorded -- a run whose row was deleted, or one
+ * started from elsewhere. Said from the engine's list, or said to be unread.
+ */
+function engineSweepSentence(sweep: EngineSweep): string {
+  if (!sweep.listed) {
+    return `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
+      "records may still be running: pause the engine from the Failsafe console to be sure.";
+  }
+  const { runs } = sweep;
+  if (runs.length === 0) return "The engine listed no other live run.";
+  const unrecorded = runs.filter((one) => one.testId === null).length;
+  const failed = runs.filter((one) => !one.stopped);
+  const accepted = runs.length - failed.length;
+  const listed = `The engine also listed ${count(runs.length, "live run")} that no running scan here recorded` +
+    (unrecorded > 0 ? ` (${unrecorded} with no record here at all)` : "") +
+    `; ${runs.length === 1 ? "it was" : "each was"} sent a stop`;
+  const took = `the engine accepted ${accepted === runs.length ? (runs.length === 1 ? "it" : "all of them") : accepted}`;
+  if (failed.length === 0) return `${listed}, and ${took}.`;
+  const why = failed.map((one) => `${one.target ?? one.runId}: ${one.detail}`).join("; ");
+  return `${listed}; ${took}; ${failed.length} could not be stopped (${why}). ` +
+    "They may still be running: pause the engine from the Failsafe console.";
+}
+
+/** Whether every stop the report names was accepted, and nothing went unlisted. */
+function everyStopTook(report: StopReport): boolean {
+  const recorded = report.stops.listed && report.stops.scans.every((one) => one.stopped);
+  const engine = report.engineRuns === undefined || (report.engineRuns.listed && report.engineRuns.runs.every((one) => one.stopped));
+  return recorded && engine;
 }
 
 export default function AIControlPanel() {
@@ -98,7 +150,7 @@ export default function AIControlPanel() {
   // that and nothing more -- it used to say "All AI operations have been
   // terminated" over a scan that was still running, because the switch told
   // the engine nothing.
-  const [stopReport, setStopReport] = useState<KillSwitchStops | null>(null);
+  const [stopReport, setStopReport] = useState<StopReport | null>(null);
 
   // Its own mutation, never held back by another control: while any other
   // setting was saving, the shared mutation's pending state disabled "Confirm
@@ -111,16 +163,18 @@ export default function AIControlPanel() {
         systemStatus: "shutdown",
         activeSystems: [],
       });
-      return (await response.json()) as AIControlSetting & { stops?: KillSwitchStops };
+      return (await response.json()) as AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
-      const report = result.stops ?? null;
+      const report: StopReport | null = result.stops ? { stops: result.stops, engineRuns: result.engineRuns } : null;
       setStopReport(report);
       toast({
         title: "Kill switch engaged",
-        description: report ? stopSentence(report) : "The server did not say what it stopped.",
-        variant: report && report.listed && report.scans.every((one) => one.stopped) ? undefined : "destructive",
+        description: report
+          ? [stopSentence(report.stops), report.engineRuns ? engineSweepSentence(report.engineRuns) : ""].filter(Boolean).join(" ")
+          : "The server did not say what it stopped.",
+        variant: report && everyStopTook(report) ? undefined : "destructive",
       });
     },
     onError: (error: Error) => {
@@ -250,7 +304,8 @@ export default function AIControlPanel() {
                 Emergency Controls
               </CardTitle>
               <CardDescription>
-                Refuse every write except stops, and send a stop to every engine scan recorded as running
+                Refuse every write except stops, and send a stop to every engine scan recorded as running and
+                every run the engine lists as live
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -259,7 +314,12 @@ export default function AIControlPanel() {
                   happened, not a reading of the switch. */}
               {stopReport && (
                 <p className="text-sm p-3 rounded-lg border border-destructive/50" data-testid="text-kill-switch-stops">
-                  {stopSentence(stopReport)}
+                  {stopSentence(stopReport.stops)}
+                </p>
+              )}
+              {stopReport?.engineRuns && (
+                <p className="text-sm p-3 rounded-lg border border-destructive/50" data-testid="text-kill-switch-engine-runs">
+                  {engineSweepSentence(stopReport.engineRuns)}
                 </p>
               )}
               {isEmergency ? (
@@ -330,8 +390,9 @@ export default function AIControlPanel() {
                           Confirm Emergency Shutdown
                         </p>
                         <p className="text-sm text-muted-foreground mt-1">
-                          Every write except a stop is refused, and every engine scan recorded as running is sent a
-                          stop. This page then says which the engine accepted and which it could not be reached for.
+                          Every write except a stop is refused, and every engine scan recorded as running -- and every
+                          other run the engine lists as live -- is sent a stop. This page then says which the engine
+                          accepted and which it could not be reached for.
                         </p>
                       </div>
                       <div className="flex gap-2">

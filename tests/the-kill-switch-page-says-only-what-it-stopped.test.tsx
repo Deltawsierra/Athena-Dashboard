@@ -40,13 +40,13 @@ function mount(settings: unknown) {
 }
 
 /** The PATCH the kill switch sends answers with `stops`; any other PATCH hangs. */
-function engageAnswers(stops: unknown) {
+function engageAnswers(stops: unknown, engineRuns?: unknown) {
   const sent: unknown[] = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     sent.push(body);
     if (body.killSwitchEnabled !== true) return new Promise<Response>(() => {});
-    return new Response(JSON.stringify({ ...ENGAGED, stops }), { status: 200, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ ...ENGAGED, stops, engineRuns }), { status: 200, headers: { "Content-Type": "application/json" } });
   }));
   return sent;
 }
@@ -126,5 +126,47 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
     expect(confirm.disabled).toBe(false);
     fireEvent.click(confirm);
     await waitFor(() => expect(sent).toContainEqual({ killSwitchEnabled: true, systemStatus: "shutdown", activeSystems: [] }));
+  });
+
+  describe("the runs the engine itself listed as live", () => {
+    const run = (runId: string, testId: string | null, stopped: boolean, detail = "") =>
+      ({ runId, target: `https://${runId}.example/`, testId, stopped, detail });
+    const engineSaid = async () => screen.getByTestId("text-kill-switch-engine-runs").textContent ?? "";
+
+    it("names how many had no record here, and that the engine accepted each stop", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [run("r1", null, true), run("r2", "t2", true)] });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine also listed 2 live runs that no running scan here recorded (1 with no record here at all); each " +
+        "was sent a stop, and the engine accepted all of them.",
+      );
+    });
+
+    it("says which could not be stopped, and why", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [run("r1", null, false, "could not reach the engine")] });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine also listed 1 live run that no running scan here recorded (1 with no record here at all); it was " +
+        "sent a stop; the engine accepted 0; 1 could not be stopped (https://r1.example/: could not reach the engine). " +
+        "They may still be running: pause the engine from the Failsafe console.",
+      );
+    });
+
+    it("an engine list that could not be read is not read as none", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: false, detail: "the engine answered 404" });
+      await engage();
+      expect(await engineSaid()).toMatch(/^The engine's own list of live runs could not be read \(the engine answered 404\)/);
+      expect(await engineSaid()).not.toMatch(/listed no other live run/);
+    });
+
+    it("an empty list is the engine's word, said as that", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [] });
+      await engage();
+      expect(await engineSaid()).toBe("The engine listed no other live run.");
+    });
   });
 });
