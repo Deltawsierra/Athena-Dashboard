@@ -2,7 +2,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 
-import { UnresolvedReferences, unresolvedReason } from "@/pages/Assurance";
+import { UnresolvedReferences, unresolvedReason, unresolvedReasons } from "@/pages/Assurance";
 
 /**
  * The page used to end every unresolved reference with "which discovery could
@@ -15,13 +15,16 @@ import { UnresolvedReferences, unresolvedReason } from "@/pages/Assurance";
 
 afterEach(cleanup);
 
-const row = (reference: string, mechanism: string, reason: string | null) => ({
+const row = (reference: string, mechanism: string, reason: string | null, reasons?: string[]) => ({
   source: "assistant",
   sourceKind: "agent",
   reference,
   mechanism,
   reason,
+  reasons: reasons ?? (reason === null ? [] : [reason]),
 });
+
+const header = () => screen.getByText(/So this map was built over/).textContent ?? "";
 
 describe("an unresolved reference says why", () => {
   it("words each reason it knows differently", () => {
@@ -64,5 +67,82 @@ describe("an unresolved reference says why", () => {
     expect(text).toContain("revoked");
     expect(text).not.toBe(unresolvedReason("not_found"));
     expect(text).not.toBe(unresolvedReason("ambiguous"));
+  });
+});
+
+/**
+ * One reference is one row however many reasons hold. The control plane used to
+ * send a row per reason, which counted an ambiguous reference with a superseded
+ * candidate twice; it now sends the reasons as a list, and the page says every
+ * one of them -- the second is the one that says a rescan is due.
+ */
+describe("a reference reported for more than one reason", () => {
+  it("says every reason, first reason first", () => {
+    render(
+      <UnresolvedReferences
+        rows={[row("planner", "tools", "ambiguous", ["ambiguous", "superseded_identity"])]}
+        reported={1}
+        what="this map"
+      />,
+    );
+    const [item] = screen.getAllByRole("listitem").map((li) => li.textContent ?? "");
+    expect(item).toContain("more than one component answers to");
+    expect(item).toContain("rescan to confirm it");
+    expect(item.indexOf("more than one component")).toBeLessThan(item.indexOf("rescan"));
+    // One row, one count.
+    expect(header()).toContain("1 declared reference could not be placed as exactly one component");
+    expect(header()).not.toContain("more were followed");
+  });
+
+  it("falls back to the one reason when the list is empty", () => {
+    expect(unresolvedReasons({ reason: "not_found", reasons: [] })).toBe(unresolvedReason("not_found"));
+    expect(unresolvedReasons({ reason: null, reasons: [] })).toBe(unresolvedReason(null));
+  });
+});
+
+describe("a reference that was followed and waits only on a rescan", () => {
+  it("is not counted as a reference that could not be placed", () => {
+    render(
+      <UnresolvedReferences
+        rows={[row("reader", "tools", "superseded_identity"), row("svc", "identity", "superseded_identity")]}
+        reported={2}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain("2 declared references were followed to or from a component recorded under identity rules");
+    expect(text).toContain("a rescan is what confirms them");
+    expect(text).toContain("built over a graph a rescan has yet to confirm");
+    expect(text).not.toContain("could not be placed");
+    expect(text).not.toContain("incomplete graph");
+  });
+
+  it("is counted apart from the references that could not be placed", () => {
+    render(
+      <UnresolvedReferences
+        rows={[
+          row("ghost", "tools", "not_found"),
+          row("planner", "tools", "ambiguous", ["ambiguous", "superseded_identity"]),
+          row("reader", "tools", "superseded_identity"),
+        ]}
+        reported={3}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain("2 declared references could not be placed as exactly one component");
+    expect(text).toContain("1 more was followed to or from a component");
+    expect(text).toContain("a rescan is what confirms it");
+    expect(text).toContain("built over an incomplete graph");
+  });
+
+  it("does not claim a count it cannot name is either kind", () => {
+    render(
+      <UnresolvedReferences rows={[row("reader", "tools", "superseded_identity")]} reported={3} what="this map" />,
+    );
+    const text = header();
+    expect(text).toContain("3 declared references were reported unresolved");
+    expect(text).toContain("only 1 of them");
+    expect(text).toContain("built over an incomplete graph");
   });
 });

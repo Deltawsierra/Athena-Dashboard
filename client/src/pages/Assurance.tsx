@@ -228,12 +228,16 @@ interface RouteEdge {
 // metadata; both readers of that graph — the reach assessment and the route map —
 // report a miss in this one shape, so the console describes the same gap the same
 // way wherever it appears.
+//
+// `reasons` is every reason the reference is reported for, `reason` first: one
+// reference is one row however many reasons hold.
 interface UnresolvedReference {
   source: string;
   sourceKind: string;
   reference: string;
   mechanism: string;
   reason: string | null;
+  reasons: string[];
 }
 interface RouteMap {
   layers: { key: string; label: string; nodes: RouteNode[] }[];
@@ -2297,6 +2301,20 @@ export function unresolvedReason(reason: string | null): string {
   return REASON_PHRASING[reason] ?? `which could not be placed (the control plane says: ${reason})`;
 }
 
+// Every reason one reference is reported for, each said. An ambiguous reference
+// with a superseded candidate is both, and saying only the first would hide the
+// rescan the second asks for.
+export function unresolvedReasons(row: Pick<UnresolvedReference, "reason" | "reasons">): string {
+  const reasons = row.reasons.length > 0 ? row.reasons : [row.reason];
+  return reasons.map(unresolvedReason).join("; and ");
+}
+
+// Followed and counted, and waiting only on a rescan: every reason it is
+// reported for is the superseded one. Not a reference that could not be placed.
+function awaitsRescanOnly(row: UnresolvedReference): boolean {
+  return row.reasons.length > 0 && row.reasons.every((r) => r === "superseded_identity");
+}
+
 // The references the inventory declares and discovery could not place, said
 // plainly. This is not decoration: an unresolvable reference means part of the
 // graph every assessment on this page is computed over could not be placed, so a
@@ -2333,6 +2351,11 @@ export function UnresolvedReferences({
   }
   if (rows.length === 0 && (reported === null || reported === 0)) return null;
   const undercount = reported !== null && reported > rows.length;
+  // A reference reported only as superseded was followed and its powers
+  // counted; "could not be placed" would send the operator looking for a
+  // component that exists, when what it needs is a rescan.
+  const rescan = rows.filter(awaitsRescanOnly).length;
+  const unplaced = rows.length - rescan;
   return (
     <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
@@ -2341,21 +2364,35 @@ export function UnresolvedReferences({
       <p className="mb-1.5 text-[11px] leading-relaxed text-muted-foreground">
         {undercount ? (
           <>
-            {reported} declared reference{reported === 1 ? "" : "s"} could not be placed against this
-            deployment&apos;s inventory, and{" "}
+            {reported} declared reference{reported === 1 ? " was" : "s were"} reported unresolved against
+            this deployment&apos;s inventory, and{" "}
             <span className="text-foreground">
               {rows.length === 0 ? "none of them" : `only ${rows.length} of them`}
             </span>{" "}
-            arrived with a reference this console can name.
+            arrived with a reference this console can name. So {what} was built over an incomplete
+            graph.
           </>
         ) : (
           <>
-            {rows.length} declared reference{rows.length === 1 ? "" : "s"} could not be placed against
-            this deployment&apos;s inventory.
+            {unplaced > 0 && (
+              <>
+                {unplaced} declared reference{unplaced === 1 ? "" : "s"} could not be placed as exactly
+                one component against this deployment&apos;s inventory.{" "}
+              </>
+            )}
+            {rescan > 0 && (
+              <>
+                {rescan} {unplaced > 0 ? "more" : `declared reference${rescan === 1 ? "" : "s"}`}{" "}
+                {rescan === 1 ? "was" : "were"} followed to or from a component recorded under identity
+                rules no scan has re-recorded since; a rescan is what confirms{" "}
+                {rescan === 1 ? "it" : "them"}.{" "}
+              </>
+            )}
+            So {what} was built over{" "}
+            {unplaced > 0 ? "an incomplete graph" : "a graph a rescan has yet to confirm"}.
           </>
         )}{" "}
-        So {what} was built over an incomplete graph. These are gaps to chase, not components to
-        assume away.
+        These are gaps to chase, not components to assume away.
       </p>
       <ul className="space-y-1">
         {rows.map((u, i) => (
@@ -2367,7 +2404,7 @@ export function UnresolvedReferences({
                 <span className="text-foreground">{u.mechanism || "an unnamed mechanism"}</span>)
               </>
             )}{" "}
-            <span className="text-amber-400/90">{u.reference}</span>, {unresolvedReason(u.reason)}.
+            <span className="text-amber-400/90">{u.reference}</span>, {unresolvedReasons(u)}.
           </li>
         ))}
       </ul>

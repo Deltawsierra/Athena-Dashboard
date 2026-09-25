@@ -187,6 +187,31 @@ describe("an unresolved reference survives the BFF", () => {
           },
         });
       }
+      // A control plane that reports one row per reference with every reason
+      // that holds, `reason` first -- and some rows it wrote badly.
+      if (path === "/api/assurance/deployments/dep-reason-list/route-map/" && method === "GET") {
+        return json(200, {
+          ...ROUTE_MAP,
+          unresolved: [
+            { source: "assistant", source_kind: "agent", reference: "planner", mechanism: "tools",
+              reason: "ambiguous", reasons: ["ambiguous", "superseded_identity"] },
+            { source: "assistant", source_kind: "agent", reference: "reader", mechanism: "tools",
+              reason: "superseded_identity", reasons: ["superseded_identity"] },
+            // Blank, padded, non-string and repeated entries.
+            { source: "assistant", source_kind: "agent", reference: "db", mechanism: "tools",
+              reason: "ambiguous", reasons: ["", " superseded_identity ", 7, null, "ambiguous", "superseded_identity"] },
+            // A reason the list leaves out is still a reason the control plane gave.
+            { source: "assistant", source_kind: "agent", reference: "cache", mechanism: "tools",
+              reason: "not_found", reasons: ["superseded_identity"] },
+            // A list with no `reason` beside it.
+            { source: "assistant", source_kind: "agent", reference: "queue", mechanism: "tools",
+              reasons: ["names_a_principal"] },
+            // A list that is not a list.
+            { source: "assistant", source_kind: "agent", reference: "search", mechanism: "tools",
+              reason: "not_found", reasons: "superseded_identity" },
+          ],
+        });
+      }
       // A backend that sends a row with nothing in it. Not a gap an operator can
       // chase; counting it would be a manufactured finding.
       if (path === "/api/assurance/deployments/dep-blank/route-map/" && method === "GET") {
@@ -218,8 +243,8 @@ describe("an unresolved reference survives the BFF", () => {
     const res = await user.get("/api/assurance/deployments/dep-1/route-map");
     expect(res.status).toBe(200);
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null },
-      { source: "report-builder", sourceKind: "tool", reference: "mcp-ghost", mechanism: "server", reason: null },
+      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null, reasons: [] },
+      { source: "report-builder", sourceKind: "tool", reference: "mcp-ghost", mechanism: "server", reason: null, reasons: [] },
     ]);
   });
 
@@ -236,7 +261,7 @@ describe("an unresolved reference survives the BFF", () => {
     const res = await user.get("/api/assurance/deployments/dep-1/effective-access");
     expect(res.status).toBe(200);
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null },
+      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null, reasons: [] },
     ]);
     expect(res.body.summary.unresolvedReferences).toBe(1);
   });
@@ -292,7 +317,7 @@ describe("an unresolved reference survives the BFF", () => {
   it("does not give an unknown mechanism the wording reserved for a known one", async () => {
     const res = await user.get("/api/assurance/deployments/dep-mechanism/route-map");
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "vault-prod", mechanism: "credential", reason: null },
+      { source: "assistant", sourceKind: "agent", reference: "vault-prod", mechanism: "credential", reason: null, reasons: [] },
     ]);
     // The mechanism reaches the page as itself, so the page can decline to word
     // it as either of the two it knows.
@@ -312,6 +337,34 @@ describe("an unresolved reference survives the BFF", () => {
       null,
     ]);
     expect(res.body.summary.unresolvedIdentityReferences).toBe(1);
+  });
+
+  it("carries every reason a reference is reported for, its first reason first", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-reason-list/route-map");
+    expect(res.status).toBe(200);
+    expect(res.body.unresolved.map((u: { reference: string; reason: string | null; reasons: string[] }) => [
+      u.reference, u.reason, u.reasons,
+    ])).toEqual([
+      ["planner", "ambiguous", ["ambiguous", "superseded_identity"]],
+      ["reader", "superseded_identity", ["superseded_identity"]],
+      // Only the strings the control plane actually said, each once.
+      ["db", "ambiguous", ["ambiguous", "superseded_identity"]],
+      ["cache", "not_found", ["not_found", "superseded_identity"]],
+      // Its `reason` is still what the control plane said -- nothing.
+      ["queue", null, ["names_a_principal"]],
+      ["search", "not_found", ["not_found"]],
+    ]);
+  });
+
+  it("gives a control plane that predates the list its one reason, or none", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-reasons/route-map");
+    expect(res.body.unresolved.map((u: { reasons: string[] }) => u.reasons)).toEqual([
+      ["not_found"],
+      ["ambiguous"],
+      ["names_a_principal"],
+      [],
+      [],
+    ]);
   });
 
   it("does not report an identity count a control plane never sent", async () => {

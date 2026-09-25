@@ -1937,7 +1937,7 @@ describe("assurance BFF", () => {
     // The shadow node and the dangling reference come through.
     expect(res.body.nodes.find((n: { uuid: string }) => n.uuid === "n-tool").shadow).toBe(true);
     expect(res.body.unresolved[0]).toEqual({
-      source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null,
+      source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null, reasons: [],
     });
   });
 
