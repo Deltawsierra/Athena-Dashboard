@@ -196,7 +196,7 @@ function ago(iso: string | null | undefined, now = Date.now()): string | null {
  * Months between the first and the last are filled with zeros -- a month with
  * no new findings is a measurement -- and the window is the last twelve.
  */
-function trendRows(findings: ApiFinding[]): TrendRow[] {
+export function trendRows(findings: ApiFinding[]): TrendRow[] {
   const dated = findings
     .map((finding) => ({ finding, at: new Date(finding.firstSeenAt) }))
     .filter((one) => !Number.isNaN(one.at.getTime()));
