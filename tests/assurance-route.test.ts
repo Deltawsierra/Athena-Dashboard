@@ -41,6 +41,8 @@ describe("assurance BFF", () => {
   // When set, the next assignable-users read is refused with a backend 404, so
   // the BFF's passthrough of that reason can be exercised.
   let refuseAssignable = false;
+  // What the BFF forwarded on the last recompute, verbatim.
+  let lastRecomputeBody: string | null = null;
   const unknowns = new Map<string, Record<string, unknown>>();
 
   beforeAll(async () => {
@@ -75,6 +77,7 @@ describe("assurance BFF", () => {
         }
 
         if (path === "/api/assurance/deployments/dep-1/recompute/" && method === "POST") {
+          lastRecomputeBody = raw;
           return json(200, { decision: "ready", decision_label: "Ready" });
         }
 
@@ -2221,6 +2224,15 @@ describe("assurance BFF", () => {
     const res = await user.post("/api/assurance/deployments/dep-1/recompute").send({ paused: false });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ decision: "ready", decisionLabel: "Ready" });
+    expect(JSON.parse(lastRecomputeBody ?? "null")).toEqual({ paused: false });
+  });
+
+  it("forwards no pause when the caller names none, so the backend keeps its own", async () => {
+    // Defaulted to false here, a recompute lifted a pause an operator committed
+    // after the page loaded.
+    const res = await user.post("/api/assurance/deployments/dep-1/recompute").send({});
+    expect(res.status).toBe(200);
+    expect(JSON.parse(lastRecomputeBody ?? "null")).toEqual({});
   });
 
   it("patches an unknown's disposition and maps camelCase to the backend", async () => {

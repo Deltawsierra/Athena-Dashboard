@@ -7488,7 +7488,9 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
 
   const recompute = useMutation({
     mutationFn: async (uuid: string) =>
-      (await apiRequest("POST", `/api/assurance/deployments/${uuid}/recompute`, { paused: false })).json(),
+      // No `paused`: a recompute keeps whatever pause the backend holds now, not
+      // the one this page last saw.
+      (await apiRequest("POST", `/api/assurance/deployments/${uuid}/recompute`, {})).json(),
     onSuccess: (_data, uuid) => {
       // Recompute moves the decision AND rewrites the derived read-only panels
       // for this deployment (executive-summary, assurance-receipt, and the rest),
