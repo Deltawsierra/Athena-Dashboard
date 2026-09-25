@@ -4,6 +4,10 @@
  * are computed from the set. The release recommendation reflects the latest
  * test's verdict. Cards with no backing source are labelled illustrative
  * rather than dressed up as real approvals.
+ *
+ * The banner used to read "Document the truth." A record -- signed or not --
+ * documents what someone observed or asserted, and who put it on record; it
+ * does not make the observation behind it true. The subtitle says that.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -73,7 +77,7 @@ export default function Evidence() {
     <div className="mx-auto max-w-[1600px] px-4 py-6 md:px-8">
       <PageHero
         title="Evidence"
-        subtitle="Document the truth. Enable confident decisions."
+        subtitle="What was recorded, by whom, and when. A record shows what was observed or asserted, not that it is true."
         background="library"
         verbs={["Evidence", "Proof", "Trust", "Deploys"]}
       />
