@@ -283,14 +283,9 @@ const ENGINE_OWNED_TEST_FIELDS = [
 /** The one key of an engine test's `findings` a person writes; every other key is the run's. */
 const HUMAN_FINDINGS_KEY = "details";
 
+/** Whether a value sent back is the one on record: null and absent alike, a date by its instant. */
 function sameValue(a: unknown, b: unknown): boolean {
-  if ((a === null || a === undefined) && (b === null || b === undefined)) return true;
-  if (a instanceof Date || b instanceof Date) {
-    const at = a === null || a === undefined ? Number.NaN : new Date(a as string | number | Date).getTime();
-    const bt = b === null || b === undefined ? Number.NaN : new Date(b as string | number | Date).getTime();
-    return at === bt;
-  }
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
 function engineRecordEdited(

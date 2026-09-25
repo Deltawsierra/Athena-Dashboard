@@ -101,3 +101,32 @@ it("a just-drafted resume is not signable on a failed first read: putting an eng
   await waitFor(() => expect(screen.getByTestId("text-command-unread")).toBeTruthy());
   expect(screen.queryByTestId("button-submit-signature")).toBeNull();
 });
+
+it("a command opened from the list whose first read fails is read again without anyone asking", async () => {
+  // No draft answer to seed it: the console has nothing but its own read.
+  // It used to re-read only while it held a command awaiting signatures, so a
+  // failed first read stayed failed until someone pressed "Read it again".
+  let blip = true;
+  const standDown = { ...pause, uuid: "sd-9", action: "stand_down", requiredSignatures: 2, signers: ["alice"] };
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity,
+      queryFn: async ({ queryKey }) => {
+        if (queryKey[0] === "/api/failsafe/commands") {
+          if (blip) throw new Error("Failed to fetch");
+          return { ...drafted, command: standDown, draft: { ...drafted.draft, action: "stand_down" } };
+        }
+        if (queryKey[0] === "/api/failsafe/status") return STATUS;
+        if (queryKey[0] === "/api/failsafe/audit") return [];
+        return { engineId: "athena-1", engineState: "running", engineStateAvailable: true,
+          awaitingSignatures: [standDown], ready: [], recent: [] };
+      } } },
+  });
+  client.setQueryData(["/api/failsafe/status"], STATUS);
+  render(<QueryClientProvider client={client}><Failsafe /></QueryClientProvider>);
+  fireEvent.click(await screen.findByTestId("button-open-sd-9"));
+  await waitFor(() => expect(screen.getByTestId("text-command-unread")).toBeTruthy());
+  blip = false;
+  await waitFor(() => expect(screen.queryByTestId("button-submit-signature")).toBeTruthy(), { timeout: 6_000 });
+  expect(screen.queryByTestId("text-command-unread")).toBeNull();
+  expect(document.body.textContent).toMatch(/1 of 2 operator signatures/);
+}, 10_000);

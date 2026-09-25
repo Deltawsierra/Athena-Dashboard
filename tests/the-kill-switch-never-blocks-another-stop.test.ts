@@ -346,6 +346,19 @@ describe("no failed read stands between an operator and a stop", () => {
     expect(kill.body.stops).toEqual({ listed: false, detail: "database is locked" });
   });
 
+  it("when the audit log cannot be written, the stops are still sent and their outcome still reaches the page", async () => {
+    const { storage } = await import("../server/storage-unified");
+    vi.spyOn(storage, "createActivityLog").mockRejectedValue(new Error("disk full"));
+    engine.calls.length = 0;
+    const kill = await admin.patch("/api/ai-control").send(KILL);
+    expect(kill.status).toBe(200);
+    expect(kill.body.stops).toEqual({
+      listed: true,
+      scans: [{ testId: scan.testId, runId: scan.runId, target: "https://acme.example/", stopped: true, detail: "" }],
+    });
+    expect(engine.calls).toContain(`POST /api/scans/${scan.runId}/abort`);
+  });
+
   it("when the kill switch setting cannot be read, a stop still goes through, and an ordinary write does not", async () => {
     const { storage } = await import("../server/storage-unified");
     vi.spyOn(storage, "getAIControlSettings").mockRejectedValue(new Error("database is locked"));

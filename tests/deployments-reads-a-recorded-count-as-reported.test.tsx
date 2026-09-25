@@ -93,6 +93,24 @@ describe("Deployments reads a recorded count", () => {
     expect(r.textContent).toContain("3 (0C / 0H)");
   });
 
+  it("a severity recorded without counts is still the band", () => {
+    // The severity field alone, as a person may record it: not "Not rated".
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity,
+      queryFn: async ({ queryKey }) => { throw new Error(`unexpected ${JSON.stringify(queryKey)}`); } } } });
+    const rated = test("rated", "c1", { severity: "high", vulnerabilitiesFound: 2 });
+    const summary = summarizeFindings({ clients: [CLIENTS[0]], sites: [], findings: [], tests: [rated] as never });
+    for (const [k, v] of [
+      [["/api/clients"], [CLIENTS[0]]], [["/api/tests"], [rated]], [["/api/findings/summary"], JSON.parse(JSON.stringify(summary))],
+      [["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 }],
+      [["/api/auth/check"], { authenticated: true, user: null }],
+    ] as Array<[unknown[], unknown]>) client.setQueryData(k, v);
+    render(<QueryClientProvider client={client}><Deployments /></QueryClientProvider>);
+    const r = row("Acme App");
+    expect(within(r).getByText("High")).toBeTruthy();
+    expect(r.textContent).not.toMatch(/Not rated/);
+    expect(r.textContent).toContain("2 (0C / 0H)");
+  });
+
   it("the highest-risk list names every system that reported findings, rated or not", () => {
     mount(<Deployments />);
     expect(screen.getByTestId("highest-risk-c1").textContent).toMatch(/Critical.*Acme App.*2 findings reported \(2C \/ 0H\)/);

@@ -103,6 +103,33 @@ describe("editing an engine test on the Tests screen", () => {
     expect(cleared.body.findings).toEqual({ runId: started.body.runId, target: "https://acme.example/", results: [] });
   });
 
+  it("what the engine decided may be sent back unchanged: a whole record round-trips", async () => {
+    state = "running";
+    const clientId = await engagement("RoundTrip");
+    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const id = started.body.test.id;
+    const held = (await admin.get(`/api/tests/${id}`)).body;
+    // Everything as read -- dates as the JSON strings they arrive as, the run's
+    // keys as they are -- plus a note.
+    const back = await admin.patch(`/api/tests/${id}`).send({
+      summary: "round trip", testType: held.testType, status: held.status, severity: held.severity,
+      completedAt: held.completedAt, clientId: held.clientId, siteId: held.siteId,
+      vulnerabilitiesFound: held.vulnerabilitiesFound, criticalCount: held.criticalCount, highCount: held.highCount,
+      mediumCount: held.mediumCount, lowCount: held.lowCount,
+      findings: { ...held.findings, details: "checked" },
+    });
+    expect(back.status).toBe(200);
+    expect(back.body.findings).toEqual({ ...held.findings, details: "checked" });
+    // A null for a key the run never wrote is no change to the run either.
+    const absent = await admin.patch(`/api/tests/${id}`).send({ findings: { ...held.findings, error: null, details: "checked" } });
+    expect(absent.status).toBe(200);
+    expect(absent.body.findings).toEqual({ ...held.findings, details: "checked" });
+    // A blank note is no note.
+    const blank = await admin.patch(`/api/tests/${id}`).send({ findings: { details: "   " } });
+    expect(blank.status).toBe(200);
+    expect(blank.body.findings).toEqual(held.findings);
+  });
+
   it("what the engine decided is refused as an edit, and the record is left as it was", async () => {
     state = "running";
     const clientId = await engagement("Owned");
