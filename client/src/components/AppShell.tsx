@@ -39,6 +39,7 @@ import {
 } from "lucide-react";
 import { ReactNode } from "react";
 import ThemeToggle from "./ThemeToggle";
+import { isSampleMode, SAMPLE_LABEL, shellSample } from "@/sample";
 import { cn } from "@/lib/utils";
 import athenaStatue from "@assets/mythos/athena-statue.webp";
 import mythosGlyph from "@assets/mythos/mark-glyph.webp";
@@ -165,6 +166,8 @@ export default function AppShell({ children, onLogout, isAdmin, username }: AppS
       .slice(0, 2)
       .join("")
       .toUpperCase() || "U";
+  // Asked for only when sample mode is on; shellSample() refuses otherwise.
+  const sampleOrg = isSampleMode() ? shellSample().organization : null;
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -231,33 +234,35 @@ export default function AppShell({ children, onLogout, isAdmin, username }: AppS
           </label>
 
           <div className="ml-auto flex items-center gap-2 md:gap-3">
-            {/* Org switcher */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  className="flex items-center gap-2 rounded-lg border border-border/70 bg-surface-1/50 px-3 py-1.5 text-left hover:border-primary/50"
-                  data-testid="button-org-switcher"
-                >
-                  <span className="flex h-6 w-6 items-center justify-center rounded bg-primary/15 text-[11px] font-semibold text-primary">
-                    AF
-                  </span>
-                  <span className="hidden flex-col leading-tight sm:flex">
-                    <span className="text-xs font-medium text-foreground">Acme Financial</span>
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                      Enterprise
+            {/* Org switcher. Sample mode only: this build stores no
+                organization, so a real install names none rather than a
+                fixture tenant on every screen. */}
+            {sampleOrg && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="flex items-center gap-2 rounded-lg border border-border/70 bg-surface-1/50 px-3 py-1.5 text-left hover:border-primary/50"
+                    data-testid="button-org-switcher"
+                    title={SAMPLE_LABEL}
+                  >
+                    <span className="flex h-6 w-6 items-center justify-center rounded bg-primary/15 text-[11px] font-semibold text-primary">
+                      {sampleOrg.initials}
                     </span>
-                  </span>
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-52">
-                <DropdownMenuLabel>Organizations</DropdownMenuLabel>
-                <DropdownMenuItem>Acme Financial</DropdownMenuItem>
-                <DropdownMenuItem className="text-muted-foreground">
-                  Add organization…
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                    <span className="hidden flex-col leading-tight sm:flex">
+                      <span className="text-xs font-medium text-foreground">{sampleOrg.name}</span>
+                      <span className="text-[10px] uppercase tracking-wider text-gold" data-testid="org-sample-label">
+                        Sample data
+                      </span>
+                    </span>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuLabel>{SAMPLE_LABEL}</DropdownMenuLabel>
+                  <DropdownMenuItem>{sampleOrg.name} · {sampleOrg.plan}</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
 
             <ThemeToggle />
 

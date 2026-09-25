@@ -83,9 +83,10 @@ then `~/.athena-ai/athena.db` under Electron, then `./athena.db`.
 
 ### Sample mode (prospect demos only)
 
-By default every figure on the Overview comes from the record, and anything
-nothing measures says so ("Not measured", "Not tracked yet"). A demo build can
-show a populated sample estate instead:
+By default every figure on the Overview comes from the record, Settings states
+only the posture a source reports, and anything nothing measures says so ("Not
+measured", "Not tracked yet", "Not reported"). A demo build can show a populated
+sample estate and tenant instead:
 
 ```bash
 VITE_MYTHOS_SAMPLE_MODE=1 npm run dev            # or: npm run build:client

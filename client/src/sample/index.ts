@@ -10,6 +10,8 @@
  */
 import { isSampleMode, SAMPLE_MODE_ENV } from "./mode";
 import { OVERVIEW_SAMPLE } from "./overview";
+import { SETTINGS_SAMPLE } from "./settings";
+import { SHELL_SAMPLE } from "./shell";
 
 export { isSampleMode, SAMPLE_MODE_ENV } from "./mode";
 export { SAMPLE_LABEL, SampleModeBanner, SamplePanelLabel } from "./labels";
@@ -26,4 +28,12 @@ function guarded<T>(screen: string, figures: T): T {
 
 export function overviewSample() {
   return guarded("Overview", OVERVIEW_SAMPLE);
+}
+
+export function settingsSample() {
+  return guarded("Settings", SETTINGS_SAMPLE);
+}
+
+export function shellSample() {
+  return guarded("header", SHELL_SAMPLE);
 }
