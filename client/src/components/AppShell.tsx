@@ -266,14 +266,16 @@ export default function AppShell({ children, onLogout, isAdmin, username }: AppS
 
             <ThemeToggle />
 
-            {/* Notifications */}
+            {/* Notifications. It used to carry a lit "unread" dot on every
+                screen for every user; nothing records notifications, so
+                nothing can be unread, and the dot is gone. */}
             <button
               className="relative flex h-9 w-9 items-center justify-center rounded-lg border border-border/70 bg-surface-1/50 text-muted-foreground hover:border-primary/50 hover:text-foreground"
-              aria-label="Notifications"
+              aria-label="Notifications (not tracked yet)"
+              title="Notifications are not tracked yet"
               data-testid="button-notifications"
             >
               <Bell className="h-[18px] w-[18px]" />
-              <span className="absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary)/0.9)]" />
             </button>
 
             {/* Account */}
