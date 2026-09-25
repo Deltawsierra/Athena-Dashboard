@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { errorMessage } from "@/lib/loaded";
-import { Plus, Search, Filter, Calendar, MapPin, Shield, AlertTriangle, CheckCircle, XCircle, Pencil, FileText } from "lucide-react";
+import { Plus, Search, Filter, Calendar, MapPin, Shield, AlertTriangle, CheckCircle, XCircle, Pencil, FileText, Square } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
 import GlassCard from "@/components/GlassCard";
@@ -38,7 +38,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { unfinishedRunOf } from "@/lib/engineRuns";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
@@ -57,15 +58,6 @@ function engineRunOf(findings: unknown): string | null {
   if (!findings || typeof findings !== "object" || Array.isArray(findings)) return null;
   const runId = (findings as { runId?: unknown }).runId;
   return typeof runId === "string" && runId !== "" ? runId : null;
-}
-
-/** Engine run states after which nothing more happens (server/routes.ts FINISHED_RUN_STATES). */
-const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
-
-/** The engine run of a test that may still be running, or null. */
-function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
-  const runId = engineRunOf(test.findings);
-  return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
 }
 
 /** A person's notes on a test: the `details` of its findings, when there are any. */
@@ -162,6 +154,26 @@ export default function Tests() {
     },
     onError: (error) => {
       toast({ title: "Failed to delete test", description: error.message, variant: "destructive" });
+    },
+  });
+
+  // A running engine scan's Stop, on its row. It existed only on the scan
+  // screen that started the scan, so once that page was left -- or for a scan
+  // someone else started -- this list showed the scan with Edit and Delete
+  // and no way to stop it. The abort route asks the engine and says if it did
+  // not stop; nothing here decides that a scan has stopped.
+  const stopMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await apiRequest("POST", `/api/scans/${id}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean; runId: string };
+    },
+    onSuccess: (result, id) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/scans/${id}`] });
+      void invalidateTestsAndFindings();
+      toast({ title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+    },
+    onError: (error) => {
+      toast({ title: "Not stopped", description: error.message, variant: "destructive" });
     },
   });
 
@@ -603,6 +615,18 @@ export default function Tests() {
                             )}
                           </div>
                           <div className="flex gap-2">
+                            {unfinishedRunOf(test) && (
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => stopMutation.mutate(test.id)}
+                                disabled={stopMutation.isPending && stopMutation.variables === test.id}
+                                data-testid={`button-stop-${test.id}`}
+                              >
+                                <Square className="w-4 h-4 mr-1" />
+                                {stopMutation.isPending && stopMutation.variables === test.id ? "Stopping…" : "Stop"}
+                              </Button>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"

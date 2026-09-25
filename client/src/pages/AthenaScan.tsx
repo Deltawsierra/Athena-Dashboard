@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/select";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
+import RunningScans from "@/components/RunningScans";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -403,6 +404,10 @@ export default function AthenaScan() {
           </div>
         </form>
       </GlassCard>
+
+      {/* Every other scan recorded as running -- started elsewhere, or before
+          this page was opened -- with its Stop. */}
+      <RunningScans exclude={testId} className="mt-5" />
 
       {/* ---- Live scan: only real readings ------------------------------ */}
       {scanUnread !== null && (
