@@ -1,9 +1,21 @@
 /**
  * Deployments: the systems under assessment, read from `/api/clients` and the
- * tests run against them. Each row is a client system with the risk from its
- * most recent test; the headline counts and the highest-risk rail are computed
- * from that same data. Columns the backend has no source for -- model provider,
- * data-sensitivity tags -- are omitted rather than filled with fiction.
+ * tests run against them. Each row is a client system; its risk and findings
+ * are what its latest COMPLETED test reported, and a system with no completed
+ * test says "Not scanned". Columns the backend has no source for -- model
+ * provider, data-sensitivity tags -- are omitted rather than filled with
+ * fiction.
+ *
+ * This page used to call a never-scanned system "Clean", give every system a
+ * 0-100 "risk score" from a hard-coded table (Clean was 8, High 72), count a
+ * pending scan as a scan, and tick off "N of N approved for production" and
+ * "N systems live in production" from nothing but the client status "active",
+ * which every new client gets by default. Athena computes no risk score and
+ * records neither a human sign-off nor a production deployment, so the page
+ * now says "Not scored" and "Not tracked" instead.
+ *
+ * While a source is loading a figure reads "…"; when it failed, "—" and the
+ * reason. See client/src/lib/loaded.ts.
  */
 import {
   Boxes,
@@ -24,8 +36,10 @@ import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Emblem } from "@/components/mythos/Ornament";
-import { StatusPill, Timeline, type StatusTone, type TimelineStep } from "@/components/mythos/atoms";
+import { SeverityPill, StatusPill, Timeline, type StatusTone, type TimelineStep } from "@/components/mythos/atoms";
+import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
+import type { FindingsSummary } from "@shared/findings-summary";
 
 interface ApiClient { id: string; name: string; company: string; status: string; lastTestDate: string | null; notes: string | null }
 interface ApiTest {
@@ -34,125 +48,161 @@ interface ApiTest {
   criticalCount: number; highCount: number; mediumCount: number; lowCount: number;
 }
 
-type Band = "critical" | "high" | "medium" | "low" | "none";
-function bandOf(sev: string | null, vulns: number): Band {
-  const v = (sev || "").toLowerCase();
+/** What a system's latest completed test reported, worst first. */
+type Band = "critical" | "high" | "medium" | "low" | "none" | "unscanned";
+const BAND_ORDER: Band[] = ["critical", "high", "medium", "low", "none", "unscanned"];
+function bandOf(test: ApiTest | undefined): Band {
+  if (!test) return "unscanned";
+  const v = (test.severity || "").toLowerCase();
   if (v === "critical") return "critical";
   if (v === "high") return "high";
   if (v === "medium") return "medium";
   if (v === "low") return "low";
-  return vulns > 0 ? "medium" : "none";
+  return test.vulnerabilitiesFound > 0 ? "medium" : "none";
 }
-const BAND_DOT: Record<Band, string> = { critical: "bg-sev-critical", high: "bg-sev-high", medium: "bg-sev-medium", low: "bg-emerald-400", none: "bg-muted-foreground/40" };
-const BAND_TEXT: Record<Band, string> = { critical: "text-sev-critical", high: "text-sev-high", medium: "text-sev-medium", low: "text-emerald-400", none: "text-muted-foreground" };
-const BAND_LABEL: Record<Band, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low", none: "Clean" };
-// a rough 0-100 score so the average tile means something
-const BAND_SCORE: Record<Band, number> = { critical: 90, high: 72, medium: 50, low: 28, none: 8 };
+const BAND_DOT: Record<Band, string> = {
+  critical: "bg-sev-critical", high: "bg-sev-high", medium: "bg-sev-medium", low: "bg-emerald-400",
+  none: "bg-muted-foreground/40", unscanned: "bg-muted-foreground/20",
+};
+const BAND_TEXT: Record<Band, string> = {
+  critical: "text-sev-critical", high: "text-sev-high", medium: "text-sev-medium", low: "text-emerald-400",
+  none: "text-muted-foreground", unscanned: "text-muted-foreground",
+};
+// "None reported", not "Clean": a scan that reported nothing has not shown
+// that nothing is there.
+const BAND_LABEL: Record<Band, string> = {
+  critical: "Critical", high: "High", medium: "Medium", low: "Low", none: "None reported", unscanned: "Not scanned",
+};
 
+/** A test the engine (or a person) has not finished with. */
+const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
 const READINESS_TONE: Record<string, StatusTone> = {
-  completed: "complete", running: "progress", pending: "progress", queued: "review", failed: "neutral", aborted: "neutral",
+  completed: "complete", running: "progress", pending: "progress", "in-progress": "progress",
+  queued: "review", failed: "neutral", aborted: "neutral",
 };
 function readinessLabel(status: string): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
+  const words = status.replace(/[-_]+/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
+const when = (t: ApiTest) => new Date(t.completedAt || t.startedAt).getTime();
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * The release-readiness pipeline, derived from the real fleet rather than a
- * fixed script: each step's state and detail come from actual counts of
- * registered systems, completed scans, systems carrying findings, and systems
- * live in production. Nothing here claims progress that the data does not show —
- * an empty fleet reads as "todo" at every step, and each detail states the count
- * it is based on.
+ * The release-readiness pipeline, each step from a record or marked as not
+ * tracked. "Scanned" means a completed test; a pending or running one is in
+ * flight, not a scan. Findings to review are the open findings on record.
+ * Nothing records a human sign-off or a production deployment -- an assurance
+ * decision on the Assurance page is decision support, not an approval, and a
+ * client's status is not a deployment -- so those two steps say so and are
+ * never ticked off.
  */
 function readinessSteps(
-  registered: number,
-  scanned: number,
-  pendingScans: number,
-  withFindings: number,
-  live: number,
+  registered: Loaded<number>,
+  scanned: Loaded<{ scanned: number; inFlight: number }>,
+  withOpen: Loaded<number>,
 ): TimelineStep[] {
-  const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many);
-  const discover: TimelineStep = {
-    title: "Discover",
-    detail: `${registered} ${plural(registered, "system")} registered.`,
-    state: registered > 0 ? "done" : "todo",
-  };
-  const scan: TimelineStep = {
-    title: "Scan",
-    detail: registered === 0
-      ? "No systems to scan yet."
-      : `${scanned} of ${registered} scanned${pendingScans > 0 ? ` · ${pendingScans} in flight` : ""}.`,
-    state: registered === 0
-      ? "todo"
-      : scanned >= registered
-        ? "done"
-        : scanned > 0 || pendingScans > 0
-          ? "active"
-          : "todo",
-  };
-  const review: TimelineStep = {
-    title: "Review Evidence",
-    detail: scanned === 0
-      ? "Awaiting the first scan."
-      : withFindings > 0
-        ? `${withFindings} ${plural(withFindings, "system")} with findings to review.`
-        : "No open findings on scanned systems.",
-    state: scanned === 0 ? "todo" : withFindings > 0 ? "active" : "done",
-  };
+  const discover: TimelineStep = registered.state === "ready"
+    ? { title: "Discover", detail: `${plural(registered.data, "system")} registered.`, state: registered.data > 0 ? "done" : "todo" }
+    : { title: "Discover", detail: notInHand(registered, "systems"), state: "todo" };
+
+  const src = both(registered, scanned);
+  let scan: TimelineStep;
+  let review: TimelineStep;
+  if (src.state !== "ready") {
+    scan = { title: "Scan", detail: notInHand(src, "scans"), state: "todo" };
+    review = { title: "Review Evidence", detail: notInHand(src, "scans"), state: "todo" };
+  } else {
+    const [total, { scanned: done, inFlight }] = src.data;
+    scan = {
+      title: "Scan",
+      detail: total === 0
+        ? "No systems to scan yet."
+        : `${done} of ${total} with a completed scan${inFlight > 0 ? ` · ${inFlight} in flight` : ""}.`,
+      state: total === 0 ? "todo" : done >= total ? "done" : done > 0 || inFlight > 0 ? "active" : "todo",
+    };
+    if (withOpen.state !== "ready") {
+      review = { title: "Review Evidence", detail: notInHand(withOpen, "findings"), state: "todo" };
+    } else if (withOpen.data > 0) {
+      review = { title: "Review Evidence", detail: `${plural(withOpen.data, "system")} with open findings to review.`, state: "active" };
+    } else if (done === 0) {
+      review = { title: "Review Evidence", detail: "Awaiting the first completed scan.", state: "todo" };
+    } else {
+      review = { title: "Review Evidence", detail: "No open findings on record.", state: "done" };
+    }
+  }
+
   const approval: TimelineStep = {
     title: "Human Approval",
-    detail: registered === 0
-      ? "No systems awaiting sign-off."
-      : `${live} of ${registered} approved for production.`,
-    state: registered === 0 ? "todo" : live >= registered ? "done" : live > 0 ? "active" : "todo",
+    detail: "Not tracked: Athena records no human sign-off for a system. Assurance decisions (Assurance page) are decision support, not approval.",
+    state: "todo",
   };
   const deploy: TimelineStep = {
     title: "Deploy",
-    detail: `${live} ${plural(live, "system")} live in production.`,
-    state: live > 0 ? "done" : "todo",
+    detail: "Not tracked: nothing records which systems are live in production.",
+    state: "todo",
   };
   return [discover, scan, review, approval, deploy];
 }
 
 
 export default function Deployments() {
-  const { data: clients = [], isLoading: cLoading } = useQuery<ApiClient[]>({ queryKey: ["/api/clients"] });
-  const { data: tests = [] } = useQuery<ApiTest[]>({ queryKey: ["/api/tests"] });
+  const clientsQ = loaded(useQuery<ApiClient[]>({ queryKey: ["/api/clients"] }));
+  const testsQ = loaded(useQuery<ApiTest[]>({ queryKey: ["/api/tests"] }));
+  const summaryQ = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
+  const clients = clientsQ.state === "ready" ? clientsQ.data : [];
+  const tests = testsQ.state === "ready" ? testsQ.data : [];
 
-  // latest test per client
+  // Per client: the newest test of any status (what is happening now), and the
+  // newest COMPLETED one (the only one whose counts are a result).
   const latest = new Map<string, ApiTest>();
+  const latestDone = new Map<string, ApiTest>();
   for (const t of tests) {
     const cur = latest.get(t.clientId);
-    const when = (x: ApiTest) => new Date(x.completedAt || x.startedAt).getTime();
     if (!cur || when(t) > when(cur)) latest.set(t.clientId, t);
+    if (t.status === "completed") {
+      const done = latestDone.get(t.clientId);
+      if (!done || when(t) > when(done)) latestDone.set(t.clientId, t);
+    }
   }
 
   const rows = clients.map((c) => {
     const t = latest.get(c.id);
-    const vulns = t?.vulnerabilitiesFound ?? 0;
-    const band = bandOf(t?.severity ?? null, vulns);
+    const done = latestDone.get(c.id);
+    // The latest completed scan on record; a date typed onto the client only
+    // when there is none.
+    const lastScan = done?.completedAt || c.lastTestDate || null;
     return {
       id: c.id, system: c.name, company: c.company, status: c.status,
       readiness: t ? readinessLabel(t.status) : "Not scanned",
       readinessTone: t ? (READINESS_TONE[t.status] ?? "neutral") : ("neutral" as StatusTone),
-      band, vulns, score: BAND_SCORE[band],
-      crit: t?.criticalCount ?? 0, high: t?.highCount ?? 0,
-      lastScan: (c.lastTestDate || t?.completedAt) ? new Date((c.lastTestDate || t?.completedAt) as string).toLocaleString() : "—",
+      band: bandOf(done),
+      scanned: done !== undefined,
+      vulns: done?.vulnerabilitiesFound ?? 0,
+      crit: done?.criticalCount ?? 0,
+      high: done?.highCount ?? 0,
+      lastScan: lastScan ? new Date(lastScan).toLocaleString() : "—",
     };
   });
 
-  const production = clients.filter((c) => c.status === "active").length;
-  const pending = tests.filter((t) => t.status === "pending" || t.status === "running").length;
-  const paused = clients.filter((c) => c.status === "paused" || c.status === "inactive").length;
-  const scored = rows.filter((r) => r.band !== "none");
-  const avgScore = scored.length ? Math.round(scored.reduce((s, r) => s + r.score, 0) / scored.length) : 0;
-
-  // The release-readiness pipeline, derived from the same live fleet as the rest
-  // of the page: registered systems, how many have a scan, how many carry
-  // findings to review, and how many are live in production.
-  const scannedCount = rows.filter((r) => r.readiness !== "Not scanned").length;
-  const withFindings = rows.filter((r) => r.band !== "none").length;
-  const readiness = readinessSteps(clients.length, scannedCount, pending, withFindings, production);
+  const inFlightTests = figure(testsQ, (list) => list.filter((t) => IN_FLIGHT.has(t.status)).length);
+  const registered: Loaded<number> = clientsQ.state === "ready" ? { state: "ready", data: clientsQ.data.length } : clientsQ;
+  const scanProgress: Loaded<{ scanned: number; inFlight: number }> = (() => {
+    const src = both(clientsQ, testsQ);
+    if (src.state !== "ready") return src;
+    const [clientList, testList] = src.data;
+    const ids = new Set(clientList.map((c) => c.id));
+    const scanned = clientList.filter((c) => latestDone.has(c.id)).length;
+    const inFlight = new Set(testList.filter((t) => IN_FLIGHT.has(t.status) && ids.has(t.clientId)).map((t) => t.clientId)).size;
+    return { state: "ready", data: { scanned, inFlight } };
+  })();
+  const withOpen: Loaded<number> = (() => {
+    const src = both(clientsQ, summaryQ);
+    if (src.state !== "ready") return src;
+    const [clientList, summary] = src.data;
+    const open = new Map(summary.byClient.map((one) => [one.clientId, one.open]));
+    return { state: "ready", data: clientList.filter((c) => (open.get(c.id) ?? 0) > 0).length };
+  })();
+  const readiness = readinessSteps(registered, scanProgress, withOpen);
 
   // filters
   const [, navigate] = useLocation();
@@ -167,16 +217,22 @@ export default function Deployments() {
   const filtersActive = statusF !== "all" || q !== "";
   const clearFilters = () => { setStatusF("all"); setSearch(""); };
 
-  const highestRisk = rows.slice().filter((r) => r.band !== "none").sort((a, b) => b.score - a.score).slice(0, 3);
+  // Worst latest-completed result first, then most critical, then most high.
+  const highestRisk = rows
+    .filter((r) => r.band !== "none" && r.band !== "unscanned")
+    .sort((a, b) =>
+      BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band) || b.crit - a.crit || b.high - a.high || b.vulns - a.vulns)
+    .slice(0, 3);
   const recent = tests.slice()
-    .sort((a, b) => new Date(b.completedAt || b.startedAt).getTime() - new Date(a.completedAt || a.startedAt).getTime())
+    .sort((a, b) => when(b) - when(a))
     .slice(0, 5)
     .map((t) => {
       const c = clients.find((x) => x.id === t.clientId);
       return { title: `${readinessLabel(t.status)} — ${t.testType.replace(/-/g, " ")}`, note: c?.name ?? "system", when: new Date(t.completedAt || t.startedAt).toLocaleDateString() };
     });
 
-  const empty = !cLoading && clients.length === 0;
+  const table = both(clientsQ, testsQ);
+  const empty = clientsQ.state === "ready" && clients.length === 0;
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-6 md:px-8">
@@ -193,11 +249,17 @@ export default function Deployments() {
 
       {/* stats -- live */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label="Total Deployments" value={clients.length} icon={Boxes} />
-        <StatCard label="Active Systems" value={production} icon={Activity} />
-        <StatCard label="Scans Pending" value={pending} icon={Clock} />
-        <StatCard label="Paused" value={paused} icon={PauseCircle} />
-        <StatCard label="Average Risk Score" value={avgScore} icon={Gauge} sublabel="out of 100" />
+        <StatCard label="Total Deployments" value={figure(clientsQ, (list) => list.length)} icon={Boxes}
+          sublabel={clientsQ.state === "error" ? "Could not load systems" : "Systems registered"} />
+        <StatCard label="Active Systems" value={figure(clientsQ, (list) => list.filter((c) => c.status === "active").length)} icon={Activity}
+          sublabel="Client status set to active" />
+        <StatCard label="Scans Pending" value={inFlightTests} icon={Clock}
+          sublabel={testsQ.state === "error" ? "Could not load scans" : "Pending, queued or running"} />
+        <StatCard label="Paused" value={figure(clientsQ, (list) => list.filter((c) => c.status === "paused" || c.status === "inactive").length)} icon={PauseCircle}
+          sublabel="Client status paused or inactive" />
+        {/* Athena computes no risk score. The old tile averaged a hard-coded
+            0-100 mapping of severity bands (a clean system scored 8). */}
+        <StatCard label="Risk Score" value="—" icon={Gauge} sublabel="Not scored: Athena computes no risk score" />
       </div>
 
       {/* filters -- live */}
@@ -238,8 +300,8 @@ export default function Deployments() {
                   </tr>
                 </thead>
                 <tbody>
-                  {cLoading ? (
-                    <tr><td colSpan={7} className="px-4 py-8 text-center text-[12px] text-muted-foreground">Loading…</td></tr>
+                  {table.state !== "ready" ? (
+                    <tr><td colSpan={7} className="px-4 py-8 text-center text-[12px] text-muted-foreground">{notInHand(table, "systems")}</td></tr>
                   ) : viewRows.length === 0 ? (
                     <tr><td colSpan={7} className="px-4 py-8 text-center text-[12px] text-muted-foreground">No systems match the current filters.</td></tr>
                   ) : viewRows.map((d) => (
@@ -255,12 +317,12 @@ export default function Deployments() {
                           <span className={cn("h-2 w-2 rounded-full", BAND_DOT[d.band])} />
                           <span className="leading-tight">
                             <span className={cn("block text-[12px] font-medium", BAND_TEXT[d.band])}>{BAND_LABEL[d.band]}</span>
-                            <span className="block text-[11px] text-muted-foreground">{d.score}/100</span>
+                            <span className="block text-[11px] text-muted-foreground">{d.scanned ? "Latest completed scan" : "—"}</span>
                           </span>
                         </div>
                       </td>
                       <td className="px-4 py-4 text-[12px] text-muted-foreground">
-                        {d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : "—"}
+                        {!d.scanned ? "—" : d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : "0 reported"}
                       </td>
                       <td className="px-4 py-4 text-[12px] text-muted-foreground">{d.lastScan}</td>
                       <td className="px-4 py-4 text-muted-foreground"><MoreHorizontal className="h-4 w-4" /></td>
@@ -288,16 +350,19 @@ export default function Deployments() {
 
           <GlassCard hover={false}>
             <p className="athena-label mb-3">Highest Risk Deployments</p>
-            {highestRisk.length === 0 ? (
-              <p className="text-[12px] text-muted-foreground">No scored systems yet.</p>
+            <p className="-mt-2 mb-3 text-[11px] text-muted-foreground">By what each system&apos;s latest completed scan reported.</p>
+            {table.state !== "ready" ? (
+              <p className="text-[12px] text-muted-foreground">{notInHand(table, "scans")}</p>
+            ) : highestRisk.length === 0 ? (
+              <p className="text-[12px] text-muted-foreground">No completed scan has reported a finding.</p>
             ) : (
               <ul className="space-y-3">
                 {highestRisk.map((h) => (
                   <li key={h.id} className="flex items-center gap-3">
-                    <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full border text-[12px] font-semibold", h.band === "critical" ? "border-sev-critical/40 text-sev-critical" : "border-sev-high/40 text-sev-high")}>{h.score}</span>
+                    <SeverityPill severity={h.band as "critical" | "high" | "medium" | "low"} />
                     <span className="min-w-0 flex-1 leading-tight">
                       <span className="block truncate text-[13px] text-foreground">{h.system}</span>
-                      <span className="block truncate text-[11px] text-muted-foreground">{h.vulns} finding{h.vulns === 1 ? "" : "s"}</span>
+                      <span className="block truncate text-[11px] text-muted-foreground">{h.vulns} finding{h.vulns === 1 ? "" : "s"} reported ({h.crit}C / {h.high}H)</span>
                     </span>
                     <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
                   </li>
@@ -311,7 +376,9 @@ export default function Deployments() {
               <p className="athena-label">Recent Activity</p>
               <span className="flex items-center gap-1 text-[11px] text-gold">View all <ChevronRight className="h-3 w-3" /></span>
             </div>
-            {recent.length === 0 ? (
+            {testsQ.state !== "ready" ? (
+              <p className="text-[12px] text-muted-foreground">{notInHand(testsQ, "scans")}</p>
+            ) : recent.length === 0 ? (
               <p className="text-[12px] text-muted-foreground">No recent scans.</p>
             ) : (
               <ul className="space-y-3">
