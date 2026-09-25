@@ -20,6 +20,7 @@ import { FlaskConical, Trash2 } from "lucide-react";
 
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { isAdmin } from "@/utils/auth";
 import { loaded } from "@/lib/loaded";
 import type { PublicUser, SampleDataCounts } from "@shared/schema";
@@ -103,6 +104,9 @@ export default function SampleDataNotice({
     },
     onSuccess: (result) => {
       for (const key of AFFECTED) queryClient.invalidateQueries({ queryKey: [key] });
+      // The seeded tests' counts reached the findings summary (the untracked
+      // caveat on the Overview), which outlived the notice until now.
+      void invalidateTestsAndFindings();
       const { removed } = result;
       toast({
         title: "Sample data removed",

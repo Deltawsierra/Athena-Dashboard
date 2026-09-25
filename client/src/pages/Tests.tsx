@@ -38,7 +38,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, InsertTest } from "@shared/schema";
 
 /**
@@ -88,7 +89,9 @@ export default function Tests() {
   const createMutation = useMutation({
     mutationFn: async (data: InsertTest) => apiRequest("POST", "/api/tests", data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      // Not only the list: the findings summary and every other answer
+      // computed from tests (lib/invalidate.ts).
+      void invalidateTestsAndFindings();
       toast({ title: "Test created successfully" });
       setIsCreateDialogOpen(false);
     },
@@ -101,7 +104,7 @@ export default function Tests() {
     mutationFn: async ({ id, data }: { id: string; data: Partial<Test> }) =>
       apiRequest("PATCH", `/api/tests/${id}`, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      void invalidateTestsAndFindings();
       toast({ title: "Test updated successfully" });
       setIsEditDialogOpen(false);
       setEditingTest(null);
@@ -114,7 +117,7 @@ export default function Tests() {
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => apiRequest("DELETE", `/api/tests/${id}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      void invalidateTestsAndFindings();
       toast({ title: "Test deleted successfully" });
     },
     onError: (error) => {

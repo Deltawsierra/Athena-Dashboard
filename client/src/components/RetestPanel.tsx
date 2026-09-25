@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 
 interface DecisionTwin {
   id: number;
@@ -112,6 +113,8 @@ export default function RetestPanel({ testId }: { testId: string }) {
       return (await response.json()) as RetestResult;
     },
     onSuccess: (result) => {
+      // The verdict may have closed or reopened a finding.
+      void invalidateTestsAndFindings();
       if (typeof result.twinId === "number") {
         setResults((previous) => ({ ...previous, [result.twinId as number]: result }));
       }

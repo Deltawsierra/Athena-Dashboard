@@ -27,7 +27,8 @@ import {
 import GlassCard from "@/components/GlassCard";
 import PageHeader from "@/components/PageHeader";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Client } from "@shared/schema";
 
 interface FindingRow {
@@ -89,7 +90,8 @@ export default function Findings() {
       const response = await apiRequest("PATCH", `/api/findings/${id}`, body);
       return response.json();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: [key] }),
+    // Every answer computed from findings, this list included.
+    onSuccess: () => invalidateTestsAndFindings(),
     onError: (error: Error) => {
       // The server's sentence, verbatim. The refusal to mark something fixed
       // explains what to do instead, and summarising it away would lose that.

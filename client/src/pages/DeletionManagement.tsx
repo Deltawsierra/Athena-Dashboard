@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Client, Test, Document } from "@shared/schema";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
@@ -47,6 +48,9 @@ export default function DeletionManagement() {
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: [`/api/${variables.type}`] });
+      // A deleted client or test changes every answer computed from tests
+      // and findings, the findings summary first among them.
+      void invalidateTestsAndFindings();
       toast({
         title: "Deleted Successfully",
         description: `${variables.type.slice(0, -1)} has been permanently deleted.`,

@@ -31,6 +31,7 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import templeStorm from "@assets/mythos/temple-storm.webp";
@@ -134,6 +135,13 @@ export default function AthenaScan() {
   // within reach, and a second scan is not started over it.
   const scan = scan$.state === "ready" ? scan$.data : undefined;
   const scanUnread = testId !== null && scan$.state === "error" ? scan$.message : null;
+  // A scan that stops on a later poll has had its findings filed on the
+  // server by that poll: every answer computed from tests and findings (the
+  // findings summary first) is out of date from that moment.
+  const stoppedNow = scan !== undefined && FINISHED.has(scan.state);
+  useEffect(() => {
+    if (testId !== null && stoppedNow) void invalidateTestsAndFindings();
+  }, [testId, stoppedNow]);
 
   const start = useMutation({
     mutationFn: async () => {
@@ -146,7 +154,8 @@ export default function AthenaScan() {
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      // A scan the engine finished inline has filed its findings already.
+      void invalidateTestsAndFindings();
     },
     onError: (error: Error) =>
       // The engine's own refusal, verbatim — "the target is a loopback address"
