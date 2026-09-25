@@ -211,13 +211,21 @@ export interface RouteLayer {
  *
  * `mechanism` says which kind of declaration failed: "tools" is an agent naming a
  * tool it cannot reach, "server" is a component naming a backend that is not
- * there. They are different conversations and the wording follows the mechanism.
+ * there, "identity" is an agent naming the account it acts as. They are different
+ * conversations and the wording follows the mechanism.
+ *
+ * `reason` says HOW it failed, and the three are different findings: "not_found"
+ * names nothing discovery placed; "ambiguous" names more than one component, and
+ * the backend followed it to every one; "names_a_principal" names an agent or a
+ * service account where a tool or backend belongs. Null when the control plane
+ * did not say -- it predates the field -- which is not any of the three.
  */
 export interface UnresolvedReference {
   source: string;
   sourceKind: string;
   reference: string;
   mechanism: string;
+  reason: string | null;
 }
 export interface AssuranceRouteMap {
   layers: RouteLayer[];
@@ -236,6 +244,7 @@ export interface AssuranceRouteMap {
     unresolvedEdges: number | null;
     unresolvedToolReferences: number | null;
     unresolvedServerReferences: number | null;
+    unresolvedIdentityReferences: number | null;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -1485,6 +1494,7 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
       unresolvedEdges: numOrNull(rawSummary.unresolved_edges),
       unresolvedToolReferences: numOrNull(rawSummary.unresolved_tool_references),
       unresolvedServerReferences: numOrNull(rawSummary.unresolved_server_references),
+      unresolvedIdentityReferences: numOrNull(rawSummary.unresolved_identity_references),
       layersPresent: strList(rawSummary.layers_present),
       logsObserved: bool(rawSummary.logs_observed),
     },
@@ -1519,6 +1529,7 @@ function unresolvedReferences(raw: unknown): UnresolvedReference[] | null {
       // reference renders as a gap with no name.
       reference: str(u.reference).trim(),
       mechanism: str(u.mechanism),
+      reason: strOrNull(typeof u.reason === "string" ? u.reason.trim() : null),
     }))
     .filter((u) => u.reference !== "");
 }

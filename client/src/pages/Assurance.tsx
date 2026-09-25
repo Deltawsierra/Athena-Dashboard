@@ -231,6 +231,7 @@ interface UnresolvedReference {
   sourceKind: string;
   reference: string;
   mechanism: string;
+  reason: string | null;
 }
 interface RouteMap {
   layers: { key: string; label: string; nodes: RouteNode[] }[];
@@ -246,6 +247,7 @@ interface RouteMap {
     unresolvedEdges: number | null;
     unresolvedToolReferences: number | null;
     unresolvedServerReferences: number | null;
+    unresolvedIdentityReferences: number | null;
     layersPresent: string[];
     logsObserved: boolean;
   };
@@ -2263,7 +2265,27 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
 const MECHANISM_PHRASING: Record<string, string> = {
   tools: "names",
   server: "is wired to",
+  identity: "acts as",
 };
+
+// Why the reference could not be placed as one component. These are different
+// findings and used to share one sentence -- "which discovery could not place" --
+// which is false for two of them: an ambiguous reference WAS placed, twice, and
+// the backend followed it to every candidate; a reference naming an agent where
+// a tool belongs names something that exists. Each says what to go and fix. A
+// reason this console has not been taught is named as itself, and a control
+// plane that sent none is not credited with any of the three.
+const REASON_PHRASING: Record<string, string> = {
+  not_found: "which discovery could not place",
+  ambiguous:
+    "which more than one component answers to — the inventory does not say which, so every one of them was followed",
+  names_a_principal: "which is an agent or a service account, not something this declaration can point at",
+};
+
+export function unresolvedReason(reason: string | null): string {
+  if (reason === null) return "which could not be placed as exactly one component";
+  return REASON_PHRASING[reason] ?? `which could not be placed (the control plane says: ${reason})`;
+}
 
 // The references the inventory declares and discovery could not place, said
 // plainly. This is not decoration: an unresolvable reference means part of the
@@ -2279,7 +2301,7 @@ const MECHANISM_PHRASING: Record<string, string> = {
 // this console can name, BOTH numbers are shown. Deriving the sentence from the
 // list alone would hide a row the backend counted and did not send; printing the
 // backend's total alone would claim to have named rows that are not on screen.
-function UnresolvedReferences({
+export function UnresolvedReferences({
   rows,
   reported,
   what,
@@ -2335,8 +2357,7 @@ function UnresolvedReferences({
                 <span className="text-foreground">{u.mechanism || "an unnamed mechanism"}</span>)
               </>
             )}{" "}
-            <span className="text-amber-400/90">{u.reference}</span>, which discovery could not
-            place.
+            <span className="text-amber-400/90">{u.reference}</span>, {unresolvedReason(u.reason)}.
           </li>
         ))}
       </ul>

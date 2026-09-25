@@ -166,6 +166,27 @@ describe("an unresolved reference survives the BFF", () => {
           },
         });
       }
+      // A control plane that says WHY each reference could not be placed, for
+      // each mechanism it knows, including the account an agent acts as.
+      if (path === "/api/assurance/deployments/dep-reasons/route-map/" && method === "GET") {
+        return json(200, {
+          ...ROUTE_MAP,
+          unresolved: [
+            { source: "assistant", source_kind: "agent", reference: "svc-gone", mechanism: "identity", reason: "not_found" },
+            { source: "assistant", source_kind: "agent", reference: "planner", mechanism: "tools", reason: " ambiguous " },
+            { source: "reader", source_kind: "tool", reference: "assistant", mechanism: "server", reason: "names_a_principal" },
+            { source: "reader", source_kind: "tool", reference: "db", mechanism: "server", reason: "" },
+            { source: "reader", source_kind: "tool", reference: "cache", mechanism: "server", reason: 7 },
+          ],
+          summary: {
+            ...ROUTE_MAP.summary,
+            unresolved_edges: 5,
+            unresolved_tool_references: 1,
+            unresolved_server_references: 3,
+            unresolved_identity_references: 1,
+          },
+        });
+      }
       // A backend that sends a row with nothing in it. Not a gap an operator can
       // chase; counting it would be a manufactured finding.
       if (path === "/api/assurance/deployments/dep-blank/route-map/" && method === "GET") {
@@ -197,8 +218,8 @@ describe("an unresolved reference survives the BFF", () => {
     const res = await user.get("/api/assurance/deployments/dep-1/route-map");
     expect(res.status).toBe(200);
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools" },
-      { source: "report-builder", sourceKind: "tool", reference: "mcp-ghost", mechanism: "server" },
+      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null },
+      { source: "report-builder", sourceKind: "tool", reference: "mcp-ghost", mechanism: "server", reason: null },
     ]);
   });
 
@@ -215,7 +236,7 @@ describe("an unresolved reference survives the BFF", () => {
     const res = await user.get("/api/assurance/deployments/dep-1/effective-access");
     expect(res.status).toBe(200);
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools" },
+      { source: "assistant", sourceKind: "agent", reference: "ghost-tool", mechanism: "tools", reason: null },
     ]);
     expect(res.body.summary.unresolvedReferences).toBe(1);
   });
@@ -271,13 +292,31 @@ describe("an unresolved reference survives the BFF", () => {
   it("does not give an unknown mechanism the wording reserved for a known one", async () => {
     const res = await user.get("/api/assurance/deployments/dep-mechanism/route-map");
     expect(res.body.unresolved).toEqual([
-      { source: "assistant", sourceKind: "agent", reference: "vault-prod", mechanism: "credential" },
+      { source: "assistant", sourceKind: "agent", reference: "vault-prod", mechanism: "credential", reason: null },
     ]);
     // The mechanism reaches the page as itself, so the page can decline to word
     // it as either of the two it knows.
     expect(res.body.summary.unresolvedEdges).toBe(1);
     expect(res.body.summary.unresolvedToolReferences).toBe(0);
     expect(res.body.summary.unresolvedServerReferences).toBe(0);
+  });
+
+  it("carries why each reference could not be placed, and nothing it was not told", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-reasons/route-map");
+    expect(res.body.unresolved.map((u: { reason: string | null }) => u.reason)).toEqual([
+      "not_found",
+      "ambiguous",
+      "names_a_principal",
+      // Blank and non-string are the control plane not saying, never a reason.
+      null,
+      null,
+    ]);
+    expect(res.body.summary.unresolvedIdentityReferences).toBe(1);
+  });
+
+  it("does not report an identity count a control plane never sent", async () => {
+    const old = await user.get("/api/assurance/deployments/dep-1/route-map");
+    expect(old.body.summary.unresolvedIdentityReferences).toBeNull();
   });
 
   it("refuses either assessment to anyone not signed in", async () => {
@@ -306,6 +345,7 @@ describe("the Assurance page says where the graph had holes", () => {
     // of declaration to go and fix.
     expect(source).toContain('tools: "names"');
     expect(source).toContain('server: "is wired to"');
+    expect(source).toContain('identity: "acts as"');
     // And the lookup must be a MAP with an explicit unknown branch, not a
     // two-way ternary. A ternary's else-arm hands every future mechanism the
     // wording reserved for one of these two: a dangling credential binding would
