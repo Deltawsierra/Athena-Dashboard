@@ -2284,6 +2284,12 @@ const REASON_PHRASING: Record<string, string> = {
   ambiguous:
     "which more than one component answers to — the inventory does not say which, so every one of them was followed",
   names_a_principal: "which is an agent or a service account, not something this declaration can point at",
+  // Placed and followed -- its powers are counted -- but recorded under identity
+  // rules the control plane no longer writes, and no scan has recorded it since.
+  // "Could not be placed" would send the operator looking for a component that
+  // exists; what it needs is a rescan.
+  superseded_identity:
+    "which was followed, but is recorded under identity rules no scan has re-recorded since — rescan to confirm it",
 };
 
 export function unresolvedReason(reason: string | null): string {

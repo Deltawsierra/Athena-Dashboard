@@ -227,8 +227,12 @@ export interface RouteLayer {
  * `reason` says HOW it failed, and the three are different findings: "not_found"
  * names nothing discovery placed; "ambiguous" names more than one component, and
  * the backend followed it to every one; "names_a_principal" names an agent or a
- * service account where a tool or backend belongs. Null when the control plane
- * did not say -- it predates the field -- which is not any of the three.
+ * service account where a tool or backend belongs; "superseded_identity" was
+ * followed, to or from a component recorded under identity rules no scan has
+ * re-recorded since, and a rescan is what confirms it. One reference can carry
+ * two rows -- "ambiguous" and "superseded_identity" -- when both are true. Null
+ * when the control plane did not say -- it predates the field -- which is none
+ * of these.
  */
 export interface UnresolvedReference {
   source: string;

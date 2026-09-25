@@ -45,6 +45,15 @@ describe("an unresolved reference says why", () => {
     expect(items[2]).not.toContain("could not place");
   });
 
+  it("says a superseded reference was followed and needs a rescan, not that it was never placed", () => {
+    const text = unresolvedReason("superseded_identity");
+    expect(text).toContain("was followed");
+    expect(text).toContain("rescan");
+    expect(text).not.toContain("could not place");
+    expect(text).not.toContain("could not be placed");
+    expect(text).not.toContain("the control plane says");
+  });
+
   it("does not credit a control plane that sent no reason with any of them", () => {
     expect(unresolvedReason(null)).toBe("which could not be placed as exactly one component");
     expect(unresolvedReason(null)).not.toContain("discovery");
