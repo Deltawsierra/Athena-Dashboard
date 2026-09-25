@@ -36,6 +36,7 @@ import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/comp
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
+import type { FindingsSummary, UntrackedScan } from "@shared/findings-summary";
 
 /* ---- live types (subset of the API shapes) ---------------------------- */
 interface ApiClient { id: string; name: string; status: string; lastTestDate: string | null }
@@ -157,6 +158,19 @@ export default function Risks() {
       ? "No engagement on record yet. Add a client and run a scan; its findings appear here."
       : notInHand(source, "findings");
 
+  // What this engagement's latest completed scan reported, when no finding row
+  // stands behind it (a scan a person recorded on the Tests screen). The
+  // findings ledger cannot see those counts, so "nothing needs attention" is
+  // said only once the summary has answered that there are none.
+  const summaryQ = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
+  const untracked: Loaded<UntrackedScan | null> = (() => {
+    if (summaryQ.state !== "ready") return summaryQ;
+    const own = summaryQ.data.byClient.find((one) => one.clientId === clientId);
+    return own
+      ? { state: "ready", data: own.untrackedScan }
+      : { state: "error", message: "this engagement is not in the findings summary yet" };
+  })();
+
   const data = ready ? source.data : undefined;
   const findings = data?.findings ?? [];
   const counts = data?.counts ?? {};
@@ -232,8 +246,9 @@ export default function Risks() {
         verbs={["Analyze", "Evidence", "Mitigate", "Strengthen"]}
       />
       <Divider variant="astrolabe" className="mt-5" />
-      {/* The engagement picker lists seeded demo clients like any other; this says how many. */}
-      <SampleDataNotice counts={["clients"]} className="mt-5" />
+      {/* The engagement picker lists seeded demo clients like any other, and a
+          seeded test's counts can reach the reasoning panel; this says how many. */}
+      <SampleDataNotice counts={["clients", "tests"]} className="mt-5" />
 
       {/* stats -- all live from the findings ledger */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
@@ -277,7 +292,7 @@ export default function Risks() {
               {!ready ? (
                 <p className="py-8 text-center text-[12px] text-muted-foreground">{unavailable}</p>
               ) : heat.length === 0 ? (
-                <p className="py-8 text-center text-[12px] text-muted-foreground">No open risks to chart.</p>
+                <p className="py-8 text-center text-[12px] text-muted-foreground">No open tracked findings to chart.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left">
@@ -311,7 +326,7 @@ export default function Risks() {
                   {!ready ? (
                     <li className="text-[12px] text-muted-foreground">{unavailable}</li>
                   ) : donut.length === 0 ? (
-                    <li className="text-[12px] text-muted-foreground">No open risks.</li>
+                    <li className="text-[12px] text-muted-foreground">No open tracked findings.</li>
                   ) : donut.map((d) => (
                     <li key={d.label} className="flex items-center gap-2 text-[12px]">
                       <span className="h-2 w-2 rounded-full" style={{ background: d.color }} />
@@ -379,7 +394,11 @@ export default function Risks() {
                   ? unavailable
                   : sharpest
                     ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity)} severity on ${sharpest.target || "the target"}.`
-                    : "\"No open findings. Nothing here needs attention right now.\""}
+                    : untracked.state !== "ready"
+                      ? `"No open tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
+                      : untracked.data
+                        ? `"No open tracked findings, but the latest completed scan reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
+                        : "\"No open tracked findings, and the latest completed scan reported no critical or high one. Nothing here needs attention right now.\""}
               </p>
             </div>
             <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">

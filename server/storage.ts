@@ -69,6 +69,12 @@ export interface IStorage {
   /** What a run observed. Idempotent per (finding, run). */
   recordSighting(findingId: string, runId: string | null, testId: string | null, seen: boolean): Promise<void>;
   getSightings(findingId: string): Promise<FindingSighting[]>;
+  /**
+   * Whether this test filed any of its results as a finding: a sighting it
+   * recorded as seen. The engine's scans file every result they return; a
+   * test a person records on the Tests screen files none.
+   */
+  testFiledFindings(testId: string): Promise<boolean>;
   /** A retest, appended. Never replaces an earlier one. */
   recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">): Promise<FindingCheck>;
   getChecks(findingId: string): Promise<FindingCheck[]>;
@@ -377,6 +383,9 @@ export class MemStorage implements IStorage {
   }
   async getSightings(findingId: string) {
     return this.sightings.filter((one) => one.findingId === findingId);
+  }
+  async testFiledFindings(testId: string) {
+    return this.sightings.some((one) => one.testId === testId && one.seen);
   }
   async recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">) {
     const row: FindingCheck = { ...check, id: randomUUID(), checkedAt: new Date() };

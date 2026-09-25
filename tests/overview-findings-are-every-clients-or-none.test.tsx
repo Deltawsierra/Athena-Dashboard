@@ -99,7 +99,7 @@ describe("the Overview's findings figures are every client's, or none", () => {
       ).toBeTruthy();
     }
     // No all-clear stands in for the missing answer.
-    expect(screen.queryByText(/No open findings/)).toBeNull();
+    expect(screen.queryByText(/No open (tracked )?findings/)).toBeNull();
     expect(screen.queryByText(/Nothing flagged/)).toBeNull();
   });
 
@@ -116,6 +116,6 @@ describe("the Overview's findings figures are every client's, or none", () => {
       const panel = screen.getByTestId(`overview-panel-${id}`);
       expect(within(panel).getByText("Loading…"), `${id} drew a picture before the findings arrived`).toBeTruthy();
     }
-    expect(screen.queryByText(/No open findings/)).toBeNull();
+    expect(screen.queryByText(/No open (tracked )?findings/)).toBeNull();
   });
 });

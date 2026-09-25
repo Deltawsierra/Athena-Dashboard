@@ -718,20 +718,23 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // A run the engine finished inline has its results now, and its row is
+    // written as finished: counted from what came back and dated. It used to
+    // be written with zero counts and no completion time, and the status
+    // route never revisits a completed row -- so a scan that returned a
+    // critical read as "0 reported" on every screen that reads the test.
+    const completedInline = started.state === "completed";
     const test = await storage.createTest({
       clientId: data.clientId,
       siteId: data.siteId ?? null,
       testType: data.testType,
-      status: started.state === "completed" ? "completed" : "running",
-      severity: null,
-      completedAt: null,
+      status: completedInline ? "completed" : "running",
+      completedAt: completedInline ? new Date() : null,
       summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
       findings: { runId: started.runId, target: data.target, results: started.findings },
-      vulnerabilitiesFound: 0,
-      criticalCount: 0,
-      highCount: 0,
-      mediumCount: 0,
-      lowCount: 0,
+      ...(completedInline
+        ? countSeverities(started.findings ?? [])
+        : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
       executedBy: req.session.userId ?? null,
     });
 

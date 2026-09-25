@@ -35,6 +35,14 @@ export interface FindingsSummary {
   /**
    * Every client's open findings: how many, how many critical and high, and
    * when a critical or high one was last seen (null when there is none).
+   *
+   * Findings are lifecycle rows, which only the engine's scans file. So each
+   * client also carries its latest completed test's reported counts when that
+   * test reported something critical or high and filed none of it as a
+   * finding -- a scan a person recorded on the Tests screen, say. Those counts
+   * are what the scan reported, not open findings: nothing tracks whether they
+   * were fixed, so a screen must neither add them into the open totals nor
+   * clear the client while they stand. null when there is no such test.
    */
   byClient: Array<{
     clientId: string;
@@ -42,5 +50,15 @@ export interface FindingsSummary {
     critical: number;
     high: number;
     latestSeriousSeenAt: string | null;
+    untrackedScan: UntrackedScan | null;
   }>;
+}
+
+/** A latest completed test's reported critical/high counts with no finding row behind them. */
+export interface UntrackedScan {
+  testId: string;
+  /** When it completed (ISO), or null when no completion time is recorded. */
+  completedAt: string | null;
+  critical: number;
+  high: number;
 }

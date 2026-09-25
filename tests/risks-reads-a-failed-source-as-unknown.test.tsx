@@ -68,7 +68,7 @@ describe("Risks when its sources are not in hand", () => {
     const text = document.body.textContent ?? "";
     expect(text, "failed request rendered as 'nothing needs attention'").not.toMatch(ALL_CLEAR);
     expect(text).not.toMatch(/No findings recorded for this engagement yet/);
-    expect(text).not.toMatch(/No open risks/);
+    expect(text).not.toMatch(/No open (risks|tracked findings)/);
     expect(text).toMatch(/Could not load findings: source failed/);
     for (const label of ["Total Open Risks", "Critical Risks", "High Risks", "Acknowledged", "Fixed"]) {
       expect(tile(label), `${label} tile`).toBe("—");
@@ -113,12 +113,22 @@ describe("Risks when its sources are not in hand", () => {
     expect(text).toMatch(/Could not load engagements: source failed/);
   });
 
+  // The all-clear also needs the summary's word that the engagement's latest
+  // completed scan reported nothing the ledger cannot see (round 2, R2-A).
+  const SUMMARY = (untrackedScan: unknown) => ({
+    clients: 1, open: { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+    byEnvironment: [], byMonth: [], topOpen: [],
+    byClient: [{ clientId: "c1", open: 0, critical: 0, high: 0, latestSeriousSeenAt: null, untrackedScan }],
+  });
+  const EMPTY_LEDGER = { findings: [], counts: { open: 0, acknowledged: 0, accepted: 0, fixed: 0 } };
+
   it("gives the all-clear only for a successful, empty answer", () => {
     mount([
       [["/api/clients"], CLIENTS],
       [["/api/tests"], []],
       [["/api/users/assignable"], []],
-      [["/api/findings", { clientId: "c1" }], { findings: [], counts: { open: 0, acknowledged: 0, accepted: 0, fixed: 0 } }],
+      [["/api/findings", { clientId: "c1" }], EMPTY_LEDGER],
+      [["/api/findings/summary"], SUMMARY(null)],
     ]);
     const text = document.body.textContent ?? "";
     expect(text).toMatch(ALL_CLEAR);
@@ -126,5 +136,44 @@ describe("Risks when its sources are not in hand", () => {
     expect(tile("Total Open Risks")).toBe("0");
     // Nothing recorded is not "0% remediated".
     expect(text).not.toMatch(/(^|[^0-9])0%/);
+  });
+
+  it("gives no all-clear while the latest completed scan reported criticals the ledger cannot see", () => {
+    mount([
+      [["/api/clients"], CLIENTS],
+      [["/api/tests"], []],
+      [["/api/users/assignable"], []],
+      [["/api/findings", { clientId: "c1" }], EMPTY_LEDGER],
+      [["/api/findings/summary"], SUMMARY({ testId: "t1", completedAt: null, critical: 3, high: 5 })],
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(ALL_CLEAR);
+    expect(text).toMatch(/the latest completed scan reported 3 critical \/ 5 high that are not tracked as findings/);
+  });
+
+  it("gives no all-clear when what the latest completed scan reported could not be checked", async () => {
+    const client = mount([
+      [["/api/clients"], CLIENTS],
+      [["/api/tests"], []],
+      [["/api/users/assignable"], []],
+      [["/api/findings", { clientId: "c1" }], EMPTY_LEDGER],
+    ]);
+    await waitFor(() => expect(client.getQueryState(["/api/findings/summary"])?.status).toBe("error"));
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(ALL_CLEAR);
+    expect(text).toMatch(/Could not load what the latest completed scan reported: source failed/);
+  });
+
+  it("gives no all-clear for an engagement the summary has not counted yet", () => {
+    mount([
+      [["/api/clients"], CLIENTS],
+      [["/api/tests"], []],
+      [["/api/users/assignable"], []],
+      [["/api/findings", { clientId: "c1" }], EMPTY_LEDGER],
+      [["/api/findings/summary"], { ...SUMMARY(null), byClient: [] }],
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(ALL_CLEAR);
+    expect(text).toMatch(/this engagement is not in the findings summary yet/);
   });
 });

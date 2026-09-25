@@ -251,6 +251,12 @@ export class SqliteStorage implements IStorage {
     return db.select().from(schema.findingSightings)
       .where(eq(schema.findingSightings.findingId, findingId)).all();
   }
+  async testFiledFindings(testId: string): Promise<boolean> {
+    const one = db.select({ id: schema.findingSightings.id }).from(schema.findingSightings)
+      .where(and(eq(schema.findingSightings.testId, testId), eq(schema.findingSightings.seen, true)))
+      .limit(1).get();
+    return one !== undefined;
+  }
   async recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">): Promise<FindingCheck> {
     const row: FindingCheck = { ...check, id: randomUUID(), checkedAt: new Date() };
     db.insert(schema.findingChecks).values(row).run();

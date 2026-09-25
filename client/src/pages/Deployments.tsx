@@ -87,10 +87,21 @@ function readinessLabel(status: string): string {
 const when = (t: ApiTest) => new Date(t.completedAt || t.startedAt).getTime();
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** Whether a completed test reported any finding at all, by its total or any severity. */
+function reportsFindings(test: ApiTest): boolean {
+  return test.vulnerabilitiesFound > 0 ||
+    test.criticalCount + test.highCount + test.mediumCount + test.lowCount > 0;
+}
+
 /**
  * The release-readiness pipeline, each step from a record or marked as not
  * tracked. "Scanned" means a completed test; a pending or running one is in
- * flight, not a scan. Findings to review are the open findings on record.
+ * flight, not a scan. Findings to review are the open tracked findings on
+ * record AND whatever each system's latest completed scan reported: only the
+ * engine's scans file findings, so a scan a person recorded on the Tests
+ * screen has counts and no finding rows, and reading the findings alone ticked
+ * this step done beside a "Critical 15 (3C / 5H)" row. It is done only when
+ * neither reports anything.
  * Nothing records a human sign-off or a production deployment -- an assurance
  * decision on the Assurance page is decision support, not an approval, and a
  * client's status is not a deployment -- so those two steps say so and are
@@ -98,7 +109,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
  */
 function readinessSteps(
   registered: Loaded<number>,
-  scanned: Loaded<{ scanned: number; inFlight: number }>,
+  scanned: Loaded<{ scanned: number; inFlight: number; reporting: number }>,
   withOpen: Loaded<number>,
 ): TimelineStep[] {
   const discover: TimelineStep = registered.state === "ready"
@@ -112,7 +123,7 @@ function readinessSteps(
     scan = { title: "Scan", detail: notInHand(src, "scans"), state: "todo" };
     review = { title: "Review Evidence", detail: notInHand(src, "scans"), state: "todo" };
   } else {
-    const [total, { scanned: done, inFlight }] = src.data;
+    const [total, { scanned: done, inFlight, reporting }] = src.data;
     scan = {
       title: "Scan",
       detail: total === 0
@@ -122,12 +133,22 @@ function readinessSteps(
     };
     if (withOpen.state !== "ready") {
       review = { title: "Review Evidence", detail: notInHand(withOpen, "findings"), state: "todo" };
-    } else if (withOpen.data > 0) {
-      review = { title: "Review Evidence", detail: `${plural(withOpen.data, "system")} with open findings to review.`, state: "active" };
+    } else if (withOpen.data > 0 || reporting > 0) {
+      const detail = [
+        withOpen.data > 0 ? `${plural(withOpen.data, "system")} with open findings to review.` : null,
+        reporting > 0
+          ? `${plural(reporting, "system")} whose latest completed scan reported findings to review.`
+          : null,
+      ].filter(Boolean).join(" ");
+      review = { title: "Review Evidence", detail, state: "active" };
     } else if (done === 0) {
       review = { title: "Review Evidence", detail: "Awaiting the first completed scan.", state: "todo" };
     } else {
-      review = { title: "Review Evidence", detail: "No open findings on record.", state: "done" };
+      review = {
+        title: "Review Evidence",
+        detail: "No open tracked findings, and no system's latest completed scan reported any.",
+        state: "done",
+      };
     }
   }
 
@@ -186,20 +207,31 @@ export default function Deployments() {
 
   const inFlightTests = figure(testsQ, (list) => list.filter((t) => IN_FLIGHT.has(t.status)).length);
   const registered: Loaded<number> = clientsQ.state === "ready" ? { state: "ready", data: clientsQ.data.length } : clientsQ;
-  const scanProgress: Loaded<{ scanned: number; inFlight: number }> = (() => {
+  const scanProgress: Loaded<{ scanned: number; inFlight: number; reporting: number }> = (() => {
     const src = both(clientsQ, testsQ);
     if (src.state !== "ready") return src;
     const [clientList, testList] = src.data;
     const ids = new Set(clientList.map((c) => c.id));
     const scanned = clientList.filter((c) => latestDone.has(c.id)).length;
     const inFlight = new Set(testList.filter((t) => IN_FLIGHT.has(t.status) && ids.has(t.clientId)).map((t) => t.clientId)).size;
-    return { state: "ready", data: { scanned, inFlight } };
+    // The same scans the table's Risk and Findings columns read.
+    const reporting = clientList.filter((c) => {
+      const done = latestDone.get(c.id);
+      return done !== undefined && reportsFindings(done);
+    }).length;
+    return { state: "ready", data: { scanned, inFlight, reporting } };
   })();
   const withOpen: Loaded<number> = (() => {
     const src = both(clientsQ, summaryQ);
     if (src.state !== "ready") return src;
     const [clientList, summary] = src.data;
     const open = new Map(summary.byClient.map((one) => [one.clientId, one.open]));
+    // A system registered since the summary was counted has findings nobody
+    // has counted yet: unknown, not none.
+    const uncounted = clientList.filter((c) => !open.has(c.id)).length;
+    if (uncounted > 0) {
+      return { state: "error", message: `${plural(uncounted, "system")} not in the findings summary yet` };
+    }
     return { state: "ready", data: clientList.filter((c) => (open.get(c.id) ?? 0) > 0).length };
   })();
   const readiness = readinessSteps(registered, scanProgress, withOpen);

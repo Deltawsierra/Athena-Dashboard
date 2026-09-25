@@ -175,7 +175,12 @@ describe("Deployments (default build) states only what the record says", () => {
     const r = row("Unscanned App");
     expect(r.textContent).not.toMatch(/Clean/);
     expect(within(r).getByText("None reported")).toBeTruthy();
-    expect(step("Review Evidence")).toContain("No open findings on record.");
+    // Done only when neither the tracked findings nor the latest completed
+    // scan reports anything, and the sentence says it covers both.
+    expect(step("Review Evidence")).toContain(
+      "No open tracked findings, and no system's latest completed scan reported any.",
+    );
+    expect(step("Review Evidence")).toContain("✓");
   });
 
   it("reads failed sources as unknown, never as an empty estate", async () => {

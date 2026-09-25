@@ -139,9 +139,10 @@ describe("summarizeFindings", () => {
       ],
     });
     expect(summary.byClient).toEqual([
-      { clientId: "c1", open: 3, critical: 1, high: 1, latestSeriousSeenAt: "2026-03-04T00:00:00.000Z" },
-      { clientId: "c2", open: 1, critical: 0, high: 0, latestSeriousSeenAt: null },
-      { clientId: "c3", open: 0, critical: 0, high: 0, latestSeriousSeenAt: null },
+      // No test on record, so no scan's counts stand outside the findings.
+      { clientId: "c1", open: 3, critical: 1, high: 1, latestSeriousSeenAt: "2026-03-04T00:00:00.000Z", untrackedScan: null },
+      { clientId: "c2", open: 1, critical: 0, high: 0, latestSeriousSeenAt: null, untrackedScan: null },
+      { clientId: "c3", open: 0, critical: 0, high: 0, latestSeriousSeenAt: null, untrackedScan: null },
     ]);
   });
 

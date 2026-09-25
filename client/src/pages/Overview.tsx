@@ -21,6 +21,11 @@
  *                                  lifecycle record (one row per issue, not per
  *                                  sighting) counted once on the server, for
  *                                  every client or not at all
+ * - a latest completed scan whose critical/high counts no finding stands
+ *   behind (one a person recorded on the Tests screen)
+ *                                  the same summary's `untrackedScan`: flagged
+ *                                  in Systems Needing Attention, never added to
+ *                                  the open totals and never cleared
  * - assurance decisions            /api/assurance/deployments
  * - overall risk score, compliance readiness, the review schedule
  *                                  nothing computes these, so they say so
@@ -65,7 +70,7 @@ import { Label, SeverityPill, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
-import type { FindingsSummary } from "@shared/findings-summary";
+import type { FindingsSummary, UntrackedScan } from "@shared/findings-summary";
 
 /* ---- the page's model: what every panel renders, live or sample ------- */
 
@@ -182,6 +187,23 @@ export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[]
   });
 }
 
+/** "latest completed scan reported 3 critical / 5 high; not tracked as findings". */
+export function untrackedNote(scan: UntrackedScan): string {
+  return `latest completed scan reported ${scan.critical} critical / ${scan.high} high; not tracked as findings`;
+}
+
+/**
+ * The clients whose latest completed scan reported critical or high findings
+ * that no finding row stands behind. Every sentence on this page that sounds
+ * like an all-clear is about tracked findings only, and says so; this is what
+ * it adds while such scans stand.
+ */
+function untrackedCaveat(summary: FindingsSummary): string {
+  const n = summary.byClient.filter((one) => one.untrackedScan).length;
+  if (n === 0) return "";
+  return ` ${n === 1 ? "1 client's" : `${n} clients'`} latest completed scan reported critical or high findings that are not tracked as findings; see Systems Needing Attention.`;
+}
+
 function useLiveOverview(): OverviewModel {
   const clients = loaded(useQuery<ApiClient[]>({ queryKey: ["/api/clients"] }));
   const sites = loaded(useQuery<ApiSite[]>({ queryKey: ["/api/sites"] }));
@@ -214,7 +236,10 @@ function useLiveOverview(): OverviewModel {
       value: figure(summary, (s) => s.open.total),
       sublabel:
         summary.state === "ready"
-          ? `${summary.data.open.critical} critical · ${summary.data.open.high} high`
+          ? `${summary.data.open.critical} critical · ${summary.data.open.high} high` +
+            (summary.data.byClient.some((one) => one.untrackedScan)
+              ? ` · ${plural(summary.data.byClient.filter((one) => one.untrackedScan).length, "untracked scan result")} not counted`
+              : "")
           : summary.state === "error" ? "Could not load findings" : "Across every engagement",
       icon: AlertTriangle,
       accent: "var(--sev-high)",
@@ -247,7 +272,11 @@ function useLiveOverview(): OverviewModel {
       value: open,
       tone: "hsl(var(--primary))",
     }));
-    return rowsOr(rows, "No open findings to place. This fills in from the sites open findings are recorded on.");
+    return rowsOr(
+      rows,
+      "No open tracked findings to place. This fills in from the sites open findings are recorded on." +
+        untrackedCaveat(summary.data),
+    );
   })();
 
   // Least covered first, so a cut at six rows drops the best-covered clients,
@@ -299,27 +328,46 @@ function useLiveOverview(): OverviewModel {
     const flagged: Array<{ rank: number; row: { name: string; note: string; sev: Severity | null; ago: string | null } }> = [];
     for (const client of clientData) {
       const own = byClient.get(client.id);
-      const serious = own ? own.critical + own.high : 0;
-      if (own && serious > 0) {
+      const tracked = own ? own.critical + own.high : 0;
+      // A scan's reported counts that no finding stands behind: a person's
+      // record of a pentest, say. Nothing tracks whether those were fixed, so
+      // the client is flagged with them rather than cleared.
+      const untracked = own?.untrackedScan ?? null;
+      const reported = untracked ? untracked.critical + untracked.high : 0;
+      if (own && (tracked > 0 || reported > 0)) {
+        const notes = [
+          tracked > 0 ? plural(tracked, "open critical/high finding") : null,
+          untracked && reported > 0 ? untrackedNote(untracked) : null,
+        ].filter((note): note is string => note !== null);
+        const note = notes.join(" · ");
+        const times = [own.latestSeriousSeenAt, untracked?.completedAt ?? null]
+          .filter((at): at is string => Boolean(at))
+          .sort();
         flagged.push({
-          rank: serious,
+          rank: tracked + reported,
           row: {
             name: client.name,
-            note: plural(serious, "open critical/high finding"),
-            sev: own.critical > 0 ? "critical" : "high",
-            ago: ago(own.latestSeriousSeenAt),
+            note: note.charAt(0).toUpperCase() + note.slice(1),
+            sev: own.critical > 0 || (untracked?.critical ?? 0) > 0 ? "critical" : "high",
+            ago: ago(times[times.length - 1] ?? null),
           },
         });
       } else if (!testList.some((t) => t.clientId === client.id && t.status === "completed")) {
         flagged.push({ rank: 0, row: { name: client.name, note: "No completed scan on record", sev: null, ago: null } });
+      } else if (!own) {
+        // Registered since the summary was counted: its findings are unknown
+        // here, which is not the same as none.
+        flagged.push({ rank: 0, row: { name: client.name, note: "Not in the findings summary yet: its findings are not counted", sev: null, ago: null } });
       }
     }
     flagged.sort((a, b) => b.rank - a.rank);
+    // Only when neither source reports anything, and saying what it covers:
+    // tracked findings, and what each client's latest completed scan reported.
     return rowsOr(
       flagged.slice(0, 5).map((one) => one.row),
       clientData.length === 0
         ? "No clients registered yet."
-        : "Nothing flagged: no client has an open critical or high finding, and every client has a completed scan.",
+        : "Nothing flagged: no client has an open tracked critical or high finding, no client's latest completed scan reported one, and every client has a completed scan.",
     );
   })();
 
@@ -354,7 +402,7 @@ function useLiveOverview(): OverviewModel {
       sev: normSev(f.severity),
       meta: f.clientName || undefined,
     }));
-    return rowsOr(rows, "No open findings on record.");
+    return rowsOr(rows, "No open tracked findings on record." + untrackedCaveat(summary.data));
   })();
 
   return {
@@ -362,7 +410,8 @@ function useLiveOverview(): OverviewModel {
     posture: {
       note:
         "Not scored. Athena does not compute an overall risk score, so none is shown. " +
-        "The open findings below are counted from the record; the Risks page lists each one.",
+        "The open findings below are the tracked findings on record; the Risks page lists each one." +
+        (summary.state === "ready" ? untrackedCaveat(summary.data) : ""),
     },
     postureFigures: [
       { value: figure(summary, (s) => s.open.total), label: "Open Findings" },
@@ -373,7 +422,8 @@ function useLiveOverview(): OverviewModel {
       summary.state === "ready"
         ? rowsOr(
             trendFromSummary(summary.data.byMonth),
-            "No findings recorded yet. The trend fills in as scans record findings, by the month each was first seen.",
+            "No tracked findings recorded yet. The trend fills in as scans record findings, by the month each was first seen." +
+              untrackedCaveat(summary.data),
           )
         : pending(summary, "the findings trend"),
     environments,
@@ -472,7 +522,7 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
       ) : (
         // Rows the installer wrote are real rows, so they are counted -- and
         // this says how many there are, with the means to remove them.
-        <SampleDataNotice counts={["clients", "sites", "tests"]} className="mt-5" />
+        <SampleDataNotice counts={["clients", "sites", "tests", "findings"]} className="mt-5" />
       )}
       <Divider variant="astrolabe" className="mt-5" />
 
