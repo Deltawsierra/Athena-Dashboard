@@ -76,9 +76,30 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
 | `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. |
 | `ATHENA_FAILSAFE_ENGINE_ID` | unset                        | Default engine id a fresh failsafe draft targets. |
+| `VITE_MYTHOS_SAMPLE_MODE` | unset (off)                    | Build time. `1` turns on sample mode for prospect demos; see below. Never set it for a customer build. |
 
 Database location, in order: `ATHENA_DB_PATH`, then `ATHENA_USER_DATA/athena.db`,
 then `~/.athena-ai/athena.db` under Electron, then `./athena.db`.
+
+### Sample mode (prospect demos only)
+
+By default every figure on the Overview comes from the record, and anything
+nothing measures says so ("Not measured", "Not tracked yet"). A demo build can
+show a populated sample estate instead:
+
+```bash
+VITE_MYTHOS_SAMPLE_MODE=1 npm run dev            # or: npm run build:client
+```
+
+The flag is read at build time: a build made without it cannot show the sample
+figures, and the bundler drops them from it entirely. With it on, each affected page carries a banner and
+every affected panel carries the label "Sample data — not from your
+environment". The sample figures live only in `client/src/sample/`; pages reach
+them through `@/sample`, whose accessors refuse when sample mode is off.
+
+This is not the same thing as the installer's seeded rows
+(`ATHENA_SKIP_SAMPLE_DATA`): those are real database rows, counted like any
+other, with a notice on each screen that shows them and a button to remove them.
 
 ## Architecture
 
@@ -120,6 +141,6 @@ written by older builds are verified once and transparently upgraded.
 
 - The Windows icon at `build/icon.ico` is a placeholder and must be replaced
   before shipping an installer.
-- The Dashboard, Pentest Scan, CVE Classifier, AI Chat and AI Health screens
+- The Pentest Scan, CVE Classifier, AI Chat and AI Health screens
   still display placeholder data. They are not yet connected to the Mythos
   engine; that is the next phase of work.
