@@ -76,6 +76,7 @@ export interface SettingsSample {
   secureDefaults: { value: string; sublabel: string };
   approvalGates: { value: string; sublabel: string };
   guidance: Guidance[];
+  guideNote: string;
   organization: { name: string; environment: string; logoText: string; color: string; timeZone: string };
   preferences: { defaultView: string; itemsPerPage: string; theme: string; toggles: { label: string; on: boolean }[] };
   modelRoutes: { primary: string; model: string; fallback: string; embedding: string; routing: string[] };
@@ -521,14 +522,18 @@ export default function Settings() {
                 </span>
               </li>
             ))}
-            <li className="flex items-start gap-2.5 rounded-lg border border-border/50 px-3 py-2.5">
-              <BookOpen className="mt-0.5 h-4 w-4 shrink-0 text-gold" />
-              <span>
-                <span className="block text-[12px] font-medium text-foreground">Explore more guidance</span>
-                <span className="block text-[11px] text-muted-foreground">View the Mythos Security Configuration Guide for detailed recommendations.</span>
-              </span>
-              <ChevronRight className="ml-auto mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            </li>
+            {/* Sample mode only: no such guide ships with this build, and the
+                item led nowhere. */}
+            {demo && (
+              <li className="flex items-start gap-2.5 rounded-lg border border-border/50 px-3 py-2.5">
+                <BookOpen className="mt-0.5 h-4 w-4 shrink-0 text-gold" />
+                <span>
+                  <span className="block text-[12px] font-medium text-foreground">Explore more guidance</span>
+                  <span className="block text-[11px] text-muted-foreground">{demo.guideNote}</span>
+                </span>
+                <ChevronRight className="ml-auto mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+              </li>
+            )}
           </ul>
         </Card>
       </div>

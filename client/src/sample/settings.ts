@@ -17,6 +17,7 @@ export const SETTINGS_SAMPLE: SettingsSample = {
     { tone: "ok", title: "SSO is enabled", note: "Your organization uses SAML SSO." },
     { tone: "ok", title: "Training data reuse is disabled", note: "Good — customer data will not be used for model training." },
   ],
+  guideNote: "View the Mythos Security Configuration Guide for detailed recommendations.",
   organization: {
     name: "Acme Financial",
     environment: "Production",

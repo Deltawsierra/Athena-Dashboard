@@ -79,6 +79,7 @@ function sampleStrings(): string[] {
     s.approvalGates.value,
     s.approvalGates.sublabel,
     ...s.guidance.flatMap((g) => [g.title, g.note]),
+    s.guideNote,
     s.organization.name,
     s.organization.logoText,
     s.organization.timeZone,
