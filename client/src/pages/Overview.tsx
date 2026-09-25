@@ -98,6 +98,8 @@ export interface OverviewModel {
   trend: PanelRows<TrendRow>;
   environments: PanelRows<{ env: string; value: number; tone: string }>;
   coverage: PanelRows<{ name: string; pct: number | null; detail?: string }>;
+  /** How many clients the coverage list shows of how many, and how many have no scan. */
+  coverageNote?: string;
   attention: PanelRows<{ name: string; note: string; sev: Severity | null; ago: string | null }>;
   activity: PanelRows<{ icon: LucideIcon; tone: string; text: string; meta: string; ago: string | null }>;
   reviews: PanelRows<{ date: string; name: string; findings: number; sev: Severity }>;
@@ -124,6 +126,8 @@ interface ApiDeployment { uuid: string; decision: string | null }
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
+/** How many clients the coverage panel lists. */
+const COVERAGE_ROWS = 6;
 
 /** What a panel says when its source is not in hand. */
 function pending<T>(source: Loaded<unknown>, what: string): PanelRows<T> {
@@ -246,6 +250,9 @@ function useLiveOverview(): OverviewModel {
     return rowsOr(rows, "No open findings to place. This fills in from the sites open findings are recorded on.");
   })();
 
+  // Least covered first, so a cut at six rows drops the best-covered clients,
+  // never the ones with no scan -- and the panel says how many it left out.
+  let coverageNote: string | undefined;
   const coverage: OverviewModel["coverage"] = (() => {
     const src = both(both(clients, sites), tests);
     if (src.state !== "ready") return pending(src, "scan coverage");
@@ -263,9 +270,23 @@ function useLiveOverview(): OverviewModel {
             detail: `${scanned} of ${plural(own.length, "site")} scanned`,
           };
     });
-    rows.sort((a, b) => (b.pct ?? -1) - (a.pct ?? -1));
+    rows.sort((a, b) => (a.pct ?? -1) - (b.pct ?? -1));
+    const unscanned = clientData.filter(
+      (client) => !testList.some((t) => t.clientId === client.id && t.status === "completed"),
+    ).length;
+    if (clientData.length > 0) {
+      const shown = Math.min(COVERAGE_ROWS, clientData.length);
+      coverageNote = [
+        shown < clientData.length
+          ? `Showing ${shown} of ${plural(clientData.length, "client")}, least covered first.`
+          : `All ${plural(clientData.length, "client")}, least covered first.`,
+        unscanned === 0
+          ? "Every client has a completed scan."
+          : `${unscanned} of ${clientData.length} ${unscanned === 1 ? "has" : "have"} no completed scan.`,
+      ].join(" ");
+    }
     return rowsOr(
-      rows.slice(0, 6),
+      rows.slice(0, COVERAGE_ROWS),
       "No clients registered yet. Add a client and its sites; each row then shows how many of its sites have a completed scan.",
     );
   })();
@@ -357,6 +378,7 @@ function useLiveOverview(): OverviewModel {
         : pending(summary, "the findings trend"),
     environments,
     coverage,
+    coverageNote,
     attention,
     activity,
     reviews: {
@@ -596,6 +618,11 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
             </ul>
           ) : (
             <Note text={model.coverage.note} />
+          )}
+          {model.coverageNote && (
+            <p className="mt-4 text-[11px] text-muted-foreground" data-testid="overview-coverage-note">
+              {model.coverageNote}
+            </p>
           )}
         </Panel>
 
