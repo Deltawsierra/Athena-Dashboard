@@ -222,7 +222,8 @@ export default function Settings() {
   const demo = sample ? settingsSample() : null;
 
   const { data: conn, isError: connError } = useQuery<Connections>({ queryKey: ["/api/settings/connections"] });
-  const { data: engine } = useQuery<EngineStatus>({ queryKey: ["/api/engine/status"] });
+  const engineQ = useQuery<EngineStatus>({ queryKey: ["/api/engine/status"] });
+  const engine = engineQ.data;
   const { data: apiKeys, isError: keysError } = useQuery<ApiKey[]>({ queryKey: ["/api/api-keys"], enabled: !sample });
   const [tab, setTab] = useState("General");
   const [routing, setRouting] = useState(demo?.modelRoutes.routing[0] ?? "");
@@ -230,13 +231,38 @@ export default function Settings() {
   const fields = conn?.fields;
   const setCount = fields?.filter((f) => f.set).length ?? 0;
   const field = (name: string) => fields?.find((f) => f.field === name);
-  const engineOk = engine?.configured && engine?.reachable && engine?.authorized !== false;
-
-  const engineGuidance: Guidance = engine?.configured
-    ? engineOk
-      ? { tone: "ok", title: "Engine is connected", note: `Reachable at ${engine?.url ?? "the configured address"} and authorized.` }
-      : { tone: "warn", title: "Engine configured but not reachable", note: engine?.detail ?? "Check the engine address and operator key." }
-    : { tone: "warn", title: "No engine is configured", note: "Set the engine address and an operator key (or ATHENA_ENGINE_URL / ATHENA_ENGINE_KEY) before scanning." };
+  // The engine's status exactly as the server checked it. `reachable` is
+  // whether it answered; `authorized` is whether it accepted the operator key,
+  // and null there means the key could not be checked -- not known, and not
+  // yes. This used to treat null as authorized ("Reachable ... and
+  // authorized" under a green tick) and a rejected key as "not reachable".
+  const engineView: { tile: string; guidance: Guidance } = engineQ.isError
+    ? {
+        tile: "—",
+        guidance: {
+          tone: "warn",
+          title: "Engine status could not be read",
+          note: engineQ.error instanceof Error ? engineQ.error.message : "The status request failed.",
+        },
+      }
+    : !engine
+      ? { tile: "…", guidance: { tone: "unreported", title: "Engine: checking", note: "Asking the server for the engine's status." } }
+      : !engine.configured
+        ? {
+            tile: "Not set",
+            guidance: { tone: "warn", title: "No engine is configured", note: "Set the engine address and an operator key (or ATHENA_ENGINE_URL / ATHENA_ENGINE_KEY) before scanning." },
+          }
+        : !engine.reachable
+          ? { tile: "Unreachable", guidance: { tone: "warn", title: "Engine configured but not reachable", note: engine.detail || "Check the engine address." } }
+          : engine.authorized === true
+            ? { tile: "Connected", guidance: { tone: "ok", title: "Engine is connected", note: `Reachable at ${engine.url ?? "the configured address"} and authorized.` } }
+            : engine.authorized === false
+              ? { tile: "Key rejected", guidance: { tone: "warn", title: "Engine reachable; key rejected", note: engine.detail || "The engine refused the operator key." } }
+              : {
+                  tile: "Key not checked",
+                  guidance: { tone: "unreported", title: "Engine reachable; operator key not checked", note: engine.detail || "The server could not check the operator key." },
+                };
+  const engineGuidance = engineView.guidance;
 
   const wired = ["General", "Integrations", "Data Handling"];
 
@@ -263,9 +289,15 @@ export default function Settings() {
         <StatCard
           layout="tile"
           label="Engine"
-          value={engine ? (engineOk ? "Connected" : engine.configured ? "Unreachable" : "Not set") : "…"}
+          value={engineView.tile}
           icon={ShieldCheck}
-          sublabel={engine?.configured ? (engine?.url ?? "") : "No address configured"}
+          sublabel={
+            engineQ.isError
+              ? "Could not read the engine status"
+              : !engine
+                ? "Checking"
+                : engine.configured ? (engine.url ?? "") : "No address configured"
+          }
         />
         <StatCard
           layout="tile"
