@@ -540,24 +540,21 @@ const FAILSAFE_RECOVER_ACTIONS = new Set(["resume", "release"]);
  * An emergency stop that takes the other stops away at exactly the moment
  * someone reaches for them is worse than none.
  *
- *   "stop"   -- a scan's Stop, a failsafe draft whose action is a stop, and
- *               revoking an API key (it only takes access away). Never
- *               refused, and decided without reading anything, so no failed
- *               read can stand in its way either.
- *   "relay"  -- a signature for a failsafe command. A stop's is let through;
- *               only a resume's or a release's is refused. When the command
- *               cannot be read the relay is let through: it might be a stop's,
- *               and the control plane and the engine check every signature.
- *   "cancel" -- withdrawing a failsafe command. Withdrawing a resume or a
- *               release is let through (it keeps an engine stopped);
- *               withdrawing a stop is refused, and so is one whose command
- *               cannot be read.
- *   null     -- an ordinary write: refused while the switch is engaged.
+ *   "stop"    -- a scan's Stop, a failsafe draft whose action is a stop, and
+ *                revoking an API key (it only takes access away). Never
+ *                refused, and decided without reading anything, so no failed
+ *                read can stand in its way either.
+ *   "command" -- a signature for, or the withdrawal of, a failsafe command.
+ *                Whether it may pass depends on the command's action, so it
+ *                is decided in the route's own handler
+ *                (killSwitchRefusesCommand), from the uuid Express decoded
+ *                for it -- exactly the one that handler relays.
+ *   null      -- an ordinary write: refused while the switch is engaged.
  *
  * Case-insensitive, as Express's own routing is, so a spelling that reaches a
  * stop's handler is a stop here too.
  */
-type KillSwitchClass = { kind: "stop" } | { kind: "relay" | "cancel"; uuid: string } | null;
+type KillSwitchClass = { kind: "stop" | "command" } | null;
 
 function killSwitchClass(method: string, fullPath: string, body: unknown): KillSwitchClass {
   if (method === "POST" && /^\/api\/scans\/[^/]+\/abort$/i.test(fullPath)) return { kind: "stop" };
@@ -566,15 +563,8 @@ function killSwitchClass(method: string, fullPath: string, body: unknown): KillS
     const action = body && typeof body === "object" ? (body as { action?: unknown }).action : undefined;
     return typeof action === "string" && FAILSAFE_STOP_ACTIONS.has(action) ? { kind: "stop" } : null;
   }
-  const command = /^\/api\/failsafe\/commands\/([^/]+)\/(signatures|cancel)$/i.exec(fullPath);
-  if (method === "POST" && command) {
-    let uuid = command[1];
-    try {
-      uuid = decodeURIComponent(uuid);
-    } catch {
-      // Express will not route a malformed escape either; test what we were given.
-    }
-    return { kind: command[2].toLowerCase() === "signatures" ? "relay" : "cancel", uuid };
+  if (method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/(signatures|cancel)$/i.test(fullPath)) {
+    return { kind: "command" };
   }
   return null;
 }
@@ -587,6 +577,45 @@ async function failsafeActionOf(uuid: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+const KILL_SWITCH_REFUSAL =
+  "The AI kill switch is engaged. Writes are disabled, except stops: a scan's Stop, and a failsafe " +
+  "pause, stand-down or terminate, stay available.";
+
+/**
+ * Whether the engaged kill switch refuses this signature relay or withdrawal.
+ *
+ *   relay  -- a stop's signature is let through; a resume's or a release's
+ *             is refused. When the settings or the command cannot be read
+ *             the relay is let through: it might be a stop's, and the
+ *             control plane and the engine check every signature.
+ *   cancel -- withdrawing a resume or a release is let through (it keeps an
+ *             engine stopped); withdrawing a stop is refused, and so is one
+ *             whose command cannot be read.
+ *
+ * Called by the route's handler with req.params.uuid, the uuid Express
+ * decoded and the handler relays. The middleware used to re-parse the path
+ * and decode it itself, so what it looked up and what was relayed were two
+ * readings of one string: an escaped character or a capitalised route
+ * segment read differently in each was all it took to relay a resume's
+ * signature past the switch. Now there is one reading.
+ */
+async function killSwitchRefusesCommand(res: Response, kind: "relay" | "cancel", uuid: string): Promise<boolean> {
+  let settings;
+  try {
+    settings = await storage.getAIControlSettings();
+  } catch (cause) {
+    // A relay that may be a stop's is not refused because a read failed.
+    if (kind === "relay") return false;
+    throw cause;
+  }
+  if (!settings?.killSwitchEnabled) return false;
+  const action = await failsafeActionOf(uuid);
+  if (kind === "relay" && (action === null || !FAILSAFE_RECOVER_ACTIONS.has(action))) return false;
+  if (kind === "cancel" && action !== null && FAILSAFE_RECOVER_ACTIONS.has(action)) return false;
+  res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
+  return true;
 }
 
 export const enforceKillSwitch: RequestHandler = (req, res, next) => {
@@ -604,33 +633,17 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
     return;
   }
   const kind = killSwitchClass(req.method, fullPath, req.body);
-  // Before the settings are read: a stop does not wait on that read, or fail with it.
-  if (kind?.kind === "stop") {
+  // Before the settings are read: a stop does not wait on that read, or fail
+  // with it; and a command's handler decides for itself.
+  if (kind !== null) {
     next();
     return;
   }
 
   (async () => {
-    let settings;
-    try {
-      settings = await storage.getAIControlSettings();
-    } catch (cause) {
-      // A relay that may be a stop's is not refused because a read failed.
-      if (kind?.kind === "relay") return void next();
-      throw cause;
-    }
+    const settings = await storage.getAIControlSettings();
     if (!settings?.killSwitchEnabled) return void next();
-    if (kind) {
-      const action = await failsafeActionOf(kind.uuid);
-      if (kind.kind === "relay" && (action === null || !FAILSAFE_RECOVER_ACTIONS.has(action))) return void next();
-      if (kind.kind === "cancel" && action !== null && FAILSAFE_RECOVER_ACTIONS.has(action)) return void next();
-    }
-    res.status(503).json({
-      message:
-        "The AI kill switch is engaged. Writes are disabled, except stops: a scan's Stop, and a failsafe " +
-        "pause, stand-down or terminate, stay available.",
-      systemStatus: settings.systemStatus,
-    });
+    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
   })().catch(next);
 };
 
@@ -2025,6 +2038,7 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.post("/api/failsafe/commands/:uuid/signatures", requireAdmin, asyncHandler(async (req, res) => {
+    if (await killSwitchRefusesCommand(res, "relay", req.params.uuid)) return;
     const data = submitSignatureSchema.parse(req.body);
     let result;
     try {
@@ -2045,6 +2059,7 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
+    if (await killSwitchRefusesCommand(res, "cancel", req.params.uuid)) return;
     let result;
     try {
       result = await failsafe.cancelCommand(req.params.uuid);
