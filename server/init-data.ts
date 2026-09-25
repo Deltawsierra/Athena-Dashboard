@@ -1,5 +1,6 @@
 import { storage } from "./storage-unified";
 import type { InsertUser, InsertClient, InsertTest, InsertDocument, InsertSite } from "@shared/schema";
+import { DEFAULT_ACTIVE_SYSTEMS, LEGACY_SEEDED_SYSTEMS } from "@shared/ai-systems";
 
 /**
  * First-run seeding. Runs only when the users table is empty.
@@ -36,7 +37,40 @@ export function sampleSeedingRequested(env: NodeJS.ProcessEnv = process.env): bo
   return env.ATHENA_SEED_SAMPLE_DATA === "1";
 }
 
+/**
+ * Read an install's untouched legacy seed of active systems as today's default.
+ *
+ * The installer used to write ids the AI Control page does not use
+ * (LEGACY_SEEDED_SYSTEMS), so the page drew every switch off while the record
+ * said three systems were on. Now that the switches are enforced when a scan
+ * starts, that record would refuse every scan. Exactly the installer's list
+ * means nobody has switched a system since install -- a switch from the page
+ * adds or removes one of the page's own ids -- so it is the installer's
+ * default, and becomes today's. Any other list is left exactly as it is: the
+ * page shows the ids it knows as they are, and the rest as unknown.
+ */
+export async function migrateLegacyActiveSystems(): Promise<void> {
+  // Best-effort: it runs at every start, before the server listens, and a
+  // read or write that fails here (a full disk) must never keep the server --
+  // and so every Stop and the kill switch -- from coming up. Left unmigrated,
+  // the legacy ids switch nothing on: scans are refused, which the page shows.
+  try {
+    const settings = await storage.getAIControlSettings();
+    const recorded = settings?.activeSystems ?? null;
+    if (!recorded || recorded.length !== LEGACY_SEEDED_SYSTEMS.length) return;
+    if (!LEGACY_SEEDED_SYSTEMS.every((id, i) => recorded[i] === id)) return;
+    await storage.updateAIControlSettings({ activeSystems: [...DEFAULT_ACTIVE_SYSTEMS] });
+    console.log("[init] AI control: the installer's legacy system ids replaced by its current default");
+  } catch (cause) {
+    console.error(
+      `[init] AI control: the installer's legacy system ids could not be replaced: ${
+        cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
 export async function initializeDefaultData(): Promise<void> {
+  await migrateLegacyActiveSystems();
   const existing = await storage.getAllUsers();
   if (existing.length > 0) {
     return;
@@ -62,13 +96,14 @@ export async function initializeDefaultData(): Promise<void> {
   };
   await storage.createUser(testUser);
 
+  // The page's own ids: the installer used to write ids no screen knew
+  // (LEGACY_SEEDED_SYSTEMS), and every switch read off over a record that
+  // said three systems were on.
   await storage.updateAIControlSettings({
     systemStatus: "operational",
     killSwitchEnabled: false,
-    overrideMode: false,
-    activeSystems: ["threat_detection", "vulnerability_scanner", "log_analyzer"],
+    activeSystems: [...DEFAULT_ACTIVE_SYSTEMS],
     maxConcurrentTests: 5,
-    autoShutdownThreshold: 90,
     lastModifiedBy: admin.id,
   });
 

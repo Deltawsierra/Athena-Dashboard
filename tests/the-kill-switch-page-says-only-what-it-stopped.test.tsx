@@ -119,7 +119,7 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
   it("Confirm Shutdown is not held back while another setting is saving", async () => {
     mount(SETTINGS);
     const sent = engageAnswers({ listed: true, scans: [] });
-    fireEvent.click(screen.getByTestId("switch-override-mode")); // its PATCH never answers
+    fireEvent.click(screen.getByTestId("switch-penetration-testing")); // its PATCH never answers
     await waitFor(() => expect(sent).toHaveLength(1));
     fireEvent.click(screen.getByTestId("button-kill-switch"));
     const confirm = screen.getByTestId("button-confirm-kill-switch") as HTMLButtonElement;

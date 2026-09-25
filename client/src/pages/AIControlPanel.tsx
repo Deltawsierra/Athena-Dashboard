@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest, apiFetch, throwIfResNotOk } from "@/lib/queryClient";
 import type { AIControlSetting } from "@shared/schema";
+import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
 
@@ -217,7 +218,7 @@ export default function AIControlPanel() {
     updateMutation.mutate({
       killSwitchEnabled: false,
       systemStatus: "active",
-      activeSystems: ["penetration-testing", "vulnerability-scanner", "threat-detection"],
+      activeSystems: [...DEFAULT_ACTIVE_SYSTEMS],
     });
   };
 
@@ -231,23 +232,24 @@ export default function AIControlPanel() {
     updateMutation.mutate({ activeSystems: newSystems });
   };
 
-  const handleOverrideMode = (enabled: boolean) => {
-    updateMutation.mutate({ overrideMode: enabled });
-  };
-
-  const handleUpdateThreshold = (value: number) => {
-    updateMutation.mutate({ autoShutdownThreshold: value });
-  };
-
   const handleUpdateMaxTests = (value: number) => {
     updateMutation.mutate({ maxConcurrentTests: value });
   };
 
-  const systemOptions = [
-    { id: "penetration-testing", label: "Penetration Testing", icon: Shield },
-    { id: "vulnerability-scanner", label: "Vulnerability Scanner", icon: Activity },
-    { id: "threat-detection", label: "Threat Detection", icon: AlertTriangle },
-  ];
+  // The systems the server switches (shared/ai-systems.ts), and what switching
+  // each off does. "Threat Detection" was offered beside them and governed
+  // nothing -- this build does no threat detection -- so it is not offered.
+  const ICONS: Record<string, typeof Shield> = { "penetration-testing": Shield, "vulnerability-scanner": Activity };
+  const EFFECT: Record<string, string> = {
+    "penetration-testing": "Off: no penetration test (the scan screens' scans) can be started.",
+    "vulnerability-scanner": "Off: no vulnerability scan can be started.",
+  };
+  const systemOptions = AI_SYSTEMS.map((one) => ({ ...one, icon: ICONS[one.id] ?? Shield, effect: EFFECT[one.id] ?? "" }));
+  // Ids on record that are not a system this build switches (the installer's
+  // old ids, or anything written through the API): shown, not guessed at.
+  const unknownSystems = known
+    ? (settings.activeSystems ?? []).filter((id) => !systemOptions.some((one) => one.id === id))
+    : [];
 
   // No full-page spinner while the settings load: it hid the kill switch
   // until they answered, so a read that hung held the stop out of reach. The
@@ -286,7 +288,7 @@ export default function AIControlPanel() {
                 animate={{ opacity: 1 }}
                 transition={{ delay: 0.8, duration: 1 }}
               >
-                Monitor and control all AI systems with emergency override capabilities
+                Stop what is running, and decide which scans may start
               </motion.p>
             </div>
 
@@ -457,7 +459,9 @@ export default function AIControlPanel() {
                   Active Systems
                 </CardTitle>
                 <CardDescription>
-                  Enable or disable individual AI systems
+                  Enforced when a scan starts: a scan whose system is switched off is refused. A scan already
+                  running is not stopped by a switch -- use its Stop or the kill switch -- and no switch ever holds
+                  back a stop.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -476,9 +480,12 @@ export default function AIControlPanel() {
                     >
                       <div className="flex items-center gap-3">
                         <Icon className={`w-5 h-5 ${isActive ? 'text-primary' : 'text-muted-foreground'}`} />
-                        <Label htmlFor={`system-${system.id}`} className="cursor-pointer">
-                          {system.label}
-                        </Label>
+                        <div>
+                          <Label htmlFor={`system-${system.id}`} className="cursor-pointer">
+                            {system.label}
+                          </Label>
+                          <p className="text-xs text-muted-foreground">{system.effect}</p>
+                        </div>
                       </div>
                       <Switch
                         id={`system-${system.id}`}
@@ -490,6 +497,12 @@ export default function AIControlPanel() {
                     </motion.div>
                   );
                 })}
+                {unknownSystems.length > 0 && (
+                  <p className="text-sm text-muted-foreground" data-testid="text-unknown-systems">
+                    Also on record, and not a system this build switches, so it governs nothing:{" "}
+                    {unknownSystems.join(", ")}.
+                  </p>
+                )}
               </CardContent>
             </GlassCard>
           </AnimatedContainer>
@@ -503,26 +516,10 @@ export default function AIControlPanel() {
                   System Configuration
                 </CardTitle>
                 <CardDescription>
-                  Adjust system parameters and limits
+                  Enforced when a scan starts. Stops are never limited.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-6">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="override-mode">Override Mode</Label>
-                    <Switch
-                      id="override-mode"
-                      checked={settings?.overrideMode ?? false}
-                      onCheckedChange={handleOverrideMode}
-                      disabled={!known || isEmergency || updateMutation.isPending}
-                      data-testid="switch-override-mode"
-                    />
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Bypass safety protocols for emergency operations
-                  </p>
-                </div>
-
                 <div className="space-y-2">
                   <Label htmlFor="max-tests">Max Concurrent Tests</Label>
                   <div className="flex items-center gap-2">
@@ -538,25 +535,8 @@ export default function AIControlPanel() {
                     />
                     <span className="text-sm text-muted-foreground whitespace-nowrap">tests</span>
                   </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="shutdown-threshold">Auto-Shutdown Threshold</Label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      id="shutdown-threshold"
-                      type="number"
-                      min={50}
-                      max={100}
-                      value={settings?.autoShutdownThreshold ?? ""}
-                      onChange={(e) => handleUpdateThreshold(parseInt(e.target.value))}
-                      disabled={!known || isEmergency || updateMutation.isPending}
-                      data-testid="input-shutdown-threshold"
-                    />
-                    <span className="text-sm text-muted-foreground">%</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    System load threshold for automatic safety shutdown
+                  <p className="text-sm text-muted-foreground" data-testid="text-max-tests-effect">
+                    A scan is refused while this many engine scans are running (as the engine lists them; as recorded here when it cannot be asked).
                   </p>
                 </div>
               </CardContent>
@@ -571,7 +551,7 @@ export default function AIControlPanel() {
               <CardTitle>System Information</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">Active Systems</p>
                   <p className="text-2xl font-bold" data-testid="text-active-count">
@@ -581,12 +561,6 @@ export default function AIControlPanel() {
                     {known
                       ? `${systemOptions.filter((o) => settings.activeSystems?.includes(o.id)).length} / ${systemOptions.length}`
                       : "—"}
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <p className="text-sm text-muted-foreground">Override Mode</p>
-                  <p className="text-2xl font-bold" data-testid="text-override-status">
-                    {known ? (settings.overrideMode ? "Enabled" : "Disabled") : "—"}
                   </p>
                 </div>
                 <div className="space-y-1">

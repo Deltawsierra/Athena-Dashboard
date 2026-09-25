@@ -9,6 +9,7 @@ import * as engine from "./engine";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
+import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
@@ -464,7 +465,59 @@ function engineRecordEdited(
   return false;
 }
 
-const updateAIControlSettingSchema = insertAIControlSettingSchema.partial();
+/**
+ * What an AI Control change may set.
+ *
+ * Auto-Shutdown Threshold ("system load threshold for automatic safety
+ * shutdown") and Override Mode ("bypass safety protocols") were stored and
+ * read by nothing: no load is measured, nothing shuts down on one, and there
+ * is no protocol here to bypass. A control that does nothing, offered as a
+ * safety control, is worse than none -- someone relies on it. They are no
+ * longer offered, and a change that sets one is refused, naming it
+ * (refusedAIControlFields) -- unless it engages the kill switch, which is
+ * never refused (engagingAIControlChange); the columns stay, unread, so no
+ * stored install breaks. Max Concurrent Tests is enforced when a scan starts, so it is a
+ * real limit of at least one.
+ */
+const updateAIControlSettingSchema = insertAIControlSettingSchema
+  .omit({ overrideMode: true, autoShutdownThreshold: true })
+  .extend({ maxConcurrentTests: z.number().int().min(1).max(1000) })
+  .partial();
+
+const UNENFORCED_AI_CONTROL_FIELDS = ["overrideMode", "autoShutdownThreshold"] as const;
+
+function refusedAIControlFields(res: Response, body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const named = UNENFORCED_AI_CONTROL_FIELDS.filter((field) => field in (body as Record<string, unknown>));
+  if (named.length === 0) return false;
+  res.status(400).json({
+    message: `${named.join(" and ")} ${named.length === 1 ? "is" : "are"} not enforced by this build -- nothing ` +
+      "measures load or shuts down on it, and there is no protocol to bypass -- so it cannot be set",
+  });
+  return true;
+}
+
+/**
+ * What an engaging change stores. Engaging the kill switch is never refused
+ * over the other fields sent with it: a field this build does not take (an
+ * unenforced one, or a value the schema refuses) is left out and named, and
+ * the switch is engaged and the stops sent all the same.
+ */
+function engagingAIControlChange(body: Record<string, unknown>): {
+  data: z.infer<typeof updateAIControlSettingSchema>;
+  ignored: string[];
+} {
+  const ignored = new Set<string>(UNENFORCED_AI_CONTROL_FIELDS.filter((field) => field in body));
+  const without = () => Object.fromEntries(Object.entries(body).filter(([key]) => !ignored.has(key)));
+  let parsed = updateAIControlSettingSchema.safeParse(without());
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      if (issue.path.length > 0) ignored.add(String(issue.path[0]));
+    }
+    parsed = updateAIControlSettingSchema.safeParse(without());
+  }
+  return { data: parsed.success ? parsed.data : { killSwitchEnabled: true }, ignored: Array.from(ignored) };
+}
 const updateClassifierSchema = insertClassifierSchema.partial();
 
 /**
@@ -1146,6 +1199,54 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // What the AI Control page says about starting scans, enforced here --
+    // at the start, and only there: nothing on that page can hold back a
+    // stop. Its system switches and Max Concurrent Tests were stored and
+    // read by nothing, so switching scanning off stopped no scan from
+    // starting. A settings read that fails refuses the start (asyncHandler's
+    // 500); it never touches a stop.
+    const control = await storage.getAIControlSettings();
+    const system = systemOfScan(data.testType);
+    const active = control ? control.activeSystems ?? [] : DEFAULT_ACTIVE_SYSTEMS;
+    if (!active.includes(system)) {
+      const label = AI_SYSTEMS.find((one) => one.id === system)!.label;
+      return void res.status(409).json({
+        error: `${label} is switched off on the AI Control page, so this scan was not started. Switch it on there to ` +
+          "start it.",
+        reason: "system_off",
+        system,
+      });
+    }
+    // Counted from the engine's own list of live runs: a row reads
+    // "running" until someone polls its status, so rows alone would count
+    // scans that finished long ago and refuse every start once enough pages
+    // were left -- and would miss a live run that has no row. Only when that
+    // list cannot be read are the rows recorded as running counted instead.
+    const limit = control?.maxConcurrentTests ?? 5;
+    let running: number;
+    let unlisted: string | null = null;
+    try {
+      running = (await engine.activeRuns()).length;
+    } catch (cause) {
+      if (!(cause instanceof engine.EngineUnavailable)) throw cause;
+      unlisted = cause.message;
+      running = (await storage.getAllTests()).filter((test) => unfinishedRunOf(test) !== null).length;
+    }
+    if (running >= limit) {
+      return void res.status(409).json({
+        error: `${running} engine scan${running === 1 ? " is" : "s are"} ` +
+          (unlisted === null
+            ? "running"
+            : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
+          `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started. Stop one, ` +
+          "or raise the limit, to start another.",
+        reason: "concurrency_limit",
+        running,
+        counted: unlisted === null ? "engine" : "recorded",
+        limit,
+      });
+    }
+
     let started;
     try {
       started = await engine.startScan({
@@ -1703,7 +1804,18 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.patch("/api/ai-control", requireAdmin, asyncHandler(async (req, res) => {
-    const data = updateAIControlSettingSchema.parse(req.body);
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>)
+      : {};
+    let data: z.infer<typeof updateAIControlSettingSchema>;
+    let ignored: string[] = [];
+    if (body.killSwitchEnabled === true) {
+      ({ data, ignored } = engagingAIControlChange(body));
+    } else {
+      if (refusedAIControlFields(res, req.body)) return;
+      data = updateAIControlSettingSchema.parse(req.body);
+    }
+    const noted = ignored.length > 0 ? { ignored } : {};
     // The flag first, so every other write is refused from here on; then the
     // stops (stopEverythingRunning). Sent again each time the switch is sent
     // on, so an operator can retry the scans that could not be reached.
@@ -1730,6 +1842,7 @@ export function registerRoutes(app: Express): void {
     }
     const logged = stops === null || engineRuns === null ? data : {
       ...data,
+      ...noted,
       ...(notStored !== null ? { notStored } : {}),
       stops: stops.listed
         ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
@@ -1755,9 +1868,10 @@ export function registerRoutes(app: Express): void {
         engaged: false,
         stops,
         engineRuns,
+        ...noted,
       });
     }
-    res.json(stops === null ? settings : { ...settings, stops, engineRuns });
+    res.json(stops === null ? settings : { ...settings, stops, engineRuns, ...noted });
   }));
 
   // ==== AI CHAT ====

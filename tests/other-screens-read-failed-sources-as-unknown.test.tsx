@@ -167,7 +167,9 @@ describe("control screens do not show a failed read as a safe state", () => {
     await failed(client, ["/api/ai-control"]);
     await waitFor(() => expect(text()).toMatch(/Could not load the AI control settings: source failed/));
     expect(screen.getByTestId("text-active-count").textContent).toBe("—");
-    expect(screen.getByTestId("text-override-status").textContent).toBe("—");
+    // Override Mode is no longer drawn at all (it governed nothing); it is not
+    // drawn in a state nobody read either.
+    expect(screen.queryByTestId("text-override-status")).toBeNull();
     expect(screen.getByTestId("text-status").textContent).toBe("—");
     expect(text()).toMatch(/Kill switch state unknown/);
     // The emergency action stays available: not knowing the state is no
@@ -176,7 +178,9 @@ describe("control screens do not show a failed read as a safe state", () => {
   });
 
   it("AI control panel: the installer's settings are not shown as offline, nor as systems it cannot show", () => {
-    // What server/init-data.ts writes on every first start.
+    // What server/init-data.ts wrote on first start before its ids matched
+    // the page's -- still on record wherever someone has changed it since
+    // (an untouched copy is replaced by today's default at startup).
     mount(<AIControlPanel />, [[["/api/ai-control"], {
       id: "s", systemStatus: "operational", killSwitchEnabled: false, overrideMode: false,
       activeSystems: ["threat_detection", "vulnerability_scanner", "log_analyzer"],
@@ -185,8 +189,13 @@ describe("control screens do not show a failed read as a safe state", () => {
     }]]);
     expect(screen.getByTestId("text-status").textContent).toBe("Operational");
     // None of those ids is a system this page lists (every switch is off), so
-    // the count is 0 of 3, not "3 / 3".
-    expect(screen.getByTestId("text-active-count").textContent).toBe("0 / 3");
+    // the count is 0 of the 2 it switches, not "3 / 3" -- and the ids are
+    // shown as what they are, not guessed at.
+    expect(screen.getByTestId("text-active-count").textContent).toBe("0 / 2");
+    expect(screen.getByTestId("text-unknown-systems").textContent).toBe(
+      "Also on record, and not a system this build switches, so it governs nothing: threat_detection, " +
+      "vulnerability_scanner, log_analyzer.",
+    );
   });
 
   it("Assurance: a registry that failed hides the views, rather than drawing deployments without it", async () => {

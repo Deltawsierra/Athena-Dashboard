@@ -16,6 +16,7 @@ import {
   type ApiKey,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
+import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 
@@ -154,7 +155,9 @@ function defaultControlSettings(): AIControlSetting {
     systemStatus: "active",
     killSwitchEnabled: false,
     overrideMode: false,
-    activeSystems: [],
+    // Every system this build can switch, on: an install that has never
+    // touched the AI Control page scans as it always did.
+    activeSystems: [...DEFAULT_ACTIVE_SYSTEMS],
     maxConcurrentTests: 5,
     autoShutdownThreshold: 90,
     lastModifiedBy: null,

@@ -3,6 +3,7 @@ import * as schema from "@shared/schema";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
+import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import type { IStorage } from "./storage";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
@@ -492,7 +493,7 @@ export class SqliteStorage implements IStorage {
         systemStatus: "active",
         killSwitchEnabled: false,
         overrideMode: false,
-        activeSystems: [],
+        activeSystems: [...DEFAULT_ACTIVE_SYSTEMS],
         maxConcurrentTests: 5,
         autoShutdownThreshold: 90,
         lastModifiedBy: null,
