@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { motion, AnimatePresence } from "framer-motion";
 import { MessageSquare, Send, Paperclip, FileText, Copy, Check, Bot, User, Unplug } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,9 +27,16 @@ export default function AIChat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { data: messages = [], isLoading } = useQuery<AIChatMessage[]>({
+  const {
+    data: messages = [],
+    isLoading,
+    isError: messagesFailed,
+    error: messagesError,
+  } = useQuery<AIChatMessage[]>({
     queryKey: ["/api/chat"],
   });
+  // A failed read is not an empty conversation: its counts are unknown.
+  const tally = (n: number) => (messagesFailed ? "—" : n);
 
   const { data: assistant } = useQuery<AssistantStatus>({
     queryKey: ["/api/assistant/status"],
@@ -275,7 +283,9 @@ export default function AIChat() {
                     <div className="text-center space-y-2">
                       <Bot className="w-16 h-16 text-muted-foreground mx-auto opacity-50" />
                       <p className="text-muted-foreground">
-                        No messages yet. Start a conversation with Athena AI
+                        {messagesFailed
+                          ? `Could not load the conversation: ${errorMessage(messagesError)}`
+                          : "No messages yet. Start a conversation with Athena AI"}
                       </p>
                     </div>
                   </div>
@@ -362,19 +372,19 @@ export default function AIChat() {
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">Total Messages</p>
                   <p className="text-2xl font-bold" data-testid="text-total-messages">
-                    {messages.length}
+                    {tally(messages.length)}
                   </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">AI Responses</p>
                   <p className="text-2xl font-bold" data-testid="text-ai-responses">
-                    {messages.filter(m => m.sender === "ai").length}
+                    {tally(messages.filter(m => m.sender === "ai").length)}
                   </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">Your Messages</p>
                   <p className="text-2xl font-bold" data-testid="text-user-messages">
-                    {messages.filter(m => m.sender === "user").length}
+                    {tally(messages.filter(m => m.sender === "user").length)}
                   </p>
                 </div>
               </div>

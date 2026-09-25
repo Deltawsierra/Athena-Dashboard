@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { Plus, Search, Filter, FileText, Download, Trash2, Calendar, Pencil } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
@@ -38,7 +39,12 @@ export default function Documents() {
   const [editingDocument, setEditingDocument] = useState<Document | null>(null);
   const { toast } = useToast();
 
-  const { data: documents = [], isLoading } = useQuery<Document[]>({
+  const {
+    data: documents = [],
+    isLoading,
+    isError: documentsFailed,
+    error: documentsError,
+  } = useQuery<Document[]>({
     queryKey: ["/api/documents"],
   });
 
@@ -287,7 +293,18 @@ export default function Documents() {
         </AnimatedContainer>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredDocuments.length === 0 && (
+          {documentsFailed && (
+            // A failed read is not an empty record: say so, not "No Documents Found".
+            <div className="col-span-full">
+              <GlassCard>
+                <div className="text-center py-12">
+                  <FileText className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">Could not load documents: {errorMessage(documentsError)}</p>
+                </div>
+              </GlassCard>
+            </div>
+          )}
+          {!documentsFailed && filteredDocuments.length === 0 && (
             <div className="col-span-full">
               <AnimatedContainer direction="up" delay={0.2}>
                 <GlassCard>

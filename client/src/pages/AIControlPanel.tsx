@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { motion } from "framer-motion";
 import { Shield, Power, AlertTriangle, Settings, Activity, Zap, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,9 +19,18 @@ export default function AIControlPanel() {
   const { toast } = useToast();
   const [isKillSwitchConfirmOpen, setIsKillSwitchConfirmOpen] = useState(false);
 
-  const { data: settings, isLoading } = useQuery<AIControlSetting>({
+  const {
+    data: settings,
+    isLoading,
+    isError: settingsFailed,
+    error: settingsError,
+  } = useQuery<AIControlSetting>({
     queryKey: ["/api/ai-control"],
   });
+  // Whether the settings are in hand. When they are not, no control is drawn
+  // in a state nobody read: not the kill switch as off, not a system as
+  // offline, not a limit at a default the record may not hold.
+  const known = settings !== undefined && settings !== null;
 
   const updateMutation = useMutation({
     mutationFn: async (data: Partial<AIControlSetting>) => {
@@ -101,6 +111,15 @@ export default function AIControlPanel() {
   }
 
   const isEmergency = settings?.killSwitchEnabled || settings?.systemStatus === "shutdown";
+  // The status as recorded. It used to read "Offline" for anything but
+  // "active", so the installer's "operational" showed as offline.
+  const statusLabel = !known
+    ? "—"
+    : isEmergency
+      ? "Shut down"
+      : settings.systemStatus === "active" || settings.systemStatus === "operational"
+        ? "Operational"
+        : settings.systemStatus.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <div className="min-h-screen">
@@ -144,6 +163,14 @@ export default function AIControlPanel() {
           </div>
         </AnimatedContainer>
 
+        {settingsFailed && (
+          <GlassCard className="border border-destructive/50">
+            <CardContent className="pt-6 text-sm text-muted-foreground" data-testid="text-settings-failed">
+              Could not load the AI control settings: {errorMessage(settingsError)}
+            </CardContent>
+          </GlassCard>
+        )}
+
         {/* Emergency Kill Switch */}
         <AnimatedContainer direction="up" delay={0.2}>
           <GlassCard className="border-2 border-destructive/50">
@@ -182,6 +209,11 @@ export default function AIControlPanel() {
                 </div>
               ) : (
                 <div className="space-y-4">
+                  {!known && (
+                    <p className="text-sm text-muted-foreground" data-testid="text-kill-switch-unknown">
+                      Kill switch state unknown: the settings could not be read. Activating it still sends the shutdown.
+                    </p>
+                  )}
                   {!isKillSwitchConfirmOpen ? (
                     <Button
                       onClick={handleKillSwitch}
@@ -270,7 +302,7 @@ export default function AIControlPanel() {
                         id={`system-${system.id}`}
                         checked={isActive}
                         onCheckedChange={() => handleToggleSystem(system.id)}
-                        disabled={isEmergency || updateMutation.isPending}
+                        disabled={!known || isEmergency || updateMutation.isPending}
                         data-testid={`switch-${system.id}`}
                       />
                     </motion.div>
@@ -300,7 +332,7 @@ export default function AIControlPanel() {
                       id="override-mode"
                       checked={settings?.overrideMode ?? false}
                       onCheckedChange={handleOverrideMode}
-                      disabled={isEmergency || updateMutation.isPending}
+                      disabled={!known || isEmergency || updateMutation.isPending}
                       data-testid="switch-override-mode"
                     />
                   </div>
@@ -317,9 +349,9 @@ export default function AIControlPanel() {
                       type="number"
                       min={1}
                       max={20}
-                      value={settings?.maxConcurrentTests ?? 5}
+                      value={settings?.maxConcurrentTests ?? ""}
                       onChange={(e) => handleUpdateMaxTests(parseInt(e.target.value))}
-                      disabled={isEmergency || updateMutation.isPending}
+                      disabled={!known || isEmergency || updateMutation.isPending}
                       data-testid="input-max-tests"
                     />
                     <span className="text-sm text-muted-foreground whitespace-nowrap">tests</span>
@@ -334,9 +366,9 @@ export default function AIControlPanel() {
                       type="number"
                       min={50}
                       max={100}
-                      value={settings?.autoShutdownThreshold ?? 90}
+                      value={settings?.autoShutdownThreshold ?? ""}
                       onChange={(e) => handleUpdateThreshold(parseInt(e.target.value))}
-                      disabled={isEmergency || updateMutation.isPending}
+                      disabled={!known || isEmergency || updateMutation.isPending}
                       data-testid="input-shutdown-threshold"
                     />
                     <span className="text-sm text-muted-foreground">%</span>
@@ -361,19 +393,24 @@ export default function AIControlPanel() {
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">Active Systems</p>
                   <p className="text-2xl font-bold" data-testid="text-active-count">
-                    {settings?.activeSystems?.length ?? 0} / {systemOptions.length}
+                    {/* Only the systems this page lists, so the count agrees
+                        with the switches above; an id it does not know is
+                        not an active system it can show. */}
+                    {known
+                      ? `${systemOptions.filter((o) => settings.activeSystems?.includes(o.id)).length} / ${systemOptions.length}`
+                      : "—"}
                   </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">Override Mode</p>
                   <p className="text-2xl font-bold" data-testid="text-override-status">
-                    {settings?.overrideMode ? "Enabled" : "Disabled"}
+                    {known ? (settings.overrideMode ? "Enabled" : "Disabled") : "—"}
                   </p>
                 </div>
                 <div className="space-y-1">
                   <p className="text-sm text-muted-foreground">System Status</p>
                   <p className="text-2xl font-bold" data-testid="text-status">
-                    {settings?.systemStatus === "active" ? "Operational" : "Offline"}
+                    {statusLabel}
                   </p>
                 </div>
               </div>

@@ -7589,26 +7589,44 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   // deployment's children, and grouping client-side means one fetch each rather
   // than a request per deployment. The BFF follows DRF pagination, so these are
   // complete.
-  const { data: deployments = [], isLoading: depLoading } = useQuery<Deployment[]>({
+  const deploymentsQ = useQuery<Deployment[]>({
     queryKey: ["/api/assurance/deployments"],
     enabled: reachable,
   });
-  const { data: findings = [] } = useQuery<Finding[]>({
+  const findingsQ = useQuery<Finding[]>({
     queryKey: ["/api/assurance/findings"],
     enabled: reachable,
   });
-  const { data: unknowns = [] } = useQuery<Unknown[]>({
+  const unknownsQ = useQuery<Unknown[]>({
     queryKey: ["/api/assurance/unknowns"],
     enabled: reachable,
   });
-  const { data: assets = [] } = useQuery<Asset[]>({
+  const assetsQ = useQuery<Asset[]>({
     queryKey: ["/api/assurance/assets"],
     enabled: reachable,
   });
-  const { data: providers = [] } = useQuery<Provider[]>({
+  const providersQ = useQuery<Provider[]>({
     queryKey: ["/api/assurance/providers"],
     enabled: reachable,
   });
+  const deployments = deploymentsQ.data ?? [];
+  const findings = findingsQ.data ?? [];
+  const unknowns = unknownsQ.data ?? [];
+  const assets = assetsQ.data ?? [];
+  const providers = providersQ.data ?? [];
+  // Every registry, or none. A deployment drawn after its findings or gaps
+  // failed to load would show "0 findings" and no open gaps -- a failed read
+  // rendered as a clean record. So one failure replaces the views with the
+  // reason, and nothing is drawn until all five are in hand.
+  const registries = [
+    ["deployments", deploymentsQ],
+    ["findings", findingsQ],
+    ["unknowns", unknownsQ],
+    ["assets", assetsQ],
+    ["providers", providersQ],
+  ] as const;
+  const registryFailure = registries.find(([, q]) => q.isError);
+  const registriesLoading = registries.some(([, q]) => q.data === undefined);
   // Who a finding's remediation may be assigned to. Only an admin sees the
   // picker, so this is fetched only for an admin; the endpoint returns just an
   // id and username, and the assign write sends the username the backend knows.
@@ -7937,7 +7955,15 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
             {ViewToggle}
           </div>
 
-          {depLoading ? (
+          {registryFailure ? (
+            <GlassCard>
+              <p className="text-[13px] text-muted-foreground" data-testid="assurance-registry-failed">
+                Could not load the {registryFailure[0]}:{" "}
+                {registryFailure[1].error instanceof Error ? registryFailure[1].error.message : "request failed"}.
+                Nothing is drawn below, since a deployment shown without its {registryFailure[0]} would look complete.
+              </p>
+            </GlassCard>
+          ) : registriesLoading ? (
             <GlassCard>
               <p className="text-[13px] text-muted-foreground">Loading…</p>
             </GlassCard>

@@ -5,6 +5,7 @@
  * workload, assigned systems -- are left as a dash rather than invented.
  */
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import {
   Users,
   UserCheck,
@@ -216,6 +217,7 @@ function whenLabel(iso: string | null): string {
 function ApiKeysPanel({
   keys,
   loading,
+  failure,
   fresh,
   onCreate,
   creating,
@@ -225,6 +227,8 @@ function ApiKeysPanel({
 }: {
   keys: ApiKey[];
   loading: boolean;
+  /** Why the keys could not be read, or null when they were. */
+  failure: string | null;
   fresh: { name: string; secret: string } | null;
   onCreate: (name: string) => void;
   creating: boolean;
@@ -294,7 +298,9 @@ function ApiKeysPanel({
         </button>
       </div>
 
-      {loading ? (
+      {failure !== null ? (
+        <p className="text-[12px] text-muted-foreground">Could not load API keys: {failure}</p>
+      ) : loading ? (
         <p className="text-[12px] text-muted-foreground">Loading keys…</p>
       ) : keys.length === 0 ? (
         <p className="text-[12px] text-muted-foreground">
@@ -337,7 +343,14 @@ function ApiKeysPanel({
 
 export default function Teams() {
   const { toast } = useToast();
-  const { data: users = [], isLoading } = useQuery<ApiUser[]>({ queryKey: ["/api/users"] });
+  const {
+    data: users = [],
+    isLoading,
+    isError: usersFailed,
+    error: usersError,
+  } = useQuery<ApiUser[]>({ queryKey: ["/api/users"] });
+  // A count over a directory that could not be read is not zero.
+  const tally = (n: number) => (usersFailed ? "—" : isLoading ? "…" : n);
   // The approval workflow is derived from live remediation state; the API keys
   // are this dashboard's own programmatic credentials. Both are admin reads (the
   // /admin route is admin-only), so they load with the page.
@@ -346,7 +359,12 @@ export default function Teams() {
     isLoading: findingsLoading,
     isError: findingsError,
   } = useQuery<ApiFinding[]>({ queryKey: ["/api/assurance/findings"] });
-  const { data: apiKeys = [], isLoading: keysLoading } = useQuery<ApiKey[]>({
+  const {
+    data: apiKeys = [],
+    isLoading: keysLoading,
+    isError: keysFailed,
+    error: keysError,
+  } = useQuery<ApiKey[]>({
     queryKey: ["/api/api-keys"],
   });
 
@@ -430,10 +448,11 @@ export default function Teams() {
 
       {/* stats -- live from the user directory */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Total Members" value={users.length} icon={Users} sublabel={`Across ${roles.length} role${roles.length === 1 ? "" : "s"}`} />
-        <StatCard label="Active Members" value={active} icon={UserCheck} sublabel="Can sign in and act" />
-        <StatCard label="Administrators" value={admins} icon={ShieldHalf} sublabel="Full approval authority" />
-        <StatCard label="Inactive" value={users.length - active} icon={UserCog} sublabel="Access suspended" />
+        <StatCard label="Total Members" value={tally(users.length)} icon={Users}
+          sublabel={usersFailed ? "Could not load team members" : `Across ${roles.length} role${roles.length === 1 ? "" : "s"}`} />
+        <StatCard label="Active Members" value={tally(active)} icon={UserCheck} sublabel="Can sign in and act" />
+        <StatCard label="Administrators" value={tally(admins)} icon={ShieldHalf} sublabel="Full approval authority" />
+        <StatCard label="Inactive" value={tally(users.length - active)} icon={UserCog} sublabel="Access suspended" />
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -469,7 +488,9 @@ export default function Teams() {
                 onCancel={() => setAddingMember(false)}
               />
             )}
-            {users.length === 0 ? (
+            {usersFailed ? (
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">Could not load team members: {errorMessage(usersError)}</p>
+            ) : users.length === 0 ? (
               <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{isLoading ? "Loading team…" : "No team members found."}</p>
             ) : tab === "Team Members" ? (
               filtered.length === 0 ? (
@@ -569,6 +590,7 @@ export default function Teams() {
                   <ApiKeysPanel
                     keys={apiKeys}
                     loading={keysLoading}
+                    failure={keysFailed ? errorMessage(keysError) : null}
                     fresh={freshKey}
                     onCreate={(n) => createApiKey.mutate(n)}
                     creating={createApiKey.isPending}

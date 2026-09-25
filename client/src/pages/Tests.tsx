@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { Plus, Search, Filter, Calendar, MapPin, Shield, AlertTriangle, CheckCircle, XCircle, Pencil, FileText } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
@@ -67,7 +68,12 @@ export default function Tests() {
   const [editingTest, setEditingTest] = useState<Test | null>(null);
   const { toast } = useToast();
 
-  const { data: tests = [], isLoading } = useQuery<Test[]>({
+  const {
+    data: tests = [],
+    isLoading,
+    isError: testsFailed,
+    error: testsError,
+  } = useQuery<Test[]>({
     queryKey: ["/api/tests"],
   });
 
@@ -474,7 +480,17 @@ export default function Tests() {
 
         <AnimatedContainer direction="up" delay={0.2}>
           <div className="grid gap-6">
-            {filteredTests.length === 0 ? (
+            {testsFailed ? (
+              // A failed read is not an empty record: say so, not "No Tests Found".
+              <GlassCard>
+                <div className="text-center py-12">
+                  <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">
+                    Could not load tests: {errorMessage(testsError)}
+                  </p>
+                </div>
+              </GlassCard>
+            ) : filteredTests.length === 0 ? (
               <GlassCard>
                 <div className="text-center py-12">
                   <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />

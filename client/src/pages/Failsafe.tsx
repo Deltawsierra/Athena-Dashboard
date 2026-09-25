@@ -26,6 +26,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import {
   Snowflake,
   Play,
@@ -546,7 +547,11 @@ export default function Failsafe() {
   // The command whose console is open.
   const [openUuid, setOpenUuid] = useState<string | null>(null);
 
-  const { data: status } = useQuery<FailsafeStatus>({
+  const {
+    data: status,
+    isError: statusFailed,
+    error: statusError,
+  } = useQuery<FailsafeStatus>({
     queryKey: ["/api/failsafe/status"],
     refetchInterval: 30_000,
   });
@@ -558,17 +563,39 @@ export default function Failsafe() {
   const authorized = status?.authorized === true;
   const canOperate = configured && authorized;
 
-  const { data: state } = useQuery<FailsafeStateView>({
+  const {
+    data: state,
+    isError: stateFailed,
+    error: stateError,
+  } = useQuery<FailsafeStateView>({
     queryKey: ["/api/failsafe/state", effectiveEngineId],
     enabled: canOperate && effectiveEngineId.length > 0,
     refetchInterval: 5_000,
   });
 
-  const { data: audit = [] } = useQuery<FailsafeAuditEvent[]>({
+  const {
+    data: audit = [],
+    isSuccess: auditRead,
+    isError: auditFailed,
+    error: auditError,
+  } = useQuery<FailsafeAuditEvent[]>({
     queryKey: ["/api/failsafe/audit"],
     enabled: canOperate,
     refetchInterval: 15_000,
   });
+
+  // The command counts and the governor state come from the engine's state
+  // read. Until it has answered -- the control plane not ready, no engine
+  // named, still loading, or failed -- they are unknown, not zero.
+  const stateCount = (read: (view: FailsafeStateView) => number) =>
+    state ? read(state) : stateFailed || !canOperate || effectiveEngineId.length === 0 ? "—" : "…";
+  const stateUnread = stateFailed
+    ? `Could not read the engine state: ${errorMessage(stateError)}`
+    : !canOperate
+      ? "Not read: the failsafe control plane is not ready."
+      : effectiveEngineId.length === 0
+        ? "Not read: name a target engine."
+        : "Reading the engine state…";
 
   const draft = useMutation({
     mutationFn: async (spec: ActionSpec) => {
@@ -620,8 +647,9 @@ export default function Failsafe() {
           <div className="space-y-1">
             <div className="font-medium">The failsafe control plane is not ready</div>
             <p className="text-sm text-muted-foreground">
-              {status?.detail ??
-                "Checking the control plane…"}
+              {statusFailed
+                ? `Could not read the failsafe status: ${errorMessage(statusError)}`
+                : status?.detail ?? "Checking the control plane…"}
             </p>
           </div>
         </GlassCard>
@@ -631,7 +659,12 @@ export default function Failsafe() {
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-4">
         <GlassCard bodyClassName="space-y-2">
           <span className="athena-label">Engine governor</span>
-          {state?.engineStateAvailable ? (
+          {!state ? (
+            <div>
+              <StatusPill tone="neutral">Not read</StatusPill>
+              <p className="mt-1.5 text-xs text-muted-foreground">{stateUnread}</p>
+            </div>
+          ) : state.engineStateAvailable ? (
             <StatusPill tone={engineStateTone(state.engineState)}>{state.engineState ?? "unknown"}</StatusPill>
           ) : (
             <div>
@@ -644,11 +677,11 @@ export default function Failsafe() {
         </GlassCard>
         <StatCard
           label="Awaiting signatures"
-          value={state?.awaitingSignatures.length ?? 0}
+          value={stateCount((view) => view.awaitingSignatures.length)}
           icon={KeyRound}
           layout="tile"
         />
-        <StatCard label="Ready for engine" value={state?.ready.length ?? 0} icon={Radio} layout="tile" />
+        <StatCard label="Ready for engine" value={stateCount((view) => view.ready.length)} icon={Radio} layout="tile" />
         <GlassCard bodyClassName="space-y-2">
           <span className="athena-label">Target engine</span>
           <Input
@@ -771,7 +804,17 @@ export default function Failsafe() {
         <AthenaLabel>Recent failsafe activity</AthenaLabel>
         <GlassCard className="mt-3" bodyClassName="p-0">
           <div className="divide-y divide-border/50">
-            {audit.length === 0 && (
+            {/* "No activity recorded" only about an audit read that came back
+                empty -- not one that failed, has not run, or cannot run. */}
+            {!auditRead ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                {auditFailed
+                  ? `Could not load failsafe activity: ${errorMessage(auditError)}`
+                  : !canOperate
+                    ? "Failsafe activity is not readable until the control plane is ready."
+                    : "Loading failsafe activity…"}
+              </div>
+            ) : audit.length === 0 && (
               <div className="py-8 text-center text-sm text-muted-foreground">No failsafe activity recorded yet.</div>
             )}
             {audit.slice(0, 20).map((event) => (

@@ -22,6 +22,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { formatDistanceToNow } from "date-fns";
 import {
   Activity, Boxes, Clock, Cpu, Gauge, MemoryStick, ScanLine, ShieldCheck,
@@ -86,13 +87,22 @@ const TOOLTIP = {
 } as const;
 
 export default function AIHealth() {
-  const { data: latest, isLoading } = useQuery<AIHealthMetric | null>({
+  const {
+    data: latest,
+    isLoading,
+    isError: latestFailed,
+    error: latestError,
+  } = useQuery<AIHealthMetric | null>({
     queryKey: ["/api/ai-health/latest"],
     // A sample is written every minute; there is no point reading faster.
     refetchInterval: 60_000,
   });
 
-  const { data: history = [] } = useQuery<AIHealthMetric[]>({
+  const {
+    data: history = [],
+    isError: historyFailed,
+    error: historyError,
+  } = useQuery<AIHealthMetric[]>({
     queryKey: ["/api/ai-health"],
     refetchInterval: 60_000,
   });
@@ -122,7 +132,17 @@ export default function AIHealth() {
           description="Measured on this machine, once a minute. Anything without a source is shown as absent rather than as a number."
         />
 
-        {!isLoading && !latest && (
+        {latestFailed && (
+          // A reading that could not be fetched is not "no reading yet", and
+          // is no evidence the sampler has stopped.
+          <GlassCard ruling>
+            <p className="text-sm text-muted-foreground" data-testid="text-reading-failed">
+              Could not load the latest reading: {errorMessage(latestError)}
+            </p>
+          </GlassCard>
+        )}
+
+        {!isLoading && !latestFailed && !latest && (
           <GlassCard ruling>
             <div className="athena-label">No reading yet</div>
             <p className="mt-2 text-sm text-muted-foreground" data-testid="text-no-reading">
@@ -216,7 +236,11 @@ export default function AIHealth() {
               <AnimatedContainer direction="up" delay={0.1}>
                 <GlassCard>
                   <div className="athena-label mb-4">This machine</div>
-                  {series.length < 2 ? (
+                  {historyFailed ? (
+                    <p className="text-sm text-muted-foreground" data-testid="text-history-failed">
+                      Could not load the reading history: {errorMessage(historyError)}
+                    </p>
+                  ) : series.length < 2 ? (
                     <p className="text-sm text-muted-foreground" data-testid="text-thin-series">
                       One reading so far. The line appears once there are two,
                       about a minute from now.
