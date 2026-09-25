@@ -1548,6 +1548,23 @@ describe("assurance BFF", () => {
           });
         }
 
+        // Packs that report their signing status: one plainly unsigned with a
+        // reason, and one sending the string "true", which is not a yes.
+        const packSigned: Record<string, unknown> = {
+          "/api/assurance/findings/f-unsigned/incident-pack/": false,
+          "/api/assurance/findings/f-strsigned/incident-pack/": "true",
+        };
+        if (path in packSigned && method === "GET") {
+          return json(200, {
+            pack_version: "mythos.assurance.incident_pack/1.0",
+            identity: { deployment: { uuid: "dep-1" }, finding: { uuid: "f-x" } },
+            receipt: { algorithm: "sha256", digest: "d".repeat(64), evidence_count: 0 },
+            algorithm: "sha256", digest: "e".repeat(64), computed_at: null,
+            signed: packSigned[path],
+            unsigned_reason: packSigned[path] === false ? "This backend holds no signing key." : null,
+          });
+        }
+
         if (path === "/api/assurance/findings/f-1/incident-pack/" && method === "GET") {
           // An honest pack: a null owner and a null decision carried at true
           // strength, the runtime transcript stated as an explicit gap.
@@ -2901,6 +2918,20 @@ describe("assurance BFF", () => {
     expect(res.body.runtimeTranscript.enginePackRef.engineRunId).toBeNull();
     // An uncomputed decision is null, never read as ready.
     expect(res.body.decision.decision).toBeNull();
+  });
+
+  it("carries the incident pack's signing status as the backend said it, and a silence or non-boolean as null", async () => {
+    const unsigned = await user.get("/api/assurance/findings/f-unsigned/incident-pack");
+    expect(unsigned.status).toBe(200);
+    expect(unsigned.body.signed).toBe(false);
+    expect(unsigned.body.unsignedReason).toBe("This backend holds no signing key.");
+    // f-1's pack says nothing about signing: null, not false and not true.
+    const silent = await user.get("/api/assurance/findings/f-1/incident-pack");
+    expect(silent.body.signed).toBeNull();
+    expect(silent.body.unsignedReason).toBeNull();
+    // The string "true" is not a report that the pack is signed.
+    const odd = await user.get("/api/assurance/findings/f-strsigned/incident-pack");
+    expect(odd.body.signed).toBeNull();
   });
 
   it("refuses the incident pack to anyone not signed in", async () => {

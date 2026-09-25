@@ -4963,6 +4963,13 @@ export interface IncidentPack {
   algorithm: string;
   digest: string;
   computedAt: string | null;
+  // Whether this copy of the pack is signed, exactly as the backend said: a
+  // boolean when it sent one, null when it sent nothing (or anything else).
+  // A silence is neither answer, so the page must not print "signed" or
+  // "unsigned" for it -- the same rule as the assurance receipt.
+  signed: boolean | null;
+  // The backend's own reason this copy is unsigned, verbatim; null when none.
+  unsignedReason: string | null;
 }
 
 function incidentPackAsset(raw: unknown): IncidentPackAsset | null {
@@ -5085,6 +5092,8 @@ function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
     algorithm: str(raw.algorithm),
     digest: str(raw.digest),
     computedAt: strOrNull(raw.computed_at),
+    signed: typeof raw.signed === "boolean" ? raw.signed : null,
+    unsignedReason: strOrNull(raw.unsigned_reason),
   };
 }
 

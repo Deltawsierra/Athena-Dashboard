@@ -1794,8 +1794,9 @@ function FindingRow({
           endpoint on demand: the attributed history of every workflow move. */}
       {showRemediation && <RemediationDetailView findingUuid={f.uuid} />}
       {/* Incident evidence pack (Phase 3.7): a finding IS the incident. A reader
-          opens the portable, verifiable pack on demand — it attests integrity and
-          provenance, never that the incident is resolved or the system secure. */}
+          opens the pack on demand. Its digests identify a recorded state, and
+          show a change only against an independent or signature-covered copy;
+          never that the incident is resolved or the system secure. */}
       <div className="mt-2 border-t border-border/30 pt-2">
         <button
           className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
@@ -7361,13 +7362,18 @@ interface IncidentPack {
   algorithm: string;
   digest: string;
   computedAt: string | null;
+  /** As the backend reported it; absent or null when it said nothing. */
+  signed?: boolean | null;
+  unsignedReason?: string | null;
 }
 
 /**
  * A finding's AI Incident Evidence Pack (Phase 3.7), self-fetching when a reader
- * opens it from the finding. Attests integrity and provenance, never that the
- * conclusion is true or the system fixed: the runtime transcript is an explicit
- * gap, a null decision reads "Not assessed", and a downloadable copy is offered.
+ * opens it from the finding. Its digests identify a recorded state; they show a
+ * change only against an independently obtained or signature-covered copy, and
+ * never that the conclusion is true or the system fixed. The runtime transcript
+ * is an explicit gap, a null decision reads "Not assessed", and the download is
+ * labelled as what it is: this view, re-serialized by the page.
  */
 /** A timestamp rendered in the reader's locale, or an em dash when there is none
  *  or it cannot be parsed — never a fabricated or misleading date. */
@@ -7445,7 +7451,7 @@ function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
   );
 }
 
-function IncidentPackView({ findingUuid }: { findingUuid: string }) {
+export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<IncidentPack>({
     queryKey: [`/api/assurance/findings/${findingUuid}/incident-pack`],
@@ -7482,13 +7488,35 @@ function IncidentPackView({ findingUuid }: { findingUuid: string }) {
         <button
           className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
           onClick={download}
+          title="This page's copy of the pack, re-serialized as JSON: not the bytes the digests were computed over."
         >
           <Download className="h-3 w-3" />
-          Download JSON
+          Download this view (JSON)
         </button>
       </div>
-      <p className="text-[10px] text-muted-foreground/80">
-        Attests {data.attests}.
+      {/* It used to say "Attests integrity and provenance ..." beside two
+          unsigned digests. A bare digest attests nothing: whoever changes the
+          content can recompute it. So the pack says what its digests can show,
+          and whether a signature came with it, as the receipt panel does. */}
+      <p className="text-[10px] text-muted-foreground/80" data-testid="incident-pack-digest-meaning">
+        The digests below identify a recorded state of this pack. They show a change only against a
+        copy obtained independently, or one a verified signature covers; on their own they attest
+        nothing, and never that the conclusion is true.
+      </p>
+      <p className="text-[10px] text-muted-foreground/80" data-testid="incident-pack-signature">
+        {data.signed === true ? (
+          <>
+            <span className="text-foreground">Reported signed.</span> The backend reports this pack as
+            signed. This page neither shows nor verifies the signature; verify it offline before relying on it.
+          </>
+        ) : data.signed === false ? (
+          <>
+            <span className="text-foreground">Unsigned.</span> The backend reports that this pack carries no
+            signature.{data.unsignedReason ? ` Backend's reason: ${data.unsignedReason}` : ""}
+          </>
+        ) : (
+          <>No signature came with this pack, and the backend did not say whether it is signed.</>
+        )}
       </p>
       {/* The finding's disposition, on the pack itself. A pack headed "Incident
           evidence pack" that shows no disposition reads as a confirmed incident
