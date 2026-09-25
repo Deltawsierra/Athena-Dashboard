@@ -1,7 +1,7 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { storage } from "./storage-unified";
-import { loadFindingsSummary } from "./findings-summary";
+import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import { requireAuth, requireAdmin, asyncHandler, actor } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
@@ -2716,14 +2716,25 @@ export function registerRoutes(app: Express): void {
   // per client (each of which also loaded every finding's history). Every
   // client's findings, or an error: a total over the clients that happened to
   // read cleanly would be wrong and look right. See server/findings-summary.ts.
+  //
+  // A read that failed and a count that failed are different faults with
+  // different fixes, so they are answered with different sentences: the first
+  // sends an operator to storage, the second to this code. Neither carries a
+  // total, and neither leaks the underlying error's text.
   app.get("/api/findings/summary", asyncHandler(async (_req, res) => {
     let summary;
     try {
       summary = await loadFindingsSummary(storage);
     } catch (cause) {
-      console.error("[findings] summary: could not read every engagement's findings:", cause);
+      if (cause instanceof SummaryReadError) {
+        console.error("[findings] summary: could not read every engagement's findings:", cause.reason);
+        return void res.status(500).json({
+          message: "Could not read every engagement's findings, so no totals are given.",
+        });
+      }
+      console.error("[findings] summary: read every engagement's findings but could not count them:", cause);
       return void res.status(500).json({
-        message: "Could not read every engagement's findings, so no totals are given.",
+        message: "Every engagement's findings were read, but counting them failed, so no totals are given.",
       });
     }
     res.json(summary);

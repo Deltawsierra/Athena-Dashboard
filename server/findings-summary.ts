@@ -13,6 +13,12 @@
  * findings cannot be read, loadFindingsSummary rejects and the route answers
  * an error -- never a total over whichever clients happened to read cleanly,
  * which would be wrong and look right.
+ *
+ * Everything is counted in single passes. The first version spread every
+ * finding into Math.max/Math.min (a RangeError past ~125k arguments, so the
+ * summary failed for good once an estate crossed it: lifecycle rows are never
+ * deleted) and filtered the whole open list once per client (O(clients x
+ * findings): seconds of blocked event loop at a thousand clients).
  */
 import type { Client, Finding, Site } from "@shared/schema";
 import type { IStorage } from "./storage";
@@ -39,7 +45,7 @@ function time(value: Date | string | number | null | undefined): number {
   return new Date(value).getTime();
 }
 
-function isoOf(value: Date | string | number): string {
+function isoOf(value: Date | string | number | null | undefined): string {
   const at = time(value);
   return Number.isNaN(at) ? "" : new Date(at).toISOString();
 }
@@ -48,28 +54,85 @@ const monthKey = (at: Date) => at.getUTCFullYear() * 12 + at.getUTCMonth();
 const monthLabel = (key: number) =>
   `${Math.floor(key / 12)}-${String((key % 12) + 1).padStart(2, "0")}`;
 
+type SummaryFinding = Pick<
+  Finding,
+  "id" | "clientId" | "siteId" | "type" | "severity" | "message" | "status" | "firstSeenAt" | "lastSeenAt"
+>;
+
+/** Worse first; between equals, the most recently seen first. */
+function worse(a: SummaryFinding, b: SummaryFinding): number {
+  const rank = (one: SummaryFinding) => SUMMARY_SEVERITIES.indexOf(severityOf(one.severity));
+  return rank(a) - rank(b) || time(b.lastSeenAt) - time(a.lastSeenAt);
+}
+
 /** The summary of a set of findings. Pure: everything it counts is passed in. */
 export function summarizeFindings(input: {
   clients: Pick<Client, "id" | "name">[];
   sites: Pick<Site, "id" | "environment">[];
-  findings: Pick<
-    Finding,
-    "id" | "clientId" | "siteId" | "type" | "severity" | "message" | "status" | "firstSeenAt" | "lastSeenAt"
-  >[];
+  findings: SummaryFinding[];
 }): FindingsSummary {
   const { clients, sites, findings } = input;
   const envOf = new Map(sites.map((site) => [site.id, site.environment]));
   const nameOf = new Map(clients.map((client) => [client.id, client.name]));
-  const open = findings.filter((finding) => finding.status === "open");
 
-  const openCounts: FindingsSummary["open"] = { total: open.length, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const finding of open) openCounts[severityOf(finding.severity)] += 1;
-
+  const openCounts: FindingsSummary["open"] = { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   const envCounts = new Map<string | null, number>();
-  for (const finding of open) {
+  // One entry per client on record, filled in the same pass as everything
+  // else: a finding finds its client by key, not by a filter over every
+  // finding per client.
+  const perClient = new Map(
+    clients.map((client) => [client.id, { open: 0, critical: 0, high: 0, latestSerious: Number.NaN }]),
+  );
+  // The month each dated finding arrived in, and the first and latest of them,
+  // as running values. Never a spread: an argument list the size of the estate
+  // is a RangeError waiting for the estate to grow.
+  const monthOf = new Array<number>(findings.length);
+  let firstMonth = Number.POSITIVE_INFINITY;
+  let lastMonth = Number.NEGATIVE_INFINITY;
+  // The worst TOP_OPEN open findings, kept sorted as they are met. Ties keep
+  // the order they arrived in, as a stable sort would.
+  const topOpen: SummaryFinding[] = [];
+
+  findings.forEach((finding, index) => {
+    const first = time(finding.firstSeenAt);
+    if (Number.isNaN(first)) {
+      monthOf[index] = Number.NaN;
+    } else {
+      const key = monthKey(new Date(first));
+      monthOf[index] = key;
+      if (key < firstMonth) firstMonth = key;
+      if (key > lastMonth) lastMonth = key;
+    }
+
+    if (finding.status !== "open") return;
+    const sev = severityOf(finding.severity);
+    openCounts.total += 1;
+    openCounts[sev] += 1;
+
     const env = finding.siteId && envOf.has(finding.siteId) ? (envOf.get(finding.siteId) as string) : null;
     envCounts.set(env, (envCounts.get(env) ?? 0) + 1);
-  }
+
+    const own = perClient.get(finding.clientId);
+    if (own) {
+      own.open += 1;
+      if (sev === "critical") own.critical += 1;
+      if (sev === "high") own.high += 1;
+      if (sev === "critical" || sev === "high") {
+        const seen = time(finding.lastSeenAt);
+        if (!Number.isNaN(seen) && (Number.isNaN(own.latestSerious) || seen > own.latestSerious)) {
+          own.latestSerious = seen;
+        }
+      }
+    }
+
+    if (topOpen.length < TOP_OPEN || worse(finding, topOpen[topOpen.length - 1]) < 0) {
+      let at = topOpen.length;
+      while (at > 0 && worse(finding, topOpen[at - 1]) < 0) at -= 1;
+      topOpen.splice(at, 0, finding);
+      if (topOpen.length > TOP_OPEN) topOpen.pop();
+    }
+  });
+
   const byEnvironment = Array.from(envCounts.entries())
     .map(([environment, count]) => ({ environment, open: count }))
     // Most first; on a tie, named environments before "no site", then by name.
@@ -80,34 +143,37 @@ export function summarizeFindings(input: {
         String(a.environment).localeCompare(String(b.environment)),
     );
 
-  const dated = findings
-    .map((finding) => ({ finding, at: new Date(time(finding.firstSeenAt)) }))
-    .filter((one) => !Number.isNaN(one.at.getTime()));
   const byMonth: FindingsSummary["byMonth"] = [];
-  if (dated.length > 0) {
-    const last = Math.max(...dated.map((one) => monthKey(one.at)));
-    const first = Math.max(Math.min(...dated.map((one) => monthKey(one.at))), last - (TREND_MONTHS - 1));
-    for (let key = first; key <= last; key += 1) {
+  if (lastMonth >= firstMonth) {
+    const first = Math.max(firstMonth, lastMonth - (TREND_MONTHS - 1));
+    for (let key = first; key <= lastMonth; key += 1) {
       byMonth.push({ month: monthLabel(key), critical: 0, high: 0, medium: 0, low: 0 });
     }
-    for (const { finding, at } of dated) {
-      const key = monthKey(at);
-      if (key < first) continue;
+    findings.forEach((finding, index) => {
+      const key = monthOf[index];
+      if (Number.isNaN(key) || key < first) return;
       const sev = severityOf(finding.severity);
       if (sev !== "info") byMonth[key - first][sev] += 1;
-    }
+    });
   }
 
-  const rank = (sev: SummarySeverity) => SUMMARY_SEVERITIES.indexOf(sev);
-  const topOpen = open
-    .slice()
-    .sort(
-      (a, b) =>
-        rank(severityOf(a.severity)) - rank(severityOf(b.severity)) ||
-        time(b.lastSeenAt) - time(a.lastSeenAt),
-    )
-    .slice(0, TOP_OPEN)
-    .map((finding) => ({
+  const byClient = clients.map((client) => {
+    const own = perClient.get(client.id) as { open: number; critical: number; high: number; latestSerious: number };
+    return {
+      clientId: client.id,
+      open: own.open,
+      critical: own.critical,
+      high: own.high,
+      latestSeriousSeenAt: Number.isNaN(own.latestSerious) ? null : new Date(own.latestSerious).toISOString(),
+    };
+  });
+
+  return {
+    clients: clients.length,
+    open: openCounts,
+    byEnvironment,
+    byMonth,
+    topOpen: topOpen.map((finding) => ({
       id: finding.id,
       clientId: finding.clientId,
       clientName: nameOf.get(finding.clientId) ?? "",
@@ -115,34 +181,35 @@ export function summarizeFindings(input: {
       severity: severityOf(finding.severity),
       message: finding.message ?? null,
       lastSeenAt: isoOf(finding.lastSeenAt),
-    }));
-
-  const byClient = clients.map((client) => {
-    const own = open.filter((finding) => finding.clientId === client.id);
-    const serious = own.filter((finding) => {
-      const sev = severityOf(finding.severity);
-      return sev === "critical" || sev === "high";
-    });
-    const seen = serious.map((finding) => time(finding.lastSeenAt)).filter((t) => !Number.isNaN(t));
-    const latest = seen.length > 0 ? Math.max(...seen) : Number.NaN;
-    return {
-      clientId: client.id,
-      open: own.length,
-      critical: own.filter((finding) => severityOf(finding.severity) === "critical").length,
-      high: own.filter((finding) => severityOf(finding.severity) === "high").length,
-      latestSeriousSeenAt: Number.isNaN(latest) ? null : new Date(latest).toISOString(),
-    };
-  });
-
-  return { clients: clients.length, open: openCounts, byEnvironment, byMonth, topOpen, byClient };
+    })),
+    byClient,
+  };
 }
 
 /**
- * Every client's findings, read from storage and summarized. Rejects if any one
- * client's findings cannot be read: there is no partial summary.
+ * A read the summary depends on failed. Kept apart from a failure to count
+ * what was read, so the route blames storage only when storage failed.
+ */
+export class SummaryReadError extends Error {
+  constructor(readonly reason: unknown) {
+    super(`could not read every engagement's findings: ${reason instanceof Error ? reason.message : String(reason)}`);
+    this.name = "SummaryReadError";
+  }
+}
+
+/**
+ * Every client's findings, read from storage and summarized. Rejects with a
+ * SummaryReadError if any one read fails: there is no partial summary. An
+ * error thrown while counting what was read is passed on as it is.
  */
 export async function loadFindingsSummary(storage: IStorage): Promise<FindingsSummary> {
-  const [clients, sites] = await Promise.all([storage.getAllClients(), storage.getAllSites()]);
-  const perClient = await Promise.all(clients.map((client) => storage.getFindingsByClient(client.id)));
-  return summarizeFindings({ clients, sites, findings: perClient.flat() });
+  let read: Parameters<typeof summarizeFindings>[0];
+  try {
+    const [clients, sites] = await Promise.all([storage.getAllClients(), storage.getAllSites()]);
+    const perClient = await Promise.all(clients.map((client) => storage.getFindingsByClient(client.id)));
+    read = { clients, sites, findings: perClient.flat() };
+  } catch (cause) {
+    throw new SummaryReadError(cause);
+  }
+  return summarizeFindings(read);
 }
