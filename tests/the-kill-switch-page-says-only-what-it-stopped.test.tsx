@@ -169,4 +169,34 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       expect(await engineSaid()).toBe("The engine listed no other live run.");
     });
   });
+
+  it("a switch that could not be stored says it is NOT engaged, and still says what each stop came to", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      message: "The kill switch could not be engaged: SQLITE_FULL: database or disk is full. Every stop was sent all the " +
+        "same; what each came to is below. Writes are not refused until the switch is engaged.",
+      engaged: false,
+      stops: { listed: true, scans: [scan("a", true)] },
+      engineRuns: { listed: true, runs: [] },
+    }), { status: 500, headers: { "Content-Type": "application/json" } })));
+    const said = (await engage()).textContent;
+    expect(said).toBe("Kill switch NOT engaged, stops sent anyway; 1 running scan was sent a stop, and the engine accepted it.");
+    expect(screen.getByTestId("text-kill-switch-not-engaged").textContent).toMatch(
+      /^The kill switch could not be engaged: SQLITE_FULL: database or disk is full\. Every stop was sent all the same/,
+    );
+    expect(document.body.textContent).not.toMatch(/Kill switch engaged/);
+  });
+
+  it("a failure that carries no stops is a plain failure: no report is drawn", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Forbidden" }), {
+      status: 403, headers: { "Content-Type": "application/json" },
+    })));
+    fireEvent.click(screen.getByTestId("button-kill-switch"));
+    fireEvent.click(screen.getByTestId("button-confirm-kill-switch"));
+    await waitFor(() => expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId("text-kill-switch-stops")).toBeNull();
+    expect(screen.queryByTestId("text-kill-switch-not-engaged")).toBeNull();
+  });
 });

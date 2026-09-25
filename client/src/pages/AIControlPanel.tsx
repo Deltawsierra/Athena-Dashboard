@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { queryClient, apiRequest } from "@/lib/queryClient";
+import { queryClient, apiRequest, apiFetch, throwIfResNotOk } from "@/lib/queryClient";
 import type { AIControlSetting } from "@shared/schema";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
@@ -42,6 +42,8 @@ type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; de
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
+  /** Set when the switch itself could not be stored: why, in the server's words. The stops went out regardless. */
+  notEngaged?: string;
   stops: KillSwitchStops;
   /** Absent when the server said nothing about the engine's own list; then nothing is said of it. */
   engineRuns?: EngineSweep;
@@ -55,18 +57,18 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
  * did not, with the reason. Never "all terminated": an accepted stop is the
  * engine's word that it is stopping, and a refused or unreachable one is said.
  */
-function stopSentence(report: KillSwitchStops): string {
+function stopSentence(report: KillSwitchStops, lead = "Kill switch engaged"): string {
   if (!report.listed) {
-    return `Kill switch engaged, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
+    return `${lead}, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
       "Stop them from the scan screens, or pause the engine from the Failsafe console.";
   }
   const { scans } = report;
   if (scans.length === 0) {
-    return "Kill switch engaged. No engine scan was recorded as running, so none was sent a stop.";
+    return `${lead}. No engine scan was recorded as running, so none was sent a stop.`;
   }
   const accepted = scans.filter((one) => one.stopped).length;
   const failed = scans.filter((one) => !one.stopped);
-  const sent = `Kill switch engaged; ${count(scans.length, "running scan")} ${scans.length === 1 ? "was" : "were"} sent a stop`;
+  const sent = `${lead}; ${count(scans.length, "running scan")} ${scans.length === 1 ? "was" : "were"} sent a stop`;
   const took = `the engine accepted ${accepted === scans.length ? (scans.length === 1 ? "it" : "all of them") : accepted}`;
   if (failed.length === 0) return `${sent}, and ${took}.`;
   const why = failed.map((one) => `${one.target ?? one.testId}: ${one.detail}`).join("; ");
@@ -98,6 +100,9 @@ function engineSweepSentence(sweep: EngineSweep): string {
   return `${listed}; ${took}; ${failed.length} could not be stopped (${why}). ` +
     "They may still be running: pause the engine from the Failsafe console.";
 }
+
+/** The lead of the report: engaged, or not -- with the stops sent regardless. */
+const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill switch NOT engaged, stops sent anyway" : "Kill switch engaged");
 
 /** Whether every stop the report names was accepted, and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
@@ -158,23 +163,37 @@ export default function AIControlPanel() {
   // switch on twice sends the stops twice, which is harmless.
   const engage = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest("PATCH", "/api/ai-control", {
+      const response = await apiFetch("PATCH", "/api/ai-control", {
         killSwitchEnabled: true,
         systemStatus: "shutdown",
         activeSystems: [],
       });
-      return (await response.json()) as AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep };
+      // A switch that could not be stored still sent every stop, and the
+      // server's 500 says what each came to: that is read, not thrown away.
+      const answered = (await response.clone().json().catch(() => null)) as
+        (AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: false; message?: string }) | null;
+      if (!response.ok && answered?.engaged === false && answered.stops) {
+        return { ...answered, notEngaged: answered.message ?? "the setting could not be saved" };
+      }
+      await throwIfResNotOk(response);
+      return answered as AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
-      const report: StopReport | null = result.stops ? { stops: result.stops, engineRuns: result.engineRuns } : null;
+      const report: StopReport | null = result.stops
+        ? { stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged }
+        : null;
       setStopReport(report);
       toast({
-        title: "Kill switch engaged",
+        title: result.notEngaged !== undefined ? "The kill switch was not engaged" : "Kill switch engaged",
         description: report
-          ? [stopSentence(report.stops), report.engineRuns ? engineSweepSentence(report.engineRuns) : ""].filter(Boolean).join(" ")
+          ? [
+              report.notEngaged ?? "",
+              stopSentence(report.stops, leadOf(report)),
+              report.engineRuns ? engineSweepSentence(report.engineRuns) : "",
+            ].filter(Boolean).join(" ")
           : "The server did not say what it stopped.",
-        variant: report && everyStopTook(report) ? undefined : "destructive",
+        variant: report && report.notEngaged === undefined && everyStopTook(report) ? undefined : "destructive",
       });
     },
     onError: (error: Error) => {
@@ -312,9 +331,14 @@ export default function AIControlPanel() {
               {/* The server's account of the stops this page sent, shown
                   whatever the settings read says since: it is a record of what
                   happened, not a reading of the switch. */}
+              {stopReport?.notEngaged !== undefined && (
+                <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-not-engaged">
+                  {stopReport.notEngaged}
+                </p>
+              )}
               {stopReport && (
                 <p className="text-sm p-3 rounded-lg border border-destructive/50" data-testid="text-kill-switch-stops">
-                  {stopSentence(stopReport.stops)}
+                  {stopSentence(stopReport.stops, leadOf(stopReport))}
                 </p>
               )}
               {stopReport?.engineRuns && (

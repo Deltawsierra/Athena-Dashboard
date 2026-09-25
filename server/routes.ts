@@ -195,7 +195,7 @@ function unfinishedRunOf(test: { findings: unknown; status: string }): string | 
 async function sendStop(
   req: Request,
   run: { runId: string; target: string | null; testId: string | null },
-  via: "kill_switch" | "delete",
+  via: "kill_switch" | "delete" | "start_not_recorded",
 ): Promise<{ stopped: boolean; detail: string }> {
   let outcome: { stopped: boolean; detail: string };
   try {
@@ -1164,39 +1164,75 @@ export function registerRoutes(app: Express): void {
     // route never revisits a completed row -- so a scan that returned a
     // critical read as "0 reported" on every screen that reads the test.
     const completedInline = started.state === "completed";
-    const test = await storage.createTest({
-      clientId: data.clientId,
-      siteId: data.siteId ?? null,
-      testType: data.testType,
-      status: completedInline ? "completed" : "running",
-      completedAt: completedInline ? new Date() : null,
-      summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
-      findings: { runId: started.runId, target: data.target, results: started.findings },
-      ...(completedInline
-        ? countSeverities(started.findings ?? [])
-        : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
-      executedBy: req.session.userId ?? null,
-    });
+    let test;
+    try {
+      test = await storage.createTest({
+        clientId: data.clientId,
+        siteId: data.siteId ?? null,
+        testType: data.testType,
+        status: completedInline ? "completed" : "running",
+        completedAt: completedInline ? new Date() : null,
+        summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
+        findings: { runId: started.runId, target: data.target, results: started.findings },
+        ...(completedInline
+          ? countSeverities(started.findings ?? [])
+          : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
+        executedBy: req.session.userId ?? null,
+      });
+    } catch (cause) {
+      // The engine is scanning, and the row that is this run's Stop -- and
+      // the kill switch's view of it -- could not be written. Answering "the
+      // start failed" left the run going with nothing here able to stop it.
+      // So the run just started is stopped, and the answer says what came of
+      // that.
+      if (!started.runId || completedInline) throw cause;
+      const stop = await sendStop(req, { runId: started.runId, target: data.target, testId: null }, "start_not_recorded");
+      return void res.status(500).json({
+        error: `the engine started run ${started.runId} but it could not be recorded here (${causeOf(cause)}); ` +
+          (stop.stopped
+            ? "the run was sent a stop, and the engine accepted it"
+            : `the run was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
+              "stop it with the kill switch or a failsafe pause"),
+        runId: started.runId,
+        stopped: stop.stopped,
+      });
+    }
 
-    // File what came back as findings with a life of their own. A scan that
-    // completes inline has its results now; one still running is filed when
-    // it finishes, on the status route.
-    const filed = await lifecycle.ingest(storage, started.findings ?? [], {
-      clientId: data.clientId,
-      siteId: data.siteId ?? null,
-      engagementRef,
-      target: data.target,
-      testId: test.id,
-      runId: started.runId ?? null,
-    });
+    // From here the row -- and so the run's Stop -- exists. Nothing after it
+    // may answer "the start failed" over a run that is scanning: a filing or
+    // log write that fails is reported, and the page still gets its test.
+    let filed: lifecycle.IngestResult | null = null;
+    let notFiled: string | null = null;
+    try {
+      // File what came back as findings with a life of their own. A scan that
+      // completes inline has its results now; one still running is filed when
+      // it finishes, on the status route.
+      filed = await lifecycle.ingest(storage, started.findings ?? [], {
+        clientId: data.clientId,
+        siteId: data.siteId ?? null,
+        engagementRef,
+        target: data.target,
+        testId: test.id,
+        runId: started.runId ?? null,
+      });
+    } catch (cause) {
+      notFiled = causeOf(cause);
+    }
 
-    await storage.createActivityLog({
-      action: "started", entityType: "test", entityId: test.id,
-      details: { target: data.target, engagementRef, runId: started.runId, filed },
-      ...actor(req),
-    });
+    try {
+      await storage.createActivityLog({
+        action: "started", entityType: "test", entityId: test.id,
+        details: { target: data.target, engagementRef, runId: started.runId, filed },
+        ...actor(req),
+      });
+    } catch {
+      // The run started and its row exists; the page needs its test id more than the log line.
+    }
 
-    res.status(201).json({ test, runId: started.runId, state: started.state, filed });
+    res.status(201).json({
+      test, runId: started.runId, state: started.state, filed,
+      ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
+    });
   }));
 
   /**
@@ -1238,10 +1274,16 @@ export function registerRoutes(app: Express): void {
       });
     }
 
-    await storage.createActivityLog({
-      action: "aborted", entityType: "test", entityId: test.id,
-      details: { runId }, ...actor(req),
-    });
+    // After the stop, and best-effort: a log write that failed (a full disk)
+    // turned a stop the engine had accepted into "Internal server error".
+    try {
+      await storage.createActivityLog({
+        action: "aborted", entityType: "test", entityId: test.id,
+        details: { runId }, ...actor(req),
+      });
+    } catch (cause) {
+      console.error(`[abort] run ${runId} was stopped; its activity log could not be written: ${causeOf(cause)}`);
+    }
 
     res.json({ stopped: true, runId });
   }));
@@ -1652,16 +1694,30 @@ export function registerRoutes(app: Express): void {
     // The flag first, so every other write is refused from here on; then the
     // stops (stopEverythingRunning). Sent again each time the switch is sent
     // on, so an operator can retry the scans that could not be reached.
-    const settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
+    //
+    // A flag that could not be stored holds back no stop. On a full disk (or
+    // a read-only or locked database) the write failed and the handler
+    // answered 500 before sending a single stop, although the engine was
+    // reachable and the running scans could be read. Now the stops are sent
+    // whatever the write did, and the answer carries both outcomes.
+    let settings: Awaited<ReturnType<typeof storage.updateAIControlSettings>> | null = null;
+    let notStored: string | null = null;
+    try {
+      settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
+    } catch (cause) {
+      if (data.killSwitchEnabled !== true) throw cause;
+      notStored = causeOf(cause);
+    }
     let stops: RecordedStops | null = null;
     let engineRuns: EngineSweep | null = null;
     if (data.killSwitchEnabled === true) {
-      // Neither list failing is a 500: the switch is engaged, and what the page
-      // must say is which list could not be read -- not that nothing ran.
+      // Neither list failing is a 500: what the page must say is which list
+      // could not be read -- not that nothing ran.
       ({ stops, engineRuns } = await stopEverythingRunning(req));
     }
     const logged = stops === null || engineRuns === null ? data : {
       ...data,
+      ...(notStored !== null ? { notStored } : {}),
       stops: stops.listed
         ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
         : { listed: false, detail: stops.detail },
@@ -1670,10 +1726,23 @@ export function registerRoutes(app: Express): void {
         : { listed: false, detail: engineRuns.detail },
     };
     try {
-      await storage.createActivityLog({ action: "updated", entityType: "ai_control", entityId: settings.id, details: logged, ...actor(req) });
+      await storage.createActivityLog({
+        action: "updated", entityType: "ai_control", entityId: settings?.id ?? "ai_control", details: logged, ...actor(req),
+      });
     } catch (cause) {
       // Once stops were sent, their outcome reaches the page whatever the log did.
       if (stops === null) throw cause;
+    }
+    if (notStored !== null) {
+      // Not engaged -- the flag is not stored, so writes are not refused -- and
+      // the stops went out all the same: both are said.
+      return void res.status(500).json({
+        message: `The kill switch could not be engaged: ${notStored}. Every stop was sent all the same; ` +
+          "what each came to is below. Writes are not refused until the switch is engaged.",
+        engaged: false,
+        stops,
+        engineRuns,
+      });
     }
     res.json(stops === null ? settings : { ...settings, stops, engineRuns });
   }));
@@ -1875,6 +1944,22 @@ export function registerRoutes(app: Express): void {
     return false;
   };
 
+  /**
+   * Record a failsafe act on this side, after the control plane took it.
+   *
+   * Best-effort: the draft, the signature or the withdrawal has happened on
+   * the control plane by now, and answering 500 because the log could not be
+   * written reported it as failed -- and lost the uuid of a drafted pause,
+   * which the console needs to open it for signing. The failure is logged.
+   */
+  async function recordFailsafeAct(req: Request, action: string, uuid: string, details: Record<string, unknown>): Promise<void> {
+    try {
+      await storage.createActivityLog({ action, entityType: "failsafe_command", entityId: uuid, details, ...actor(req) });
+    } catch (cause) {
+      console.error(`[failsafe] ${action} ${uuid} went through; its activity log could not be written: ${causeOf(cause)}`);
+    }
+  }
+
   app.get("/api/failsafe/status", requireAdmin, asyncHandler(async (_req, res) => {
     // status() answers its own unreachability rather than throwing, so a
     // control plane that is simply not configured renders as words on the
@@ -1918,13 +2003,11 @@ export function registerRoutes(app: Express): void {
       return void res.status(result.status).json({ error: result.detail });
     }
     // Drafting a failsafe command is an act worth recording on this side too,
-    // independent of the backend's own audit trail.
-    await storage.createActivityLog({
-      action: "drafted",
-      entityType: "failsafe_command",
-      entityId: result.drafted.command.uuid,
-      details: { failsafeAction: data.action, engineId: data.engineId, reason: data.reason },
-      ...actor(req),
+    // independent of the backend's own audit trail -- after the draft, and
+    // best-effort: a log write that failed answered 500 for a pause the control
+    // plane had drafted, and the page never received the uuid it signs.
+    await recordFailsafeAct(req, "drafted", result.drafted.command.uuid, {
+      failsafeAction: data.action, engineId: data.engineId, reason: data.reason,
     });
     res.status(201).json(result.drafted);
   }));
@@ -1955,12 +2038,8 @@ export function registerRoutes(app: Express): void {
       // to see verbatim -- it is the whole point of relaying it here.
       return void res.status(result.status).json({ error: result.detail });
     }
-    await storage.createActivityLog({
-      action: "signed",
-      entityType: "failsafe_command",
-      entityId: req.params.uuid,
-      details: { keyId: data.keyId, status: result.command.status, signers: result.command.signers },
-      ...actor(req),
+    await recordFailsafeAct(req, "signed", req.params.uuid, {
+      keyId: data.keyId, status: result.command.status, signers: result.command.signers,
     });
     res.json(result.command);
   }));
@@ -1976,13 +2055,7 @@ export function registerRoutes(app: Express): void {
     if (!result.ok) {
       return void res.status(result.status).json({ error: result.detail });
     }
-    await storage.createActivityLog({
-      action: "canceled",
-      entityType: "failsafe_command",
-      entityId: req.params.uuid,
-      details: { status: result.command.status },
-      ...actor(req),
-    });
+    await recordFailsafeAct(req, "canceled", req.params.uuid, { status: result.command.status });
     res.json(result.command);
   }));
 

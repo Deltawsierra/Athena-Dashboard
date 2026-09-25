@@ -41,7 +41,7 @@ function notifyUnauthorized(): void {
   unauthorizedListeners.forEach((listener) => listener());
 }
 
-async function throwIfResNotOk(res: Response): Promise<void> {
+export async function throwIfResNotOk(res: Response): Promise<void> {
   if (res.ok) return;
   if (res.status === 401) {
     notifyUnauthorized();
@@ -65,13 +65,22 @@ async function throwIfResNotOk(res: Response): Promise<void> {
   throw new Error(text || `Request failed with status ${res.status}`);
 }
 
-export async function apiRequest(method: string, url: string, data?: unknown): Promise<Response> {
-  const res = await fetch(getApiUrl(url), {
+/**
+ * The request apiRequest sends, answered as it came: for the caller that has
+ * to read a failure's body itself (the kill switch's, whose 500 still says
+ * which stops were sent). Anything else should use apiRequest.
+ */
+export async function apiFetch(method: string, url: string, data?: unknown): Promise<Response> {
+  return fetch(getApiUrl(url), {
     method,
     headers: data !== undefined ? { "Content-Type": "application/json" } : {},
     body: data !== undefined ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
+}
+
+export async function apiRequest(method: string, url: string, data?: unknown): Promise<Response> {
+  const res = await apiFetch(method, url, data);
   await throwIfResNotOk(res);
   return res;
 }
