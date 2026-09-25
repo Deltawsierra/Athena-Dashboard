@@ -283,6 +283,37 @@ const ENGINE_OWNED_TEST_FIELDS = [
 /** The one key of an engine test's `findings` a person writes; every other key is the run's. */
 const HUMAN_FINDINGS_KEY = "details";
 
+/**
+ * The keys of `findings` that only the scan route writes, from the run it
+ * started: they are what makes a row an engine scan to every other part of
+ * the app.
+ */
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results"] as const;
+
+/**
+ * Refuse a person's test whose findings carry a run's keys, on create as on
+ * update.
+ *
+ * The rule was enforced on PATCH only. POST /api/tests took `findings` as
+ * free JSON, so a test created with `findings: { runId: "run-1" }` became an
+ * engine scan: the Tests screen called it "recorded by the engine", the
+ * status route asked the engine for run-1 and filed another client's results
+ * under this one, and the run keys were then engine-owned, so the forgery
+ * could not be edited away. A key sent as null supplies nothing and is not
+ * refused.
+ */
+function suppliedEngineKeys(res: Response, findings: unknown): boolean {
+  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return false;
+  const sent = findings as Record<string, unknown>;
+  const named = ENGINE_FINDINGS_KEYS.filter((key) => sent[key] !== undefined && sent[key] !== null);
+  if (named.length === 0) return false;
+  res.status(400).json({
+    message: `${named.map((key) => `findings.${key}`).join(", ")} ${named.length === 1 ? "is" : "are"} recorded ` +
+      "by the scan that started an engine run and cannot be supplied",
+  });
+  return true;
+}
+
 /** Whether a value sent back is the one on record: null and absent alike, a date by its instant. */
 function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -296,15 +327,7 @@ function engineRecordEdited(
   const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
     ? (data.findings as Record<string, unknown>)
     : null;
-  if (runIdOf(before) === null) {
-    if (sent && sent.runId !== undefined && sent.runId !== null) {
-      res.status(400).json({
-        message: "an engine run is recorded by the scan that started it and cannot be supplied",
-      });
-      return true;
-    }
-    return false;
-  }
+  if (runIdOf(before) === null) return suppliedEngineKeys(res, data.findings);
 
   const recorded = before.findings as Record<string, unknown>;
   const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
@@ -858,6 +881,8 @@ export function registerRoutes(app: Express): void {
     // the update path came to allow forging it.
     if (forgedAttribution(res, req.body)) return;
     const data = createTestSchema.parse(req.body);
+    // A person's test: a run's keys are the scan route's to write, never this one's.
+    if (suppliedEngineKeys(res, data.findings)) return;
     if (await parentMissing(res, data.clientId, data.siteId)) return;
     const test = await storage.createTest({
       ...data,

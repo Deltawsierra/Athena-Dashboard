@@ -55,7 +55,10 @@ describe("the compliance map over an engagement", () => {
   async function anEngagement(results: unknown[]) {
     const client = await agent.post("/api/clients")
       .send({ name: "Mapped", company: "Mapped Ltd", email: "m@example.test" });
-    await agent.post("/api/tests").send({
+    // An engine scan's row, as the scan route writes it: a run's keys are
+    // that route's to record, and POST /api/tests refuses them (R5-A).
+    const { storage } = await import("../server/storage-unified");
+    await storage.createTest({
       clientId: client.body.id, testType: "pentest", status: "completed",
       findings: { runId: "run-1", results }, vulnerabilitiesFound: results.length,
     });
