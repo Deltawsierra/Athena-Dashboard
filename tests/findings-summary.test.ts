@@ -127,6 +127,17 @@ describe("summarizeFindings", () => {
     expect(summary.topOpen[0].lastSeenAt).toBe("2026-03-05T00:00:00.000Z");
   });
 
+  it("keeps the order findings were read in among exact ties, as a stable sort did", () => {
+    // Same severity, same last sighting: nothing ranks them, so the list must
+    // not reshuffle them between one load and the next.
+    const tied = at("2026-03-05T00:00:00Z");
+    const summary = summarizeFindings({
+      clients, sites,
+      findings: ["first", "second", "third"].map((message) => finding({ severity: "high", message, lastSeenAt: tied })),
+    });
+    expect(summary.topOpen.map((one) => one.message)).toEqual(["first", "second", "third"]);
+  });
+
   it("gives every client its open, critical and high counts, and when a serious one was last seen", () => {
     const summary = summarizeFindings({
       clients, sites,
