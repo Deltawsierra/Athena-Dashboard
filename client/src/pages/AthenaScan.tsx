@@ -142,7 +142,7 @@ export default function AthenaScan() {
         siteId: siteId || undefined,
         target: target.trim(),
       });
-      return (await response.json()) as { test: Test; runId: string | null };
+      return (await response.json()) as { test: Test; runId: string | null; state?: string };
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
@@ -181,7 +181,13 @@ export default function AthenaScan() {
   const findings = returned.filter((f) => !f.internal);
   const notes = returned.filter((f) => f.internal);
   const running = scan !== undefined && !FINISHED.has(scan.state);
-  const mayBeRunning = running || scanUnread !== null;
+  // Until a read says the scan has stopped, it may be running, and its Stop is
+  // on screen: while the first read is still on its way, and after a read
+  // fails, as much as while it reads "running". A stop is never held back by a
+  // read; the abort route asks the engine and says if it did not stop.
+  const startedAs = start.data && start.data.test.id === testId ? start.data.state : undefined;
+  const knownStopped = scan !== undefined ? FINISHED.has(scan.state) : startedAs !== undefined && FINISHED.has(startedAs);
+  const mayBeRunning = testId !== null && !knownStopped;
   const finished = scan !== undefined && FINISHED.has(scan.state);
 
   const counts: SeverityCounts = {

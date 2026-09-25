@@ -104,13 +104,9 @@ export default function AIControlPanel() {
     { id: "threat-detection", label: "Threat Detection", icon: AlertTriangle },
   ];
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-primary border-r-transparent"></div>
-      </div>
-    );
-  }
+  // No full-page spinner while the settings load: it hid the kill switch
+  // until they answered, so a read that hung held the stop out of reach. The
+  // switch is drawn at once, in no state, and sends the shutdown either way.
 
   const isEmergency = settings?.killSwitchEnabled || settings?.systemStatus === "shutdown";
   // The status as recorded. It used to read "Offline" for anything but
@@ -213,7 +209,10 @@ export default function AIControlPanel() {
                 <div className="space-y-4">
                   {!known && (
                     <p className="text-sm text-muted-foreground" data-testid="text-kill-switch-unknown">
-                      Kill switch state unknown: the settings could not be read. Activating it still sends the shutdown.
+                      {isLoading
+                        ? "Kill switch state not read yet: the settings are still loading."
+                        : "Kill switch state unknown: the settings could not be read."}{" "}
+                      Activating it still sends the shutdown.
                     </p>
                   )}
                   {!isKillSwitchConfirmOpen ? (

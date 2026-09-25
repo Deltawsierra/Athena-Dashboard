@@ -22,6 +22,16 @@
  * Nothing here fakes an engine's state: until the engine reports its live
  * governor state and the backend proxies it, this says "not reported by the
  * engine" rather than drawing a green light nobody checked.
+ *
+ * And one rule about reads: a stop is never blocked by one. Pause, stand-down
+ * and terminate -- drafting them, confirming them, and reaching an in-flight
+ * one to add the second signature -- stay live whatever the status or state
+ * reads last said, or failed to say. Those reads are probes. The draft and
+ * signature routes check the control plane themselves and say when they
+ * refuse, and the engine checks every signature before it acts; a status poll
+ * that failed has no business standing between an operator and a stop. What
+ * a failed read changes is what is SHOWN: the status, the governor, the counts
+ * and a command's signers read as unknown, never as their last answer.
  */
 
 import { useMemo, useState } from "react";
@@ -193,6 +203,19 @@ const ACTION_BY_KEY: Record<string, ActionSpec> = Object.fromEntries(
   ACTIONS.map((a) => [a.key, a]),
 );
 
+/**
+ * Whether an action stops the engine: pause, stand-down, terminate. These are
+ * never gated on a read (see the header). Resume and release put an engine
+ * back to work, and stay gated on the control plane having said it is ready.
+ */
+function isStop(action: string): boolean {
+  const spec = ACTION_BY_KEY[action];
+  return spec !== undefined && spec.weight !== "recover";
+}
+
+/** How soon a failed status read is retried: seconds, not the next 30s poll. */
+const STATUS_RETRY_MS = 3_000;
+
 function actionLabel(key: string): string {
   return ACTION_BY_KEY[key]?.label ?? key;
 }
@@ -310,6 +333,13 @@ function CommandConsole({
   // since, so the error wins over it (see lib/loaded.ts).
   const command$ = loaded(commandQ);
   const data = command$.state === "ready" ? command$.data : undefined;
+  // ...but a failed re-read must not take a STOP out of reach. The draft and
+  // its signing bytes were fixed when the command was issued, so the last ones
+  // read are still the ones to sign; the signature route checks the command
+  // itself and refuses one that has expired, been canceled or filled up.
+  const stale = command$.state === "error" ? commandQ.data : undefined;
+  const relayStale =
+    stale !== undefined && isStop(stale.command.action) && stale.command.status === "awaiting_signatures";
 
   const submit = useMutation({
     mutationFn: async () => {
@@ -360,26 +390,37 @@ function CommandConsole({
     },
   });
 
-  if (command$.state === "error") {
-    return (
-      <div className="space-y-4 py-6 text-center text-sm text-muted-foreground" data-testid="text-command-unread">
-        <p>
-          Could not read this command from the control plane: {command$.message}. Its status and signatures are
-          not shown, because the last ones read may no longer be current.
-        </p>
-        <Button type="button" variant="outline" onClick={onClose} data-testid="button-close-console">
-          Close
+  const unread = command$.state === "error" ? (
+    <div className="space-y-4 py-2 text-center text-sm text-muted-foreground" data-testid="text-command-unread">
+      <p>
+        Could not read this command from the control plane: {command$.message}. Its status and signatures are
+        not shown, because the last ones read may no longer be current.
+        {relayStale &&
+          " It is a stop, so signing and relaying stay available: the signature route checks the command itself" +
+            " and says if it can no longer be signed."}
+      </p>
+      <div className="flex justify-center gap-3">
+        <Button type="button" variant="outline" onClick={() => void commandQ.refetch()} data-testid="button-reread-command">
+          Read it again
         </Button>
+        {!relayStale && (
+          <Button type="button" variant="outline" onClick={onClose} data-testid="button-close-console">
+            Close
+          </Button>
+        )}
       </div>
-    );
-  }
-  if (!data) {
+    </div>
+  ) : null;
+
+  if (command$.state === "error" && !relayStale) return unread;
+  const shown = data ?? (relayStale ? stale : undefined);
+  if (!shown) {
     return (
       <div className="py-10 text-center text-sm text-muted-foreground">Loading the command…</div>
     );
   }
 
-  const { command, draft, signingBytes } = data;
+  const { command, draft, signingBytes } = shown;
   const spec = ACTION_BY_KEY[command.action];
   const signed = command.signers.length;
   const need = command.requiredSignatures;
@@ -389,6 +430,9 @@ function CommandConsole({
 
   return (
     <div className="space-y-5">
+      {unread}
+      {data && (
+      <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           {spec && (
@@ -435,6 +479,14 @@ function CommandConsole({
             Nothing on this server can make it act sooner.
           </p>
         </GlassCard>
+      )}
+      </>
+      )}
+      {!data && (
+        <div className="font-serif text-xl" data-testid="text-command-stale-action">
+          {actionLabel(command.action)}{" "}
+          <span className="athena-mono text-xs text-muted-foreground">· {command.engineId}</span>
+        </div>
       )}
 
       {open && (
@@ -514,7 +566,7 @@ function CommandConsole({
 
       <Divider className="my-1" />
       <div className="flex flex-wrap justify-between gap-3">
-        {open ? (
+        {open && data ? (
           <Button
             type="button"
             variant="ghost"
@@ -568,36 +620,59 @@ export default function Failsafe() {
   // Every source on this console is polled, and React Query keeps the last
   // answer after a poll fails. Read raw, that answer went on rendering as the
   // current one: the governor said "running" and the counts held while every
-  // read of the engine state was failing. So each is read through loaded(),
+  // read of the engine state was failing. So each is SHOWN through loaded(),
   // where an error wins over data it has since failed to refresh, and nothing
-  // is derived from a status or state that is not in hand -- including
-  // whether the controls are live.
-  const status$ = loaded(useQuery<FailsafeStatus>({
+  // is shown from a status or state that is not in hand.
+  //
+  // What an operator can DO is another matter. For a while a failed status
+  // poll also took the controls away: one network blip disabled pause,
+  // stand-down and terminate, killed an armed confirmation, and hid the
+  // stand-down a second operator had to sign -- for up to 30 seconds after
+  // the control plane was back. A stop is never gated on a read now (see the
+  // header); a failed status is re-read within seconds; and only resume and
+  // release wait on the control plane having said, in its last answer, that
+  // it is ready.
+  const statusQ = useQuery<FailsafeStatus>({
     queryKey: ["/api/failsafe/status"],
-    refetchInterval: 30_000,
-  }));
+    refetchInterval: (query) => (query.state.status === "error" ? STATUS_RETRY_MS : 30_000),
+  });
+  const status$ = loaded(statusQ);
   const status = status$.state === "ready" ? status$.data : undefined;
   const statusFailed = status$.state === "error";
   const statusError = status$.state === "error" ? status$.message : "";
+  /** The last status that answered, even if a later read failed: for operating, never for showing. */
+  const lastStatus = statusQ.data;
 
   // Default the engine id from the deployment, once, until the operator types.
-  const effectiveEngineId = engineIdTouched ? engineId : engineId || status?.defaultEngineId || "";
+  // From the last status that answered: an input's value is not a reading, and
+  // losing it on a failed poll would take the stop's target away.
+  const effectiveEngineId = engineIdTouched ? engineId : engineId || lastStatus?.defaultEngineId || "";
+  const engineNamed = effectiveEngineId.trim().length > 0;
 
-  const configured = status?.configured === true;
-  const authorized = status?.authorized === true;
-  const canOperate = configured && authorized;
-  const stateReadable = canOperate && effectiveEngineId.length > 0;
+  /** Whether the status in hand NOW says the control plane is usable: what the page shows. */
+  const canOperate = status?.configured === true && status?.authorized === true;
+  /** Whether the last status that answered said so: what resume and release wait on. */
+  const lastReady = lastStatus?.configured === true && lastStatus?.authorized === true;
+  /** Whether an action may be drafted and confirmed. A stop, whenever an engine is named. */
+  const operable = (action: string) => engineNamed && (isStop(action) || lastReady);
+  const stateReadable = canOperate && engineNamed;
 
-  const state$ = loaded(useQuery<FailsafeStateView>({
+  // Read unless a status that answered said there is nothing to read. A status
+  // that failed, or has not answered, does not stop the state being read: the
+  // in-flight commands it lists are how a second operator reaches a stop.
+  const stateQ = useQuery<FailsafeStateView>({
     queryKey: ["/api/failsafe/state", effectiveEngineId],
-    enabled: stateReadable,
+    enabled: engineNamed && (status === undefined || canOperate),
     refetchInterval: 5_000,
-  }));
-  // Only while it can be read at all: a query switched off keeps its last
-  // answer too, and that answer is about a control plane this page can no
-  // longer vouch for.
+  });
+  const state$ = loaded(stateQ);
+  // Shown only while the status and the state are both in hand: a state read
+  // under a status nobody can read now is not shown as current.
   const state = stateReadable && state$.state === "ready" ? state$.data : undefined;
   const stateFailed = stateReadable && state$.state === "error";
+  // The commands the last state read listed as in flight, kept reachable while
+  // that read is not shown as current. Each one's console reads it afresh.
+  const lastInFlight = !state && stateQ.data ? [...stateQ.data.awaitingSignatures, ...stateQ.data.ready] : [];
 
   const audit$ = loaded(useQuery<FailsafeAuditEvent[]>({
     queryKey: ["/api/failsafe/audit"],
@@ -611,14 +686,16 @@ export default function Failsafe() {
   // read. Until it has answered -- the control plane not ready, no engine
   // named, still loading, or failed -- they are unknown, not zero.
   const stateCount = (read: (view: FailsafeStateView) => number) =>
-    state ? read(state) : stateFailed || !canOperate || effectiveEngineId.length === 0 ? "—" : "…";
+    state ? read(state) : stateFailed || !canOperate || !engineNamed ? "—" : "…";
   const stateUnread = stateFailed
     ? `Could not read the engine state: ${state$.state === "error" ? state$.message : ""}`
-    : !canOperate
-      ? "Not read: the failsafe control plane is not ready."
-      : effectiveEngineId.length === 0
-        ? "Not read: name a target engine."
-        : "Reading the engine state…";
+    : statusFailed
+      ? "Not read: the failsafe status could not be read."
+      : !canOperate
+        ? "Not read: the failsafe control plane is not ready."
+        : !engineNamed
+          ? "Not read: name a target engine."
+          : "Reading the engine state…";
 
   const draft = useMutation({
     mutationFn: async (spec: ActionSpec) => {
@@ -668,11 +745,21 @@ export default function Failsafe() {
         <GlassCard className="mt-5" bodyClassName="flex items-start gap-3">
           <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-sev-high" />
           <div className="space-y-1">
-            <div className="font-medium">The failsafe control plane is not ready</div>
-            <p className="text-sm text-muted-foreground">
+            <div className="font-medium">
               {statusFailed
-                ? `Could not read the failsafe status: ${statusError}`
+                ? "The failsafe status could not be read"
+                : status
+                  ? "The failsafe control plane is not ready"
+                  : "Checking the failsafe control plane"}
+            </div>
+            <p className="text-sm text-muted-foreground" data-testid="text-failsafe-status">
+              {statusFailed
+                ? `Could not read the failsafe status: ${statusError}. Reading it again in a few seconds.`
                 : status?.detail ?? "Checking the control plane…"}
+            </p>
+            <p className="text-sm text-muted-foreground" data-testid="text-stops-stay-live">
+              Pause, stand-down and terminate stay available whatever this says: drafting or signing one asks the
+              control plane itself, which says if it refuses, and the engine verifies every signature before it acts.
             </p>
           </div>
         </GlassCard>
@@ -715,7 +802,6 @@ export default function Failsafe() {
             }}
             placeholder="athena-1"
             className="athena-mono"
-            disabled={!canOperate}
             data-testid="input-engine-id"
           />
         </GlassCard>
@@ -761,7 +847,7 @@ export default function Failsafe() {
                   "w-full gap-2",
                   spec.weight === "critical" && "bg-sev-critical text-white hover:bg-sev-critical/90",
                 )}
-                disabled={!canOperate || effectiveEngineId.length === 0}
+                disabled={!operable(spec.key)}
                 onClick={() => {
                   setReason("");
                   setTypedId("");
@@ -785,6 +871,9 @@ export default function Failsafe() {
           {!state ? (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground" data-testid="text-inflight-unread">
               {stateUnread}
+              {lastInFlight.length > 0 &&
+                " The commands the last state read listed are below, so a stop still waiting for a second" +
+                  " signature stays within reach; each one's current status is read when it is opened."}
             </GlassCard>
           ) : inFlight.length === 0 && (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground">
@@ -822,6 +911,32 @@ export default function Failsafe() {
                   {cmd.status === "awaiting_signatures" ? "Sign / relay" : "View"}
                 </Button>
               </div>
+            </GlassCard>
+          ))}
+          {lastInFlight.map((cmd) => (
+            <GlassCard
+              key={cmd.uuid}
+              bodyClassName="flex flex-wrap items-center justify-between gap-3"
+              data-testid={`inflight-last-read-${cmd.uuid}`}
+            >
+              <div>
+                <div className="font-medium">
+                  {actionLabel(cmd.action)}{" "}
+                  <span className="athena-mono text-xs text-muted-foreground">· {cmd.engineId}</span>
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Last read as {commandStatusLabel(cmd.status).toLowerCase()}. Not a current reading.
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setOpenUuid(cmd.uuid)}
+                data-testid={`button-open-${cmd.uuid}`}
+              >
+                {cmd.status === "awaiting_signatures" ? "Sign / relay" : "View"}
+              </Button>
             </GlassCard>
           ))}
         </div>
@@ -922,11 +1037,11 @@ export default function Failsafe() {
             <AlertDialogCancel data-testid="button-cancel-draft">Cancel</AlertDialogCancel>
             <AlertDialogAction
               className={cn(pending?.weight === "critical" && "bg-sev-critical text-white hover:bg-sev-critical/90")}
-              disabled={!canOperate || !terminateArmed || draft.isPending}
+              disabled={!pending || !operable(pending.key) || !terminateArmed || draft.isPending}
               onClick={(e) => {
-                // Keep the dialog logic ours; only fire when armed, and only
-                // while the control plane's status is in hand and says it can.
-                if (!pending || !terminateArmed || !canOperate) {
+                // Keep the dialog logic ours; only fire when armed. A stop is
+                // not held back by a status read: the draft route decides.
+                if (!pending || !terminateArmed || !operable(pending.key)) {
                   e.preventDefault();
                   return;
                 }

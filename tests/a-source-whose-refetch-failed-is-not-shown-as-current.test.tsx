@@ -116,15 +116,26 @@ describe("Failsafe", () => {
     }
   });
 
-  it("the controls go dead when the status they were enabled by can no longer be read", async () => {
+  // Inverted in round 3 (F1). This used to assert that every Draft control
+  // went DEAD when the status read failed. That was the bug: a failed status
+  // poll must never block a stop -- the draft route and the engine's own
+  // signature check are the authority. The display half is unchanged: the
+  // failure is said, and nothing read under that status is shown as current.
+  // See a-failed-status-read-never-blocks-a-stop.test.tsx.
+  it("a failed status read is said and shows nothing as current, but never takes a stop away", async () => {
     const client = mount(<Failsafe />, FAILSAFE_SEED());
     expect((screen.getByTestId("button-draft-pause") as HTMLButtonElement).disabled).toBe(false);
     await nextReadFails(client, "/api/failsafe/status");
     expect(text()).toMatch(/Could not read the failsafe status: bff unreachable/);
-    for (const action of ["pause", "resume", "stand_down", "release", "terminate"]) {
-      expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(true);
+    for (const action of ["pause", "stand_down", "terminate"]) {
+      expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(false);
     }
-    // And nothing read under that status is shown as current either.
+    // Resume and release go by the last status that answered, which said the
+    // control plane was ready; the draft route re-checks it either way.
+    for (const action of ["resume", "release"]) {
+      expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(false);
+    }
+    // And nothing read under that status is shown as current.
     expect(governor()).not.toMatch(/running/);
     expect(text()).not.toMatch(/command drafted/);
   });
@@ -139,16 +150,19 @@ describe("Failsafe", () => {
     await nextReadFails(client, "/api/failsafe/status");
     expect((screen.getByTestId("input-engine-id") as HTMLInputElement).value).toBe("athena-1");
     expect(governor()).not.toMatch(/running/);
-    expect(governor()).toMatch(/Not read: the failsafe control plane is not ready/);
+    // (It said "the control plane is not ready" -- a claim nobody had read.)
+    expect(governor()).toMatch(/Not read: the failsafe status could not be read/);
   });
 
-  it("an open draft dialog cannot confirm once the status it was opened under can no longer be read", async () => {
+  // Inverted in round 3 (F1): this asserted that an armed pause could no
+  // longer be confirmed once a status poll failed -- a stop blocked by a read.
+  it("an open pause dialog can still confirm after the status it was opened under fails to re-read", async () => {
     const client = mount(<Failsafe />, FAILSAFE_SEED());
     fireEvent.click(screen.getByTestId("button-draft-pause"));
     const confirm = () => screen.getByTestId("button-confirm-draft") as HTMLButtonElement;
     expect(confirm().disabled).toBe(false);
     await nextReadFails(client, "/api/failsafe/status");
-    expect(confirm().disabled).toBe(true);
+    expect(confirm().disabled).toBe(false);
   });
 
   it("a command console does not keep the last status and signers after its read fails", async () => {
@@ -170,7 +184,11 @@ describe("Failsafe", () => {
     await nextReadFails(client, "/api/failsafe/commands", ["/api/failsafe/commands", "cmd-1"]);
     expect(screen.getByTestId("text-command-unread").textContent).toMatch(/Could not read this command from the control plane: bff unreachable/);
     expect(text()).not.toMatch(/1 of 2 operator signatures/);
-    expect(screen.queryByTestId("button-submit-signature")).toBeNull();
+    // Inverted in round 3 (F1): this asserted the signature box was gone. The
+    // command is a pause -- a stop -- so relaying its signature stays live; the
+    // signature route checks the command itself. (A resume's console still
+    // hides it: a-failed-status-read-never-blocks-a-stop.test.tsx.)
+    expect(screen.getByTestId("button-submit-signature")).toBeTruthy();
   });
 
   it("the audit trail is not left showing the last rows after its read fails", async () => {
