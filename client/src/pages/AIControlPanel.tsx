@@ -15,6 +15,45 @@ import type { AIControlSetting } from "@shared/schema";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
 
+/** One stop the kill switch sent (server/routes.ts ScanStop). */
+interface ScanStop {
+  testId: string;
+  runId: string;
+  target: string | null;
+  stopped: boolean;
+  detail: string;
+}
+
+/** What the server did about running scans when the switch was sent on. */
+type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
+
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * What the kill switch did, from the server's own account of it: how many
+ * running scans were sent a stop, how many the engine accepted, and which it
+ * did not, with the reason. Never "all terminated": an accepted stop is the
+ * engine's word that it is stopping, and a refused or unreachable one is said.
+ */
+function stopSentence(report: KillSwitchStops): string {
+  if (!report.listed) {
+    return `Kill switch engaged, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
+      "Stop them from the scan screens, or pause the engine from the Failsafe console.";
+  }
+  const { scans } = report;
+  if (scans.length === 0) {
+    return "Kill switch engaged. No engine scan was recorded as running, so none was sent a stop.";
+  }
+  const accepted = scans.filter((one) => one.stopped).length;
+  const failed = scans.filter((one) => !one.stopped);
+  const sent = `Kill switch engaged; ${count(scans.length, "running scan")} ${scans.length === 1 ? "was" : "were"} sent a stop`;
+  const took = `the engine accepted ${accepted === scans.length ? (scans.length === 1 ? "it" : "all of them") : accepted}`;
+  if (failed.length === 0) return `${sent}, and ${took}.`;
+  const why = failed.map((one) => `${one.target ?? one.testId}: ${one.detail}`).join("; ");
+  return `${sent}; ${took}; ${failed.length} could not be stopped (${why}). ` +
+    "They may still be running: stop them from the scan screens, or pause the engine from the Failsafe console.";
+}
+
 export default function AIControlPanel() {
   const { toast } = useToast();
   const [isKillSwitchConfirmOpen, setIsKillSwitchConfirmOpen] = useState(false);
@@ -54,21 +93,54 @@ export default function AIControlPanel() {
     },
   });
 
+  // What the server did when the switch was last sent on from this page: which
+  // running scans it sent a stop, and which the engine accepted. The page says
+  // that and nothing more -- it used to say "All AI operations have been
+  // terminated" over a scan that was still running, because the switch told
+  // the engine nothing.
+  const [stopReport, setStopReport] = useState<KillSwitchStops | null>(null);
+
+  // Its own mutation, never held back by another control: while any other
+  // setting was saving, the shared mutation's pending state disabled "Confirm
+  // Shutdown". Nor is it disabled while its own request is out: sending the
+  // switch on twice sends the stops twice, which is harmless.
+  const engage = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("PATCH", "/api/ai-control", {
+        killSwitchEnabled: true,
+        systemStatus: "shutdown",
+        activeSystems: [],
+      });
+      return (await response.json()) as AIControlSetting & { stops?: KillSwitchStops };
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
+      const report = result.stops ?? null;
+      setStopReport(report);
+      toast({
+        title: "Kill switch engaged",
+        description: report ? stopSentence(report) : "The server did not say what it stopped.",
+        variant: report && report.listed && report.scans.every((one) => one.stopped) ? undefined : "destructive",
+      });
+    },
+    onError: (error: Error) => {
+      toast({ title: "The kill switch was not engaged", description: error.message, variant: "destructive" });
+    },
+  });
+
   const handleKillSwitch = () => {
     if (!isKillSwitchConfirmOpen) {
       setIsKillSwitchConfirmOpen(true);
       return;
     }
 
-    updateMutation.mutate({
-      killSwitchEnabled: true,
-      systemStatus: "shutdown",
-      activeSystems: [],
-    });
+    engage.mutate();
     setIsKillSwitchConfirmOpen(false);
   };
 
   const handleReactivate = () => {
+    // The report is about the engagement this page sent; it says nothing about a later one.
+    setStopReport(null);
     updateMutation.mutate({
       killSwitchEnabled: false,
       systemStatus: "active",
@@ -178,21 +250,45 @@ export default function AIControlPanel() {
                 Emergency Controls
               </CardTitle>
               <CardDescription>
-                Immediate shutdown of all AI systems and testing operations
+                Refuse every write except stops, and send a stop to every engine scan recorded as running
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* The server's account of the stops this page sent, shown
+                  whatever the settings read says since: it is a record of what
+                  happened, not a reading of the switch. */}
+              {stopReport && (
+                <p className="text-sm p-3 rounded-lg border border-destructive/50" data-testid="text-kill-switch-stops">
+                  {stopSentence(stopReport)}
+                </p>
+              )}
               {isEmergency ? (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between p-4 rounded-lg bg-destructive/10 border border-destructive">
                     <div className="flex items-center gap-3">
                       <Power className="w-6 h-6 text-destructive animate-pulse" />
                       <div>
-                        <p className="font-semibold text-destructive">System Shutdown Active</p>
-                        <p className="text-sm text-muted-foreground">All AI operations have been terminated</p>
+                        <p className="font-semibold text-destructive">Kill switch engaged</p>
+                        <p className="text-sm text-muted-foreground" data-testid="text-kill-switch-engaged">
+                          Writes are refused while it is engaged, except stops: a scan&apos;s Stop, and a failsafe
+                          pause, stand-down or terminate, stay available.
+                          {!stopReport &&
+                            " This page has not sent it in this session, so it does not say what was stopped; each" +
+                              " stop sent when it was engaged is in the audit log."}
+                        </p>
                       </div>
                     </div>
                   </div>
+                  <Button
+                    onClick={() => engage.mutate()}
+                    variant="destructive"
+                    size="lg"
+                    className="w-full"
+                    data-testid="button-resend-stops"
+                  >
+                    <Power className="w-5 h-5 mr-2" />
+                    {engage.isPending ? "Sending the stops…" : "Send the stops again"}
+                  </Button>
                   <Button
                     onClick={handleReactivate}
                     variant="default"
@@ -234,7 +330,8 @@ export default function AIControlPanel() {
                           Confirm Emergency Shutdown
                         </p>
                         <p className="text-sm text-muted-foreground mt-1">
-                          This will immediately stop all active tests and AI operations
+                          Every write except a stop is refused, and every engine scan recorded as running is sent a
+                          stop. This page then says which the engine accepted and which it could not be reached for.
                         </p>
                       </div>
                       <div className="flex gap-2">
@@ -243,10 +340,9 @@ export default function AIControlPanel() {
                           variant="destructive"
                           className="flex-1"
                           data-testid="button-confirm-kill-switch"
-                          disabled={updateMutation.isPending}
                         >
                           <Check className="w-4 h-4 mr-2" />
-                          Confirm Shutdown
+                          {engage.isPending ? "Engaging…" : "Confirm Shutdown"}
                         </Button>
                         <Button
                           onClick={() => setIsKillSwitchConfirmOpen(false)}

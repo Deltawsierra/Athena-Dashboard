@@ -150,6 +150,78 @@ function countSeverities(findings: unknown[]): {
     severity: worst,
   };
 }
+
+/** The engine run a test records, or null for a test no engine run stands behind. */
+function runIdOf(test: { findings: unknown }): string | null {
+  const recorded = test.findings;
+  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
+  const runId = (recorded as Record<string, unknown>).runId;
+  return typeof runId === "string" && runId !== "" ? runId : null;
+}
+
+/** Engine run states after which nothing more happens. */
+const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+
+/** What one stop sent to the engine came to. */
+interface ScanStop {
+  testId: string;
+  runId: string;
+  target: string | null;
+  /** True only when the engine accepted the stop. */
+  stopped: boolean;
+  /** Why not, in the engine's or the network's words; empty when stopped. */
+  detail: string;
+}
+
+/**
+ * Send the engine a stop for every engine scan that may still be running.
+ *
+ * Engaging the kill switch used to store a flag and nothing else: the scan it
+ * was engaged over went on running against the customer's system while the
+ * AI Control page said every operation had been terminated. Every test with
+ * an engine run that has not finished is sent the same abort its own Stop
+ * sends, all at once, and each outcome is recorded against its test. A stop
+ * the engine refused or could not be reached for is reported as exactly that
+ * -- the page says which scans could not be stopped and why -- never folded
+ * into a success.
+ */
+async function stopRunningScans(req: Request): Promise<ScanStop[]> {
+  const running = (await storage.getAllTests())
+    .map((test) => ({ test, runId: runIdOf(test) }))
+    .filter((one): one is { test: (typeof one)["test"]; runId: string } =>
+      one.runId !== null && !FINISHED_RUN_STATES.has(one.test.status));
+
+  return Promise.all(running.map(async ({ test, runId }): Promise<ScanStop> => {
+    const recorded = test.findings as Record<string, unknown>;
+    const target = typeof recorded.target === "string" ? recorded.target : null;
+    let outcome: ScanStop;
+    try {
+      const accepted = await engine.abort(runId);
+      outcome = {
+        testId: test.id, runId, target, stopped: accepted,
+        detail: accepted ? "" : "the engine did not accept the stop; the scan may still be running",
+      };
+    } catch (cause) {
+      outcome = {
+        testId: test.id, runId, target, stopped: false,
+        detail: cause instanceof Error ? cause.message : String(cause),
+      };
+    }
+    try {
+      await storage.createActivityLog({
+        action: outcome.stopped ? "aborted" : "abort_failed",
+        entityType: "test",
+        entityId: test.id,
+        details: { runId, via: "kill_switch", ...(outcome.stopped ? {} : { detail: outcome.detail }) },
+        ...actor(req),
+      });
+    } catch {
+      // The stop was sent either way; a log write that failed does not unsend it
+      // or hide its outcome from the page.
+    }
+    return outcome;
+  }));
+}
 const createDocumentSchema = insertDocumentSchema.omit({ createdBy: true, isSample: true });
 
 const updateClientSchema = createClientSchema.partial();
@@ -239,6 +311,72 @@ async function parentMissing(res: Response, clientId?: string | null, siteId?: s
  */
 const killSwitchExempt = new Set(["/api/ai-control", "/api/auth/login", "/api/auth/logout"]);
 
+/**
+ * The failsafe actions that stop an engine, and the two that put one back to
+ * work. Only the first kind is ever let past an engaged kill switch.
+ */
+const FAILSAFE_STOP_ACTIONS = new Set(["pause", "stand_down", "terminate"]);
+const FAILSAFE_RECOVER_ACTIONS = new Set(["resume", "release"]);
+
+/**
+ * What a write is, as far as the kill switch is concerned.
+ *
+ * The switch refused every write but its own, so the moment an admin engaged
+ * it every OTHER stop went out of reach: a running scan's Stop, and drafting
+ * or co-signing a failsafe pause, stand-down or terminate, all answered 503 --
+ * while the scan kept running, because the switch told the engine nothing.
+ * An emergency stop that takes the other stops away at exactly the moment
+ * someone reaches for them is worse than none.
+ *
+ *   "stop"   -- a scan's Stop, a failsafe draft whose action is a stop, and
+ *               revoking an API key (it only takes access away). Never
+ *               refused, and decided without reading anything, so no failed
+ *               read can stand in its way either.
+ *   "relay"  -- a signature for a failsafe command. A stop's is let through;
+ *               only a resume's or a release's is refused. When the command
+ *               cannot be read the relay is let through: it might be a stop's,
+ *               and the control plane and the engine check every signature.
+ *   "cancel" -- withdrawing a failsafe command. Withdrawing a resume or a
+ *               release is let through (it keeps an engine stopped);
+ *               withdrawing a stop is refused, and so is one whose command
+ *               cannot be read.
+ *   null     -- an ordinary write: refused while the switch is engaged.
+ *
+ * Case-insensitive, as Express's own routing is, so a spelling that reaches a
+ * stop's handler is a stop here too.
+ */
+type KillSwitchClass = { kind: "stop" } | { kind: "relay" | "cancel"; uuid: string } | null;
+
+function killSwitchClass(method: string, fullPath: string, body: unknown): KillSwitchClass {
+  if (method === "POST" && /^\/api\/scans\/[^/]+\/abort$/i.test(fullPath)) return { kind: "stop" };
+  if (method === "DELETE" && /^\/api\/api-keys\/[^/]+$/i.test(fullPath)) return { kind: "stop" };
+  if (method === "POST" && /^\/api\/failsafe\/commands$/i.test(fullPath)) {
+    const action = body && typeof body === "object" ? (body as { action?: unknown }).action : undefined;
+    return typeof action === "string" && FAILSAFE_STOP_ACTIONS.has(action) ? { kind: "stop" } : null;
+  }
+  const command = /^\/api\/failsafe\/commands\/([^/]+)\/(signatures|cancel)$/i.exec(fullPath);
+  if (method === "POST" && command) {
+    let uuid = command[1];
+    try {
+      uuid = decodeURIComponent(uuid);
+    } catch {
+      // Express will not route a malformed escape either; test what we were given.
+    }
+    return { kind: command[2].toLowerCase() === "signatures" ? "relay" : "cancel", uuid };
+  }
+  return null;
+}
+
+/** The action of a failsafe command, or null when it cannot be read. */
+async function failsafeActionOf(uuid: string): Promise<string | null> {
+  try {
+    const drafted = await failsafe.getCommand(uuid);
+    return drafted ? drafted.command.action : null;
+  } catch {
+    return null;
+  }
+}
+
 export const enforceKillSwitch: RequestHandler = (req, res, next) => {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
     next();
@@ -253,20 +391,35 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
     next();
     return;
   }
+  const kind = killSwitchClass(req.method, fullPath, req.body);
+  // Before the settings are read: a stop does not wait on that read, or fail with it.
+  if (kind?.kind === "stop") {
+    next();
+    return;
+  }
 
-  storage
-    .getAIControlSettings()
-    .then((settings) => {
-      if (settings?.killSwitchEnabled) {
-        res.status(503).json({
-          message: "The AI kill switch is engaged. Writes are disabled.",
-          systemStatus: settings.systemStatus,
-        });
-        return;
-      }
-      next();
-    })
-    .catch(next);
+  (async () => {
+    let settings;
+    try {
+      settings = await storage.getAIControlSettings();
+    } catch (cause) {
+      // A relay that may be a stop's is not refused because a read failed.
+      if (kind?.kind === "relay") return void next();
+      throw cause;
+    }
+    if (!settings?.killSwitchEnabled) return void next();
+    if (kind) {
+      const action = await failsafeActionOf(kind.uuid);
+      if (kind.kind === "relay" && (action === null || !FAILSAFE_RECOVER_ACTIONS.has(action))) return void next();
+      if (kind.kind === "cancel" && action !== null && FAILSAFE_RECOVER_ACTIONS.has(action)) return void next();
+    }
+    res.status(503).json({
+      message:
+        "The AI kill switch is engaged. Writes are disabled, except stops: a scan's Stop, and a failsafe " +
+        "pause, stand-down or terminate, stay available.",
+      systemStatus: settings.systemStatus,
+    });
+  })().catch(next);
 };
 
 /**
@@ -798,8 +951,7 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    const runId = runIdOf(test);
     if (!runId) {
       return void res.status(409).json({
         error: "this test has no engine run recorded against it, so there is nothing to stop",
@@ -1236,9 +1388,33 @@ export function registerRoutes(app: Express): void {
 
   app.patch("/api/ai-control", requireAdmin, asyncHandler(async (req, res) => {
     const data = updateAIControlSettingSchema.parse(req.body);
+    // The flag first, so every other write is refused from here on; then the
+    // stops (stopRunningScans). Sent again each time the switch is sent on, so
+    // an operator can retry the scans that could not be reached.
     const settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
-    await storage.createActivityLog({ action: "updated", entityType: "ai_control", entityId: settings.id, details: data, ...actor(req) });
-    res.json(settings);
+    let stops: { listed: true; scans: ScanStop[] } | { listed: false; detail: string } | null = null;
+    if (data.killSwitchEnabled === true) {
+      try {
+        stops = { listed: true, scans: await stopRunningScans(req) };
+      } catch (cause) {
+        // Not a 500: the switch is engaged, and what the page must say is that
+        // the scans to stop could not be listed -- not that there were none.
+        stops = { listed: false, detail: cause instanceof Error ? cause.message : String(cause) };
+      }
+    }
+    const logged = stops === null ? data : {
+      ...data,
+      stops: stops.listed
+        ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
+        : { listed: false, detail: stops.detail },
+    };
+    try {
+      await storage.createActivityLog({ action: "updated", entityType: "ai_control", entityId: settings.id, details: logged, ...actor(req) });
+    } catch (cause) {
+      // Once stops were sent, their outcome reaches the page whatever the log did.
+      if (stops === null) throw cause;
+    }
+    res.json(stops === null ? settings : { ...settings, stops });
   }));
 
   // ==== AI CHAT ====
