@@ -147,6 +147,30 @@ describe("assurance BFF", () => {
           });
         }
 
+        // Two backends that answer `signed` with something other than a
+        // boolean: the string "false" and the number 1. Neither is a yes or a
+        // no, so neither may reach the page as one -- "false" coerced by
+        // truthiness would read as "signed (reported)".
+        const oddSigned: Record<string, unknown> = {
+          "/api/assurance/deployments/dep-str/assurance-receipt/": "false",
+          "/api/assurance/deployments/dep-num/assurance-receipt/": 1,
+        };
+        if (path in oddSigned && method === "GET") {
+          return json(200, {
+            receipt_version: "mythos.assurance.receipt/1.0",
+            system: { name: "odd", uuid: "dep-odd", environment: "staging", environment_label: "Staging" },
+            result: { decision: null, decision_label: null },
+            policy: { declared: false },
+            evidence: { algorithm: "sha256", root: "1".repeat(64), finding_count: 0 },
+            assessments: {},
+            algorithm: "sha256",
+            digest: "7".repeat(64),
+            computed_at: "2026-09-17T02:00:00Z",
+            signed: oddSigned[path],
+            unsigned_reason: null,
+          });
+        }
+
         if (path === "/api/assurance/deployments/dep-1/capabilities/" && method === "GET") {
           return json(200, {
             capabilities: [
@@ -1833,6 +1857,17 @@ describe("assurance BFF", () => {
     expect(silent.status).toBe(200);
     expect(silent.body.signed).toBeNull();
     expect(silent.body.unsignedReason).toBeNull();
+  });
+
+  it("carries a `signed` that is not a boolean as null, never coerced to yes or no", async () => {
+    // The string "false" is truthy, and 1 is not a boolean: a mapper that
+    // coerced either would make the page say "signed (reported)" about a copy
+    // no backend said was signed. Only a real boolean is a report.
+    for (const dep of ["dep-str", "dep-num"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/assurance-receipt`);
+      expect(res.status).toBe(200);
+      expect(res.body.signed, `${dep}: a non-boolean signed was coerced`).toBeNull();
+    }
   });
 
   it("carries a declared data boundary through the receipt policy, camelCased", async () => {
