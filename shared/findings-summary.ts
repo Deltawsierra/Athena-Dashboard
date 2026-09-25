@@ -118,10 +118,16 @@ export function untrackedResults(scan: UntrackedScan): string {
   const rated = scan.ratedNotCounted ?? 0;
   const unrated = scan.unrated ?? 0;
   const parts: string[] = [];
-  if (scan.critical + scan.high > 0 || rated > 0) {
+  if (scan.critical + scan.high > 0) {
     parts.push(
       `${rated > 0 ? "at least " : ""}${scan.critical} critical / ${scan.high} high that are not tracked as findings`
         + (rated > 0 ? ` (rated, not counted by severity${(scan.scans ?? 1) > 1 ? `: ${rated} of those scans` : ""})` : ""),
+    );
+  } else if (rated > 0) {
+    // The floor a rating stands for is filed, and how many more stand behind
+    // it is not on record: no "0 critical / 0 high" the record never counted.
+    parts.push(
+      `results rated critical or high that no count breaks down${(scan.scans ?? 1) > 1 ? ` (${rated} of those scans)` : ""}, so whether every one is tracked as a finding is not known`,
     );
   }
   if (unrated > 0) {

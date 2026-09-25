@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 
 import { readScan, reportedSeverity } from "../shared/latest-scans";
-import { reportedSerious } from "../server/findings-summary";
+import { reportedSerious, summarizeFindings } from "../server/findings-summary";
+import { untrackedResults } from "../shared/findings-summary";
 
 /**
  * PR #52 round 5. Round 4 made the Deployments band the worse of a test's
@@ -77,5 +78,38 @@ describe("a test's record is read whole", () => {
     // Rated medium with no count: no critical or high is implied.
     expect(reportedSerious({ ...base, ...test({ severity: "medium", vulnerabilitiesFound: 4 }) } as never))
       .toEqual({ critical: 0, high: 0, ratedNotCounted: false, unrated: 0 });
+  });
+
+  it("an engine scan whose counts were never recorded carries its results that nobody rated", () => {
+    const base = { id: "t", clientId: "c1", siteId: "s1", startedAt: null, completedAt: null };
+    const legacy = { ...base, ...test({ findings: { runId: "r", target: "https://a.example/", results: [
+      { type: "odd", endpoint: "/a" }, { type: "xss", endpoint: "/b", severity: "high" },
+    ] } }) };
+    expect(reportedSerious(legacy as never)).toEqual({ critical: 0, high: 1, ratedNotCounted: false, unrated: 1 });
+    const onlyUnrated = { ...legacy, findings: { runId: "r", target: "https://a.example/", results: [{ type: "odd", endpoint: "/a" }] } };
+    const summary = summarizeFindings({
+      clients: [{ id: "c1", name: "Acme" }], sites: [], findings: [], tests: [onlyUnrated] as never,
+    });
+    expect(summary.byClient[0].untrackedScan).toMatchObject({ critical: 0, high: 0, ratedNotCounted: 0, unrated: 1 });
+  });
+
+  it("a rating is never read as tracked, even once a finding stands behind the one result it implies", () => {
+    // Rated critical, 2 found, no counts; one critical finding filed from it.
+    // How many of the two are critical is not on record, so the other is not
+    // shown to be tracked -- and no "0 critical / 0 high" is said of it.
+    const rated = { id: "t", clientId: "c1", siteId: "s1", startedAt: null, completedAt: "2026-09-01T10:00:00.000Z",
+      ...test({ severity: "critical", vulnerabilitiesFound: 2 }) };
+    const summary = summarizeFindings({
+      clients: [{ id: "c1", name: "Acme" }], sites: [], findings: [], tests: [rated] as never,
+      filed: new Map([["t", { critical: 1, high: 0 }]]),
+    });
+    const untracked = summary.byClient[0].untrackedScan;
+    expect(untracked).toMatchObject({ critical: 0, high: 0, ratedNotCounted: 1, unrated: 0, scans: 1 });
+    const said = untrackedResults(untracked!);
+    expect(said).toBe("results rated critical or high that no count breaks down, so whether every one is tracked as a finding is not known");
+    expect(said).not.toMatch(/0 critical/);
+    // With a count still standing, the floor is said as a floor.
+    expect(untrackedResults({ ...untracked!, critical: 1 }))
+      .toBe("at least 1 critical / 0 high that are not tracked as findings (rated, not counted by severity)");
   });
 });

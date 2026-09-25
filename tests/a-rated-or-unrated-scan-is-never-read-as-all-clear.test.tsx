@@ -7,6 +7,7 @@ import type { ReactElement } from "react";
 import { makeApp, signIn } from "./helpers";
 import Risks from "@/pages/Risks";
 import Overview from "@/pages/Overview";
+import { summarizeFindings } from "../server/findings-summary";
 
 /**
  * PR #52 round 5, R5-F. The all-clear rule ("a critical any site's latest
@@ -114,5 +115,30 @@ describe("a scan rated critical, or whose results nobody rated, is never read as
     expect(within(row("Unrated API")).queryByText(/^(Critical|High|Medium|Low|Info)$/)).toBeNull();
     const issues = screen.getByTestId("overview-panel-issues").textContent ?? "";
     expect(issues).toMatch(/2 clients have critical or high results, or results with no severity recorded, from a latest completed scan that are not tracked as findings/);
+  });
+});
+
+describe("the Overview's Recent Activity reads a rating with no count as a rating", () => {
+  it("a scan rated critical with nothing counted is not '0 findings reported'", () => {
+    const CLIENTS = [{ id: "c1", name: "Rated Only", company: "R", status: "active", lastTestDate: null }];
+    const at = new Date(Date.now() - 3_600_000).toISOString();
+    const TESTS = [{
+      id: "t1", clientId: "c1", siteId: null, testType: "penetration-test", status: "completed", severity: "critical",
+      startedAt: at, completedAt: at, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+      findings: null,
+    }];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity,
+      queryFn: async ({ queryKey }) => { throw new Error(`unseeded: ${JSON.stringify(queryKey)}`); } } } });
+    for (const [k, v] of [
+      [["/api/clients"], CLIENTS], [["/api/tests"], TESTS], [["/api/sites"], []],
+      [["/api/findings/summary"], JSON.parse(JSON.stringify(summarizeFindings({ clients: CLIENTS, sites: [], findings: [], tests: TESTS as never })))],
+      [["/api/assurance/deployments"], []],
+      [["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 }],
+      [["/api/auth/check"], { authenticated: true, user: null }],
+    ] as Array<[unknown[], unknown]>) client.setQueryData(k, v);
+    render(<QueryClientProvider client={client}><Overview /></QueryClientProvider>);
+    const activity = screen.getByTestId("overview-panel-activity").textContent ?? "";
+    expect(activity).toMatch(/Rated Only · rated critical, no count recorded/);
+    expect(activity).not.toMatch(/0 findings reported/);
   });
 });
