@@ -38,7 +38,7 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider } from "@/components/mythos/Ornament";
 import { StatusPill, Avatar } from "@/components/mythos/atoms";
 import { figure, loaded, notInHand } from "@/lib/loaded";
-import { countsNotRecorded } from "@shared/latest-scans";
+import { readScan, type ReadableTest } from "@shared/latest-scans";
 
 interface ApiDoc { id: string; title: string; description: string | null; documentType: string; fileUrl: string | null; createdAt: string; createdBy: string | null }
 interface ApiUser { id: string; username: string }
@@ -52,6 +52,36 @@ const TYPE_ICON: Record<string, typeof FileText> = {
   Report: FileText, Policy: ClipboardList, Evidence: FileCheck2, Archive: FolderArchive,
 };
 function typeIcon(t: string) { return TYPE_ICON[t] ?? FileText; }
+
+/**
+ * What a completed scan's record says it found at critical and high, read
+ * whole (shared/latest-scans.ts readScan). From the critical and high counts
+ * alone, a scan recorded "Severity: Critical, Total Vulnerabilities: 2" with
+ * the counts left at 0 "reported 0 critical and 0 high findings".
+ */
+export function latestScanReport(test: ReadableTest): string {
+  const read = readScan(test);
+  // An engine scan finished before the inline-count fix has results and no
+  // counts: they were never taken, so they are not read as 0.
+  if (read.countsNotRecorded) return "Its latest completed scan returned results, but its counts were not recorded";
+  const n = (count: number, what: string) => `${count} ${what}${count === 1 ? "" : "s"}`;
+  const counted = read.counts.critical + read.counts.high + read.counts.medium + read.counts.low;
+  // Nothing broken down by severity: no "0 critical" the record never said.
+  if (counted === 0 && read.ratedNotCounted) {
+    return read.total > 0
+      ? `Its latest completed scan reported ${n(read.total, "finding")}, rated ${read.ratedNotCounted}; not broken down by severity`
+      : `Its latest completed scan was rated ${read.ratedNotCounted}, with no count recorded`;
+  }
+  if (counted === 0 && read.unrated > 0) {
+    return `Its latest completed scan reported ${n(read.total, "finding")}${read.unrated === read.total ? "" : `, ${read.unrated}`} with no severity recorded`;
+  }
+  const serious = `${read.counts.critical} critical and ${read.counts.high} high finding${read.counts.critical + read.counts.high === 1 ? "" : "s"}`;
+  const notes = [
+    read.ratedNotCounted ? `rated ${read.ratedNotCounted}, with no ${read.ratedNotCounted} count recorded` : null,
+    read.unrated > 0 ? `${n(read.unrated, "finding")} with no severity recorded` : null,
+  ].filter((note): note is string => note !== null);
+  return `Its latest completed scan reported ${serious}${notes.length ? `; ${notes.join("; ")}` : ""}`;
+}
 
 const tabOn = "rounded-full bg-primary/15 px-3 py-1 text-[12px] font-medium text-primary";
 const tabOff = "rounded-full px-3 py-1 text-[12px] font-medium text-muted-foreground hover:text-foreground transition-colors";
@@ -209,12 +239,7 @@ export default function Evidence() {
                   <div>
                     <p className="text-[14px] font-semibold text-foreground">{latestClient?.name ?? "Unknown system"}</p>
                     <p className="mt-1 text-[12px] text-muted-foreground">
-                      {/* An engine scan finished before the inline-count fix has
-                          results and no counts (shared/latest-scans.ts): its
-                          counts were never taken, so they are not read as 0. */}
-                      {countsNotRecorded(latestDone)
-                        ? "Its latest completed scan returned results, but its counts were not recorded"
-                        : `Its latest completed scan reported ${latestDone.criticalCount} critical and ${latestDone.highCount} high finding${latestDone.criticalCount + latestDone.highCount === 1 ? "" : "s"}`}
+                      {latestScanReport(latestDone)}
                       {latestDone.completedAt ? ` (${new Date(latestDone.completedAt).toLocaleDateString()})` : ""}.
                     </p>
                   </div>
