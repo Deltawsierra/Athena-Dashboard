@@ -40,7 +40,7 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
-import type { Test, Client, Site, InsertTest } from "@shared/schema";
+import type { Test, Client, Site, CreateTest } from "@shared/schema";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -87,7 +87,7 @@ export default function Tests() {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (data: InsertTest) => apiRequest("POST", "/api/tests", data),
+    mutationFn: async (data: CreateTest) => apiRequest("POST", "/api/tests", data),
     onSuccess: () => {
       // Not only the list: the findings summary and every other answer
       // computed from tests (lib/invalidate.ts).
@@ -129,7 +129,10 @@ export default function Tests() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const findingsText = formData.get("findings") as string || "";
-    const data: InsertTest = {
+    // The route's own schema's type: no `executedBy` (the server records who
+    // ran it from the session, and refuses a body that names it) and no
+    // `completedAt` (the server stamps it when a test is created completed).
+    const data: CreateTest = {
       clientId: formData.get("clientId") as string,
       siteId: normalizeOptional(formData.get("siteId")),
       testType: formData.get("testType") as string,
@@ -142,8 +145,6 @@ export default function Tests() {
       highCount: parseInt(formData.get("highCount") as string) || 0,
       mediumCount: parseInt(formData.get("mediumCount") as string) || 0,
       lowCount: parseInt(formData.get("lowCount") as string) || 0,
-      executedBy: null,
-      completedAt: null,
     };
     createMutation.mutate(data);
   };

@@ -12,7 +12,7 @@ import { controlMap, type ScanFinding } from "./compliance";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
-  insertClientSchema, insertSiteSchema, insertTestSchema,
+  insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
   insertUserSchema, insertAIControlSettingSchema, insertAIChatMessageSchema,
   updateConnectionSettingsSchema,
@@ -44,8 +44,6 @@ function hostOf(url: string): string | null {
     return null;
   }
 }
-
-const createTestSchema = insertTestSchema.omit({ executedBy: true, isSample: true });
 
 /**
  * When a test becomes completed, it completed now -- unless the caller says
