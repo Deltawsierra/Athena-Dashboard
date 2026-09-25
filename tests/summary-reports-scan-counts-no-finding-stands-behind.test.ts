@@ -55,7 +55,7 @@ describe("a completed scan's counts that no finding stands behind are reported",
     const summary = (await agent.get("/api/findings/summary")).body;
     expect(mineIn(summary, client.id)).toEqual({
       clientId: client.id, open: 0, critical: 0, high: 0, latestSeriousSeenAt: null,
-      untrackedScan: { testId: created.body.id, completedAt: "2026-09-01T10:00:00.000Z", critical: 3, high: 5, scans: 1 },
+      untrackedScan: { testId: created.body.id, completedAt: "2026-09-01T10:00:00.000Z", critical: 3, high: 5, ratedNotCounted: 0, unrated: 0, scans: 1 },
     });
     // Reported, not open: nothing tracks whether those were fixed.
     expect(summary.open.total).toBe(0);
@@ -184,7 +184,7 @@ describe("the untracked-scan rule, pure", () => {
       ] as never,
     });
     expect(summary.byClient.map((one) => one.untrackedScan)).toEqual([
-      { testId: "new", completedAt: null, critical: 0, high: 1, scans: 1 },
+      { testId: "new", completedAt: null, critical: 0, high: 1, ratedNotCounted: 0, unrated: 0, scans: 1 },
       null,
     ]);
   });

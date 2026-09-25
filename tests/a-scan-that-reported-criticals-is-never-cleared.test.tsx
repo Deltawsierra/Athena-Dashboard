@@ -94,7 +94,7 @@ const ANY_ALL_CLEAR = /Nothing flagged|No open (tracked )?findings on record|No 
 describe("a completed scan that reported critical findings is not answered with an all-clear", () => {
   it("the summary the page reads carries the scan's counts, outside the open totals", () => {
     const summary = summaryFor([MANUAL]);
-    expect(summary.byClient[0].untrackedScan).toEqual({ testId: "t1", completedAt: now, critical: 3, high: 5, scans: 1 });
+    expect(summary.byClient[0].untrackedScan).toEqual({ testId: "t1", completedAt: now, critical: 3, high: 5, ratedNotCounted: 0, unrated: 0, scans: 1 });
     expect(summary.open.total).toBe(0);
   });
 
@@ -170,7 +170,9 @@ describe("a completed scan that reported critical findings is not answered with 
       defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity,
         queryFn: async ({ queryKey }) => { throw new Error(`unexpected ${JSON.stringify(queryKey)}`); } } },
     });
-    const highOnly = { ...MANUAL, criticalCount: 0, highCount: 2, vulnerabilitiesFound: 2 };
+    // Rated high: spread from MANUAL it kept "Severity: Critical", a rating
+    // with no critical count behind it, which is read as at least one critical.
+    const highOnly = { ...MANUAL, severity: "high", criticalCount: 0, highCount: 2, mediumCount: 0, lowCount: 0, vulnerabilitiesFound: 2 };
     const summary = summaryFor([highOnly]);
     // Two open tracked mediums/highs from an earlier engine scan as well.
     // The tracked one was last seen three days ago; the scan completed just now,

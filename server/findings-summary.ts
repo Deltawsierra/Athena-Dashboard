@@ -50,7 +50,7 @@ import {
   type SummarySeverity,
   type UntrackedScan,
 } from "@shared/findings-summary";
-import { completedTime, countsNotRecorded, latestCompletedBySite } from "@shared/latest-scans";
+import { completedTime, latestCompletedBySite, ratingOf, readScan } from "@shared/latest-scans";
 import { foldResults } from "./findings";
 
 export { SUMMARY_SEVERITIES, type FindingsSummary, type SummarySeverity };
@@ -84,7 +84,7 @@ export type SummaryTest = Pick<
   Test,
   "id" | "clientId" | "status" | "startedAt" | "completedAt" | "criticalCount" | "highCount"
 > &
-  Partial<Pick<Test, "siteId" | "findings" | "vulnerabilitiesFound" | "mediumCount" | "lowCount">>;
+  Partial<Pick<Test, "siteId" | "severity" | "findings" | "vulnerabilitiesFound" | "mediumCount" | "lowCount">>;
 
 /** Critical and high counts. */
 export interface SeriousCounts {
@@ -92,9 +92,27 @@ export interface SeriousCounts {
   high: number;
 }
 
+/** What a test reported at critical and high, and what its record leaves unknown there. */
+export interface SeriousReading extends SeriousCounts {
+  /**
+   * The test is rated critical or high and counts nothing at that severity
+   * ("Severity: Critical, Total Vulnerabilities: 2"): it is taken to report
+   * at least one result at its rating, and its figures are a floor.
+   */
+  ratedNotCounted: boolean;
+  /** Results it reported with no severity recorded: any of them may be critical or high. */
+  unrated: number;
+}
+
 /**
  * The distinct critical and high issues a test reported: the unit the finding
- * ledger files in.
+ * ledger files in -- read from the whole record (shared/latest-scans.ts
+ * readScan), not the critical and high counts alone. Those alone read a test
+ * recorded "Severity: Critical, Total Vulnerabilities: 2" (counts left at 0)
+ * as reporting no critical, and one recorded "Total Vulnerabilities: 4" with
+ * no severity as reporting no critical or high, and the screens said nothing
+ * needed attention beside both. A rating with no count behind it is at least
+ * one result at that rating; results nobody rated are carried as unrated.
  *
  * A test's counts are counted per result, so several payloads landing on one
  * endpoint are several criticals there and one finding in the ledger. Those
@@ -105,39 +123,46 @@ export interface SeriousCounts {
  * reports what its counts say. A completed engine test whose counts were never
  * recorded (all zero beside real results) reports what its results say.
  */
-export function reportedSerious(test: SummaryTest): SeriousCounts {
-  const recorded = (test.findings ?? {}) as Record<string, unknown>;
-  const results = Array.isArray(recorded.results) ? (recorded.results as unknown[]) : null;
-  const stored = { critical: test.criticalCount ?? 0, high: test.highCount ?? 0 };
-  if (!results) return stored;
-  const folded = foldResults(results, test.clientId, typeof recorded.target === "string" ? recorded.target : null);
-  const counts = {
+export function reportedSerious(test: SummaryTest): SeriousReading {
+  const read = readScan({
     status: test.status,
+    severity: test.severity ?? null,
     findings: test.findings,
     vulnerabilitiesFound: test.vulnerabilitiesFound ?? 0,
-    criticalCount: stored.critical,
-    highCount: stored.high,
+    criticalCount: test.criticalCount ?? 0,
+    highCount: test.highCount ?? 0,
     mediumCount: test.mediumCount ?? 0,
     lowCount: test.lowCount ?? 0,
-  };
-  if (countsNotRecorded(counts)) {
+  });
+  const recorded = (test.findings ?? {}) as Record<string, unknown>;
+  const results = Array.isArray(recorded.results) ? (recorded.results as unknown[]) : null;
+  const folded = results
+    ? foldResults(results, test.clientId, typeof recorded.target === "string" ? recorded.target : null)
+    : null;
+  if (folded && read.countsNotRecorded) {
     const distinct = Array.from(folded.distinct.values());
     return {
       critical: distinct.filter((one) => severityOf(one.severity) === "critical").length,
       high: distinct.filter((one) => severityOf(one.severity) === "high").length,
+      ratedNotCounted: false,
+      unrated: distinct.filter((one) => ratingOf(one.severity) === null).length,
     };
   }
+  const floor = (band: "critical" | "high") => (read.ratedNotCounted === band ? 1 : 0);
   return {
-    critical: Math.max(0, stored.critical - (folded.foldedAway.critical ?? 0)),
-    high: Math.max(0, stored.high - (folded.foldedAway.high ?? 0)),
+    critical: Math.max(floor("critical"), read.counts.critical - (folded?.foldedAway.critical ?? 0)),
+    high: Math.max(floor("high"), read.counts.high - (folded?.foldedAway.high ?? 0)),
+    ratedNotCounted: read.ratedNotCounted === "critical" || read.ratedNotCounted === "high",
+    unrated: read.unrated,
   };
 }
 
-/** A test whose reported critical/high counts may need a finding row behind them. */
-const reportsSerious = (test: SummaryTest) => {
-  const reported = reportedSerious(test);
-  return reported.critical + reported.high > 0;
-};
+/** Whether a test's record leaves anything at critical or high for the summary to flag. */
+const flagsSerious = (reported: SeriousReading) =>
+  reported.critical + reported.high > 0 || reported.ratedNotCounted || reported.unrated > 0;
+
+/** A test whose reported critical/high results may need a finding row behind them. */
+const reportsSerious = (test: SummaryTest) => flagsSerious(reportedSerious(test));
 
 type SummaryFinding = Pick<
   Finding,
@@ -262,7 +287,10 @@ export function summarizeFindings(input: {
     const sighted = filed.get(scan.id) ?? { critical: 0, high: 0 };
     const critical = Math.max(0, reported.critical - sighted.critical);
     const high = Math.max(0, reported.high - sighted.high);
-    if (critical + high === 0) continue;
+    // A rating with no count behind it, or results nobody rated, is never read
+    // as tracked: how many critical or high results stand behind it is not
+    // on record, so no filed finding can be shown to cover them.
+    if (!flagsSerious({ ...reported, critical, high })) continue;
     const sum = untrackedOf.get(scan.clientId);
     const newest = newestOf.get(scan.clientId);
     const lead = !newest || completedTime(scan) > completedTime(newest) ? scan : newest;
@@ -272,6 +300,8 @@ export function summarizeFindings(input: {
       completedAt: isoOf(lead.completedAt) || null,
       critical: (sum?.critical ?? 0) + critical,
       high: (sum?.high ?? 0) + high,
+      ratedNotCounted: (sum?.ratedNotCounted ?? 0) + (reported.ratedNotCounted ? 1 : 0),
+      unrated: (sum?.unrated ?? 0) + reported.unrated,
       scans: (sum?.scans ?? 0) + 1,
     });
   }

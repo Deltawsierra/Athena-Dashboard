@@ -128,7 +128,9 @@ describe("an all-clear says only what the record supports", () => {
   it("several sites' latest scans with untracked results are said as several, and added up", () => {
     const tests = [
       { ...ENGINE_TEST, id: "p1", testType: "penetration-test", criticalCount: 1, highCount: 0, findings: null },
-      { ...ENGINE_TEST, id: "p2", siteId: "s2", testType: "penetration-test", criticalCount: 0, highCount: 4, findings: null },
+      // Rated high: spread from ENGINE_TEST it kept "critical", a rating with
+      // no critical count behind it, which is read as at least one critical.
+      { ...ENGINE_TEST, id: "p2", siteId: "s2", testType: "penetration-test", severity: "high", criticalCount: 0, highCount: 4, findings: null },
     ];
     const summary = JSON.parse(JSON.stringify(summarizeFindings({
       clients: CLIENTS, sites: SITES, findings: [],

@@ -42,7 +42,7 @@ import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/comp
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
-import { isOpenStatus, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
+import { isOpenStatus, untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
 /* ---- live types (subset of the API shapes) ---------------------------- */
 interface ApiClient { id: string; name: string; status: string; lastTestDate: string | null }
@@ -403,10 +403,14 @@ export default function Risks() {
                     : untracked.state !== "ready"
                       ? `"No open or in-review tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
                       : untracked.data
-                        ? `"No open or in-review tracked findings, but ${(untracked.data.scans ?? 1) > 1 ? `${untracked.data.scans} latest completed scans (one per site)` : "the latest completed scan"} reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
+                        ? `"No open or in-review tracked findings, but ${(untracked.data.scans ?? 1) > 1 ? `${untracked.data.scans} latest completed scans (one per site)` : "the latest completed scan"} reported ${untrackedResults(untracked.data)}."`
                         // Exactly what it covers. Not "the latest scan reported
                         // no critical": one it reported and filed, then fixed
-                        // or accepted, is not open and not untracked.
+                        // or accepted, is not open and not untracked. And never
+                        // beside a scan rated critical or high that counted
+                        // nothing there, or results nobody rated: the summary
+                        // flags those (untrackedScan), since none is on record
+                        // as tracked.
                         : "\"No open or in-review tracked findings, and every critical or high result of this engagement's latest completed scans is tracked as a finding. Nothing here needs attention right now. Accepted risks and verified fixes are not counted.\""}
               </p>
             </div>

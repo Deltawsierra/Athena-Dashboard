@@ -144,7 +144,7 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     await record(site.id, 1, 0, "2026-09-01T00:00:00.000Z");
     const newest = (await record(other.id, 0, 4, "2026-09-02T00:00:00.000Z")).body;
     expect((await mine(client.id)).untrackedScan).toEqual({
-      testId: newest.id, completedAt: "2026-09-02T00:00:00.000Z", critical: 1, high: 4, scans: 2,
+      testId: newest.id, completedAt: "2026-09-02T00:00:00.000Z", critical: 1, high: 4, ratedNotCounted: 0, unrated: 0, scans: 2,
     });
   });
 
@@ -214,7 +214,7 @@ describe("what a completed test reported, in the ledger's unit", () => {
   });
 
   it("is what a person recorded, when there are no engine results", () => {
-    expect(reportedSerious(test({ criticalCount: 3, highCount: 2 }) as never)).toEqual({ critical: 3, high: 2 });
+    expect(reportedSerious(test({ criticalCount: 3, highCount: 2 }) as never)).toEqual({ critical: 3, high: 2, ratedNotCounted: false, unrated: 0 });
   });
 
   it("the latest per site is by completion time; a test with no readable time never displaces one that has one", () => {
@@ -243,7 +243,7 @@ describe("what a completed test reported, in the ledger's unit", () => {
     expect(reportedSerious(test({
       criticalCount: 2, highCount: 3, vulnerabilitiesFound: 5,
       findings: { runId: "r", target: "https://app.example", results },
-    }) as never)).toEqual({ critical: 1, high: 2 });
+    }) as never)).toEqual({ critical: 1, high: 2, ratedNotCounted: false, unrated: 0 });
   });
 
   it("is what the results say for an engine test whose counts were never recorded", () => {
@@ -257,7 +257,7 @@ describe("what a completed test reported, in the ledger's unit", () => {
         { type: "xss", severity: "high", evidence: { endpoint: "https://app.example/b" } },
       ] },
     });
-    expect(reportedSerious(unrecorded as never)).toEqual({ critical: 1, high: 1 });
+    expect(reportedSerious(unrecorded as never)).toEqual({ critical: 1, high: 1, ratedNotCounted: false, unrated: 0 });
     const summary = summarizeFindings({
       clients: [{ id: "c1", name: "One" }], sites: [], findings: [], tests: [unrecorded] as never,
       // It filed the sqli at its first severity, medium, and the xss at high.

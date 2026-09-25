@@ -74,8 +74,8 @@ import { Label, SeverityPill, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
-import type { FindingsSummary, UntrackedScan } from "@shared/findings-summary";
-import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
+import { untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
+import { readScan } from "@shared/latest-scans";
 
 /* ---- the page's model: what every panel renders, live or sample ------- */
 
@@ -128,7 +128,7 @@ const TREND_SERIES = [
 interface ApiClient { id: string; name: string }
 interface ApiSite { id: string; clientId: string; environment: string }
 interface ApiTest {
-  id: string; clientId: string; siteId: string | null; testType: string; status: string;
+  id: string; clientId: string; siteId: string | null; testType: string; status: string; severity?: string | null;
   startedAt: string; completedAt: string | null; vulnerabilitiesFound: number;
   criticalCount: number; highCount: number; mediumCount: number; lowCount: number; findings?: unknown;
 }
@@ -196,14 +196,16 @@ export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[]
 /**
  * "latest completed scan reported 3 critical / 5 high that are not tracked as
  * findings" -- the scans' own results no finding stands behind, not their
- * whole counts: a scan that filed some of them is flagged for the rest.
+ * whole counts: a scan that filed some of them is flagged for the rest. A scan
+ * rated critical or high with nothing counted there, and results nobody rated,
+ * are said as what they are (shared/findings-summary.ts untrackedResults).
  */
 export function untrackedNote(scan: UntrackedScan): string {
   const scans = scan.scans ?? 1;
   // One latest completed scan per site (a test recorded against the client
   // alone counts as one more), so several can stand at once.
   const which = scans > 1 ? `${scans} latest completed scans (one per site)` : "latest completed scan";
-  return `${which} reported ${scan.critical} critical / ${scan.high} high that are not tracked as findings`;
+  return `${which} reported ${untrackedResults(scan)}`;
 }
 
 /**
@@ -213,9 +215,19 @@ export function untrackedNote(scan: UntrackedScan): string {
  * it adds while such results stand.
  */
 function untrackedCaveat(summary: FindingsSummary): string {
-  const n = summary.byClient.filter((one) => one.untrackedScan).length;
+  const flagged = summary.byClient.filter((one) => one.untrackedScan);
+  const n = flagged.length;
   if (n === 0) return "";
-  return ` ${n === 1 ? "1 client has" : `${n} clients have`} critical or high results from a latest completed scan that are not tracked as findings; see Systems Needing Attention.`;
+  const unrated = flagged.some((one) => (one.untrackedScan?.unrated ?? 0) > 0);
+  return ` ${n === 1 ? "1 client has" : `${n} clients have`} critical or high results${unrated ? ", or results with no severity recorded," : ""} from a latest completed scan that are not tracked as findings; see Systems Needing Attention.`;
+}
+
+/** What a completed test's record says it found, for the Recent Activity list. */
+function recentMeta(test: ApiTest): string {
+  const read = readScan(test);
+  if (read.countsNotRecorded) return "counts not recorded";
+  if (read.total === 0 && read.ratedNotCounted) return `rated ${read.ratedNotCounted}, no count recorded`;
+  return `${plural(read.total, "finding")} reported`;
 }
 
 function useLiveOverview(): OverviewModel {
@@ -346,23 +358,28 @@ function useLiveOverview(): OverviewModel {
       // A scan's reported counts that no finding stands behind: a person's
       // record of a pentest, say. Nothing tracks whether those were fixed, so
       // the client is flagged with them rather than cleared.
+      // A scan rated critical or high with nothing counted there, or results
+      // nobody rated, are flagged too: none of them is on record as tracked.
       const untracked = own?.untrackedScan ?? null;
       const reported = untracked ? untracked.critical + untracked.high : 0;
-      if (own && (tracked > 0 || reported > 0)) {
+      const unknown = untracked ? (untracked.ratedNotCounted ?? 0) + (untracked.unrated ?? 0) : 0;
+      if (own && (tracked > 0 || reported > 0 || unknown > 0)) {
         const notes = [
           tracked > 0 ? plural(tracked, "open critical/high finding") : null,
-          untracked && reported > 0 ? untrackedNote(untracked) : null,
+          untracked && reported + unknown > 0 ? untrackedNote(untracked) : null,
         ].filter((note): note is string => note !== null);
         const note = notes.join(" · ");
         const times = [own.latestSeriousSeenAt, untracked?.completedAt ?? null]
           .filter((at): at is string => Boolean(at))
           .sort();
         flagged.push({
-          rank: tracked + reported,
+          rank: tracked + reported + unknown,
           row: {
             name: client.name,
             note: note.charAt(0).toUpperCase() + note.slice(1),
-            sev: own.critical > 0 || (untracked?.critical ?? 0) > 0 ? "critical" : "high",
+            // No pill for results nobody rated: they are not known to be high.
+            sev: own.critical > 0 || (untracked?.critical ?? 0) > 0 ? "critical"
+              : own.high > 0 || (untracked?.high ?? 0) > 0 ? "high" : null,
             ago: ago(times[times.length - 1] ?? null),
           },
         });
@@ -405,11 +422,10 @@ function useLiveOverview(): OverviewModel {
           icon: done ? CheckCircle2 : failed ? XCircle : ScanLine,
           tone: done ? "text-emerald-400" : failed ? "text-sev-high" : "text-primary",
           text: `${humanize(t.status)}: ${humanize(t.testType)}`,
-          // From the counts too, and never a 0 nobody recorded: a total left
-          // at 0 beside "Critical Count: 2" said "0 findings reported".
-          meta: [nameOf.get(t.clientId) ?? "Unknown client", !done ? null
-            : countsNotRecorded(t) ? "counts not recorded"
-            : `${plural(reportedTotal(t), "finding")} reported`]
+          // From the whole record, and never a 0 nobody recorded: a total left
+          // at 0 beside "Critical Count: 2" said "0 findings reported", and so
+          // did one left at 0 beside "Severity: Critical".
+          meta: [nameOf.get(t.clientId) ?? "Unknown client", !done ? null : recentMeta(t)]
             .filter(Boolean)
             .join(" · "),
           ago: ago(t.completedAt || t.startedAt),

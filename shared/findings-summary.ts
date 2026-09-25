@@ -67,8 +67,11 @@ export interface FindingsSummary {
    * screen, and the shortfall for a scan that filed fewer critical or high
    * findings than it reported. Those are what the scans reported, not open
    * findings: nothing tracks whether they were fixed, so a screen must neither
-   * add them into the open totals nor clear the client while they stand. null
-   * when there are none.
+   * add them into the open totals nor clear the client while they stand. It
+   * also carries the scans rated critical or high with no count at that
+   * severity, and results with no severity recorded: how many of those are
+   * critical or high is not on record, so they are never read as tracked.
+   * null when there are none.
    */
   byClient: Array<{
     clientId: string;
@@ -82,7 +85,8 @@ export interface FindingsSummary {
 
 /**
  * Critical and high results of a client's latest completed tests (one per
- * site) that no finding row stands behind, added up over those tests.
+ * site) that no finding row stands behind, added up over those tests -- and
+ * what those tests' records leave unknown at critical and high.
  */
 export interface UntrackedScan {
   /** The most recently completed of those tests. */
@@ -93,6 +97,37 @@ export interface UntrackedScan {
   critical: number;
   /** High results reported and not filed as high findings, over every such test. */
   high: number;
+  /**
+   * How many of those tests are rated critical or high and count nothing at
+   * that severity. Each is taken as at least one result at its rating, so
+   * `critical` and `high` are then a floor, not a count.
+   */
+  ratedNotCounted: number;
+  /** Results those tests reported with no severity recorded: any may be critical or high. */
+  unrated: number;
   /** How many of the client's latest completed tests (one per site) have any. */
   scans: number;
+}
+
+/**
+ * What an UntrackedScan says, in words, after "reported": "3 critical / 5 high
+ * that are not tracked as findings", "at least 1 critical / 0 high ... (rated,
+ * not counted by severity)", "4 results with no severity recorded ...".
+ */
+export function untrackedResults(scan: UntrackedScan): string {
+  const rated = scan.ratedNotCounted ?? 0;
+  const unrated = scan.unrated ?? 0;
+  const parts: string[] = [];
+  if (scan.critical + scan.high > 0 || rated > 0) {
+    parts.push(
+      `${rated > 0 ? "at least " : ""}${scan.critical} critical / ${scan.high} high that are not tracked as findings`
+        + (rated > 0 ? ` (rated, not counted by severity${(scan.scans ?? 1) > 1 ? `: ${rated} of those scans` : ""})` : ""),
+    );
+  }
+  if (unrated > 0) {
+    parts.push(
+      `${unrated} result${unrated === 1 ? "" : "s"} with no severity recorded, so whether ${unrated === 1 ? "it is" : "any is"} critical or high is not known`,
+    );
+  }
+  return parts.join(", and ");
 }
