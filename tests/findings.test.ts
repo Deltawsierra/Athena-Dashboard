@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  fingerprint, ingest, nextStatus, sightingOf, statusFromVerdict,
+  fingerprint, foldResults, ingest, nextStatus, sightingOf, statusFromVerdict,
   type Sighting,
 } from "../server/findings";
 import type { Finding } from "@shared/schema";
@@ -128,6 +128,49 @@ describe("filing a scan's results", () => {
     expect(filed.distinct).toBe(2);
     expect(filed.created).toBe(2);
     expect(db.rows.size).toBe(2);
+  });
+
+  // Round 3, F2. The fingerprint still excludes severity (pinned above: one
+  // endpoint and type can arrive at different severities and is one issue).
+  // What changed is the severity the folded issue is FILED at: it kept the
+  // first sighting's, so a weak payload's "medium" followed by a confirmed
+  // "critical" filed a medium -- the scan's record said 1 critical, the
+  // ledger held none, and the screens cleared the client.
+  it("files an issue seen at several severities in one scan once, at the worst of them", async () => {
+    const db = store();
+    const results = [
+      { type: "sql_injection", severity: "medium", message: "SQL error with crafted payload", evidence: { endpoint: "https://app.example/login" } },
+      { type: "sql_injection", severity: "Critical", message: "Time-based SQL injection confirmed", evidence: { endpoint: "https://app.example/login" } },
+      { type: "sql_injection", severity: "high", message: "Boolean-based", evidence: { endpoint: "https://app.example/login" } },
+    ];
+    const filed = await ingest(db, results, context);
+    expect(filed).toMatchObject({ raw: 3, distinct: 1, created: 1 });
+    const row = Array.from(db.rows.values())[0];
+    expect(row.severity).toBe("Critical");
+    // The worst sighting's own words go with it.
+    expect(row.message).toBe("Time-based SQL injection confirmed");
+    // One sighting of one finding, as before.
+    expect(db.sightings).toHaveLength(1);
+
+    // And a later scan that sees it at two severities rescores it to that
+    // scan's worst, not its first.
+    await ingest(db, [results[0], results[2]], { ...context, testId: "t2", runId: "run-2" });
+    expect(Array.from(db.rows.values())[0].severity).toBe("high");
+  });
+
+  it("says, per severity, how many results were repeats folded into another's finding", () => {
+    const folded = foldResults([
+      { type: "xss", severity: "high", evidence: { endpoint: "https://app.example/a" } },
+      { type: "xss", severity: "critical", evidence: { endpoint: "https://app.example/a" } },
+      { type: "xss", severity: "critical", evidence: { endpoint: "https://app.example/a" } },
+      { type: "xss", severity: "critical", evidence: { endpoint: "https://app.example/b" } },
+      // Untyped: counted on the test, never filed, so never a repeat.
+      { severity: "critical" },
+      { type: "error", internal: true, severity: "critical" },
+    ], "c1", "https://app.example");
+    expect(folded.raw).toBe(6);
+    expect(folded.distinct.size).toBe(2);
+    expect(folded.foldedAway).toEqual({ high: 1, critical: 1 });
   });
 
   it("recognises the same issue on a later scan instead of duplicating it", async () => {

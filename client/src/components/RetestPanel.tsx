@@ -20,12 +20,14 @@
 
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { loaded } from "@/lib/loaded";
 import { AlertTriangle, RotateCcw, ShieldCheck, ShieldX } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 
 interface DecisionTwin {
   id: number;
@@ -98,9 +100,12 @@ export default function RetestPanel({ testId }: { testId: string }) {
   const { toast } = useToast();
   const [results, setResults] = useState<Record<number, RetestResult>>({});
 
-  const { data, isLoading } = useQuery<DecisionsView>({
+  // Read error-first: a failed read is not "the engine kept no decisions",
+  // and a refetch that failed does not leave the last list standing as current.
+  const decisions$ = loaded(useQuery<DecisionsView>({
     queryKey: [`/api/tests/${testId}/decisions`],
-  });
+  }));
+  const data = decisions$.state === "ready" ? decisions$.data : undefined;
 
   const run = useMutation({
     mutationFn: async (twinId: number) => {
@@ -108,6 +113,8 @@ export default function RetestPanel({ testId }: { testId: string }) {
       return (await response.json()) as RetestResult;
     },
     onSuccess: (result) => {
+      // The verdict may have closed or reopened a finding.
+      void invalidateTestsAndFindings();
       if (typeof result.twinId === "number") {
         setResults((previous) => ({ ...previous, [result.twinId as number]: result }));
       }
@@ -119,7 +126,7 @@ export default function RetestPanel({ testId }: { testId: string }) {
     },
   });
 
-  if (isLoading) return null;
+  if (decisions$.state === "loading") return null;
 
   const decisions = data?.decisions ?? [];
 
@@ -135,13 +142,19 @@ export default function RetestPanel({ testId }: { testId: string }) {
         the finding is still there.
       </p>
 
+      {decisions$.state === "error" && (
+        <p className="text-sm text-muted-foreground" data-testid="text-decisions-unread">
+          Could not load this run&apos;s decisions: {decisions$.message}
+        </p>
+      )}
+
       {data?.detail && (
         <p className="text-sm text-muted-foreground" data-testid="text-retest-detail">
           {data.detail}
         </p>
       )}
 
-      {!data?.detail && decisions.length === 0 && (
+      {data && !data.detail && decisions.length === 0 && (
         <p className="text-sm text-muted-foreground" data-testid="text-no-decisions">
           The engine kept no decisions for this run, so there is nothing to
           retest. Decisions are captured per finding, so a scan that found

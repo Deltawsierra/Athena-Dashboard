@@ -640,6 +640,42 @@ export async function runState(runId: string): Promise<EngineScan> {
   };
 }
 
+/** One run the engine lists as still live: queued, running or aborting. */
+export interface ActiveRun {
+  runId: string;
+  target: string | null;
+  state: string;
+}
+
+/**
+ * Every run the engine says is still touching a customer.
+ *
+ * The engine's own list, not this app's rows: a run whose row was deleted, or
+ * never written, is on it all the same. An answer that cannot be read throws
+ * -- a list nobody could read is not an empty one.
+ */
+export async function activeRuns(): Promise<ActiveRun[]> {
+  const response = await call("/api/scans/active");
+  if (!response.ok) {
+    throw new EngineUnavailable(
+      `the engine answered ${response.status} when asked for its active runs: ${await body(response)}`,
+    );
+  }
+  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const listed = payload && typeof payload === "object" ? payload.active : undefined;
+  if (!Array.isArray(listed)) {
+    throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
+  }
+  return listed
+    .map((one) => (one && typeof one === "object" ? (one as Record<string, unknown>) : {}))
+    .filter((one) => typeof one.run_id === "string" && one.run_id !== "")
+    .map((one) => ({
+      runId: one.run_id as string,
+      target: typeof one.target === "string" ? one.target : null,
+      state: typeof one.state === "string" ? one.state : "unknown",
+    }));
+}
+
 /** Ask a running scan to stop. */
 export async function abort(runId: string): Promise<boolean> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}/abort`, {

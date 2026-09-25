@@ -32,6 +32,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { formatDistanceToNow } from "date-fns";
 import { Boxes, CircleSlash, FlaskConical, ScanSearch } from "lucide-react";
 
@@ -199,7 +200,12 @@ export default function CVEClassifier() {
       return (await response.json()) as Classification;
     },
   });
-  const { data: classifiers = [], isLoading } = useQuery<Classifier[]>({
+  const {
+    data: classifiers = [],
+    isLoading,
+    isError: classifiersFailed,
+    error: classifiersError,
+  } = useQuery<Classifier[]>({
     queryKey: ["/api/classifiers"],
   });
 
@@ -232,16 +238,20 @@ export default function CVEClassifier() {
           <GlassCard>
             <div className="athena-label">Active models</div>
             <div className="athena-figure text-4xl mt-1" data-testid="text-active-count">
-              {active.length}
+              {classifiersFailed ? "—" : isLoading ? "…" : active.length}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              of {classifiers.length} recorded
+              {classifiersFailed ? "Could not load classifiers" : `of ${classifiers.length} recorded`}
             </p>
           </GlassCard>
 
           <GlassCard className="md:col-span-2">
             <div className="athena-label">Accuracy, weighted by training set</div>
-            {weighted === null ? (
+            {classifiersFailed ? (
+              <p className="text-sm text-muted-foreground mt-2">
+                Could not load classifiers, so there is no figure to give.
+              </p>
+            ) : weighted === null ? (
               <p className="text-sm text-muted-foreground mt-2">
                 No active model has a training set recorded, so there is nothing
                 to weight and no figure to give.
@@ -265,7 +275,19 @@ export default function CVEClassifier() {
           </GlassCard>
         </div>
 
-        {!isLoading && classifiers.length === 0 && (
+        {classifiersFailed && (
+          // A failed read is not an empty registry.
+          <GlassCard ruling>
+            <div className="flex gap-3 items-start">
+              <CircleSlash className="w-5 h-5 mt-0.5 athena-gold shrink-0" />
+              <p className="text-sm text-muted-foreground">
+                Could not load classifiers: {errorMessage(classifiersError)}
+              </p>
+            </div>
+          </GlassCard>
+        )}
+
+        {!isLoading && !classifiersFailed && classifiers.length === 0 && (
           <GlassCard ruling>
             <div className="flex gap-3 items-start">
               <CircleSlash className="w-5 h-5 mt-0.5 athena-gold shrink-0" />

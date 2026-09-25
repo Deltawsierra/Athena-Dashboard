@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, Search, Filter, Calendar, MapPin, Shield, AlertTriangle, CheckCircle, XCircle, Pencil, FileText } from "lucide-react";
+import { errorMessage } from "@/lib/loaded";
+import { Plus, Search, Filter, Calendar, MapPin, Shield, AlertTriangle, CheckCircle, XCircle, Pencil, FileText, Square } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
 import GlassCard from "@/components/GlassCard";
@@ -38,7 +39,10 @@ import { Textarea } from "@/components/ui/textarea";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { Test, Client, Site, InsertTest } from "@shared/schema";
+import { unfinishedRunOf } from "@/lib/engineRuns";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
+import type { Test, Client, Site, CreateTest } from "@shared/schema";
+import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -49,12 +53,32 @@ function normalizeOptional(value: FormDataEntryValue | null): string | null {
   return text === "" || text === "none" ? null : text;
 }
 
+/** The engine run a test records, or null when no engine run stands behind it. */
+function engineRunOf(findings: unknown): string | null {
+  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return null;
+  const runId = (findings as { runId?: unknown }).runId;
+  return typeof runId === "string" && runId !== "" ? runId : null;
+}
+
+/** A person's notes on a test: the `details` of its findings, when there are any. */
+function notesOf(findings: unknown): string | null {
+  if (!findings || typeof findings !== "object") return null;
+  const details = (findings as { details?: unknown }).details;
+  return typeof details === "string" ? details : null;
+}
+
 /** `findings` is free-form JSON; show the details field when there is one. */
 function renderFindings(findings: unknown): string {
-  if (findings && typeof findings === "object" && "details" in findings) {
-    const details = (findings as { details: unknown }).details;
-    if (typeof details === "string") return details;
+  const runId = engineRunOf(findings);
+  if (runId) {
+    // An engine scan's results are the engine's; its notes are a person's.
+    const results = (findings as { results?: unknown }).results;
+    const n = Array.isArray(results) ? results.length : 0;
+    const notes = notesOf(findings);
+    return `Engine run ${runId}: ${n} result${n === 1 ? "" : "s"} recorded by the engine.${notes ? ` Notes: ${notes}` : ""}`;
   }
+  const notes = notesOf(findings);
+  if (notes !== null) return notes;
   return JSON.stringify(findings);
 }
 
@@ -67,7 +91,12 @@ export default function Tests() {
   const [editingTest, setEditingTest] = useState<Test | null>(null);
   const { toast } = useToast();
 
-  const { data: tests = [], isLoading } = useQuery<Test[]>({
+  const {
+    data: tests = [],
+    isLoading,
+    isError: testsFailed,
+    error: testsError,
+  } = useQuery<Test[]>({
     queryKey: ["/api/tests"],
   });
 
@@ -80,9 +109,11 @@ export default function Tests() {
   });
 
   const createMutation = useMutation({
-    mutationFn: async (data: InsertTest) => apiRequest("POST", "/api/tests", data),
+    mutationFn: async (data: CreateTest) => apiRequest("POST", "/api/tests", data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      // Not only the list: the findings summary and every other answer
+      // computed from tests (lib/invalidate.ts).
+      void invalidateTestsAndFindings();
       toast({ title: "Test created successfully" });
       setIsCreateDialogOpen(false);
     },
@@ -95,7 +126,7 @@ export default function Tests() {
     mutationFn: async ({ id, data }: { id: string; data: Partial<Test> }) =>
       apiRequest("PATCH", `/api/tests/${id}`, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+      void invalidateTestsAndFindings();
       toast({ title: "Test updated successfully" });
       setIsEditDialogOpen(false);
       setEditingTest(null);
@@ -106,13 +137,43 @@ export default function Tests() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: string) => apiRequest("DELETE", `/api/tests/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
-      toast({ title: "Test deleted successfully" });
+    mutationFn: async (id: string) => {
+      const response = await apiRequest("DELETE", `/api/tests/${id}`);
+      return (await response.json().catch(() => ({}))) as { stops?: Array<{ runId: string; stopped: boolean }> };
+    },
+    onSuccess: (result) => {
+      void invalidateTestsAndFindings();
+      // A running scan is deleted only after the engine accepted its stop; say that it was stopped.
+      const stopped = (result.stops ?? []).filter((one) => one.stopped).map((one) => one.runId);
+      toast({
+        title: "Test deleted successfully",
+        ...(stopped.length > 0
+          ? { description: `Its engine run ${stopped.join(", ")} was sent a stop first, and the engine accepted it.` }
+          : {}),
+      });
     },
     onError: (error) => {
       toast({ title: "Failed to delete test", description: error.message, variant: "destructive" });
+    },
+  });
+
+  // A running engine scan's Stop, on its row. It existed only on the scan
+  // screen that started the scan, so once that page was left -- or for a scan
+  // someone else started -- this list showed the scan with Edit and Delete
+  // and no way to stop it. The abort route asks the engine and says if it did
+  // not stop; nothing here decides that a scan has stopped.
+  const stopMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const response = await apiRequest("POST", `/api/scans/${id}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean; runId: string };
+    },
+    onSuccess: (result, id) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/scans/${id}`] });
+      void invalidateTestsAndFindings();
+      toast({ title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+    },
+    onError: (error) => {
+      toast({ title: "Not stopped", description: error.message, variant: "destructive" });
     },
   });
 
@@ -120,7 +181,10 @@ export default function Tests() {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const findingsText = formData.get("findings") as string || "";
-    const data: InsertTest = {
+    // The route's own schema's type: no `executedBy` (the server records who
+    // ran it from the session, and refuses a body that names it) and no
+    // `completedAt` (the server stamps it when a test is created completed).
+    const data: CreateTest = {
       clientId: formData.get("clientId") as string,
       siteId: normalizeOptional(formData.get("siteId")),
       testType: formData.get("testType") as string,
@@ -133,8 +197,6 @@ export default function Tests() {
       highCount: parseInt(formData.get("highCount") as string) || 0,
       mediumCount: parseInt(formData.get("mediumCount") as string) || 0,
       lowCount: parseInt(formData.get("lowCount") as string) || 0,
-      executedBy: null,
-      completedAt: null,
     };
     createMutation.mutate(data);
   };
@@ -144,6 +206,22 @@ export default function Tests() {
     if (!editingTest) return;
     const formData = new FormData(e.currentTarget);
     const findingsText = formData.get("findings") as string || "";
+    if (engineRunOf(editingTest.findings)) {
+      // An engine scan: only what a person writes. The form sent the whole
+      // findings back as `details`, which wrote over the run id -- a running
+      // scan lost its Stop and its results were never filed. Its status,
+      // severity and counts are the engine's, and the server refuses a change
+      // to them (and keeps the run's keys whatever is sent).
+      updateMutation.mutate({
+        id: editingTest.id,
+        data: {
+          summary: formData.get("summary") as string || null,
+          testType: formData.get("testType") as string,
+          findings: findingsText.trim() ? { details: findingsText } : null,
+        },
+      });
+      return;
+    }
     const data: Partial<Test> = {
       summary: formData.get("summary") as string || null,
       testType: formData.get("testType") as string,
@@ -210,6 +288,10 @@ export default function Tests() {
         return "outline";
     }
   };
+
+  // The engine run behind the test being edited, if there is one: its status,
+  // severity, counts and results are the engine's, not the form's.
+  const editingRun = editingTest ? engineRunOf(editingTest.findings) : null;
 
   if (isLoading) {
     return (
@@ -474,7 +556,17 @@ export default function Tests() {
 
         <AnimatedContainer direction="up" delay={0.2}>
           <div className="grid gap-6">
-            {filteredTests.length === 0 ? (
+            {testsFailed ? (
+              // A failed read is not an empty record: say so, not "No Tests Found".
+              <GlassCard>
+                <div className="text-center py-12">
+                  <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                  <p className="text-muted-foreground">
+                    Could not load tests: {errorMessage(testsError)}
+                  </p>
+                </div>
+              </GlassCard>
+            ) : filteredTests.length === 0 ? (
               <GlassCard>
                 <div className="text-center py-12">
                   <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
@@ -523,6 +615,18 @@ export default function Tests() {
                             )}
                           </div>
                           <div className="flex gap-2">
+                            {unfinishedRunOf(test) && (
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={() => stopMutation.mutate(test.id)}
+                                disabled={stopMutation.isPending && stopMutation.variables === test.id}
+                                data-testid={`button-stop-${test.id}`}
+                              >
+                                <Square className="w-4 h-4 mr-1" />
+                                {stopMutation.isPending && stopMutation.variables === test.id ? "Stopping…" : "Stop"}
+                              </Button>
+                            )}
                             <Button
                               size="icon"
                               variant="ghost"
@@ -543,8 +647,13 @@ export default function Tests() {
                               <AlertDialogContent>
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>Delete Test</AlertDialogTitle>
-                                  <AlertDialogDescription>
-                                    Are you sure you want to delete this test? This action cannot be undone.
+                                  <AlertDialogDescription data-testid={`text-delete-warning-${test.id}`}>
+                                    {unfinishedRunOf(test)
+                                      ? `This scan's engine run ${unfinishedRunOf(test)} may still be running. Deleting ` +
+                                        "it sends the engine a stop first, and deletes the test only once the engine " +
+                                        "accepts the stop; if it does not, nothing is deleted and the scan keeps its " +
+                                        "Stop. This action cannot be undone."
+                                      : "Are you sure you want to delete this test? This action cannot be undone."}
                                   </AlertDialogDescription>
                                 </AlertDialogHeader>
                                 <AlertDialogFooter>
@@ -586,12 +695,14 @@ export default function Tests() {
                           )}
                         </div>
 
-                        {test.vulnerabilitiesFound > 0 && (
+                        {/* By the counts too: a test recorded with only "Critical
+                            Count: 2" has a total of 0, and hid its criticals here. */}
+                        {reportedTotal(test) > 0 && (
                           <div className="border-t border-border pt-4">
                             <div className="flex items-center gap-2 mb-3">
                               <AlertTriangle className="w-4 h-4 text-primary" />
-                              <span className="font-semibold">
-                                {test.vulnerabilitiesFound} Vulnerabilities Found
+                              <span className="font-semibold" data-testid={`text-found-${test.id}`}>
+                                {reportedTotal(test)} Vulnerabilities Found
                               </span>
                             </div>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -671,6 +782,12 @@ export default function Tests() {
                       </SelectContent>
                     </Select>
                   </div>
+                  {editingRun ? (
+                    <div className="space-y-2">
+                      <Label>Status</Label>
+                      <p className="text-sm pt-2" data-testid="text-edit-status">{editingTest.status}</p>
+                    </div>
+                  ) : (
                   <div className="space-y-2">
                     <Label htmlFor="status">Status *</Label>
                     <Select name="status" required defaultValue={editingTest.status}>
@@ -685,8 +802,23 @@ export default function Tests() {
                       </SelectContent>
                     </Select>
                   </div>
+                  )}
                 </div>
 
+                {editingRun && (
+                  <p className="text-sm text-muted-foreground rounded-lg border border-border p-3" data-testid="text-edit-engine-owned">
+                    Recorded by the engine from run {editingRun}: its status, severity and counts
+                    {editingTest.status !== "completed"
+                      ? " (none until it completes)"
+                      : countsNotRecorded(editingTest)
+                        ? " (counts not recorded)"
+                        : ` (${reportedTotal(editingTest)} found; ${editingTest.criticalCount} critical, ${editingTest.highCount} high, ${editingTest.mediumCount} medium, ${editingTest.lowCount} low)`}
+                    {" "}and its results are the engine&apos;s, and are not edited here. The summary, the test type and
+                    the notes are yours.
+                  </p>
+                )}
+
+                {!editingRun && (
                 <div className="space-y-2">
                   <Label htmlFor="severity">Severity</Label>
                   <Select name="severity" defaultValue={editingTest.severity ?? "none"}>
@@ -702,6 +834,7 @@ export default function Tests() {
                     </SelectContent>
                   </Select>
                 </div>
+                )}
 
                 <div className="space-y-2">
                   <Label htmlFor="summary">Summary</Label>
@@ -714,16 +847,22 @@ export default function Tests() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="findings">Findings</Label>
+                  <Label htmlFor="findings">{editingRun ? "Notes" : "Findings"}</Label>
                   <Textarea
                     name="findings"
-                    placeholder="Detailed findings..."
+                    placeholder={editingRun ? "Your notes on this scan..." : "Detailed findings..."}
                     rows={4}
-                    defaultValue={editingTest.findings != null ? renderFindings(editingTest.findings) : ""}
+                    defaultValue={
+                      editingRun
+                        ? notesOf(editingTest.findings) ?? ""
+                        : editingTest.findings != null ? renderFindings(editingTest.findings) : ""
+                    }
                     data-testid="input-edit-findings"
                   />
                 </div>
 
+                {!editingRun && (
+                <>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="vulnerabilitiesFound">Total Vulnerabilities</Label>
@@ -779,6 +918,8 @@ export default function Tests() {
                     />
                   </div>
                 </div>
+                </>
+                )}
 
                 <div className="flex justify-end gap-2">
                   <Button type="button" variant="outline" onClick={() => setIsEditDialogOpen(false)}>

@@ -5,6 +5,18 @@
  * quotes the sharpest open finding. Where the backend has no source -- the
  * ripple effects are illustrative -- the copy says as much rather than
  * inventing a number.
+ *
+ * A findings request that failed, or had not answered yet, used to render as
+ * "0 open" and "No open findings. Nothing here needs attention right now." A
+ * source nobody read is not a zero and not an all-clear: every figure here
+ * reads "…" while it loads and "—" with the reason when it failed, and the
+ * all-clear appears only for a successful, empty answer.
+ *
+ * "Open" here is open or acknowledged (in review): an acknowledged critical
+ * is still there, and used to drop out of every open figure -- so the
+ * reasoning card said "nothing here needs attention" above a register row
+ * reading "Critical · Acknowledged". Accepted risks and verified fixes are
+ * not open, and the all-clear says it does not count them.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -24,10 +36,13 @@ import {
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Corners } from "@/components/mythos/Ornament";
 import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/components/mythos/atoms";
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
+import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
+import { isOpenStatus, untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
 /* ---- live types (subset of the API shapes) ---------------------------- */
 interface ApiClient { id: string; name: string; status: string; lastTestDate: string | null }
@@ -116,7 +131,8 @@ function FilterSelect({
 }
 
 export default function Risks() {
-  const { data: clients = [] } = useQuery<ApiClient[]>({ queryKey: ["/api/clients"] });
+  const clientsQ = loaded(useQuery<ApiClient[]>({ queryKey: ["/api/clients"] }));
+  const clients = clientsQ.state === "ready" ? clientsQ.data : [];
   const { data: tests = [] } = useQuery<{ clientId: string; startedAt: string; completedAt: string | null }[]>({ queryKey: ["/api/tests"] });
   const [selClient, setSelClient] = useState("");
   // default to the most recently scanned engagement so fresh results surface
@@ -127,17 +143,48 @@ export default function Risks() {
     ?? clients.find((c) => c.status === "active")?.id ?? clients[0]?.id ?? "";
   const clientId = selClient || defaultClient;
   const { data: users = [] } = useQuery<ApiUser[]>({ queryKey: ["/api/users/assignable"] });
-  const { data, isLoading } = useQuery<FindingsView>({
+  const findingsQ = useQuery<FindingsView>({
     queryKey: ["/api/findings", { clientId }],
     enabled: clientId !== "",
   });
+  // What the findings figures read: the engagements first (no engagement is
+  // not an empty one), then the chosen engagement's findings.
+  const noEngagement = clientsQ.state === "ready" && clients.length === 0;
+  const source: Loaded<FindingsView> =
+    clientsQ.state === "error"
+      ? { state: "error", message: `engagements: ${clientsQ.message}` }
+      : noEngagement
+        ? { state: "error", message: "no engagement on record" }
+        : loaded(findingsQ);
+  const ready = source.state === "ready";
+  /** Why the findings figures are not shown, in a sentence. */
+  const unavailable = clientsQ.state === "error"
+    ? `Could not load engagements: ${clientsQ.message}`
+    : noEngagement
+      ? "No engagement on record yet. Add a client and run a scan; its findings appear here."
+      : notInHand(source, "findings");
 
+  // What this engagement's latest completed scan reported, when no finding row
+  // stands behind it (a scan a person recorded on the Tests screen). The
+  // findings ledger cannot see those counts, so "nothing needs attention" is
+  // said only once the summary has answered that there are none.
+  const summaryQ = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
+  const untracked: Loaded<UntrackedScan | null> = (() => {
+    if (summaryQ.state !== "ready") return summaryQ;
+    const own = summaryQ.data.byClient.find((one) => one.clientId === clientId);
+    return own
+      ? { state: "ready", data: own.untrackedScan }
+      : { state: "error", message: "this engagement is not in the findings summary yet" };
+  })();
+
+  const data = ready ? source.data : undefined;
   const findings = data?.findings ?? [];
   const counts = data?.counts ?? {};
+  const count = (read: (view: FindingsView) => number) => (noEngagement ? "—" : figure(source, read));
   const userName = (id: string | null) => users.find((u) => u.id === id)?.username ?? (id ? "Assigned" : "Unassigned");
 
   // headline counts, from the full engagement record (unaffected by the filters)
-  const allOpen = findings.filter((f) => f.status === "open");
+  const allOpen = findings.filter((f) => isOpenStatus(f.status));
   const crit = allOpen.filter((f) => normSev(f.severity) === "critical").length;
   const high = allOpen.filter((f) => normSev(f.severity) === "high").length;
   const sharpest = allOpen.slice().sort((a, b) => SEV_ORDER.indexOf(normSev(a.severity)) - SEV_ORDER.indexOf(normSev(b.severity)))[0];
@@ -157,7 +204,7 @@ export default function Risks() {
   );
   const filtersActive = sevF !== "all" || statusF !== "all" || catF !== "all" || q !== "";
   const clearFilters = () => { setSevF("all"); setStatusF("all"); setCatF("all"); setSearch(""); };
-  const open = view.filter((f) => f.status === "open");
+  const open = view.filter((f) => isOpenStatus(f.status));
 
   // category (by finding type) breakdown for the donut + legend
   const byCat = new Map<string, number>();
@@ -182,15 +229,16 @@ export default function Risks() {
       status: STATUS_TONE[f.status] ?? { label: humanize(f.status), tone: "neutral" as StatusTone },
     }));
 
-  const totalFindings = findings.length || 1;
-  const fixedPct = Math.round(((counts.fixed ?? 0) / totalFindings) * 100);
+  // A share of nothing is not 0%: with no findings on record, or none in hand,
+  // there is no remediated share to show.
+  const fixedPct = ready && findings.length > 0 ? `${Math.round(((counts.fixed ?? 0) / findings.length) * 100)}%` : "—";
   const remediation = [
     { label: "Fixed", value: counts.fixed ?? 0, cls: "bg-emerald-400", color: "hsl(150 60% 55%)" },
     { label: "Acknowledged", value: counts.acknowledged ?? 0, cls: "bg-sky-400", color: "hsl(205 80% 60%)" },
     { label: "Open", value: counts.open ?? 0, cls: "bg-muted-foreground/50", color: "hsl(40 10% 45%)" },
   ];
 
-  const empty = !isLoading && view.length === 0;
+  const empty = ready && view.length === 0;
   const emptyReason = findings.length === 0
     ? "No findings recorded for this engagement yet. Run a scan from the Athena screen and results will appear here."
     : "No findings match the current filters.";
@@ -204,14 +252,18 @@ export default function Risks() {
         verbs={["Analyze", "Evidence", "Mitigate", "Strengthen"]}
       />
       <Divider variant="astrolabe" className="mt-5" />
+      {/* The engagement picker lists seeded demo clients like any other, and a
+          seeded test's counts can reach the reasoning panel; this says how many. */}
+      <SampleDataNotice counts={["clients", "tests"]} className="mt-5" />
 
       {/* stats -- all live from the findings ledger */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label="Total Open Risks" value={counts.open ?? 0} icon={AlertTriangle} />
-        <StatCard label="Critical Risks" value={crit} icon={Flame} accent="var(--sev-critical)" />
-        <StatCard label="High Risks" value={high} icon={TriangleAlert} accent="var(--sev-high)" />
-        <StatCard label="Acknowledged" value={counts.acknowledged ?? 0} icon={ShieldCheck} sublabel="in review" />
-        <StatCard label="Fixed" value={counts.fixed ?? 0} icon={CheckCircle2} sublabel="remediated & verified" />
+        <StatCard label="Total Open Risks" value={count((v) => (v.counts.open ?? 0) + (v.counts.acknowledged ?? 0))} icon={AlertTriangle}
+          sublabel={source.state === "error" ? "Not in hand" : "Open or in review, this engagement"} />
+        <StatCard label="Critical Risks" value={count(() => crit)} icon={Flame} accent="var(--sev-critical)" />
+        <StatCard label="High Risks" value={count(() => high)} icon={TriangleAlert} accent="var(--sev-high)" />
+        <StatCard label="Acknowledged" value={count((v) => v.counts.acknowledged ?? 0)} icon={ShieldCheck} sublabel="in review" />
+        <StatCard label="Fixed" value={count((v) => v.counts.fixed ?? 0)} icon={CheckCircle2} sublabel="remediated & verified" />
       </div>
 
       {/* filters -- all live: engagement switches the query, the rest filter the view */}
@@ -243,8 +295,10 @@ export default function Risks() {
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <GlassCard hover={false}>
               <p className="athena-label mb-3">Risks by Category and Severity</p>
-              {heat.length === 0 ? (
-                <p className="py-8 text-center text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No open risks to chart."}</p>
+              {!ready ? (
+                <p className="py-8 text-center text-[12px] text-muted-foreground">{unavailable}</p>
+              ) : heat.length === 0 ? (
+                <p className="py-8 text-center text-[12px] text-muted-foreground">No open tracked findings to chart.</p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full border-collapse text-left">
@@ -273,10 +327,12 @@ export default function Risks() {
               <Corners />
               <p className="athena-label mb-3">Open Risks by Category</p>
               <div className="flex items-center gap-4">
-                <Donut segments={donut.length ? donut : [{ value: 1, color: "hsl(40 20% 30% / 0.4)" }]} center={String(open.length)} sub="Open Risks" />
+                <Donut segments={donut.length ? donut : [{ value: 1, color: "hsl(40 20% 30% / 0.4)" }]} center={String(count(() => open.length))} sub="Open Risks" />
                 <ul className="flex-1 space-y-1.5">
-                  {donut.length === 0 ? (
-                    <li className="text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No open risks."}</li>
+                  {!ready ? (
+                    <li className="text-[12px] text-muted-foreground">{unavailable}</li>
+                  ) : donut.length === 0 ? (
+                    <li className="text-[12px] text-muted-foreground">No open tracked findings.</li>
                   ) : donut.map((d) => (
                     <li key={d.label} className="flex items-center gap-2 text-[12px]">
                       <span className="h-2 w-2 rounded-full" style={{ background: d.color }} />
@@ -291,9 +347,11 @@ export default function Risks() {
 
           <GlassCard hover={false} bodyClassName="p-0">
             <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
-              <p className="athena-label">Risk Register <span className="text-muted-foreground">({view.length}{filtersActive ? ` of ${findings.length}` : ""})</span></p>
+              <p className="athena-label">Risk Register <span className="text-muted-foreground">({ready ? `${view.length}${filtersActive ? ` of ${findings.length}` : ""}` : count(() => 0)})</span></p>
             </div>
-            {empty ? (
+            {!ready ? (
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{unavailable}</p>
+            ) : empty ? (
               <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{emptyReason}</p>
             ) : (
               <div className="overflow-x-auto">
@@ -306,9 +364,7 @@ export default function Risks() {
                     </tr>
                   </thead>
                   <tbody>
-                    {isLoading ? (
-                      <tr><td colSpan={9} className="px-3 py-8 text-center text-[12px] text-muted-foreground">Loading…</td></tr>
-                    ) : register.map((r) => (
+                    {register.map((r) => (
                       <tr key={r.n} className="border-t border-border/40 hover:bg-surface-1/40">
                         <td className="px-3 py-2.5 text-[12px] text-muted-foreground">{r.n}</td>
                         <td className="px-3 py-2.5"><SeverityPill severity={r.sev} /></td>
@@ -337,14 +393,29 @@ export default function Risks() {
             </div>
             <div className="flex gap-3">
               <img src={owlMedallion} alt="" aria-hidden="true" className="h-9 w-9 shrink-0 select-none object-contain" />
+              {/* The all-clear is said only about an answer that came back
+                  empty -- never about one that failed or has not arrived. */}
               <p className="font-serif text-[13px] italic text-foreground">
-                {sharpest
-                  ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity)} severity on ${sharpest.target || "the target"}.`
-                  : "\"No open findings. Nothing here needs attention right now.\""}
+                {!ready
+                  ? unavailable
+                  : sharpest
+                    ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity)} severity on ${sharpest.target || "the target"}.`
+                    : untracked.state !== "ready"
+                      ? `"No open or in-review tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
+                      : untracked.data
+                        ? `"No open or in-review tracked findings, but ${(untracked.data.scans ?? 1) > 1 ? `${untracked.data.scans} latest completed scans (one per site)` : "the latest completed scan"} reported ${untrackedResults(untracked.data)}."`
+                        // Exactly what it covers. Not "the latest scan reported
+                        // no critical": one it reported and filed, then fixed
+                        // or accepted, is not open and not untracked. And never
+                        // beside a scan rated critical or high that counted
+                        // nothing there, or results nobody rated: the summary
+                        // flags those (untrackedScan), since none is on record
+                        // as tracked.
+                        : "\"No open or in-review tracked findings, and every critical or high result of this engagement's latest completed scans is tracked as a finding. Nothing here needs attention right now. Accepted risks and verified fixes are not counted.\""}
               </p>
             </div>
             <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
-              {sharpest
+              {ready && sharpest
                 ? "This is the sharpest open finding on record. Remediate it, then re-run the scan to confirm it closes."
                 : "When a scan records a finding, Athena's read on the most pressing one shows here."}
             </p>
@@ -372,12 +443,12 @@ export default function Risks() {
               <p className="athena-label">Remediation Progress</p>
             </div>
             <div className="flex items-center gap-4">
-              <Donut segments={remediation.some((r) => r.value) ? remediation : [{ value: 1, color: "hsl(40 20% 30% / 0.4)" }]} center={`${isNaN(fixedPct) ? 0 : fixedPct}%`} sub="Remediated" />
+              <Donut segments={ready && remediation.some((r) => r.value) ? remediation : [{ value: 1, color: "hsl(40 20% 30% / 0.4)" }]} center={fixedPct} sub="Remediated" />
               <ul className="flex-1 space-y-1.5">
                 {remediation.map((r) => (
                   <li key={r.label} className="flex items-center gap-2 text-[12px]">
                     <span className={cn("h-2 w-2 rounded-full", r.cls)} />
-                    <span className="font-semibold text-foreground">{r.value}</span>
+                    <span className="font-semibold text-foreground">{count(() => r.value)}</span>
                     <span className="text-muted-foreground">{r.label}</span>
                   </li>
                 ))}

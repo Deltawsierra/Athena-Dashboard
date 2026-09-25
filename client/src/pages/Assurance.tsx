@@ -23,6 +23,7 @@
  * human can make the release decision from them.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { loaded } from "@/lib/loaded";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
@@ -110,6 +111,7 @@ interface Finding {
   ageDays: number | null;
   stale: boolean;
   // Assurance receipt (spine): a recomputable digest over the finding's evidence.
+  // No signature comes with it; see FindingReceiptMark for what it can show.
   receipt: { algorithm: string; digest: string; evidenceCount?: number };
   // Remediation workflow (Phase 2.3): the human process of getting the finding
   // fixed — who owns it and where it is in the six-state pipeline. Read-only on
@@ -413,9 +415,11 @@ interface BusinessImpact {
 
 // The full, versioned Assurance Receipt (spine): the roadmap tuple — system,
 // receipt version, policy, evidence root, result, per-assessment digests — as one
-// deterministic, portable, signable payload. It attests INTEGRITY and PROVENANCE
-// (this is the assurance state that was recorded, unaltered), never that the
-// conclusions are true or the system is secure. An undeclared policy reads as
+// deterministic, portable, signable payload. Its digests identify one recorded
+// state; they show a change only against a copy obtained independently or one a
+// verified signature covers, and never that the conclusions are true or the
+// system is secure. Whether this copy is signed is the backend's to say
+// (`signed`, null when it did not). An undeclared policy reads as
 // declared:false, never an invented boundary.
 interface AssuranceReceipt {
   receiptVersion: string;
@@ -434,6 +438,8 @@ interface AssuranceReceipt {
   algorithm: string;
   digest: string;
   computedAt: string | null;
+  signed: boolean | null;
+  unsignedReason: string | null;
 }
 
 // Third-Party Vendor Assurance (commercial spine): the posture of the vendors a
@@ -1720,15 +1726,7 @@ function FindingRow({
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
         )}
         {f.location && <span className="text-[11px] text-muted-foreground">· {f.location}</span>}
-        {f.receipt?.digest && (
-          <span
-            className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
-            title={`Assurance receipt (${f.receipt.algorithm}) — recomputable digest over this finding's evidence, attesting it is unaltered:\n${f.receipt.digest}`}
-          >
-            <Fingerprint className="h-3 w-3" />
-            {f.receipt.digest.slice(0, 12)}
-          </span>
-        )}
+        {f.receipt?.digest && <FindingReceiptMark receipt={f.receipt} />}
       </div>
       <DispositionCaveat text={f.statusMustNotImply} />
       {/* Remediation workflow (Phase 2.3): the state chip and assignee for
@@ -1797,8 +1795,9 @@ function FindingRow({
           endpoint on demand: the attributed history of every workflow move. */}
       {showRemediation && <RemediationDetailView findingUuid={f.uuid} />}
       {/* Incident evidence pack (Phase 3.7): a finding IS the incident. A reader
-          opens the portable, verifiable pack on demand — it attests integrity and
-          provenance, never that the incident is resolved or the system secure. */}
+          opens the pack on demand. Its digests identify a recorded state, and
+          show a change only against an independent or signature-covered copy;
+          never that the incident is resolved or the system secure. */}
       <div className="mt-2 border-t border-border/30 pt-2">
         <button
           className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
@@ -1923,10 +1922,12 @@ function AssetNode({
 /**
  * The AI-BOM (Phase 1.7) for one deployment: the AI supply-chain bill of
  * materials — every component and the providers behind it, each provider fact
- * evidence-graded, with a tamper-evident digest. Self-fetching (mounted only
- * inside an expanded deployment). It is an exportable artifact (procurement,
- * audit, M&A, security questionnaires): a reader can download the JSON and a
- * recipient can recompute the digest to confirm nothing was altered. Honest by
+ * evidence-graded, with the backend's digest over it. Self-fetching (mounted
+ * only inside an expanded deployment). It is an exportable artifact
+ * (procurement, audit, M&A, security questionnaires). No signature comes with
+ * the digest, so it shows a change only against a copy obtained independently;
+ * the JSON downloaded here is this page's rendering, not the bytes the backend
+ * hashed, so the digest cannot be recomputed from it. Honest by
  * construction — every fact shows how strongly it is known, and shadow supply
  * chain is flagged, never smoothed over.
  */
@@ -2074,9 +2075,12 @@ function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </div>
           )}
 
-          {/* The tamper-evident digest: a recipient recomputes it to verify the
-              exported BOM is unaltered. */}
-          <div className="mt-3 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+          {/* The backend's digest over the BOM. Unsigned, so it identifies a
+              recorded state rather than vouching for one. */}
+          <div
+            className="mt-3 flex items-center gap-1.5 text-[10px] text-muted-foreground"
+            title={`Digest over this AI-BOM as the backend recorded it (${data.receipt.algorithm}). No signature came with it: it shows a change only when compared with a copy obtained independently, and on its own attests nothing.\n${data.receipt.digest}`}
+          >
             <Fingerprint className="h-3 w-3" />
             <span className="uppercase tracking-wide">{data.receipt.algorithm}</span>
             <code className="font-mono">{data.receipt.digest.slice(0, 16)}…</code>
@@ -3276,11 +3280,83 @@ function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
+/**
+ * A finding's receipt digest, and what it can show. It used to say it was
+ * "attesting [the evidence] is unaltered"; a bare digest attests nothing -- it is
+ * a checksum anyone who changes the content can recompute. No signature comes
+ * with a finding receipt, so the words say that too.
+ */
+export function FindingReceiptMark({ receipt }: { receipt: { algorithm: string; digest: string } }) {
+  return (
+    <span
+      className="ml-auto inline-flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+      data-testid="finding-receipt"
+      title={
+        `Finding receipt (${receipt.algorithm}): a digest over this finding's identity and evidence hashes. ` +
+        "No signature came with it. It shows a change only when compared with a copy obtained " +
+        `independently; on its own it attests nothing.\n${receipt.digest}`
+      }
+    >
+      <Fingerprint className="h-3 w-3" />
+      {receipt.digest.slice(0, 12)}
+    </span>
+  );
+}
+
+/** The receipt's signing status as the backend reported it, in a word. */
+function SignedChip({ signed }: { signed: boolean | null }) {
+  const [text, tone] =
+    signed === true
+      ? ["signed (reported)", "border-sky-500/30 text-sky-300"]
+      : signed === false
+        ? ["unsigned", "border-amber-500/30 text-amber-300"]
+        : ["signing not reported", "border-border/60 text-muted-foreground"];
+  return (
+    <span className={cn("rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide", tone)} data-testid="receipt-signed-chip">
+      {text}
+    </span>
+  );
+}
+
+/**
+ * Whether this copy is signed, exactly as the backend said: `signed: false`
+ * with its reason, `signed: true`, or nothing at all -- and nothing at all is
+ * said as nothing, not rounded to either answer.
+ */
+function SignatureStatus({ signed, reason }: { signed: boolean | null; reason: string | null }) {
+  return (
+    <div className="mb-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5 text-[11px] text-muted-foreground" data-testid="receipt-signature">
+      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Signature</p>
+      {signed === false ? (
+        <>
+          <p>
+            <span className="text-foreground">Unsigned.</span> The backend reports that this copy
+            carries no signature, so its digests vouch for nothing about who produced it.
+          </p>
+          {reason && <p className="mt-1 text-muted-foreground/80">Backend&apos;s reason: {reason}</p>}
+        </>
+      ) : signed === true ? (
+        <p>
+          <span className="text-foreground">Reported signed.</span> The backend reports this copy as
+          signed. This page neither shows nor verifies the signature; verify it offline against the
+          engine&apos;s published keyring before relying on it.
+        </p>
+      ) : (
+        <p>
+          <span className="text-foreground">Not reported.</span> The backend did not say whether this
+          copy is signed, and no signature reached this page.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // A single digest, worn honestly: the full value is the load-bearing content (it
-// is what a signature covers and what an auditor recomputes), but it is long, so
+// is what a signature covers and what an auditor compares), but it is long, so
 // it is TRUNCATED for display (first 12 + last 8) while the copy button and the
-// title carry the value in FULL. A digest attests integrity — that the recorded
-// content is unaltered — never that it passes.
+// title carry the value in FULL. A digest shows a change only against a copy
+// obtained independently, or one a verified signature covers; on its own it
+// attests nothing, and never that anything passed.
 function DigestValue({ value }: { value: string }) {
   const { toast } = useToast();
   if (!value) {
@@ -3317,15 +3393,21 @@ function DigestValue({ value }: { value: string }) {
  * digests — as one deterministic, portable, signable payload. Self-fetching
  * (mounted only inside an expanded deployment, like the other panels).
  *
- * Honest by construction: this is an INTEGRITY / PROVENANCE record. It attests
- * that the recorded evidence and assessment state are unaltered and reproducible
- * — NOT that the system is secure or that its conclusions are true. The result is
- * shown faithfully at its true strength (a needs-more-evidence decision reads as
- * exactly that), an undeclared policy reads as "no data boundary declared" rather
- * than an invented one, and the digests are truncated for display but copied and
- * downloaded in full.
+ * It used to say the receipt "attests that the recorded evidence is unaltered".
+ * A digest does no such thing by itself: anyone who can change the content can
+ * change the digest beside it. It shows a change only when compared with a copy
+ * obtained independently, or with one a verified signature covers -- and the
+ * backend serves this route unsigned, saying so in the payload. So the panel
+ * says what the digests can and cannot show, and states the signing status the
+ * backend reported (signed / unsigned with its reason / not reported), never
+ * one it inferred. Never that the system is secure or its conclusions true.
+ *
+ * The result is shown faithfully at its true strength (a needs-more-evidence
+ * decision reads as exactly that), an undeclared policy reads as "no data
+ * boundary declared" rather than an invented one, and the digests are truncated
+ * for display but copied in full.
  */
-function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<AssuranceReceipt>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-receipt`],
@@ -3335,7 +3417,8 @@ function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
     <div className="mb-2 flex items-center gap-2">
       <ReceiptText className="h-4 w-4 text-primary" />
       <h3 className="text-[13px] font-semibold text-foreground">Assurance receipt</h3>
-      <span className="text-[11px] text-muted-foreground">integrity &amp; provenance record</span>
+      <span className="text-[11px] text-muted-foreground">record of the assessed state</span>
+      {data && <SignedChip signed={data.signed} />}
       {data && (
         <div className="ml-auto flex items-center gap-3">
           <button
@@ -3371,7 +3454,7 @@ function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
             }}
           >
             <Download className="h-3 w-3" />
-            Download receipt.json
+            Download this view (JSON)
           </button>
         </div>
       )}
@@ -3401,16 +3484,17 @@ function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
     <section>
       {heading}
 
-      {/* Honest framing (critical): this is an integrity / provenance record. It
-          proves the recorded evidence is unaltered and reproducible — never that
-          the system is secure or its conclusions true. */}
-      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-        This is an <span className="text-foreground">integrity &amp; provenance</span> record: it
-        attests that the recorded evidence is <span className="text-foreground">unaltered and
-        reproducible</span>, not that the system is secure or that its conclusions are true. The
-        result below is shown at its true strength — a digest proves nothing was altered between
-        record and report, never that anything passed.
+      {/* What the digests can show, and whether anything signed them -- as the
+          backend reported it. A digest checked against itself attests nothing. */}
+      <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground" data-testid="receipt-digest-meaning">
+        The digests below identify this recorded state. They show a change only when compared
+        with a copy obtained independently, or with one covered by a signature you have verified;
+        checked against themselves they attest nothing. The JSON downloaded here is this page's
+        rendering, not the bytes the backend hashed, so the digests cannot be recomputed from it.
+        None of this says the system is secure or its conclusions are true, and the result below
+        is shown at its true strength.
       </p>
+      <SignatureStatus signed={data.signed} reason={data.unsignedReason} />
 
       {/* Version + result. The six-state decision reuses the page's decision
           chip, carried faithfully (a needs-more-evidence result reads as that). */}
@@ -3494,8 +3578,8 @@ function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: string }) {
         </div>
       </div>
 
-      {/* Per-assessment digests. Each attests its assessment was recorded
-          unaltered — never that it passes. */}
+      {/* Per-assessment digests. Each identifies its assessment as recorded —
+          never that it passes. */}
       <div className="mb-3 rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
         <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
           Assessment digests
@@ -7279,13 +7363,18 @@ interface IncidentPack {
   algorithm: string;
   digest: string;
   computedAt: string | null;
+  /** As the backend reported it; absent or null when it said nothing. */
+  signed?: boolean | null;
+  unsignedReason?: string | null;
 }
 
 /**
  * A finding's AI Incident Evidence Pack (Phase 3.7), self-fetching when a reader
- * opens it from the finding. Attests integrity and provenance, never that the
- * conclusion is true or the system fixed: the runtime transcript is an explicit
- * gap, a null decision reads "Not assessed", and a downloadable copy is offered.
+ * opens it from the finding. Its digests identify a recorded state; they show a
+ * change only against an independently obtained or signature-covered copy, and
+ * never that the conclusion is true or the system fixed. The runtime transcript
+ * is an explicit gap, a null decision reads "Not assessed", and the download is
+ * labelled as what it is: this view, re-serialized by the page.
  */
 /** A timestamp rendered in the reader's locale, or an em dash when there is none
  *  or it cannot be parsed — never a fabricated or misleading date. */
@@ -7363,7 +7452,7 @@ function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
   );
 }
 
-function IncidentPackView({ findingUuid }: { findingUuid: string }) {
+export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<IncidentPack>({
     queryKey: [`/api/assurance/findings/${findingUuid}/incident-pack`],
@@ -7400,13 +7489,35 @@ function IncidentPackView({ findingUuid }: { findingUuid: string }) {
         <button
           className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-primary"
           onClick={download}
+          title="This page's copy of the pack, re-serialized as JSON: not the bytes the digests were computed over."
         >
           <Download className="h-3 w-3" />
-          Download JSON
+          Download this view (JSON)
         </button>
       </div>
-      <p className="text-[10px] text-muted-foreground/80">
-        Attests {data.attests}.
+      {/* It used to say "Attests integrity and provenance ..." beside two
+          unsigned digests. A bare digest attests nothing: whoever changes the
+          content can recompute it. So the pack says what its digests can show,
+          and whether a signature came with it, as the receipt panel does. */}
+      <p className="text-[10px] text-muted-foreground/80" data-testid="incident-pack-digest-meaning">
+        The digests below identify a recorded state of this pack. They show a change only against a
+        copy obtained independently, or one a verified signature covers; on their own they attest
+        nothing, and never that the conclusion is true.
+      </p>
+      <p className="text-[10px] text-muted-foreground/80" data-testid="incident-pack-signature">
+        {data.signed === true ? (
+          <>
+            <span className="text-foreground">Reported signed.</span> The backend reports this pack as
+            signed. This page neither shows nor verifies the signature; verify it offline before relying on it.
+          </>
+        ) : data.signed === false ? (
+          <>
+            <span className="text-foreground">Unsigned.</span> The backend reports that this pack carries no
+            signature.{data.unsignedReason ? ` Backend's reason: ${data.unsignedReason}` : ""}
+          </>
+        ) : (
+          <>No signature came with this pack, and the backend did not say whether it is signed.</>
+        )}
       </p>
       {/* The finding's disposition, on the pack itself. A pack headed "Incident
           evidence pack" that shows no disposition reads as a confirmed incident
@@ -7464,41 +7575,62 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const collapseSeeded = useRef(false);
 
-  const {
-    data: status,
-    isLoading: statusLoading,
-    isError: statusError,
-    error: statusErr,
-  } = useQuery<AssuranceStatus>({
+  // Polled. React Query keeps the last answer after a poll fails, and read
+  // raw that answer went on drawing the control plane as reachable -- the
+  // registries and every control under "Could not check the control plane".
+  // Read through loaded(), the failed check wins: nothing is drawn from a
+  // reachability this page could not confirm.
+  const status$ = loaded(useQuery<AssuranceStatus>({
     queryKey: ["/api/assurance/status"],
     refetchInterval: 30_000,
-  });
+  }));
+  const status = status$.state === "ready" ? status$.data : undefined;
+  const statusLoading = status$.state === "loading";
+  const statusError = status$.state === "error";
   const reachable = status?.configured === true && status?.reachable === true && status?.authorized === true;
 
   // Everything is fetched whole and grouped in the browser: the graph needs each
   // deployment's children, and grouping client-side means one fetch each rather
   // than a request per deployment. The BFF follows DRF pagination, so these are
   // complete.
-  const { data: deployments = [], isLoading: depLoading } = useQuery<Deployment[]>({
+  const deploymentsQ = useQuery<Deployment[]>({
     queryKey: ["/api/assurance/deployments"],
     enabled: reachable,
   });
-  const { data: findings = [] } = useQuery<Finding[]>({
+  const findingsQ = useQuery<Finding[]>({
     queryKey: ["/api/assurance/findings"],
     enabled: reachable,
   });
-  const { data: unknowns = [] } = useQuery<Unknown[]>({
+  const unknownsQ = useQuery<Unknown[]>({
     queryKey: ["/api/assurance/unknowns"],
     enabled: reachable,
   });
-  const { data: assets = [] } = useQuery<Asset[]>({
+  const assetsQ = useQuery<Asset[]>({
     queryKey: ["/api/assurance/assets"],
     enabled: reachable,
   });
-  const { data: providers = [] } = useQuery<Provider[]>({
+  const providersQ = useQuery<Provider[]>({
     queryKey: ["/api/assurance/providers"],
     enabled: reachable,
   });
+  const deployments = deploymentsQ.data ?? [];
+  const findings = findingsQ.data ?? [];
+  const unknowns = unknownsQ.data ?? [];
+  const assets = assetsQ.data ?? [];
+  const providers = providersQ.data ?? [];
+  // Every registry, or none. A deployment drawn after its findings or gaps
+  // failed to load would show "0 findings" and no open gaps -- a failed read
+  // rendered as a clean record. So one failure replaces the views with the
+  // reason, and nothing is drawn until all five are in hand.
+  const registries = [
+    ["deployments", deploymentsQ],
+    ["findings", findingsQ],
+    ["unknowns", unknownsQ],
+    ["assets", assetsQ],
+    ["providers", providersQ],
+  ] as const;
+  const registryFailure = registries.find(([, q]) => q.isError);
+  const registriesLoading = registries.some(([, q]) => q.data === undefined);
   // Who a finding's remediation may be assigned to. Only an admin sees the
   // picker, so this is fetched only for an admin; the endpoint returns just an
   // id and username, and the assign write sends the username the backend knows.
@@ -7799,7 +7931,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-foreground">Could not check the control plane.</p>
             <p className="mt-1 text-muted-foreground">
-              {statusErr instanceof Error ? statusErr.message : "The status request failed."}
+              {status$.state === "error" ? status$.message : "The status request failed."}
             </p>
           </div>
         </GlassCard>
@@ -7827,7 +7959,15 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
             {ViewToggle}
           </div>
 
-          {depLoading ? (
+          {registryFailure ? (
+            <GlassCard>
+              <p className="text-[13px] text-muted-foreground" data-testid="assurance-registry-failed">
+                Could not load the {registryFailure[0]}:{" "}
+                {registryFailure[1].error instanceof Error ? registryFailure[1].error.message : "request failed"}.
+                Nothing is drawn below, since a deployment shown without its {registryFailure[0]} would look complete.
+              </p>
+            </GlassCard>
+          ) : registriesLoading ? (
             <GlassCard>
               <p className="text-[13px] text-muted-foreground">Loading…</p>
             </GlassCard>

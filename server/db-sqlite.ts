@@ -186,6 +186,9 @@ function createSchema(handle: DatabaseType): void {
       observed_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_sightings_finding ON finding_sightings(finding_id);
+    -- Whether a test filed anything, asked by the findings summary of each
+    -- client's latest completed test.
+    CREATE INDEX IF NOT EXISTS idx_sightings_test ON finding_sightings(test_id);
     -- One observation per finding per run, so a poll that fires twice on the
     -- same run does not write the same fact again.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sightings_finding_run

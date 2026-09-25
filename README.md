@@ -29,9 +29,12 @@ On first start the database is created and seeded with two admin accounts:
 | `testadmin` | `testpass123`  |
 
 **Change both passwords after your first sign-in.** They exist so a fresh
-checkout can be opened; they are not meant to survive into any real use. Set
-`ATHENA_SKIP_SAMPLE_DATA=true` to seed the accounts without the sample clients,
-tests and documents.
+checkout can be opened; they are not meant to survive into any real use.
+
+Nothing else is written. A default install starts with no clients, tests or
+documents, so every figure on every screen comes from something you recorded.
+For a demo, `ATHENA_SEED_SAMPLE_DATA=1` also writes sample clients, sites,
+tests and documents on the first start (see "Seeded sample rows" below).
 
 ## Building
 
@@ -70,15 +73,45 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_DB_PATH`          | see below                      | SQLite file, or `:memory:` |
 | `ATHENA_USER_DATA`        | Electron user-data directory   | Where the database and session secret live |
 | `ATHENA_STORAGE`          | `sqlite`                       | Set to `memory` for tests; nothing persists |
-| `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Seed users only, no sample records |
+| `ATHENA_SEED_SAMPLE_DATA` | unset (off)                    | `1` writes the sample clients, sites, tests and documents on the first start, for a demo. Any other value, or unset, writes none. |
+| `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Older opt-out. `true` still means no sample records, and wins over `ATHENA_SEED_SAMPLE_DATA`. |
 | `COOKIE_SECURE`           | `false`                        | Set to `true` when serving over HTTPS |
 | `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console. |
 | `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
 | `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. |
 | `ATHENA_FAILSAFE_ENGINE_ID` | unset                        | Default engine id a fresh failsafe draft targets. |
+| `VITE_MYTHOS_SAMPLE_MODE` | unset (off)                    | Build time. `1` turns on sample mode for prospect demos; see below. Never set it for a customer build. |
 
 Database location, in order: `ATHENA_DB_PATH`, then `ATHENA_USER_DATA/athena.db`,
 then `~/.athena-ai/athena.db` under Electron, then `./athena.db`.
+
+### Sample mode (prospect demos only)
+
+By default every figure on the Overview comes from the record, Settings states
+only the posture a source reports, and anything nothing measures says so ("Not
+measured", "Not tracked yet", "Not reported"). A demo build can show a populated
+sample estate and tenant instead:
+
+```bash
+VITE_MYTHOS_SAMPLE_MODE=1 npm run dev            # or: npm run build:client
+```
+
+The flag is read at build time: a build made without it cannot show the sample
+figures, and the bundler drops them from it entirely. With it on, each affected page carries a banner and
+every affected panel carries the label "Sample data — not from your
+environment". The sample figures live only in `client/src/sample/`; pages reach
+them through `@/sample`, whose accessors refuse when sample mode is off.
+
+### Seeded sample rows (demo installs only)
+
+This is not the same thing as sample mode. `ATHENA_SEED_SAMPLE_DATA=1` makes
+the first start write three sample clients, four sites, three tests and three
+documents into the database. Two of those tests carry severity counts (fifteen
+and eight findings) that no scan produced. They are real database rows, so they
+are counted like any other; each row is marked as sample data, and Overview,
+Deployments, Evidence, Risks, Compliance, Tests and Documents show a notice
+saying how many seeded rows are on the screen, with a button (admins only) that
+removes them. A default install writes none of them.
 
 ## Architecture
 
@@ -120,6 +153,6 @@ written by older builds are verified once and transparently upgraded.
 
 - The Windows icon at `build/icon.ico` is a placeholder and must be replaced
   before shipping an installer.
-- The Dashboard, Pentest Scan, CVE Classifier, AI Chat and AI Health screens
+- The Pentest Scan, CVE Classifier, AI Chat and AI Health screens
   still display placeholder data. They are not yet connected to the Mythos
   engine; that is the next phase of work.

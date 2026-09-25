@@ -22,6 +22,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { loaded, notInHand } from "@/lib/loaded";
 import { formatDistanceToNow } from "date-fns";
 import {
   Activity, Boxes, Clock, Cpu, Gauge, MemoryStick, ScanLine, ShieldCheck,
@@ -86,16 +87,24 @@ const TOOLTIP = {
 } as const;
 
 export default function AIHealth() {
-  const { data: latest, isLoading } = useQuery<AIHealthMetric | null>({
+  const latestQ = useQuery<AIHealthMetric | null>({
     queryKey: ["/api/ai-health/latest"],
     // A sample is written every minute; there is no point reading faster.
     refetchInterval: 60_000,
   });
+  // Both sources are polled, and React Query keeps the last answer after a
+  // poll fails. Read raw, the tiles went on showing that answer, unlabelled,
+  // under the "could not load" card. Read through loaded(), the error wins:
+  // the old reading is not drawn, and only its time is said.
+  const latest$ = loaded(latestQ);
+  const latest = latest$.state === "ready" ? latest$.data : undefined;
+  const heldBefore = latest$.state === "error" ? latestQ.data ?? null : null;
 
-  const { data: history = [] } = useQuery<AIHealthMetric[]>({
+  const history$ = loaded(useQuery<AIHealthMetric[]>({
     queryKey: ["/api/ai-health"],
     refetchInterval: 60_000,
-  });
+  }));
+  const history = history$.state === "ready" ? history$.data : [];
 
   // Oldest first, so time runs left to right.
   const series = [...history]
@@ -122,7 +131,23 @@ export default function AIHealth() {
           description="Measured on this machine, once a minute. Anything without a source is shown as absent rather than as a number."
         />
 
-        {!isLoading && !latest && (
+        {latest$.state === "error" && (
+          // A reading that could not be fetched is not "no reading yet", and
+          // is no evidence the sampler has stopped.
+          <GlassCard ruling>
+            <p className="text-sm text-muted-foreground" data-testid="text-reading-failed">
+              Could not load the latest reading: {latest$.message}
+            </p>
+            {heldBefore && (
+              <p className="mt-2 text-xs text-muted-foreground" data-testid="text-reading-held">
+                The last reading this page received was taken at{" "}
+                {new Date(heldBefore.timestamp).toLocaleString()}. It is not shown, because it is not current.
+              </p>
+            )}
+          </GlassCard>
+        )}
+
+        {latest === null && (
           <GlassCard ruling>
             <div className="athena-label">No reading yet</div>
             <p className="mt-2 text-sm text-muted-foreground" data-testid="text-no-reading">
@@ -216,7 +241,11 @@ export default function AIHealth() {
               <AnimatedContainer direction="up" delay={0.1}>
                 <GlassCard>
                   <div className="athena-label mb-4">This machine</div>
-                  {series.length < 2 ? (
+                  {history$.state !== "ready" ? (
+                    <p className="text-sm text-muted-foreground" data-testid="text-history-failed">
+                      {notInHand(history$, "the reading history")}
+                    </p>
+                  ) : series.length < 2 ? (
                     <p className="text-sm text-muted-foreground" data-testid="text-thin-series">
                       One reading so far. The line appears once there are two,
                       about a minute from now.
@@ -249,7 +278,9 @@ export default function AIHealth() {
               <AnimatedContainer direction="up" delay={0.15}>
                 <GlassCard>
                   <div className="athena-label mb-4">Response time</div>
-                  {series.filter((one) => one.response !== null).length < 2 ? (
+                  {history$.state !== "ready" ? (
+                    <p className="text-sm text-muted-foreground">{notInHand(history$, "the reading history")}</p>
+                  ) : series.filter((one) => one.response !== null).length < 2 ? (
                     <p className="text-sm text-muted-foreground">
                       Not enough readings with traffic in them to draw a line.
                     </p>

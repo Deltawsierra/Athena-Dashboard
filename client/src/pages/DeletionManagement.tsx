@@ -1,14 +1,17 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { motion } from "framer-motion";
 import { Trash2, AlertTriangle, FileText, Users, Shield, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Client, Test, Document } from "@shared/schema";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -24,9 +27,20 @@ export default function DeletionManagement() {
   const { toast } = useToast();
   const [deleteTarget, setDeleteTarget] = useState<{ type: string; id: string; name: string } | null>(null);
 
-  const { data: clients = [] } = useQuery<Client[]>({ queryKey: ["/api/clients"] });
-  const { data: tests = [] } = useQuery<Test[]>({ queryKey: ["/api/tests"] });
-  const { data: documents = [] } = useQuery<Document[]>({ queryKey: ["/api/documents"] });
+  const clientsQ = useQuery<Client[]>({ queryKey: ["/api/clients"] });
+  const testsQ = useQuery<Test[]>({ queryKey: ["/api/tests"] });
+  const documentsQ = useQuery<Document[]>({ queryKey: ["/api/documents"] });
+  const clients = clientsQ.data ?? [];
+  const tests = testsQ.data ?? [];
+  const documents = documentsQ.data ?? [];
+  // A count read from a source that failed, or has not answered, is not zero.
+  const countOf = (q: { isError: boolean; data?: unknown[] }) =>
+    q.isError ? "—" : q.data === undefined ? "…" : q.data.length;
+  const totalItems = [clientsQ, testsQ, documentsQ].some((q) => q.isError)
+    ? "—"
+    : [clientsQ, testsQ, documentsQ].some((q) => q.data === undefined)
+      ? "…"
+      : clients.length + tests.length + documents.length;
 
   const deleteMutation = useMutation({
     mutationFn: async ({ type, id }: { type: string; id: string }) => {
@@ -34,6 +48,9 @@ export default function DeletionManagement() {
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: [`/api/${variables.type}`] });
+      // A deleted client or test changes every answer computed from tests
+      // and findings, the findings summary first among them.
+      void invalidateTestsAndFindings();
       toast({
         title: "Deleted Successfully",
         description: `${variables.type.slice(0, -1)} has been permanently deleted.`,
@@ -65,6 +82,7 @@ export default function DeletionManagement() {
       icon: Users,
       type: "clients",
       items: clients,
+      query: clientsQ,
       color: "text-primary",
       getName: (item: any) => item.name,
       getDescription: (item: any) => item.company,
@@ -74,6 +92,7 @@ export default function DeletionManagement() {
       icon: Shield,
       type: "tests",
       items: tests,
+      query: testsQ,
       color: "text-purple",
       getName: (item: any) => item.testType,
       getDescription: (item: any) => item.status,
@@ -83,6 +102,7 @@ export default function DeletionManagement() {
       icon: FileText,
       type: "documents",
       items: documents,
+      query: documentsQ,
       color: "text-primary",
       getName: (item: any) => item.title,
       getDescription: (item: any) => item.documentType,
@@ -115,6 +135,10 @@ export default function DeletionManagement() {
           </div>
         </AnimatedContainer>
 
+        {/* This screen lists and counts every client, test and document --
+            seeded demo rows among them -- so it says how many are seeded. */}
+        <SampleDataNotice counts={["clients", "tests", "documents"]} />
+
         {/* Warning Banner */}
         <AnimatedContainer direction="up" delay={0.1}>
           <Card className="border-2 border-destructive/50 bg-destructive/5">
@@ -145,12 +169,14 @@ export default function DeletionManagement() {
                       {category.title}
                     </CardTitle>
                     <CardDescription>
-                      {category.items.length} item{category.items.length !== 1 ? "s" : ""} available
+                      {category.query.isError
+                        ? `Could not load ${category.title.toLowerCase()}: ${errorMessage(category.query.error)}`
+                        : `${category.items.length} item${category.items.length !== 1 ? "s" : ""} available`}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                      {category.items.length === 0 ? (
+                      {category.query.isError ? null : category.items.length === 0 ? (
                         <p className="text-sm text-muted-foreground text-center py-4">
                           No {category.title.toLowerCase()} to delete
                         </p>
@@ -204,25 +230,25 @@ export default function DeletionManagement() {
                 <div className="text-center space-y-1">
                   <p className="text-sm text-muted-foreground">Total Clients</p>
                   <p className="text-3xl font-bold text-primary" data-testid="text-total-clients">
-                    {clients.length}
+                    {countOf(clientsQ)}
                   </p>
                 </div>
                 <div className="text-center space-y-1">
                   <p className="text-sm text-muted-foreground">Total Tests</p>
                   <p className="text-3xl font-bold text-purple" data-testid="text-total-tests">
-                    {tests.length}
+                    {countOf(testsQ)}
                   </p>
                 </div>
                 <div className="text-center space-y-1">
                   <p className="text-sm text-muted-foreground">Total Documents</p>
                   <p className="text-3xl font-bold text-primary" data-testid="text-total-documents">
-                    {documents.length}
+                    {countOf(documentsQ)}
                   </p>
                 </div>
                 <div className="text-center space-y-1">
                   <p className="text-sm text-muted-foreground">Total Items</p>
                   <p className="text-3xl font-bold" data-testid="text-total-items">
-                    {clients.length + tests.length + documents.length}
+                    {totalItems}
                   </p>
                 </div>
               </div>

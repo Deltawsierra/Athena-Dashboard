@@ -402,6 +402,18 @@ export const insertTestSchema = createInsertSchema(tests, {
   findings: optionalJson,
 }).omit({ id: true, startedAt: true });
 
+/**
+ * What a caller may send to create a test. Who ran it is recorded from the
+ * signed-in session (the route refuses a body that names it: in an audit
+ * product that is evidence), and whether a row is sample data is the
+ * seeder's alone. Shared so the Tests screen builds its body from the same
+ * schema the route parses -- it built an InsertTest, which carries
+ * `executedBy`, sent `executedBy: null`, and every create from that screen
+ * was refused with a 400.
+ */
+export const createTestSchema = insertTestSchema.omit({ executedBy: true, isSample: true });
+export type CreateTest = z.infer<typeof createTestSchema>;
+
 export const insertFindingSchema = createInsertSchema(findings, {
   statusChangedAt: optionalDate,
   fixedAt: optionalDate,

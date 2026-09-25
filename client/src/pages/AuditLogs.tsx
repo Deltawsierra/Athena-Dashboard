@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { Search, Filter, FileText, Calendar, User, Activity } from "lucide-react";
 import { motion } from "framer-motion";
 import { format } from "date-fns";
@@ -21,7 +22,12 @@ export default function AuditLogs() {
   const [actionFilter, setActionFilter] = useState<string>("all");
   const [entityTypeFilter, setEntityTypeFilter] = useState<string>("all");
 
-  const { data: logs = [], isLoading } = useQuery<ActivityLog[]>({
+  const {
+    data: logs = [],
+    isLoading,
+    isError: logsFailed,
+    error: logsError,
+  } = useQuery<ActivityLog[]>({
     queryKey: ["/api/logs"],
   });
 
@@ -153,7 +159,13 @@ export default function AuditLogs() {
 
         <AnimatedContainer direction="up" delay={0.2}>
           <GlassCard>
-            {filteredLogs.length === 0 ? (
+            {logsFailed ? (
+              // A failed read is not an empty log: say so, not "No Activity Logs Found".
+              <div className="text-center py-12">
+                <Activity className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+                <p className="text-muted-foreground">Could not load the activity log: {errorMessage(logsError)}</p>
+              </div>
+            ) : filteredLogs.length === 0 ? (
               <div className="text-center py-12">
                 <Activity className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                 <h3 className="text-lg font-semibold mb-2">No Activity Logs Found</h3>

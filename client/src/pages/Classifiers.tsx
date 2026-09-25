@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { errorMessage } from "@/lib/loaded";
 import { motion } from "framer-motion";
 import { Brain, Plus, Edit, Trash2, TrendingUp, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,7 +26,12 @@ export default function Classifiers() {
   const [createType, setCreateType] = useState("");
   const [editType, setEditType] = useState("");
 
-  const { data: classifiers = [], isLoading } = useQuery<Classifier[]>({
+  const {
+    data: classifiers = [],
+    isLoading,
+    isError: classifiersFailed,
+    error: classifiersError,
+  } = useQuery<Classifier[]>({
     queryKey: ["/api/classifiers"],
   });
 
@@ -331,7 +337,13 @@ export default function Classifiers() {
             </AnimatedContainer>
           ))}
 
-          {classifiers.length === 0 && (
+          {classifiersFailed ? (
+            // A failed read is not an empty list.
+            <div className="col-span-full text-center py-12">
+              <Brain className="w-16 h-16 text-muted-foreground mx-auto opacity-50" />
+              <p className="text-muted-foreground mt-4">Could not load classifiers: {errorMessage(classifiersError)}</p>
+            </div>
+          ) : classifiers.length === 0 && (
             <div className="col-span-full text-center py-12">
               <Brain className="w-16 h-16 text-muted-foreground mx-auto opacity-50" />
               <p className="text-muted-foreground mt-4">No classifiers yet. Create one to get started.</p>

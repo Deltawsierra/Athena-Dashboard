@@ -1,6 +1,7 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { storage } from "./storage-unified";
+import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import { requireAuth, requireAdmin, asyncHandler, actor } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
@@ -8,10 +9,11 @@ import * as engine from "./engine";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
+import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
-  insertClientSchema, insertSiteSchema, insertTestSchema,
+  insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
   insertUserSchema, insertAIControlSettingSchema, insertAIChatMessageSchema,
   updateConnectionSettingsSchema,
@@ -44,7 +46,27 @@ function hostOf(url: string): string | null {
   }
 }
 
-const createTestSchema = insertTestSchema.omit({ executedBy: true, isSample: true });
+/**
+ * When a test becomes completed, it completed now -- unless the caller says
+ * when it did.
+ *
+ * Nothing stamped it. The Tests screen never sends a completion time, so a
+ * pentest recorded as completed today kept completedAt null, and every
+ * "latest completed test" rule fell back to when the row was created: a
+ * pentest opened as pending last week and finished today ranked behind an
+ * engine scan that finished yesterday, and that scan's clean result cleared
+ * the pentest's reported criticals. Stamped on create with status
+ * "completed", and on an update that moves a test to "completed" from
+ * anything else. A test already completed keeps the time it has: an edit to
+ * its summary is not a new completion.
+ */
+function completionStamp(
+  data: { status?: string | null; completedAt?: Date | null },
+  before: { status: string } | null,
+): { completedAt?: Date } {
+  const completing = data.status === "completed" && before?.status !== "completed";
+  return completing && data.completedAt == null ? { completedAt: new Date() } : {};
+}
 
 /**
  * `isSample` marks a row the installer wrote, and nothing else may claim it.
@@ -94,6 +116,12 @@ const startScanSchema = z.object({
  * Counted here rather than accepted from anywhere: these numbers are what a
  * client reads on a report, and the only honest source for them is the list
  * of findings they claim to summarise.
+ *
+ * The severity is the worst counted one -- or "info" when every result was
+ * rated info. It used to be null then, beside a total of N, which is how a
+ * record says "N results, severity never recorded": the screens drew a scan
+ * whose every result the engine rated info as "Not rated" and listed it among
+ * the highest risks.
  */
 function countSeverities(findings: unknown[]): {
   vulnerabilitiesFound: number;
@@ -105,6 +133,7 @@ function countSeverities(findings: unknown[]): {
 } {
   const counts = { critical: 0, high: 0, medium: 0, low: 0 };
   let total = 0;
+  let info = 0;
   for (const finding of findings) {
     if (!finding || typeof finding !== "object") continue;
     const entry = finding as Record<string, unknown>;
@@ -114,11 +143,13 @@ function countSeverities(findings: unknown[]): {
     total += 1;
     const severity = String(entry.severity ?? "").toLowerCase();
     if (severity in counts) counts[severity as keyof typeof counts] += 1;
+    if (severity === "info") info += 1;
   }
   const worst = counts.critical ? "critical"
     : counts.high ? "high"
     : counts.medium ? "medium"
     : counts.low ? "low"
+    : total > 0 && info === total ? "info"
     : null;
   return {
     vulnerabilitiesFound: total,
@@ -128,6 +159,190 @@ function countSeverities(findings: unknown[]): {
     lowCount: counts.low,
     severity: worst,
   };
+}
+
+/** The engine run a test records, or null for a test no engine run stands behind. */
+function runIdOf(test: { findings: unknown }): string | null {
+  const recorded = test.findings;
+  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
+  const runId = (recorded as Record<string, unknown>).runId;
+  return typeof runId === "string" && runId !== "" ? runId : null;
+}
+
+/** Engine run states after which nothing more happens. */
+const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+
+/** What one stop sent to the engine came to. */
+interface ScanStop {
+  testId: string;
+  runId: string;
+  target: string | null;
+  /** True only when the engine accepted the stop. */
+  stopped: boolean;
+  /** Why not, in the engine's or the network's words; empty when stopped. */
+  detail: string;
+}
+
+/** A cause, as the sentence a page can show. */
+function causeOf(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** The run of a test whose engine run may still be running, or null. */
+function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
+  const runId = runIdOf(test);
+  return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
+}
+
+/**
+ * Send one run the abort its own Stop sends, and record what came of it.
+ *
+ * A stop the engine refused or could not be reached for is reported as
+ * exactly that, never folded into a success. The record is written after the
+ * stop and may fail: a log write that failed does not unsend the stop or hide
+ * its outcome.
+ */
+async function sendStop(
+  req: Request,
+  run: { runId: string; target: string | null; testId: string | null },
+  via: "kill_switch" | "delete" | "start_not_recorded",
+): Promise<{ stopped: boolean; detail: string }> {
+  let outcome: { stopped: boolean; detail: string };
+  try {
+    const accepted = await engine.abort(run.runId);
+    outcome = { stopped: accepted, detail: accepted ? "" : "the engine did not accept the stop; the scan may still be running" };
+  } catch (cause) {
+    outcome = { stopped: false, detail: causeOf(cause) };
+  }
+  try {
+    await storage.createActivityLog({
+      action: outcome.stopped ? "aborted" : "abort_failed",
+      // Against its test when one records it; against the run when none does.
+      entityType: run.testId !== null ? "test" : "engine_run",
+      entityId: run.testId ?? run.runId,
+      details: {
+        runId: run.runId, via,
+        ...(run.testId === null ? { target: run.target } : {}),
+        ...(outcome.stopped ? {} : { detail: outcome.detail }),
+      },
+      ...actor(req),
+    });
+  } catch {
+    // The stop was sent either way.
+  }
+  return outcome;
+}
+
+/** Stop a test's engine run, reported against the test. */
+async function stopScan(req: Request, test: { id: string; findings: unknown }, runId: string, via: "kill_switch" | "delete"): Promise<ScanStop> {
+  const recorded = test.findings as Record<string, unknown>;
+  const target = typeof recorded.target === "string" ? recorded.target : null;
+  return { testId: test.id, runId, target, ...(await sendStop(req, { runId, target, testId: test.id }, via)) };
+}
+
+/** A run the engine listed as live that no running test here recorded, and what its stop came to. */
+interface EngineRunStop {
+  runId: string;
+  target: string | null;
+  /** The test that records this run, when one does (its status says it ended); null when no row does. */
+  testId: string | null;
+  stopped: boolean;
+  detail: string;
+}
+
+/** The stops sent to the scans recorded here as running, or why they could not be listed. */
+type RecordedStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
+/** The stops sent to the other runs the engine listed as live, or why its list could not be read. */
+type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+
+type Settled<T> = { ok: true; value: T } | { ok: false; detail: string };
+function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
+  return pending.then((value) => ({ ok: true as const, value }), (cause) => ({ ok: false as const, detail: causeOf(cause) }));
+}
+
+/**
+ * Send a stop to everything that may still be running: every engine scan
+ * recorded here as running, and every run the ENGINE lists as live.
+ *
+ * Engaging the kill switch used to store a flag and nothing else; then it
+ * stopped the scans this app had rows for -- and only those. A run whose row
+ * was deleted, or never written, was scanning the customer's system with
+ * nothing here able to see it, and the page said no scan was running. So the
+ * engine's own list is read too, and each run on it that no running row
+ * covers is sent the same stop. The two reads start together and neither
+ * waits on the other: the rows' stops go as soon as the rows are read, and a
+ * list that could not be read holds back no stop from the other. Each outcome
+ * is reported, and one that could not be listed is said to be exactly that.
+ */
+async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedStops; engineRuns: EngineSweep }> {
+  const rowsRead = settle(storage.getAllTests());
+  const engineRead = settle(engine.activeRuns());
+
+  const rows = await rowsRead;
+  const running = rows.ok
+    ? rows.value
+      .map((test) => ({ test, runId: unfinishedRunOf(test) }))
+      .filter((one): one is { test: (typeof one)["test"]; runId: string } => one.runId !== null)
+    : [];
+  const scansStopped = Promise.all(running.map(({ test, runId }) => stopScan(req, test, runId, "kill_switch")));
+
+  const listed = await engineRead;
+  let engineRuns: EngineSweep;
+  if (!listed.ok) {
+    engineRuns = { listed: false, detail: listed.detail };
+  } else {
+    const covered = new Set(running.map((one) => one.runId));
+    const recordedBy = new Map<string, string>();
+    for (const test of rows.ok ? rows.value : []) {
+      const runId = runIdOf(test);
+      if (runId !== null) recordedBy.set(runId, test.id);
+    }
+    engineRuns = {
+      listed: true,
+      runs: await Promise.all(listed.value
+        .filter((run) => !covered.has(run.runId))
+        .map(async (run): Promise<EngineRunStop> => {
+          const testId = recordedBy.get(run.runId) ?? null;
+          return { runId: run.runId, target: run.target, testId, ...(await sendStop(req, { ...run, testId }, "kill_switch")) };
+        })),
+    };
+  }
+
+  const stops: RecordedStops = rows.ok ? { listed: true, scans: await scansStopped } : { listed: false, detail: rows.detail };
+  return { stops, engineRuns };
+}
+
+/**
+ * Stop the unfinished engine runs of tests about to be deleted, before they go.
+ *
+ * Deleting a running scan's row -- directly, or by deleting its client --
+ * told the engine nothing. The run went on against the customer's system,
+ * and with the row went its Stop (the abort route answered 404) and the kill
+ * switch's view of it. So each run is sent a stop first, and a row is deleted
+ * only once the engine has accepted its stop.
+ */
+function stopBeforeDeleting(req: Request, tests: Array<{ id: string; findings: unknown; status: string }>): Promise<ScanStop[]> {
+  return Promise.all(tests.flatMap((test) => {
+    const runId = unfinishedRunOf(test);
+    return runId === null ? [] : [stopScan(req, test, runId, "delete")];
+  }));
+}
+
+/** Refuse a delete while any of its runs could not be stopped: nothing is deleted, and the stops are reported. */
+function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): boolean {
+  const failed = stops.filter((one) => !one.stopped);
+  if (failed.length === 0) return false;
+  const accepted = stops.length - failed.length;
+  res.status(409).json({
+    message:
+      `Nothing was deleted. ${failed.map((one) => `Engine run ${one.runId}${one.target ? ` (${one.target})` : ""} ` +
+        `may still be running and could not be stopped: ${one.detail}.`).join(" ")} ` +
+      `Stop ${failed.length === 1 ? "it" : "them"} first -- the scan's Stop on the Tests screen, the kill switch, ` +
+      `or a failsafe pause -- then delete ${what}.` +
+      (accepted > 0 ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} stopped: the engine accepted the stop.` : ""),
+    stops,
+  });
+  return true;
 }
 const createDocumentSchema = insertDocumentSchema.omit({ createdBy: true, isSample: true });
 
@@ -159,7 +374,159 @@ function forgedAttribution(res: Response, body: unknown): boolean {
   });
   return true;
 }
-const updateAIControlSettingSchema = insertAIControlSettingSchema.partial();
+/**
+ * What of an engine scan's test row the engine owns, and so no edit may change.
+ *
+ * The Tests screen's Edit dialog sent `findings: { details: <the textarea> }`,
+ * and for an engine test the textarea held the JSON of {runId, target,
+ * results}. Fixing a typo in a running scan's summary wrote over the run id:
+ * its Stop answered "no engine run recorded, nothing to stop" while the engine
+ * went on scanning the customer's system, the status route stopped asking the
+ * engine, and whatever it found was never filed. On a completed scan, the
+ * findings summary began flagging a filed critical as untracked.
+ *
+ * So for a test with an engine run behind it:
+ *   - the run's own keys in `findings` (runId, target, results, and any
+ *     other the engine writes) are KEPT whatever the body says; only
+ *     `details`, a person's notes, is taken from it, and a body that tries to
+ *     change one of the run's keys is refused like the fields below;
+ *   - a change to anything else the engine or the scan route decided -- the
+ *     engagement it ran under, its status, its counts and severity, when it
+ *     completed -- is REFUSED (409), naming the fields. Sending them back
+ *     unchanged is fine, so a form that sends every field still saves.
+ * The summary, the test type and the notes stay a person's to edit. A test no
+ * engine run stands behind may not be given one here: a run id is recorded by
+ * the scan route that started the run, never supplied.
+ */
+const ENGINE_OWNED_TEST_FIELDS = [
+  "clientId", "siteId", "status", "severity", "completedAt",
+  "vulnerabilitiesFound", "criticalCount", "highCount", "mediumCount", "lowCount",
+] as const;
+/** The one key of an engine test's `findings` a person writes; every other key is the run's. */
+const HUMAN_FINDINGS_KEY = "details";
+
+/**
+ * The keys of `findings` that only the scan route writes, from the run it
+ * started: they are what makes a row an engine scan to every other part of
+ * the app.
+ */
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results"] as const;
+
+/**
+ * Refuse a person's test whose findings carry a run's keys, on create as on
+ * update.
+ *
+ * The rule was enforced on PATCH only. POST /api/tests took `findings` as
+ * free JSON, so a test created with `findings: { runId: "run-1" }` became an
+ * engine scan: the Tests screen called it "recorded by the engine", the
+ * status route asked the engine for run-1 and filed another client's results
+ * under this one, and the run keys were then engine-owned, so the forgery
+ * could not be edited away. A key sent as null supplies nothing and is not
+ * refused.
+ */
+function suppliedEngineKeys(res: Response, findings: unknown): boolean {
+  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return false;
+  const sent = findings as Record<string, unknown>;
+  const named = ENGINE_FINDINGS_KEYS.filter((key) => sent[key] !== undefined && sent[key] !== null);
+  if (named.length === 0) return false;
+  res.status(400).json({
+    message: `${named.map((key) => `findings.${key}`).join(", ")} ${named.length === 1 ? "is" : "are"} recorded ` +
+      "by the scan that started an engine run and cannot be supplied",
+  });
+  return true;
+}
+
+/** Whether a value sent back is the one on record: null and absent alike, a date by its instant. */
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+function engineRecordEdited(
+  res: Response,
+  before: { findings: unknown } & Record<string, unknown>,
+  data: { findings?: unknown } & Record<string, unknown>,
+): boolean {
+  const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
+    ? (data.findings as Record<string, unknown>)
+    : null;
+  if (runIdOf(before) === null) return suppliedEngineKeys(res, data.findings);
+
+  const recorded = before.findings as Record<string, unknown>;
+  const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
+    (field) => data[field] !== undefined && !sameValue(data[field], before[field]),
+  );
+  for (const key of Object.keys(sent ?? {})) {
+    if (key !== HUMAN_FINDINGS_KEY && !sameValue(sent![key], recorded[key])) changed.push(`findings.${key}`);
+  }
+  if (changed.length > 0) {
+    res.status(409).json({
+      message: `${changed.join(", ")} of an engine scan ${changed.length === 1 ? "is" : "are"} recorded from ` +
+        "the engine and cannot be edited; the summary, the test type and the notes can",
+    });
+    return true;
+  }
+
+  if (data.findings !== undefined) {
+    const { [HUMAN_FINDINGS_KEY]: _notes, ...kept } = recorded;
+    const notes = sent?.[HUMAN_FINDINGS_KEY];
+    data.findings = typeof notes === "string" && notes.trim() !== "" ? { ...kept, [HUMAN_FINDINGS_KEY]: notes } : kept;
+  }
+  return false;
+}
+
+/**
+ * What an AI Control change may set.
+ *
+ * Auto-Shutdown Threshold ("system load threshold for automatic safety
+ * shutdown") and Override Mode ("bypass safety protocols") were stored and
+ * read by nothing: no load is measured, nothing shuts down on one, and there
+ * is no protocol here to bypass. A control that does nothing, offered as a
+ * safety control, is worse than none -- someone relies on it. They are no
+ * longer offered, and a change that sets one is refused, naming it
+ * (refusedAIControlFields) -- unless it engages the kill switch, which is
+ * never refused (engagingAIControlChange); the columns stay, unread, so no
+ * stored install breaks. Max Concurrent Tests is enforced when a scan starts, so it is a
+ * real limit of at least one.
+ */
+const updateAIControlSettingSchema = insertAIControlSettingSchema
+  .omit({ overrideMode: true, autoShutdownThreshold: true })
+  .extend({ maxConcurrentTests: z.number().int().min(1).max(1000) })
+  .partial();
+
+const UNENFORCED_AI_CONTROL_FIELDS = ["overrideMode", "autoShutdownThreshold"] as const;
+
+function refusedAIControlFields(res: Response, body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const named = UNENFORCED_AI_CONTROL_FIELDS.filter((field) => field in (body as Record<string, unknown>));
+  if (named.length === 0) return false;
+  res.status(400).json({
+    message: `${named.join(" and ")} ${named.length === 1 ? "is" : "are"} not enforced by this build -- nothing ` +
+      "measures load or shuts down on it, and there is no protocol to bypass -- so it cannot be set",
+  });
+  return true;
+}
+
+/**
+ * What an engaging change stores. Engaging the kill switch is never refused
+ * over the other fields sent with it: a field this build does not take (an
+ * unenforced one, or a value the schema refuses) is left out and named, and
+ * the switch is engaged and the stops sent all the same.
+ */
+function engagingAIControlChange(body: Record<string, unknown>): {
+  data: z.infer<typeof updateAIControlSettingSchema>;
+  ignored: string[];
+} {
+  const ignored = new Set<string>(UNENFORCED_AI_CONTROL_FIELDS.filter((field) => field in body));
+  const without = () => Object.fromEntries(Object.entries(body).filter(([key]) => !ignored.has(key)));
+  let parsed = updateAIControlSettingSchema.safeParse(without());
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      if (issue.path.length > 0) ignored.add(String(issue.path[0]));
+    }
+    parsed = updateAIControlSettingSchema.safeParse(without());
+  }
+  return { data: parsed.success ? parsed.data : { killSwitchEnabled: true }, ignored: Array.from(ignored) };
+}
 const updateClassifierSchema = insertClassifierSchema.partial();
 
 /**
@@ -218,6 +585,101 @@ async function parentMissing(res: Response, clientId?: string | null, siteId?: s
  */
 const killSwitchExempt = new Set(["/api/ai-control", "/api/auth/login", "/api/auth/logout"]);
 
+/**
+ * The failsafe actions that stop an engine, and the two that put one back to
+ * work. Only the first kind is ever let past an engaged kill switch.
+ */
+const FAILSAFE_STOP_ACTIONS = new Set(["pause", "stand_down", "terminate"]);
+const FAILSAFE_RECOVER_ACTIONS = new Set(["resume", "release"]);
+
+/**
+ * What a write is, as far as the kill switch is concerned.
+ *
+ * The switch refused every write but its own, so the moment an admin engaged
+ * it every OTHER stop went out of reach: a running scan's Stop, and drafting
+ * or co-signing a failsafe pause, stand-down or terminate, all answered 503 --
+ * while the scan kept running, because the switch told the engine nothing.
+ * An emergency stop that takes the other stops away at exactly the moment
+ * someone reaches for them is worse than none.
+ *
+ *   "stop"    -- a scan's Stop, a failsafe draft whose action is a stop, and
+ *                revoking an API key (it only takes access away). Never
+ *                refused, and decided without reading anything, so no failed
+ *                read can stand in its way either.
+ *   "command" -- a signature for, or the withdrawal of, a failsafe command.
+ *                Whether it may pass depends on the command's action, so it
+ *                is decided in the route's own handler
+ *                (killSwitchRefusesCommand), from the uuid Express decoded
+ *                for it -- exactly the one that handler relays.
+ *   null      -- an ordinary write: refused while the switch is engaged.
+ *
+ * Case-insensitive, as Express's own routing is, so a spelling that reaches a
+ * stop's handler is a stop here too.
+ */
+type KillSwitchClass = { kind: "stop" | "command" } | null;
+
+function killSwitchClass(method: string, fullPath: string, body: unknown): KillSwitchClass {
+  if (method === "POST" && /^\/api\/scans\/[^/]+\/abort$/i.test(fullPath)) return { kind: "stop" };
+  if (method === "DELETE" && /^\/api\/api-keys\/[^/]+$/i.test(fullPath)) return { kind: "stop" };
+  if (method === "POST" && /^\/api\/failsafe\/commands$/i.test(fullPath)) {
+    const action = body && typeof body === "object" ? (body as { action?: unknown }).action : undefined;
+    return typeof action === "string" && FAILSAFE_STOP_ACTIONS.has(action) ? { kind: "stop" } : null;
+  }
+  if (method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/(signatures|cancel)$/i.test(fullPath)) {
+    return { kind: "command" };
+  }
+  return null;
+}
+
+/** The action of a failsafe command, or null when it cannot be read. */
+async function failsafeActionOf(uuid: string): Promise<string | null> {
+  try {
+    const drafted = await failsafe.getCommand(uuid);
+    return drafted ? drafted.command.action : null;
+  } catch {
+    return null;
+  }
+}
+
+const KILL_SWITCH_REFUSAL =
+  "The AI kill switch is engaged. Writes are disabled, except stops: a scan's Stop, and a failsafe " +
+  "pause, stand-down or terminate, stay available.";
+
+/**
+ * Whether the engaged kill switch refuses this signature relay or withdrawal.
+ *
+ *   relay  -- a stop's signature is let through; a resume's or a release's
+ *             is refused. When the settings or the command cannot be read
+ *             the relay is let through: it might be a stop's, and the
+ *             control plane and the engine check every signature.
+ *   cancel -- withdrawing a resume or a release is let through (it keeps an
+ *             engine stopped); withdrawing a stop is refused, and so is one
+ *             whose command cannot be read.
+ *
+ * Called by the route's handler with req.params.uuid, the uuid Express
+ * decoded and the handler relays. The middleware used to re-parse the path
+ * and decode it itself, so what it looked up and what was relayed were two
+ * readings of one string: an escaped character or a capitalised route
+ * segment read differently in each was all it took to relay a resume's
+ * signature past the switch. Now there is one reading.
+ */
+async function killSwitchRefusesCommand(res: Response, kind: "relay" | "cancel", uuid: string): Promise<boolean> {
+  let settings;
+  try {
+    settings = await storage.getAIControlSettings();
+  } catch (cause) {
+    // A relay that may be a stop's is not refused because a read failed.
+    if (kind === "relay") return false;
+    throw cause;
+  }
+  if (!settings?.killSwitchEnabled) return false;
+  const action = await failsafeActionOf(uuid);
+  if (kind === "relay" && (action === null || !FAILSAFE_RECOVER_ACTIONS.has(action))) return false;
+  if (kind === "cancel" && action !== null && FAILSAFE_RECOVER_ACTIONS.has(action)) return false;
+  res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
+  return true;
+}
+
 export const enforceKillSwitch: RequestHandler = (req, res, next) => {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") {
     next();
@@ -232,20 +694,19 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
     next();
     return;
   }
+  const kind = killSwitchClass(req.method, fullPath, req.body);
+  // Before the settings are read: a stop does not wait on that read, or fail
+  // with it; and a command's handler decides for itself.
+  if (kind !== null) {
+    next();
+    return;
+  }
 
-  storage
-    .getAIControlSettings()
-    .then((settings) => {
-      if (settings?.killSwitchEnabled) {
-        res.status(503).json({
-          message: "The AI kill switch is engaged. Writes are disabled.",
-          systemStatus: settings.systemStatus,
-        });
-        return;
-      }
-      next();
-    })
-    .catch(next);
+  (async () => {
+    const settings = await storage.getAIControlSettings();
+    if (!settings?.killSwitchEnabled) return void next();
+    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
+  })().catch(next);
 };
 
 /**
@@ -532,23 +993,45 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.delete("/api/clients/:id", asyncHandler(async (req, res) => {
+    if (!(await storage.getClient(req.params.id))) return notFound(res, "Client");
     // Deleting a client removes its tests, sites and documents. Those rows
     // used to disappear with no audit trace at all, so the log recorded one
     // deletion where ten had happened. Count them before they are gone.
+    const tests = await storage.getTestsByClient(req.params.id);
     const cascaded = {
-      tests: (await storage.getTestsByClient(req.params.id)).map((t) => t.id),
+      tests: tests.map((t) => t.id),
       sites: (await storage.getSitesByClient(req.params.id)).map((s) => s.id),
       documents: (await storage.getDocumentsByClient(req.params.id)).map((d) => d.id),
     };
 
-    const success = await storage.deleteClient(req.params.id);
+    // Its tests' running engine runs are stopped first; nothing is deleted
+    // while one of them could not be (stopBeforeDeleting).
+    const stops = await stopBeforeDeleting(req, tests);
+    if (refuseUnstoppedDelete(res, "the client", stops)) return;
+
+    let success: boolean;
+    try {
+      success = await storage.deleteClient(req.params.id);
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+      // The stops were accepted; that is not to be reported as a failure.
+      return void res.status(500).json({
+        message: `Every running scan of this client was stopped (the engine accepted each stop), but the client ` +
+          `could not be deleted: ${causeOf(cause)}`,
+        stops,
+      });
+    }
     if (!success) return notFound(res, "Client");
 
-    await storage.createActivityLog({
-      action: "deleted", entityType: "client", entityId: req.params.id,
-      details: { cascaded }, ...actor(req),
-    });
-    res.json({ success: true });
+    try {
+      await storage.createActivityLog({
+        action: "deleted", entityType: "client", entityId: req.params.id,
+        details: { cascaded, ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}) }, ...actor(req),
+      });
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+    }
+    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
   }));
 
   // ==== SITES ====
@@ -607,8 +1090,14 @@ export function registerRoutes(app: Express): void {
     // the update path came to allow forging it.
     if (forgedAttribution(res, req.body)) return;
     const data = createTestSchema.parse(req.body);
+    // A person's test: a run's keys are the scan route's to write, never this one's.
+    if (suppliedEngineKeys(res, data.findings)) return;
     if (await parentMissing(res, data.clientId, data.siteId)) return;
-    const test = await storage.createTest({ ...data, executedBy: req.session.userId ?? null });
+    const test = await storage.createTest({
+      ...data,
+      ...completionStamp(data, null),
+      executedBy: req.session.userId ?? null,
+    });
     await storage.createActivityLog({
       action: "created", entityType: "test", entityId: test.id,
       details: { testType: test.testType, clientId: test.clientId }, ...actor(req),
@@ -619,7 +1108,10 @@ export function registerRoutes(app: Express): void {
   app.patch("/api/tests/:id", asyncHandler(async (req, res) => {
     if (forgedAttribution(res, req.body)) return;
     const data = updateTestSchema.parse(req.body);
-    const test = await storage.updateTest(req.params.id, data);
+    const before = await storage.getTest(req.params.id);
+    if (!before) return notFound(res, "Test");
+    if (engineRecordEdited(res, before, data)) return;
+    const test = await storage.updateTest(req.params.id, { ...data, ...completionStamp(data, before) });
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
       await storage.createActivityLog({ action: "updated", entityType: "test", entityId: test.id, details: null, ...actor(req) });
@@ -628,10 +1120,34 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.delete("/api/tests/:id", asyncHandler(async (req, res) => {
-    const success = await storage.deleteTest(req.params.id);
+    const test = await storage.getTest(req.params.id);
+    if (!test) return notFound(res, "Test");
+    // A running engine scan is stopped first, and deleted only once the engine
+    // accepted the stop (stopBeforeDeleting): its row is its Stop.
+    const stops = await stopBeforeDeleting(req, [test]);
+    if (refuseUnstoppedDelete(res, "the test", stops)) return;
+
+    let success: boolean;
+    try {
+      success = await storage.deleteTest(req.params.id);
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+      return void res.status(500).json({
+        message: `Engine run ${stops[0].runId} was stopped (the engine accepted the stop), but the test could not ` +
+          `be deleted: ${causeOf(cause)}`,
+        stops,
+      });
+    }
     if (!success) return notFound(res, "Test");
-    await storage.createActivityLog({ action: "deleted", entityType: "test", entityId: req.params.id, details: null, ...actor(req) });
-    res.json({ success: true });
+    try {
+      await storage.createActivityLog({
+        action: "deleted", entityType: "test", entityId: req.params.id,
+        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : null, ...actor(req),
+      });
+    } catch (cause) {
+      if (stops.length === 0) throw cause;
+    }
+    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
   }));
 
   // ==== SCANS: the engine, and what it found ====
@@ -692,6 +1208,54 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // What the AI Control page says about starting scans, enforced here --
+    // at the start, and only there: nothing on that page can hold back a
+    // stop. Its system switches and Max Concurrent Tests were stored and
+    // read by nothing, so switching scanning off stopped no scan from
+    // starting. A settings read that fails refuses the start (asyncHandler's
+    // 500); it never touches a stop.
+    const control = await storage.getAIControlSettings();
+    const system = systemOfScan(data.testType);
+    const active = control ? control.activeSystems ?? [] : DEFAULT_ACTIVE_SYSTEMS;
+    if (!active.includes(system)) {
+      const label = AI_SYSTEMS.find((one) => one.id === system)!.label;
+      return void res.status(409).json({
+        error: `${label} is switched off on the AI Control page, so this scan was not started. Switch it on there to ` +
+          "start it.",
+        reason: "system_off",
+        system,
+      });
+    }
+    // Counted from the engine's own list of live runs: a row reads
+    // "running" until someone polls its status, so rows alone would count
+    // scans that finished long ago and refuse every start once enough pages
+    // were left -- and would miss a live run that has no row. Only when that
+    // list cannot be read are the rows recorded as running counted instead.
+    const limit = control?.maxConcurrentTests ?? 5;
+    let running: number;
+    let unlisted: string | null = null;
+    try {
+      running = (await engine.activeRuns()).length;
+    } catch (cause) {
+      if (!(cause instanceof engine.EngineUnavailable)) throw cause;
+      unlisted = cause.message;
+      running = (await storage.getAllTests()).filter((test) => unfinishedRunOf(test) !== null).length;
+    }
+    if (running >= limit) {
+      return void res.status(409).json({
+        error: `${running} engine scan${running === 1 ? " is" : "s are"} ` +
+          (unlisted === null
+            ? "running"
+            : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
+          `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started. Stop one, ` +
+          "or raise the limit, to start another.",
+        reason: "concurrency_limit",
+        running,
+        counted: unlisted === null ? "engine" : "recorded",
+        limit,
+      });
+    }
+
     let started;
     try {
       started = await engine.startScan({
@@ -717,42 +1281,81 @@ export function registerRoutes(app: Express): void {
       });
     }
 
-    const test = await storage.createTest({
-      clientId: data.clientId,
-      siteId: data.siteId ?? null,
-      testType: data.testType,
-      status: started.state === "completed" ? "completed" : "running",
-      severity: null,
-      completedAt: null,
-      summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
-      findings: { runId: started.runId, target: data.target, results: started.findings },
-      vulnerabilitiesFound: 0,
-      criticalCount: 0,
-      highCount: 0,
-      mediumCount: 0,
-      lowCount: 0,
-      executedBy: req.session.userId ?? null,
-    });
+    // A run the engine finished inline has its results now, and its row is
+    // written as finished: counted from what came back and dated. It used to
+    // be written with zero counts and no completion time, and the status
+    // route never revisits a completed row -- so a scan that returned a
+    // critical read as "0 reported" on every screen that reads the test.
+    const completedInline = started.state === "completed";
+    let test;
+    try {
+      test = await storage.createTest({
+        clientId: data.clientId,
+        siteId: data.siteId ?? null,
+        testType: data.testType,
+        status: completedInline ? "completed" : "running",
+        completedAt: completedInline ? new Date() : null,
+        summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
+        findings: { runId: started.runId, target: data.target, results: started.findings },
+        ...(completedInline
+          ? countSeverities(started.findings ?? [])
+          : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
+        executedBy: req.session.userId ?? null,
+      });
+    } catch (cause) {
+      // The engine is scanning, and the row that is this run's Stop -- and
+      // the kill switch's view of it -- could not be written. Answering "the
+      // start failed" left the run going with nothing here able to stop it.
+      // So the run just started is stopped, and the answer says what came of
+      // that.
+      if (!started.runId || completedInline) throw cause;
+      const stop = await sendStop(req, { runId: started.runId, target: data.target, testId: null }, "start_not_recorded");
+      return void res.status(500).json({
+        error: `the engine started run ${started.runId} but it could not be recorded here (${causeOf(cause)}); ` +
+          (stop.stopped
+            ? "the run was sent a stop, and the engine accepted it"
+            : `the run was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
+              "stop it with the kill switch or a failsafe pause"),
+        runId: started.runId,
+        stopped: stop.stopped,
+      });
+    }
 
-    // File what came back as findings with a life of their own. A scan that
-    // completes inline has its results now; one still running is filed when
-    // it finishes, on the status route.
-    const filed = await lifecycle.ingest(storage, started.findings ?? [], {
-      clientId: data.clientId,
-      siteId: data.siteId ?? null,
-      engagementRef,
-      target: data.target,
-      testId: test.id,
-      runId: started.runId ?? null,
-    });
+    // From here the row -- and so the run's Stop -- exists. Nothing after it
+    // may answer "the start failed" over a run that is scanning: a filing or
+    // log write that fails is reported, and the page still gets its test.
+    let filed: lifecycle.IngestResult | null = null;
+    let notFiled: string | null = null;
+    try {
+      // File what came back as findings with a life of their own. A scan that
+      // completes inline has its results now; one still running is filed when
+      // it finishes, on the status route.
+      filed = await lifecycle.ingest(storage, started.findings ?? [], {
+        clientId: data.clientId,
+        siteId: data.siteId ?? null,
+        engagementRef,
+        target: data.target,
+        testId: test.id,
+        runId: started.runId ?? null,
+      });
+    } catch (cause) {
+      notFiled = causeOf(cause);
+    }
 
-    await storage.createActivityLog({
-      action: "started", entityType: "test", entityId: test.id,
-      details: { target: data.target, engagementRef, runId: started.runId, filed },
-      ...actor(req),
-    });
+    try {
+      await storage.createActivityLog({
+        action: "started", entityType: "test", entityId: test.id,
+        details: { target: data.target, engagementRef, runId: started.runId, filed },
+        ...actor(req),
+      });
+    } catch {
+      // The run started and its row exists; the page needs its test id more than the log line.
+    }
 
-    res.status(201).json({ test, runId: started.runId, state: started.state, filed });
+    res.status(201).json({
+      test, runId: started.runId, state: started.state, filed,
+      ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
+    });
   }));
 
   /**
@@ -768,8 +1371,7 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    const runId = runIdOf(test);
     if (!runId) {
       return void res.status(409).json({
         error: "this test has no engine run recorded against it, so there is nothing to stop",
@@ -795,10 +1397,16 @@ export function registerRoutes(app: Express): void {
       });
     }
 
-    await storage.createActivityLog({
-      action: "aborted", entityType: "test", entityId: test.id,
-      details: { runId }, ...actor(req),
-    });
+    // After the stop, and best-effort: a log write that failed (a full disk)
+    // turned a stop the engine had accepted into "Internal server error".
+    try {
+      await storage.createActivityLog({
+        action: "aborted", entityType: "test", entityId: test.id,
+        details: { runId }, ...actor(req),
+      });
+    } catch (cause) {
+      console.error(`[abort] run ${runId} was stopped; its activity log could not be written: ${causeOf(cause)}`);
+    }
 
     res.json({ stopped: true, runId });
   }));
@@ -1205,10 +1813,74 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.patch("/api/ai-control", requireAdmin, asyncHandler(async (req, res) => {
-    const data = updateAIControlSettingSchema.parse(req.body);
-    const settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
-    await storage.createActivityLog({ action: "updated", entityType: "ai_control", entityId: settings.id, details: data, ...actor(req) });
-    res.json(settings);
+    const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? (req.body as Record<string, unknown>)
+      : {};
+    let data: z.infer<typeof updateAIControlSettingSchema>;
+    let ignored: string[] = [];
+    if (body.killSwitchEnabled === true) {
+      ({ data, ignored } = engagingAIControlChange(body));
+    } else {
+      if (refusedAIControlFields(res, req.body)) return;
+      data = updateAIControlSettingSchema.parse(req.body);
+    }
+    const noted = ignored.length > 0 ? { ignored } : {};
+    // The flag first, so every other write is refused from here on; then the
+    // stops (stopEverythingRunning). Sent again each time the switch is sent
+    // on, so an operator can retry the scans that could not be reached.
+    //
+    // A flag that could not be stored holds back no stop. On a full disk (or
+    // a read-only or locked database) the write failed and the handler
+    // answered 500 before sending a single stop, although the engine was
+    // reachable and the running scans could be read. Now the stops are sent
+    // whatever the write did, and the answer carries both outcomes.
+    let settings: Awaited<ReturnType<typeof storage.updateAIControlSettings>> | null = null;
+    let notStored: string | null = null;
+    try {
+      settings = await storage.updateAIControlSettings({ ...data, lastModifiedBy: req.session.userId ?? null });
+    } catch (cause) {
+      if (data.killSwitchEnabled !== true) throw cause;
+      notStored = causeOf(cause);
+    }
+    let stops: RecordedStops | null = null;
+    let engineRuns: EngineSweep | null = null;
+    if (data.killSwitchEnabled === true) {
+      // Neither list failing is a 500: what the page must say is which list
+      // could not be read -- not that nothing ran.
+      ({ stops, engineRuns } = await stopEverythingRunning(req));
+    }
+    const logged = stops === null || engineRuns === null ? data : {
+      ...data,
+      ...noted,
+      ...(notStored !== null ? { notStored } : {}),
+      stops: stops.listed
+        ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
+        : { listed: false, detail: stops.detail },
+      engineRuns: engineRuns.listed
+        ? { sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length }
+        : { listed: false, detail: engineRuns.detail },
+    };
+    try {
+      await storage.createActivityLog({
+        action: "updated", entityType: "ai_control", entityId: settings?.id ?? "ai_control", details: logged, ...actor(req),
+      });
+    } catch (cause) {
+      // Once stops were sent, their outcome reaches the page whatever the log did.
+      if (stops === null) throw cause;
+    }
+    if (notStored !== null) {
+      // Not engaged -- the flag is not stored, so writes are not refused -- and
+      // the stops went out all the same: both are said.
+      return void res.status(500).json({
+        message: `The kill switch could not be engaged: ${notStored}. Every stop was sent all the same; ` +
+          "what each came to is below. Writes are not refused until the switch is engaged.",
+        engaged: false,
+        stops,
+        engineRuns,
+        ...noted,
+      });
+    }
+    res.json(stops === null ? settings : { ...settings, stops, engineRuns, ...noted });
   }));
 
   // ==== AI CHAT ====
@@ -1408,6 +2080,22 @@ export function registerRoutes(app: Express): void {
     return false;
   };
 
+  /**
+   * Record a failsafe act on this side, after the control plane took it.
+   *
+   * Best-effort: the draft, the signature or the withdrawal has happened on
+   * the control plane by now, and answering 500 because the log could not be
+   * written reported it as failed -- and lost the uuid of a drafted pause,
+   * which the console needs to open it for signing. The failure is logged.
+   */
+  async function recordFailsafeAct(req: Request, action: string, uuid: string, details: Record<string, unknown>): Promise<void> {
+    try {
+      await storage.createActivityLog({ action, entityType: "failsafe_command", entityId: uuid, details, ...actor(req) });
+    } catch (cause) {
+      console.error(`[failsafe] ${action} ${uuid} went through; its activity log could not be written: ${causeOf(cause)}`);
+    }
+  }
+
   app.get("/api/failsafe/status", requireAdmin, asyncHandler(async (_req, res) => {
     // status() answers its own unreachability rather than throwing, so a
     // control plane that is simply not configured renders as words on the
@@ -1451,13 +2139,11 @@ export function registerRoutes(app: Express): void {
       return void res.status(result.status).json({ error: result.detail });
     }
     // Drafting a failsafe command is an act worth recording on this side too,
-    // independent of the backend's own audit trail.
-    await storage.createActivityLog({
-      action: "drafted",
-      entityType: "failsafe_command",
-      entityId: result.drafted.command.uuid,
-      details: { failsafeAction: data.action, engineId: data.engineId, reason: data.reason },
-      ...actor(req),
+    // independent of the backend's own audit trail -- after the draft, and
+    // best-effort: a log write that failed answered 500 for a pause the control
+    // plane had drafted, and the page never received the uuid it signs.
+    await recordFailsafeAct(req, "drafted", result.drafted.command.uuid, {
+      failsafeAction: data.action, engineId: data.engineId, reason: data.reason,
     });
     res.status(201).json(result.drafted);
   }));
@@ -1475,6 +2161,7 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.post("/api/failsafe/commands/:uuid/signatures", requireAdmin, asyncHandler(async (req, res) => {
+    if (await killSwitchRefusesCommand(res, "relay", req.params.uuid)) return;
     const data = submitSignatureSchema.parse(req.body);
     let result;
     try {
@@ -1488,17 +2175,14 @@ export function registerRoutes(app: Express): void {
       // to see verbatim -- it is the whole point of relaying it here.
       return void res.status(result.status).json({ error: result.detail });
     }
-    await storage.createActivityLog({
-      action: "signed",
-      entityType: "failsafe_command",
-      entityId: req.params.uuid,
-      details: { keyId: data.keyId, status: result.command.status, signers: result.command.signers },
-      ...actor(req),
+    await recordFailsafeAct(req, "signed", req.params.uuid, {
+      keyId: data.keyId, status: result.command.status, signers: result.command.signers,
     });
     res.json(result.command);
   }));
 
   app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
+    if (await killSwitchRefusesCommand(res, "cancel", req.params.uuid)) return;
     let result;
     try {
       result = await failsafe.cancelCommand(req.params.uuid);
@@ -1509,13 +2193,7 @@ export function registerRoutes(app: Express): void {
     if (!result.ok) {
       return void res.status(result.status).json({ error: result.detail });
     }
-    await storage.createActivityLog({
-      action: "canceled",
-      entityType: "failsafe_command",
-      entityId: req.params.uuid,
-      details: { status: result.command.status },
-      ...actor(req),
-    });
+    await recordFailsafeAct(req, "canceled", req.params.uuid, { status: result.command.status });
     res.json(result.command);
   }));
 
@@ -1584,8 +2262,9 @@ export function registerRoutes(app: Express): void {
   // — system, receipt version, policy, evidence root, result, per-assessment
   // digests — as one deterministic, portable, signable payload. The standardised
   // superset of the bare receipt above; computed, never stored. A read, behind
-  // requireAuth like the rest of the assurance reads. It attests integrity and
-  // provenance, never that the conclusions are true or the system is secure.
+  // requireAuth like the rest of the assurance reads. Served unsigned by the
+  // backend, which says so in the payload; its digests show a change only
+  // against an independently obtained copy, never that the conclusions are true.
   app.get("/api/assurance/deployments/:uuid/assurance-receipt", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.assuranceReceipt(req.params.uuid));
@@ -1618,7 +2297,7 @@ export function registerRoutes(app: Express): void {
   }));
 
   // The deployment's AI-BOM (Phase 1.7): the AI supply-chain bill of materials,
-  // an exportable, tamper-evident inventory. A read, behind requireAuth.
+  // an exportable inventory with an unsigned digest. A read, behind requireAuth.
   app.get("/api/assurance/deployments/:uuid/ai-bom", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.aiBom(req.params.uuid));
@@ -2707,6 +3386,36 @@ export function registerRoutes(app: Express): void {
   // refuses it, and the retest route writes it along with the run that earned
   // it. A human may accept a risk or say they have looked at something; those
   // are opinions, stored under their name as opinions.
+
+  // The estate's findings counted once, for the Overview and the Deployments
+  // pipeline: open counts by severity, by site environment and per client,
+  // new findings by month, and the worst open ones. One request instead of one
+  // per client (each of which also loaded every finding's history). Every
+  // client's findings, or an error: a total over the clients that happened to
+  // read cleanly would be wrong and look right. See server/findings-summary.ts.
+  //
+  // A read that failed and a count that failed are different faults with
+  // different fixes, so they are answered with different sentences: the first
+  // sends an operator to storage, the second to this code. Neither carries a
+  // total, and neither leaks the underlying error's text.
+  app.get("/api/findings/summary", asyncHandler(async (_req, res) => {
+    let summary;
+    try {
+      summary = await loadFindingsSummary(storage);
+    } catch (cause) {
+      if (cause instanceof SummaryReadError) {
+        console.error("[findings] summary: could not read every engagement's findings:", cause.reason);
+        return void res.status(500).json({
+          message: "Could not read every engagement's findings, so no totals are given.",
+        });
+      }
+      console.error("[findings] summary: read every engagement's findings but could not count them:", cause);
+      return void res.status(500).json({
+        message: "Every engagement's findings were read, but counting them failed, so no totals are given.",
+      });
+    }
+    res.json(summary);
+  }));
 
   app.get("/api/findings", asyncHandler(async (req, res) => {
     const clientId = typeof req.query.clientId === "string" ? req.query.clientId : null;

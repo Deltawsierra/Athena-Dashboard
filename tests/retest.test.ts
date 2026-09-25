@@ -217,11 +217,14 @@ describe("retesting a finding", () => {
     // the strength of the twin alone is the unfalsifiable check again.
     const client = await agent.post("/api/clients")
       .send({ name: "Siteless", company: "Siteless Ltd", email: "s@example.test" });
-    const test = await agent.post("/api/tests").send({
+    // Written as the scan route writes an engine scan's row: POST /api/tests
+    // refuses a supplied run id (R5-A).
+    const { storage } = await import("../server/storage-unified");
+    const test = await storage.createTest({
       clientId: client.body.id, testType: "manual", status: "completed",
       findings: { runId: "run-1" }, vulnerabilitiesFound: 0,
     });
-    const refused = await agent.post(`/api/tests/${test.body.id}/retest`).send({ twinId: 81 });
+    const refused = await agent.post(`/api/tests/${test.id}/retest`).send({ twinId: 81 });
     expect(refused.status).toBe(400);
     expect(refused.body.error).toContain("no site is recorded");
 

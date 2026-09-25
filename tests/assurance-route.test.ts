@@ -139,6 +139,35 @@ describe("assurance BFF", () => {
             algorithm: "sha256",
             digest: "9".repeat(64),
             computed_at: "2026-09-17T02:00:00Z",
+            // The backend's own self-report, outside the digest: this copy is
+            // unsigned, and why. dep-1 is the older shape that says nothing.
+            signed: false,
+            signature: null,
+            unsigned_reason: "THIS COPY is unsigned. This backend holds no signing key.",
+          });
+        }
+
+        // Two backends that answer `signed` with something other than a
+        // boolean: the string "false" and the number 1. Neither is a yes or a
+        // no, so neither may reach the page as one -- "false" coerced by
+        // truthiness would read as "signed (reported)".
+        const oddSigned: Record<string, unknown> = {
+          "/api/assurance/deployments/dep-str/assurance-receipt/": "false",
+          "/api/assurance/deployments/dep-num/assurance-receipt/": 1,
+        };
+        if (path in oddSigned && method === "GET") {
+          return json(200, {
+            receipt_version: "mythos.assurance.receipt/1.0",
+            system: { name: "odd", uuid: "dep-odd", environment: "staging", environment_label: "Staging" },
+            result: { decision: null, decision_label: null },
+            policy: { declared: false },
+            evidence: { algorithm: "sha256", root: "1".repeat(64), finding_count: 0 },
+            assessments: {},
+            algorithm: "sha256",
+            digest: "7".repeat(64),
+            computed_at: "2026-09-17T02:00:00Z",
+            signed: oddSigned[path],
+            unsigned_reason: null,
           });
         }
 
@@ -1519,6 +1548,23 @@ describe("assurance BFF", () => {
           });
         }
 
+        // Packs that report their signing status: one plainly unsigned with a
+        // reason, and one sending the string "true", which is not a yes.
+        const packSigned: Record<string, unknown> = {
+          "/api/assurance/findings/f-unsigned/incident-pack/": false,
+          "/api/assurance/findings/f-strsigned/incident-pack/": "true",
+        };
+        if (path in packSigned && method === "GET") {
+          return json(200, {
+            pack_version: "mythos.assurance.incident_pack/1.0",
+            identity: { deployment: { uuid: "dep-1" }, finding: { uuid: "f-x" } },
+            receipt: { algorithm: "sha256", digest: "d".repeat(64), evidence_count: 0 },
+            algorithm: "sha256", digest: "e".repeat(64), computed_at: null,
+            signed: packSigned[path],
+            unsigned_reason: packSigned[path] === false ? "This backend holds no signing key." : null,
+          });
+        }
+
         if (path === "/api/assurance/findings/f-1/incident-pack/" && method === "GET") {
           // An honest pack: a null owner and a null decision carried at true
           // strength, the runtime transcript stated as an explicit gap.
@@ -1814,6 +1860,31 @@ describe("assurance BFF", () => {
       compliance: "c".repeat(64), capabilities: "d".repeat(64),
       boundary: "e".repeat(64), bom: "f".repeat(64),
     });
+  });
+
+  it("carries the receipt's signed/unsigned self-report, and a silence as null", async () => {
+    // dep-2 says it is unsigned and why: both reach the page as the backend said.
+    const said = await user.get("/api/assurance/deployments/dep-2/assurance-receipt");
+    expect(said.status).toBe(200);
+    expect(said.body.signed).toBe(false);
+    expect(said.body.unsignedReason).toBe("THIS COPY is unsigned. This backend holds no signing key.");
+    // dep-1 says nothing about signing. That is null, not false and not true:
+    // the page must not print "unsigned" -- or "signed" -- for a silence.
+    const silent = await user.get("/api/assurance/deployments/dep-1/assurance-receipt");
+    expect(silent.status).toBe(200);
+    expect(silent.body.signed).toBeNull();
+    expect(silent.body.unsignedReason).toBeNull();
+  });
+
+  it("carries a `signed` that is not a boolean as null, never coerced to yes or no", async () => {
+    // The string "false" is truthy, and 1 is not a boolean: a mapper that
+    // coerced either would make the page say "signed (reported)" about a copy
+    // no backend said was signed. Only a real boolean is a report.
+    for (const dep of ["dep-str", "dep-num"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/assurance-receipt`);
+      expect(res.status).toBe(200);
+      expect(res.body.signed, `${dep}: a non-boolean signed was coerced`).toBeNull();
+    }
   });
 
   it("carries a declared data boundary through the receipt policy, camelCased", async () => {
@@ -2847,6 +2918,20 @@ describe("assurance BFF", () => {
     expect(res.body.runtimeTranscript.enginePackRef.engineRunId).toBeNull();
     // An uncomputed decision is null, never read as ready.
     expect(res.body.decision.decision).toBeNull();
+  });
+
+  it("carries the incident pack's signing status as the backend said it, and a silence or non-boolean as null", async () => {
+    const unsigned = await user.get("/api/assurance/findings/f-unsigned/incident-pack");
+    expect(unsigned.status).toBe(200);
+    expect(unsigned.body.signed).toBe(false);
+    expect(unsigned.body.unsignedReason).toBe("This backend holds no signing key.");
+    // f-1's pack says nothing about signing: null, not false and not true.
+    const silent = await user.get("/api/assurance/findings/f-1/incident-pack");
+    expect(silent.body.signed).toBeNull();
+    expect(silent.body.unsignedReason).toBeNull();
+    // The string "true" is not a report that the pack is signed.
+    const odd = await user.get("/api/assurance/findings/f-strsigned/incident-pack");
+    expect(odd.body.signed).toBeNull();
   });
 
   it("refuses the incident pack to anyone not signed in", async () => {

@@ -82,21 +82,86 @@ function summaryContext() {
     { critical: 0, high: 0, medium: 0, low: 0 },
   );
 
+  // shared/latest-scans.ts countsNotRecorded, restated for the raw row.
+  const countsNotRecorded = (t) => {
+    if (t.status !== "completed") return false;
+    if ((t.vulnerabilities_found ?? 0) + (t.critical_count ?? 0) + (t.high_count ?? 0)
+      + (t.medium_count ?? 0) + (t.low_count ?? 0) > 0) return false;
+    let recorded = t.findings;
+    try { recorded = typeof recorded === "string" ? JSON.parse(recorded) : recorded; } catch { return false; }
+    const results = recorded && typeof recorded === "object" ? recorded.results : undefined;
+    return Array.isArray(results) && results.some((one) => one !== null && typeof one === "object" && one.internal !== true);
+  };
+  // shared/latest-scans.ts readScan, restated for the raw row.
+  const RATINGS = ["critical", "high", "medium", "low", "info"];
+  const ratingOf = (value) => {
+    const word = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return RATINGS.includes(word) ? word : null;
+  };
+  const readScan = (t) => {
+    const counts = {
+      critical: t.critical_count ?? 0, high: t.high_count ?? 0, medium: t.medium_count ?? 0, low: t.low_count ?? 0,
+    };
+    const counted = counts.critical + counts.high + counts.medium + counts.low;
+    const total = Math.max(t.vulnerabilities_found ?? 0, counted);
+    const field = ratingOf(t.severity);
+    let recorded = t.findings;
+    try { recorded = typeof recorded === "string" ? JSON.parse(recorded) : recorded; } catch { recorded = null; }
+    const list = recorded && typeof recorded === "object" && Array.isArray(recorded.results) ? recorded.results : null;
+    const results = list && list.filter((one) => one !== null && typeof one === "object" && one.internal !== true);
+    const worst = ["critical", "high", "medium", "low"].find((one) => field === one || counts[one] > 0) ?? null;
+    const unrated = results ? results.filter((one) => ratingOf(one.severity) === null).length
+      : field === null ? total - counted : 0;
+    const infoOnly = field === "info" || (field === null && counted === 0 && results !== null && results.length > 0
+      && results.every((one) => ratingOf(one.severity) === "info"));
+    return {
+      countsNotRecorded: countsNotRecorded(t),
+      severity: worst ?? (infoOnly ? "info" : null),
+      total,
+      counts,
+      ratedNotCounted: field !== null && field !== "info" && counts[field] === 0 ? field : null,
+      unrated,
+    };
+  };
+  // server/summary.ts describeCounts, restated.
+  const describeCounts = (read) => {
+    if (read.countsNotRecorded) return "counts not recorded";
+    const { critical, high, medium, low } = read.counts;
+    const counted = critical + high + medium + low;
+    if (counted === 0 && read.ratedNotCounted) {
+      return read.total > 0
+        ? `${read.total} found, rated ${read.ratedNotCounted}, not broken down by severity`
+        : `rated ${read.ratedNotCounted}, no count recorded`;
+    }
+    if (counted === 0 && read.unrated > 0) {
+      return `${read.total} found, ${read.unrated === read.total ? "no severity recorded" : `${read.unrated} with no severity recorded`}`;
+    }
+    if (counted === 0 && read.severity === "info") return `${read.total} found, all rated info`;
+    return `${critical} critical / ${high} high / ${medium} medium / ${low} low`
+      + (read.ratedNotCounted ? `, rated ${read.ratedNotCounted} with no ${read.ratedNotCounted} count recorded` : "")
+      + (read.unrated > 0 ? `, and ${read.unrated} more with no severity recorded` : "");
+  };
+  const reads = tests.filter((t) => t.status === "completed").map(readScan);
+  const unrecorded = reads.filter((read) => read.countsNotRecorded).length;
+  const ratedOut = reads.filter((read) => !read.countsNotRecorded && read.ratedNotCounted !== null).length;
+  const unratedOut = reads.filter((read) => !read.countsNotRecorded && read.unrated > 0).length;
   const recent = tests
     .slice()
     .sort((a, b) => Number(b.started_at) - Number(a.started_at))
     .slice(0, 8)
     .map((t) => {
       const site = sites.find((s) => s.id === t.site_id);
-      return `- ${t.test_type} on ${site?.name ?? "an unnamed site"}: ${t.status}, `
-        + `${t.critical_count} critical / ${t.high_count} high `
-        + `/ ${t.medium_count} medium / ${t.low_count} low`;
+      const counts = t.status !== "completed" ? "no counts until it completes" : describeCounts(readScan(t));
+      return `- ${t.test_type} on ${site?.name ?? "an unnamed site"}: ${t.status}, ${counts}`;
     });
 
   return [
     `${clients.length} clients, ${sites.length} sites, ${tests.length} tests recorded.`,
     `Across all tests: ${totals.critical} critical, ${totals.high} high, `
-      + `${totals.medium} medium, ${totals.low} low.`,
+      + `${totals.medium} medium, ${totals.low} low.`
+      + (unrecorded > 0 ? ` Counts were not recorded for ${unrecorded} completed scan${unrecorded === 1 ? "" : "s"}, so these totals leave them out.` : "")
+      + (ratedOut > 0 ? ` ${ratedOut} test${ratedOut === 1 ? " was" : "s were"} rated with no count at ${ratedOut === 1 ? "its" : "their"} rating, which these totals leave out.` : "")
+      + (unratedOut > 0 ? ` ${unratedOut} test${unratedOut === 1 ? "" : "s"} reported results with no severity recorded, which these totals leave out.` : ""),
     recent.length ? "Most recent tests:" : "No tests have been recorded yet.",
     ...recent,
   ].join("\n");
