@@ -12,6 +12,13 @@
  * requirement failed -- so it read as a verdict against the current standard.
  * It now states the edition, that 5.0.0 is current, and what the mapping is,
  * beside every panel that renders it. See shared/asvs-edition.ts.
+ *
+ * A mapping request that failed, or had not answered, used to render as zeros,
+ * "0% Tested", "No control mapping yet -- run a scan" and "No mapped
+ * requirement is failing in the tests considered": a no-failures statement
+ * about a mapping nobody read. Every figure now reads "…" while it loads and
+ * "—" with the reason when it failed, and those sentences appear only for a
+ * mapping that came back.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -22,6 +29,7 @@ import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Corners } from "@/components/mythos/Ornament";
 import { cn } from "@/lib/utils";
+import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { ASVS_CURRENT_RELEASE, ASVS_MAPPED_VERSION } from "@shared/asvs-edition";
 
 type ControlState = "failing" | "tested" | "not_covered" | "not_run";
@@ -58,17 +66,18 @@ function MappingStatement({ version }: { version: string }) {
   );
 }
 
-function ReadinessDonut({ pct }: { pct: number }) {
+function ReadinessDonut({ pct }: { pct: number | string }) {
+  const share = typeof pct === "number" ? pct : 0;
   const r = 52, c = 2 * Math.PI * r;
   return (
     <div className="relative h-[140px] w-[140px] shrink-0">
       <svg viewBox="0 0 140 140" className="h-full w-full -rotate-90">
         <circle cx="70" cy="70" r={r} fill="none" stroke="hsl(40 20% 30% / 0.35)" strokeWidth="12" />
         <circle cx="70" cy="70" r={r} fill="none" stroke="hsl(var(--gold))" strokeWidth="12" strokeLinecap="round"
-          strokeDasharray={`${(pct / 100) * c} ${c}`} style={{ filter: "drop-shadow(0 0 6px hsl(44 88% 62% / 0.6))" }} />
+          strokeDasharray={`${(share / 100) * c} ${c}`} style={{ filter: "drop-shadow(0 0 6px hsl(44 88% 62% / 0.6))" }} />
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="athena-figure text-[26px] font-semibold text-foreground">{pct}%</span>
+        <span className="athena-figure text-[26px] font-semibold text-foreground">{typeof pct === "number" ? `${pct}%` : pct}</span>
         <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Tested</span>
       </div>
     </div>
@@ -76,7 +85,8 @@ function ReadinessDonut({ pct }: { pct: number }) {
 }
 
 export default function Compliance() {
-  const { data: clients = [] } = useQuery<ApiClient[]>({ queryKey: ["/api/clients"] });
+  const clientsQ = loaded(useQuery<ApiClient[]>({ queryKey: ["/api/clients"] }));
+  const clients = clientsQ.state === "ready" ? clientsQ.data : [];
   const { data: tests = [] } = useQuery<{ clientId: string; startedAt: string; completedAt: string | null }[]>({ queryKey: ["/api/tests"] });
   // default to the most recently scanned engagement so fresh ASVS results surface
   const latestTest = tests.slice().sort((a, b) =>
@@ -86,15 +96,34 @@ export default function Compliance() {
   const [picked, setPicked] = useState("");
   const [search, setSearch] = useState("");
   const clientId = picked || defaultClientId;
-  const { data, isLoading } = useQuery<ComplianceView>({ queryKey: [`/api/compliance/${clientId}`], enabled: clientId !== "" });
+  const mappingQ = useQuery<ComplianceView>({ queryKey: [`/api/compliance/${clientId}`], enabled: clientId !== "" });
+  // The engagements first (no engagement is not an empty mapping), then the
+  // chosen engagement's mapping.
+  const noEngagement = clientsQ.state === "ready" && clients.length === 0;
+  const source: Loaded<ComplianceView> =
+    clientsQ.state === "error"
+      ? { state: "error", message: `engagements: ${clientsQ.message}` }
+      : noEngagement
+        ? { state: "error", message: "no engagement on record" }
+        : loaded(mappingQ);
+  const ready = source.state === "ready";
+  const unavailable = clientsQ.state === "error"
+    ? `Could not load engagements: ${clientsQ.message}`
+    : noEngagement
+      ? "No engagement on record yet. Add a client and run a scan to map it against ASVS."
+      : notInHand(source, "the control mapping");
+  const count = (read: (view: ComplianceView) => number) => (noEngagement ? "—" : figure(source, read));
 
+  const data = ready ? source.data : undefined;
   const rows = data?.rows ?? [];
   const summary = data?.summary;
   const total = summary?.total ?? 0;
   // The server reports the edition it mapped against; before it answers, the
   // edition this build's mapping is pinned to -- the same constant it reads.
   const version = summary?.version ?? ASVS_MAPPED_VERSION;
-  const testedPct = total ? Math.round(((summary?.tested ?? 0) / total) * 100) : 0;
+  const testedPct: number | string = ready
+    ? (total ? Math.round(((summary?.tested ?? 0) / total) * 100) : 0)
+    : count(() => 0);
 
   // show the requirements that matter first: failing, then not-run, then tested
   const orderRank: Record<ControlState, number> = { failing: 0, not_run: 1, tested: 2, not_covered: 3 };
@@ -109,12 +138,12 @@ export default function Compliance() {
   const gaps = rows.filter((r) => r.state === "failing").slice(0, 6);
 
   const legend = [
-    { label: "Tested", value: summary?.tested ?? 0, cls: "bg-emerald-400" },
-    { label: "Failing", value: summary?.failing ?? 0, cls: "bg-sev-high" },
-    { label: "Not Run", value: summary?.notRun ?? 0, cls: "bg-sky-400" },
-    { label: "Not Covered", value: summary?.notCovered ?? 0, cls: "bg-muted-foreground/50" },
+    { label: "Tested", value: count((v) => v.summary.tested), cls: "bg-emerald-400" },
+    { label: "Failing", value: count((v) => v.summary.failing), cls: "bg-sev-high" },
+    { label: "Not Run", value: count((v) => v.summary.notRun), cls: "bg-sky-400" },
+    { label: "Not Covered", value: count((v) => v.summary.notCovered), cls: "bg-muted-foreground/50" },
   ];
-  const empty = !isLoading && rows.length === 0;
+  const empty = ready && rows.length === 0;
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-6 md:px-8">
@@ -130,11 +159,11 @@ export default function Compliance() {
 
       {/* stats -- live from the ASVS mapping */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard layout="tile" label={`ASVS ${version} Requirements`} value={total} icon={Layers} />
-        <StatCard layout="tile" label="Tested" value={summary?.tested ?? 0} icon={FileCheck2} />
-        <StatCard layout="tile" label="Open Gaps" value={summary?.failing ?? 0} icon={AlertTriangle} accent="var(--sev-high)" />
-        <StatCard layout="tile" label="Not Run" value={summary?.notRun ?? 0} icon={CircleSlash} />
-        <StatCard layout="tile" label="Tests Considered" value={data?.testsConsidered ?? 0} icon={Box} />
+        <StatCard layout="tile" label={`ASVS ${version} Requirements`} value={count((v) => v.summary.total)} icon={Layers} />
+        <StatCard layout="tile" label="Tested" value={count((v) => v.summary.tested)} icon={FileCheck2} />
+        <StatCard layout="tile" label="Open Gaps" value={count((v) => v.summary.failing)} icon={AlertTriangle} accent="var(--sev-high)" />
+        <StatCard layout="tile" label="Not Run" value={count((v) => v.summary.notRun)} icon={CircleSlash} />
+        <StatCard layout="tile" label="Tests Considered" value={count((v) => v.testsConsidered)} icon={Box} />
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
@@ -176,8 +205,10 @@ export default function Compliance() {
                 <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search requirements…" className="w-36 bg-transparent text-foreground placeholder:text-muted-foreground/70 focus:outline-none" />
               </label>
             </div>
-            {empty ? (
-              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{isLoading ? "Loading control mapping…" : "No control mapping yet — run a scan to populate ASVS coverage."}</p>
+            {!ready ? (
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{unavailable}</p>
+            ) : empty ? (
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">No control mapping yet — run a scan to populate ASVS coverage.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[720px] text-left">
@@ -235,8 +266,10 @@ export default function Compliance() {
 
           <GlassCard hover={false}>
             <p className="athena-label mb-2">High-Priority Control Gaps</p>
-            {gaps.length === 0 ? (
-              <p className="text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No mapped requirement is failing in the tests considered. Requirements not run or not covered were not checked."}</p>
+            {!ready ? (
+              <p className="text-[12px] text-muted-foreground">{unavailable}</p>
+            ) : gaps.length === 0 ? (
+              <p className="text-[12px] text-muted-foreground">No mapped requirement is failing in the tests considered. Requirements not run or not covered were not checked.</p>
             ) : (
               <ul className="space-y-2.5">
                 {gaps.map((g) => (
