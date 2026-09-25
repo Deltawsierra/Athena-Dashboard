@@ -44,7 +44,7 @@ import { SeverityPill, StatusPill, Timeline, type StatusTone, type TimelineStep 
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import type { FindingsSummary } from "@shared/findings-summary";
-import { completedTime, countsNotRecorded, latestCompletedBySite, reportedSeverity, reportedTotal } from "@shared/latest-scans";
+import { completedTime, latestCompletedBySite, readScan } from "@shared/latest-scans";
 
 interface ApiClient { id: string; name: string; company: string; status: string; lastTestDate: string | null; notes: string | null }
 interface ApiTest {
@@ -55,39 +55,44 @@ interface ApiTest {
 }
 
 /** What a system's latest completed tests reported, worst first. */
-type Band = "critical" | "high" | "medium" | "low" | "unrated" | "unrecorded" | "none" | "unscanned";
-const BAND_ORDER: Band[] = ["critical", "high", "medium", "low", "unrated", "unrecorded", "none", "unscanned"];
+type Band = "critical" | "high" | "medium" | "low" | "unrated" | "unrecorded" | "info" | "none" | "unscanned";
+const BAND_ORDER: Band[] = ["critical", "high", "medium", "low", "unrated", "unrecorded", "info", "none", "unscanned"];
 /**
- * From the whole record: the severity field AND the per-severity counts. It
- * read the severity field and the total only, so a test recorded on the Tests
- * screen with "Critical Count: 2" and the severity and total left at their
- * defaults read "None reported" -- beside a findings summary that flagged
- * those two criticals. A total with no severity recorded anywhere is "Not
- * rated", not the "Medium" this used to guess.
+ * From the whole record (shared/latest-scans.ts readScan): the severity field
+ * AND the per-severity counts. It read the severity field and the total only,
+ * so a test recorded on the Tests screen with "Critical Count: 2" and the
+ * severity and total left at their defaults read "None reported" -- beside a
+ * findings summary that flagged those two criticals. A total with no severity
+ * recorded anywhere is "Not rated", not the "Medium" this used to guess; one
+ * whose every result was rated info is "Informational", not "Not rated".
  */
 function bandOf(test: ApiTest | undefined): Band {
   if (!test) return "unscanned";
-  if (countsNotRecorded(test)) return "unrecorded";
-  return reportedSeverity(test) ?? (reportedTotal(test) > 0 ? "unrated" : "none");
+  const read = readScan(test);
+  if (read.countsNotRecorded) return "unrecorded";
+  return read.severity ?? (read.total > 0 ? "unrated" : "none");
 }
 const BAND_DOT: Record<Band, string> = {
   critical: "bg-sev-critical", high: "bg-sev-high", medium: "bg-sev-medium", low: "bg-emerald-400",
-  unrated: "bg-muted-foreground/60", unrecorded: "bg-muted-foreground/40", none: "bg-muted-foreground/40",
-  unscanned: "bg-muted-foreground/20",
+  unrated: "bg-muted-foreground/60", unrecorded: "bg-muted-foreground/40", info: "bg-sky-400/60",
+  none: "bg-muted-foreground/40", unscanned: "bg-muted-foreground/20",
 };
 const BAND_TEXT: Record<Band, string> = {
   critical: "text-sev-critical", high: "text-sev-high", medium: "text-sev-medium", low: "text-emerald-400",
-  unrated: "text-foreground", unrecorded: "text-muted-foreground", none: "text-muted-foreground",
-  unscanned: "text-muted-foreground",
+  unrated: "text-foreground", unrecorded: "text-muted-foreground", info: "text-muted-foreground",
+  none: "text-muted-foreground", unscanned: "text-muted-foreground",
 };
 // "None reported", not "Clean": a scan that reported nothing has not shown
 // that nothing is there. "Not recorded": results came back, and their counts
 // were never written down -- which is not "none". "Not rated": findings were
-// reported with no severity recorded for any of them.
+// reported with no severity recorded for any of them. "Informational": every
+// result was rated info -- a severity was recorded, and it is not a risk.
 const BAND_LABEL: Record<Band, string> = {
   critical: "Critical", high: "High", medium: "Medium", low: "Low", unrated: "Not rated",
-  unrecorded: "Not recorded", none: "None reported", unscanned: "Not scanned",
+  unrecorded: "Not recorded", info: "Informational", none: "None reported", unscanned: "Not scanned",
 };
+/** Bands that are not a risk: never listed under Highest Risk. */
+const NOT_A_RISK = new Set<Band>(["info", "none", "unscanned"]);
 /** Bands a severity pill can draw; the others are drawn as what they are. */
 const RATED = new Set<Band>(["critical", "high", "medium", "low"]);
 /** The worse of two bands. */
@@ -107,11 +112,15 @@ const when = (t: ApiTest) => new Date(t.completedAt || t.startedAt).getTime();
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * Whether a completed test reported any finding at all, by its total or any
- * severity -- or returned results whose counts were never recorded.
+ * Whether a completed test reported any finding at all, by its total, any
+ * count or its severity field -- or returned results whose counts were never
+ * recorded. Read from the total and counts alone, a test recorded "Severity:
+ * Critical" with both left at 0 reported nothing, and this step was ticked
+ * done beside the row the table draws as Critical.
  */
 function reportsFindings(test: ApiTest): boolean {
-  return reportedTotal(test) > 0 || countsNotRecorded(test);
+  const read = readScan(test);
+  return read.total > 0 || read.severity !== null || read.countsNotRecorded;
 }
 
 /**
@@ -210,7 +219,8 @@ export default function Deployments() {
   const rows = clients.map((c) => {
     const t = latest.get(c.id);
     const done = latestDone.get(c.id) ?? [];
-    const recorded = done.filter((one) => !countsNotRecorded(one));
+    const reads = done.map(readScan);
+    const recorded = reads.filter((one) => !one.countsNotRecorded);
     const newest = done.slice().sort((a, b) => completedTime(b) - completedTime(a))[0];
     // The latest completed scan on record; a date typed onto the client only
     // when there is none.
@@ -223,9 +233,14 @@ export default function Deployments() {
       scanned: done.length > 0,
       sites: done.length,
       unrecorded: done.length - recorded.length,
-      vulns: recorded.reduce((n, one) => n + reportedTotal(one), 0),
-      crit: recorded.reduce((n, one) => n + one.criticalCount, 0),
-      high: recorded.reduce((n, one) => n + one.highCount, 0),
+      // Scans rated at a severity they count nothing at: a 0 beside their
+      // rating is no reading, and at critical or high the C/H figures do not
+      // break them down.
+      ratedNotCounted: recorded.filter((one) => one.ratedNotCounted !== null).length,
+      ratedSerious: recorded.filter((one) => one.ratedNotCounted === "critical" || one.ratedNotCounted === "high").length,
+      vulns: recorded.reduce((n, one) => n + one.total, 0),
+      crit: recorded.reduce((n, one) => n + one.counts.critical, 0),
+      high: recorded.reduce((n, one) => n + one.counts.high, 0),
       lastScan: lastScan ? new Date(lastScan).toLocaleString() : "—",
     };
   });
@@ -276,7 +291,7 @@ export default function Deployments() {
   // is listed after the rated ones -- not left out, which let the empty state
   // say no completed scan had reported a finding.
   const highestRisk = rows
-    .filter((r) => r.band !== "none" && r.band !== "unscanned")
+    .filter((r) => !NOT_A_RISK.has(r.band))
     .sort((a, b) =>
       BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band) || b.crit - a.crit || b.high - a.high || b.vulns - a.vulns)
     .slice(0, 3);
@@ -381,7 +396,12 @@ export default function Deployments() {
                         </div>
                       </td>
                       <td className="px-4 py-4 text-[12px] text-muted-foreground">
-                        {!d.scanned ? "—" : d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : d.unrecorded === 0 ? "0 reported" : null}
+                        {!d.scanned ? "—" : d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : d.unrecorded > 0 ? null : d.ratedNotCounted > 0 ? "No count recorded" : "0 reported"}
+                        {d.ratedSerious > 0 && (
+                          <span className="block text-[11px]" data-testid={`text-rated-not-counted-${d.id}`}>
+                            {d.ratedSerious === d.sites ? "Rated" : `${plural(d.ratedSerious, "scan")} rated`} critical or high, not counted by severity: the C/H figures leave {d.ratedSerious === 1 ? "it" : "them"} out.
+                          </span>
+                        )}
                         {d.unrecorded > 0 && (
                           <span className="block text-[11px]" data-testid={`text-counts-not-recorded-${d.id}`}>
                             {d.unrecorded === d.sites
@@ -421,7 +441,11 @@ export default function Deployments() {
             {table.state !== "ready" ? (
               <p className="text-[12px] text-muted-foreground">{notInHand(table, "scans")}</p>
             ) : highestRisk.length === 0 ? (
-              <p className="text-[12px] text-muted-foreground">No completed scan has reported a finding.</p>
+              <p className="text-[12px] text-muted-foreground">
+                {rows.some((r) => r.band === "info")
+                  ? "No completed scan has reported a finding rated above info."
+                  : "No completed scan has reported a finding."}
+              </p>
             ) : (
               <ul className="space-y-3">
                 {highestRisk.map((h) => (
@@ -434,8 +458,11 @@ export default function Deployments() {
                       <span className="block truncate text-[11px] text-muted-foreground">
                         {h.band === "unrecorded"
                           ? "Counts not recorded"
-                          : `${h.vulns} finding${h.vulns === 1 ? "" : "s"} reported (${h.crit}C / ${h.high}H)`}
+                          : h.vulns === 0 && h.ratedNotCounted > 0
+                            ? "No count recorded"
+                            : `${h.vulns} finding${h.vulns === 1 ? "" : "s"} reported (${h.crit}C / ${h.high}H)`}
                         {h.band !== "unrecorded" && h.unrecorded > 0 ? ` · counts not recorded for ${plural(h.unrecorded, "scan")}` : ""}
+                        {h.ratedSerious > 0 ? ` · ${h.ratedSerious === h.sites ? "rated" : `${plural(h.ratedSerious, "scan")} rated`}, not counted by severity` : ""}
                       </span>
                     </span>
                     <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />

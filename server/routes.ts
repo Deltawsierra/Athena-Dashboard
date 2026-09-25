@@ -116,6 +116,12 @@ const startScanSchema = z.object({
  * Counted here rather than accepted from anywhere: these numbers are what a
  * client reads on a report, and the only honest source for them is the list
  * of findings they claim to summarise.
+ *
+ * The severity is the worst counted one -- or "info" when every result was
+ * rated info. It used to be null then, beside a total of N, which is how a
+ * record says "N results, severity never recorded": the screens drew a scan
+ * whose every result the engine rated info as "Not rated" and listed it among
+ * the highest risks.
  */
 function countSeverities(findings: unknown[]): {
   vulnerabilitiesFound: number;
@@ -127,6 +133,7 @@ function countSeverities(findings: unknown[]): {
 } {
   const counts = { critical: 0, high: 0, medium: 0, low: 0 };
   let total = 0;
+  let info = 0;
   for (const finding of findings) {
     if (!finding || typeof finding !== "object") continue;
     const entry = finding as Record<string, unknown>;
@@ -136,11 +143,13 @@ function countSeverities(findings: unknown[]): {
     total += 1;
     const severity = String(entry.severity ?? "").toLowerCase();
     if (severity in counts) counts[severity as keyof typeof counts] += 1;
+    if (severity === "info") info += 1;
   }
   const worst = counts.critical ? "critical"
     : counts.high ? "high"
     : counts.medium ? "medium"
     : counts.low ? "low"
+    : total > 0 && info === total ? "info"
     : null;
   return {
     vulnerabilitiesFound: total,
