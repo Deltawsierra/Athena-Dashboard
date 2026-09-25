@@ -97,9 +97,19 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     expect(started.body.test.criticalCount).toBe(3);
     expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: null });
 
-    // A person who then edits the count up has said something the ledger
-    // does not hold: that is untracked.
-    await agent.patch(`/api/tests/${started.body.test.id}`).send({ criticalCount: 5 }).expect(200);
+    // An engine scan's counts are counted from its results, and since round 4
+    // an edit may not change them (the Tests screen's edit wrote over the
+    // engine run; tests/an-edit-on-the-tests-screen-keeps-the-engine-run.test.ts).
+    // This used to edit the count up through PATCH /api/tests/:id and expect
+    // 200; the edit is refused now, and the summary is as it was.
+    const refused = await agent.patch(`/api/tests/${started.body.test.id}`).send({ criticalCount: 5 });
+    expect(refused.status).toBe(409);
+    expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: null });
+
+    // A record that says more than its ledger holds -- written before its
+    // counts were the engine's alone -- is still untracked by the difference.
+    const { storage } = await import("../server/storage-unified");
+    await storage.updateTest(started.body.test.id, { criticalCount: 5 });
     expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: { critical: 2, high: 0 } });
   });
 

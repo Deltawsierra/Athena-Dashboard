@@ -252,6 +252,88 @@ function forgedAttribution(res: Response, body: unknown): boolean {
   });
   return true;
 }
+/**
+ * What of an engine scan's test row the engine owns, and so no edit may change.
+ *
+ * The Tests screen's Edit dialog sent `findings: { details: <the textarea> }`,
+ * and for an engine test the textarea held the JSON of {runId, target,
+ * results}. Fixing a typo in a running scan's summary wrote over the run id:
+ * its Stop answered "no engine run recorded, nothing to stop" while the engine
+ * went on scanning the customer's system, the status route stopped asking the
+ * engine, and whatever it found was never filed. On a completed scan, the
+ * findings summary began flagging a filed critical as untracked.
+ *
+ * So for a test with an engine run behind it:
+ *   - the run's own keys in `findings` (runId, target, results, and any
+ *     other the engine writes) are KEPT whatever the body says; only
+ *     `details`, a person's notes, is taken from it, and a body that tries to
+ *     change one of the run's keys is refused like the fields below;
+ *   - a change to anything else the engine or the scan route decided -- the
+ *     engagement it ran under, its status, its counts and severity, when it
+ *     completed -- is REFUSED (409), naming the fields. Sending them back
+ *     unchanged is fine, so a form that sends every field still saves.
+ * The summary, the test type and the notes stay a person's to edit. A test no
+ * engine run stands behind may not be given one here: a run id is recorded by
+ * the scan route that started the run, never supplied.
+ */
+const ENGINE_OWNED_TEST_FIELDS = [
+  "clientId", "siteId", "status", "severity", "completedAt",
+  "vulnerabilitiesFound", "criticalCount", "highCount", "mediumCount", "lowCount",
+] as const;
+/** The one key of an engine test's `findings` a person writes; every other key is the run's. */
+const HUMAN_FINDINGS_KEY = "details";
+
+function sameValue(a: unknown, b: unknown): boolean {
+  if ((a === null || a === undefined) && (b === null || b === undefined)) return true;
+  if (a instanceof Date || b instanceof Date) {
+    const at = a === null || a === undefined ? Number.NaN : new Date(a as string | number | Date).getTime();
+    const bt = b === null || b === undefined ? Number.NaN : new Date(b as string | number | Date).getTime();
+    return at === bt;
+  }
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function engineRecordEdited(
+  res: Response,
+  before: { findings: unknown } & Record<string, unknown>,
+  data: { findings?: unknown } & Record<string, unknown>,
+): boolean {
+  const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
+    ? (data.findings as Record<string, unknown>)
+    : null;
+  if (runIdOf(before) === null) {
+    if (sent && sent.runId !== undefined && sent.runId !== null) {
+      res.status(400).json({
+        message: "an engine run is recorded by the scan that started it and cannot be supplied",
+      });
+      return true;
+    }
+    return false;
+  }
+
+  const recorded = before.findings as Record<string, unknown>;
+  const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
+    (field) => data[field] !== undefined && !sameValue(data[field], before[field]),
+  );
+  for (const key of Object.keys(sent ?? {})) {
+    if (key !== HUMAN_FINDINGS_KEY && !sameValue(sent![key], recorded[key])) changed.push(`findings.${key}`);
+  }
+  if (changed.length > 0) {
+    res.status(409).json({
+      message: `${changed.join(", ")} of an engine scan ${changed.length === 1 ? "is" : "are"} recorded from ` +
+        "the engine and cannot be edited; the summary, the test type and the notes can",
+    });
+    return true;
+  }
+
+  if (data.findings !== undefined) {
+    const { [HUMAN_FINDINGS_KEY]: _notes, ...kept } = recorded;
+    const notes = sent?.[HUMAN_FINDINGS_KEY];
+    data.findings = typeof notes === "string" && notes.trim() !== "" ? { ...kept, [HUMAN_FINDINGS_KEY]: notes } : kept;
+  }
+  return false;
+}
+
 const updateAIControlSettingSchema = insertAIControlSettingSchema.partial();
 const updateClassifierSchema = insertClassifierSchema.partial();
 
@@ -799,6 +881,7 @@ export function registerRoutes(app: Express): void {
     const data = updateTestSchema.parse(req.body);
     const before = await storage.getTest(req.params.id);
     if (!before) return notFound(res, "Test");
+    if (engineRecordEdited(res, before, data)) return;
     const test = await storage.updateTest(req.params.id, { ...data, ...completionStamp(data, before) });
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {

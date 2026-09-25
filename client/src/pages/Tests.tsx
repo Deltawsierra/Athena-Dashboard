@@ -41,7 +41,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
-import { reportedTotal } from "@shared/latest-scans";
+import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -52,12 +52,32 @@ function normalizeOptional(value: FormDataEntryValue | null): string | null {
   return text === "" || text === "none" ? null : text;
 }
 
+/** The engine run a test records, or null when no engine run stands behind it. */
+function engineRunOf(findings: unknown): string | null {
+  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return null;
+  const runId = (findings as { runId?: unknown }).runId;
+  return typeof runId === "string" && runId !== "" ? runId : null;
+}
+
+/** A person's notes on a test: the `details` of its findings, when there are any. */
+function notesOf(findings: unknown): string | null {
+  if (!findings || typeof findings !== "object") return null;
+  const details = (findings as { details?: unknown }).details;
+  return typeof details === "string" ? details : null;
+}
+
 /** `findings` is free-form JSON; show the details field when there is one. */
 function renderFindings(findings: unknown): string {
-  if (findings && typeof findings === "object" && "details" in findings) {
-    const details = (findings as { details: unknown }).details;
-    if (typeof details === "string") return details;
+  const runId = engineRunOf(findings);
+  if (runId) {
+    // An engine scan's results are the engine's; its notes are a person's.
+    const results = (findings as { results?: unknown }).results;
+    const n = Array.isArray(results) ? results.length : 0;
+    const notes = notesOf(findings);
+    return `Engine run ${runId}: ${n} result${n === 1 ? "" : "s"} recorded by the engine.${notes ? ` Notes: ${notes}` : ""}`;
   }
+  const notes = notesOf(findings);
+  if (notes !== null) return notes;
   return JSON.stringify(findings);
 }
 
@@ -155,6 +175,22 @@ export default function Tests() {
     if (!editingTest) return;
     const formData = new FormData(e.currentTarget);
     const findingsText = formData.get("findings") as string || "";
+    if (engineRunOf(editingTest.findings)) {
+      // An engine scan: only what a person writes. The form sent the whole
+      // findings back as `details`, which wrote over the run id -- a running
+      // scan lost its Stop and its results were never filed. Its status,
+      // severity and counts are the engine's, and the server refuses a change
+      // to them (and keeps the run's keys whatever is sent).
+      updateMutation.mutate({
+        id: editingTest.id,
+        data: {
+          summary: formData.get("summary") as string || null,
+          testType: formData.get("testType") as string,
+          findings: findingsText.trim() ? { details: findingsText } : null,
+        },
+      });
+      return;
+    }
     const data: Partial<Test> = {
       summary: formData.get("summary") as string || null,
       testType: formData.get("testType") as string,
@@ -221,6 +257,10 @@ export default function Tests() {
         return "outline";
     }
   };
+
+  // The engine run behind the test being edited, if there is one: its status,
+  // severity, counts and results are the engine's, not the form's.
+  const editingRun = editingTest ? engineRunOf(editingTest.findings) : null;
 
   if (isLoading) {
     return (
@@ -694,6 +734,12 @@ export default function Tests() {
                       </SelectContent>
                     </Select>
                   </div>
+                  {editingRun ? (
+                    <div className="space-y-2">
+                      <Label>Status</Label>
+                      <p className="text-sm pt-2" data-testid="text-edit-status">{editingTest.status}</p>
+                    </div>
+                  ) : (
                   <div className="space-y-2">
                     <Label htmlFor="status">Status *</Label>
                     <Select name="status" required defaultValue={editingTest.status}>
@@ -708,8 +754,23 @@ export default function Tests() {
                       </SelectContent>
                     </Select>
                   </div>
+                  )}
                 </div>
 
+                {editingRun && (
+                  <p className="text-sm text-muted-foreground rounded-lg border border-border p-3" data-testid="text-edit-engine-owned">
+                    Recorded by the engine from run {editingRun}: its status, severity and counts
+                    {editingTest.status !== "completed"
+                      ? " (none until it completes)"
+                      : countsNotRecorded(editingTest)
+                        ? " (counts not recorded)"
+                        : ` (${reportedTotal(editingTest)} found; ${editingTest.criticalCount} critical, ${editingTest.highCount} high, ${editingTest.mediumCount} medium, ${editingTest.lowCount} low)`}
+                    {" "}and its results are the engine&apos;s, and are not edited here. The summary, the test type and
+                    the notes are yours.
+                  </p>
+                )}
+
+                {!editingRun && (
                 <div className="space-y-2">
                   <Label htmlFor="severity">Severity</Label>
                   <Select name="severity" defaultValue={editingTest.severity ?? "none"}>
@@ -725,6 +786,7 @@ export default function Tests() {
                     </SelectContent>
                   </Select>
                 </div>
+                )}
 
                 <div className="space-y-2">
                   <Label htmlFor="summary">Summary</Label>
@@ -737,16 +799,22 @@ export default function Tests() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="findings">Findings</Label>
+                  <Label htmlFor="findings">{editingRun ? "Notes" : "Findings"}</Label>
                   <Textarea
                     name="findings"
-                    placeholder="Detailed findings..."
+                    placeholder={editingRun ? "Your notes on this scan..." : "Detailed findings..."}
                     rows={4}
-                    defaultValue={editingTest.findings != null ? renderFindings(editingTest.findings) : ""}
+                    defaultValue={
+                      editingRun
+                        ? notesOf(editingTest.findings) ?? ""
+                        : editingTest.findings != null ? renderFindings(editingTest.findings) : ""
+                    }
                     data-testid="input-edit-findings"
                   />
                 </div>
 
+                {!editingRun && (
+                <>
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="vulnerabilitiesFound">Total Vulnerabilities</Label>
@@ -802,6 +870,8 @@ export default function Tests() {
                     />
                   </div>
                 </div>
+                </>
+                )}
 
                 <div className="flex justify-end gap-2">
                   <Button type="button" variant="outline" onClick={() => setIsEditDialogOpen(false)}>
