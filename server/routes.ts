@@ -1947,7 +1947,10 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
-  const recomputeSchema = z.object({ paused: z.boolean().optional().default(false) });
+  // `paused` is forwarded only when the caller names it. Absent, the backend keeps
+  // whatever pause its locked row holds; defaulting it to false here lifted a
+  // pause an operator committed after this page loaded, on the next Recompute.
+  const recomputeSchema = z.object({ paused: z.boolean().optional() });
 
   app.post("/api/assurance/deployments/:uuid/recompute", requireAdmin, asyncHandler(async (req, res) => {
     const { paused } = recomputeSchema.parse(req.body ?? {});
@@ -1967,7 +1970,7 @@ export function registerRoutes(app: Express): void {
       action: "recomputed",
       entityType: "assurance_deployment",
       entityId: req.params.uuid,
-      details: { decision: result.decision, paused },
+      details: { decision: result.decision, paused: paused ?? null },
       ...actor(req),
     });
     res.json({ decision: result.decision, decisionLabel: result.decisionLabel });

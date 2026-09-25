@@ -3509,14 +3509,14 @@ export async function metadataLogging(uuid: string): Promise<AssuranceMetadataLo
  */
 export async function recomputeDecision(
   uuid: string,
-  paused: boolean,
+  paused?: boolean,
 ): Promise<
   | { ok: true; decision: string | null; decisionLabel: string }
   | { ok: false; status: number; detail: string }
 > {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/recompute/`, {
     method: "POST",
-    body: JSON.stringify({ paused }),
+    body: JSON.stringify(paused === undefined ? {} : { paused }),
   });
   // A backend refusal (e.g. the deployment is gone, or the credential may not
   // recompute it) is the operator's to see with its reason -- not a 503 that
