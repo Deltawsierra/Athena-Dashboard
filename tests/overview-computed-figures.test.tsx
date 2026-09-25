@@ -3,7 +3,10 @@ import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup, within } from "@testing-library/react";
 
-import Overview, { trendRows } from "@/pages/Overview";
+import Overview, { trendFromSummary } from "@/pages/Overview";
+// The server's own summarizer: the page is fed what GET /api/findings/summary
+// would answer for these findings, so a wrong count on either side fails here.
+import { summarizeFindings } from "../server/findings-summary";
 
 /**
  * The Overview's computed figures, each pinned to the record it is computed
@@ -11,6 +14,10 @@ import Overview, { trendRows } from "@/pages/Overview";
  * round 1, F7): acknowledged and accepted findings counted as open, fixed
  * findings counted by environment, every severity drawn as "low" in the trend,
  * a not-recommended decision counted as ready, and recent scans oldest first.
+ *
+ * The findings figures are now counted by the server (GET /api/findings/
+ * summary); tests/findings-summary.test.ts pins the counting itself, and this
+ * pins what reaches the page from it.
  */
 
 beforeAll(() => {
@@ -80,7 +87,11 @@ function mount() {
   client.setQueryData(["/api/sites"], SITES);
   client.setQueryData(["/api/tests"], TESTS);
   client.setQueryData(["/api/assurance/deployments"], DEPLOYMENTS);
-  client.setQueryData(["/api/findings", { clientId: "c1" }], { findings: FINDINGS, counts: {} });
+  client.setQueryData(["/api/findings/summary"], summarizeFindings({
+    clients: CLIENTS,
+    sites: SITES,
+    findings: FINDINGS as unknown as Parameters<typeof summarizeFindings>[0]["findings"],
+  }));
   client.setQueryData(["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 });
   client.setQueryData(["/api/auth/check"], { authenticated: true, user: null });
   return render(
@@ -139,34 +150,36 @@ describe("the Overview's computed figures", () => {
 });
 
 describe("the findings trend", () => {
-  const at = (y: number, m: number, d = 15) => new Date(y, m, d, 12).toISOString();
-  const row = (sev: string, when: string) => ({
-    id: `${sev}-${when}`, clientId: "c1", siteId: null, type: "t", severity: sev, message: null,
-    status: "open", firstSeenAt: when, lastSeenAt: when,
+  const at = (iso: string) => ({
+    id: iso, clientId: "c1", siteId: null, type: "t", severity: "high", message: null,
+    status: "open", firstSeenAt: new Date(iso), lastSeenAt: new Date(iso),
   });
 
-  it("puts each finding in its own severity's series, in the month it was first seen", () => {
-    const rows = trendRows([
-      row("critical", at(2026, 0)),
-      row("high", at(2026, 0)),
-      row("high", at(2026, 0)),
-      row("low", at(2026, 2)),
-      row("medium", at(2026, 2)),
-      row("info", at(2026, 2)),
-    ]);
+  it("draws each severity's own count, labelled by the month first seen", () => {
+    const summary = summarizeFindings({
+      clients: CLIENTS,
+      sites: [],
+      findings: [
+        { ...at("2026-01-10T00:00:00Z"), severity: "critical" },
+        { ...at("2026-01-11T00:00:00Z"), severity: "high" },
+        { ...at("2026-01-12T00:00:00Z"), severity: "high" },
+        { ...at("2026-03-01T00:00:00Z"), severity: "low" },
+        { ...at("2026-03-02T00:00:00Z"), severity: "medium" },
+        { ...at("2026-03-03T00:00:00Z"), severity: "info" },
+      ],
+    });
     // January, an empty February (a month with none is a zero, not a gap), March.
-    expect(rows.map(({ critical, high, medium, low }) => ({ critical, high, medium, low }))).toEqual([
-      { critical: 1, high: 2, medium: 0, low: 0 },
-      { critical: 0, high: 0, medium: 0, low: 0 },
-      { critical: 0, high: 0, medium: 1, low: 1 },
+    expect(trendFromSummary(summary.byMonth)).toEqual([
+      { m: "Jan 26", critical: 1, high: 2, medium: 0, low: 0 },
+      { m: "Feb 26", critical: 0, high: 0, medium: 0, low: 0 },
+      { m: "Mar 26", critical: 0, high: 0, medium: 1, low: 1 },
     ]);
-    expect(rows.map((r) => r.m)).toEqual(["Jan 26", "Feb 26", "Mar 26"]);
   });
 
-  it("keeps the last twelve months", () => {
-    const rows = trendRows([row("high", at(2024, 0)), row("critical", at(2026, 5))]);
-    expect(rows).toHaveLength(12);
-    expect(rows[0].m).toBe("Jul 25");
-    expect(rows[11]).toMatchObject({ m: "Jun 26", critical: 1, high: 0 });
+  it("labels a month by the calendar month the server counted it in", () => {
+    expect(trendFromSummary([
+      { month: "2025-12", critical: 0, high: 1, medium: 0, low: 0 },
+      { month: "2026-01", critical: 2, high: 0, medium: 0, low: 0 },
+    ]).map((row) => row.m)).toEqual(["Dec 25", "Jan 26"]);
   });
 });

@@ -53,8 +53,10 @@ const SEEDED_DOCS = [
   },
 ];
 const EMPTY_SUMMARY = {
+  clients: 1,
   open: { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-  byEnvironment: [], byMonth: [], topOpen: [], byClient: [],
+  byEnvironment: [], byMonth: [], topOpen: [],
+  byClient: [{ clientId: "a", open: 0, critical: 0, high: 0, latestSeriousSeenAt: null }],
 };
 
 const SEEDED = { clients: 3, sites: 4, tests: 3, documents: 3, findings: 23 };

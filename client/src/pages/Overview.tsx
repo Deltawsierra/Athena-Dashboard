@@ -15,9 +15,12 @@
  * measured and what would fill it:
  *
  * - systems, sites and scans       /api/clients, /api/sites, /api/tests
- * - open findings, the trend, the environment split and the top issues
- *                                  each client's /api/findings (the lifecycle
- *                                  record: one row per issue, not per sighting)
+ * - open findings, the trend, the environment split, the top issues and
+ *   which clients carry open critical/high findings
+ *                                  /api/findings/summary: every client's
+ *                                  lifecycle record (one row per issue, not per
+ *                                  sighting) counted once on the server, for
+ *                                  every client or not at all
  * - assurance decisions            /api/assurance/deployments
  * - overall risk score, compliance readiness, the review schedule
  *                                  nothing computes these, so they say so
@@ -40,7 +43,7 @@ import {
   XCircle,
   type LucideIcon,
 } from "lucide-react";
-import { useQueries, useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
   Line,
@@ -61,6 +64,8 @@ import StatCard from "@/components/mythos/StatCard";
 import { Label, SeverityPill, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
+import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
+import type { FindingsSummary } from "@shared/findings-summary";
 
 /* ---- the page's model: what every panel renders, live or sample ------- */
 
@@ -114,49 +119,15 @@ interface ApiTest {
   id: string; clientId: string; siteId: string | null; testType: string; status: string;
   startedAt: string; completedAt: string | null; vulnerabilitiesFound: number;
 }
-interface ApiFinding {
-  id: string; clientId: string; siteId: string | null; type: string; severity: string | null;
-  message: string | null; status: string; firstSeenAt: string; lastSeenAt: string;
-}
-interface FindingsView { findings: ApiFinding[] }
 interface ApiDeployment { uuid: string; decision: string | null }
 
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
 
-type Loaded<T> =
-  | { state: "loading" }
-  | { state: "error"; message: string }
-  | { state: "ready"; data: T };
-
-function loaded<T>(query: UseQueryResult<T>): Loaded<T> {
-  if (query.isError) {
-    return { state: "error", message: query.error instanceof Error ? query.error.message : "request failed" };
-  }
-  if (query.data === undefined) return { state: "loading" };
-  return { state: "ready", data: query.data };
-}
-
-/** Two sources that must both be in hand before a figure means anything. */
-function both<A, B>(a: Loaded<A>, b: Loaded<B>): Loaded<[A, B]> {
-  if (a.state === "error") return a;
-  if (b.state === "error") return b;
-  if (a.state === "loading" || b.state === "loading") return { state: "loading" };
-  return { state: "ready", data: [a.data, b.data] };
-}
-
-/** "…" while loading, "—" when the source failed: never a number nobody read. */
-function figure<T>(source: Loaded<T>, read: (data: T) => string | number): string | number {
-  if (source.state === "ready") return read(source.data);
-  return source.state === "loading" ? "…" : "—";
-}
-
 /** What a panel says when its source is not in hand. */
 function pending<T>(source: Loaded<unknown>, what: string): PanelRows<T> {
-  return source.state === "error"
-    ? { note: `Could not load ${what}: ${source.message}` }
-    : { note: "Loading…" };
+  return { note: notInHand(source, what) };
 }
 
 function rowsOr<T>(rows: T[], empty: string): PanelRows<T> {
@@ -192,69 +163,31 @@ function ago(iso: string | null | undefined, now = Date.now()): string | null {
 }
 
 /**
- * Findings by the month they were first recorded, one series per severity.
- * Months between the first and the last are filled with zeros -- a month with
- * no new findings is a measurement -- and the window is the last twelve.
+ * The trend rows the chart draws, from the summary's months ("2026-03" ->
+ * "Mar 26"). The server counts each finding into its own severity by the UTC
+ * month it was first seen, zero-fills the months between, and keeps the
+ * latest twelve; this only labels them.
  */
-export function trendRows(findings: ApiFinding[]): TrendRow[] {
-  const dated = findings
-    .map((finding) => ({ finding, at: new Date(finding.firstSeenAt) }))
-    .filter((one) => !Number.isNaN(one.at.getTime()));
-  if (dated.length === 0) return [];
-  const key = (d: Date) => d.getFullYear() * 12 + d.getMonth();
-  const last = Math.max(...dated.map((one) => key(one.at)));
-  const first = Math.max(Math.min(...dated.map((one) => key(one.at))), last - 11);
-  const rows: TrendRow[] = [];
-  for (let k = first; k <= last; k += 1) {
-    const m = new Date(Math.floor(k / 12), k % 12, 1).toLocaleString("en-US", { month: "short", year: "2-digit" });
-    rows.push({ m, critical: 0, high: 0, medium: 0, low: 0 });
-  }
-  for (const { finding, at } of dated) {
-    const k = key(at);
-    if (k < first) continue;
-    const sev = normSev(finding.severity);
-    if (sev !== "info") rows[k - first][sev] += 1;
-  }
-  return rows;
+export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[] {
+  return months.map(({ month, critical, high, medium, low }) => {
+    const [year, mon] = month.split("-").map(Number);
+    const m = new Date(Date.UTC(year, mon - 1, 1)).toLocaleString("en-US", {
+      month: "short", year: "2-digit", timeZone: "UTC",
+    });
+    return { m, critical, high, medium, low };
+  });
 }
 
 function useLiveOverview(): OverviewModel {
-  const clientsQ = useQuery<ApiClient[]>({ queryKey: ["/api/clients"] });
-  const sitesQ = useQuery<ApiSite[]>({ queryKey: ["/api/sites"] });
-  const testsQ = useQuery<ApiTest[]>({ queryKey: ["/api/tests"] });
-  const deploymentsQ = useQuery<ApiDeployment[]>({ queryKey: ["/api/assurance/deployments"] });
-  // The findings route answers one engagement at a time. Same key as the Risks
-  // page, so the two screens share one cache entry per client.
-  const clientList = clientsQ.data ?? [];
-  const findingsQs = useQueries({
-    queries: clientList.map((client) => ({ queryKey: ["/api/findings", { clientId: client.id }] })),
-  }) as UseQueryResult<FindingsView>[];
-
-  const clients = loaded(clientsQ);
-  const sites = loaded(sitesQ);
-  const tests = loaded(testsQ);
-  const deployments = loaded(deploymentsQ);
-
-  // Every client's findings, or nothing: a total over whichever clients
-  // happened to load first would be wrong and look right.
-  let findings: Loaded<ApiFinding[]>;
-  if (clients.state !== "ready") {
-    findings = clients;
-  } else {
-    const failed = findingsQs.find((q) => q.isError);
-    if (failed) {
-      findings = { state: "error", message: failed.error instanceof Error ? failed.error.message : "request failed" };
-    } else if (findingsQs.some((q) => q.data === undefined)) {
-      findings = { state: "loading" };
-    } else {
-      findings = { state: "ready", data: findingsQs.flatMap((q) => q.data?.findings ?? []) };
-    }
-  }
-
-  const nameOf = new Map(clientList.map((client) => [client.id, client.name]));
-  const open: Loaded<ApiFinding[]> =
-    findings.state === "ready" ? { state: "ready", data: findings.data.filter((f) => f.status === "open") } : findings;
-  const bySev = (list: ApiFinding[], sev: Severity) => list.filter((f) => normSev(f.severity) === sev).length;
+  const clients = loaded(useQuery<ApiClient[]>({ queryKey: ["/api/clients"] }));
+  const sites = loaded(useQuery<ApiSite[]>({ queryKey: ["/api/sites"] }));
+  const tests = loaded(useQuery<ApiTest[]>({ queryKey: ["/api/tests"] }));
+  const deployments = loaded(useQuery<ApiDeployment[]>({ queryKey: ["/api/assurance/deployments"] }));
+  // Every client's findings, counted once on the server. It answers for every
+  // client or errors -- a total over whichever clients happened to read cleanly
+  // would be wrong and look right -- so there is no partial total to guard
+  // against here. One request, however many clients there are.
+  const summary = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
 
   const metrics: OverviewMetric[] = [
     {
@@ -274,11 +207,11 @@ function useLiveOverview(): OverviewModel {
     {
       key: "findings",
       label: "Open Findings",
-      value: figure(open, (list) => list.length),
+      value: figure(summary, (s) => s.open.total),
       sublabel:
-        open.state === "ready"
-          ? `${bySev(open.data, "critical")} critical · ${bySev(open.data, "high")} high`
-          : open.state === "error" ? "Could not load findings" : "Across every engagement",
+        summary.state === "ready"
+          ? `${summary.data.open.critical} critical · ${summary.data.open.high} high`
+          : summary.state === "error" ? "Could not load findings" : "Across every engagement",
       icon: AlertTriangle,
       accent: "var(--sev-high)",
     },
@@ -304,20 +237,12 @@ function useLiveOverview(): OverviewModel {
   ];
 
   const environments: OverviewModel["environments"] = (() => {
-    const src = both(open, sites);
-    if (src.state !== "ready") return pending(src, "findings by environment");
-    const [list, siteList] = src.data;
-    const envOf = new Map(siteList.map((site) => [site.id, site.environment]));
-    const counts = new Map<string, number>();
-    for (const finding of list) {
-      const env = finding.siteId && envOf.has(finding.siteId)
-        ? humanize(envOf.get(finding.siteId) as string)
-        : "No site recorded";
-      counts.set(env, (counts.get(env) ?? 0) + 1);
-    }
-    const rows = Array.from(counts.entries())
-      .map(([env, value]) => ({ env, value, tone: "hsl(var(--primary))" }))
-      .sort((a, b) => b.value - a.value);
+    if (summary.state !== "ready") return pending(summary, "findings by environment");
+    const rows = summary.data.byEnvironment.map(({ environment, open }) => ({
+      env: environment ? humanize(environment) : "No site recorded",
+      value: open,
+      tone: "hsl(var(--primary))",
+    }));
     return rowsOr(rows, "No open findings to place. This fills in from the sites open findings are recorded on.");
   })();
 
@@ -346,20 +271,23 @@ function useLiveOverview(): OverviewModel {
   })();
 
   const attention: OverviewModel["attention"] = (() => {
-    const src = both(both(clients, open), tests);
+    const src = both(both(clients, summary), tests);
     if (src.state !== "ready") return pending(src, "systems needing attention");
-    const [[clientData, list], testList] = src.data;
+    const [[clientData, counted], testList] = src.data;
+    const byClient = new Map(counted.byClient.map((one) => [one.clientId, one]));
     const flagged: Array<{ rank: number; row: { name: string; note: string; sev: Severity | null; ago: string | null } }> = [];
     for (const client of clientData) {
-      const serious = list.filter(
-        (f) => f.clientId === client.id && (normSev(f.severity) === "critical" || normSev(f.severity) === "high"),
-      );
-      if (serious.length > 0) {
-        const worst: Severity = serious.some((f) => normSev(f.severity) === "critical") ? "critical" : "high";
-        const latest = serious.map((f) => String(f.lastSeenAt)).sort().pop() ?? null;
+      const own = byClient.get(client.id);
+      const serious = own ? own.critical + own.high : 0;
+      if (own && serious > 0) {
         flagged.push({
-          rank: serious.length,
-          row: { name: client.name, note: `${plural(serious.length, "open critical/high finding")}`, sev: worst, ago: ago(latest) },
+          rank: serious,
+          row: {
+            name: client.name,
+            note: plural(serious, "open critical/high finding"),
+            sev: own.critical > 0 ? "critical" : "high",
+            ago: ago(own.latestSeriousSeenAt),
+          },
         });
       } else if (!testList.some((t) => t.clientId === client.id && t.status === "completed")) {
         flagged.push({ rank: 0, row: { name: client.name, note: "No completed scan on record", sev: null, ago: null } });
@@ -376,6 +304,7 @@ function useLiveOverview(): OverviewModel {
 
   const activity: OverviewModel["activity"] = (() => {
     if (tests.state !== "ready") return pending(tests, "recent scans");
+    const nameOf = new Map((clients.state === "ready" ? clients.data : []).map((client) => [client.id, client.name]));
     const when = (t: ApiTest) => new Date(t.completedAt || t.startedAt).getTime();
     const rows = tests.data
       .slice()
@@ -398,13 +327,12 @@ function useLiveOverview(): OverviewModel {
   })();
 
   const issues: OverviewModel["issues"] = (() => {
-    if (open.state !== "ready") return pending(open, "open findings");
-    const rank = (f: ApiFinding) => SEV_ORDER.indexOf(normSev(f.severity));
-    const rows = open.data
-      .slice()
-      .sort((a, b) => rank(a) - rank(b) || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)))
-      .slice(0, 5)
-      .map((f) => ({ t: f.message || humanize(f.type), sev: normSev(f.severity), meta: nameOf.get(f.clientId) }));
+    if (summary.state !== "ready") return pending(summary, "open findings");
+    const rows = summary.data.topOpen.map((f) => ({
+      t: f.message || humanize(f.type),
+      sev: normSev(f.severity),
+      meta: f.clientName || undefined,
+    }));
     return rowsOr(rows, "No open findings on record.");
   })();
 
@@ -416,17 +344,17 @@ function useLiveOverview(): OverviewModel {
         "The open findings below are counted from the record; the Risks page lists each one.",
     },
     postureFigures: [
-      { value: figure(open, (list) => list.length), label: "Open Findings" },
-      { value: figure(open, (list) => bySev(list, "critical")), label: "Critical" },
-      { value: figure(open, (list) => bySev(list, "high")), label: "High" },
+      { value: figure(summary, (s) => s.open.total), label: "Open Findings" },
+      { value: figure(summary, (s) => s.open.critical), label: "Critical" },
+      { value: figure(summary, (s) => s.open.high), label: "High" },
     ],
     trend:
-      findings.state === "ready"
+      summary.state === "ready"
         ? rowsOr(
-            trendRows(findings.data),
+            trendFromSummary(summary.data.byMonth),
             "No findings recorded yet. The trend fills in as scans record findings, by the month each was first seen.",
           )
-        : pending(findings, "the findings trend"),
+        : pending(summary, "the findings trend"),
     environments,
     coverage,
     attention,

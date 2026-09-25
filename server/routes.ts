@@ -1,6 +1,7 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { storage } from "./storage-unified";
+import { loadFindingsSummary } from "./findings-summary";
 import { requireAuth, requireAdmin, asyncHandler, actor } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
@@ -2708,6 +2709,25 @@ export function registerRoutes(app: Express): void {
   // refuses it, and the retest route writes it along with the run that earned
   // it. A human may accept a risk or say they have looked at something; those
   // are opinions, stored under their name as opinions.
+
+  // The estate's findings counted once, for the Overview and the Deployments
+  // pipeline: open counts by severity, by site environment and per client,
+  // new findings by month, and the worst open ones. One request instead of one
+  // per client (each of which also loaded every finding's history). Every
+  // client's findings, or an error: a total over the clients that happened to
+  // read cleanly would be wrong and look right. See server/findings-summary.ts.
+  app.get("/api/findings/summary", asyncHandler(async (_req, res) => {
+    let summary;
+    try {
+      summary = await loadFindingsSummary(storage);
+    } catch (cause) {
+      console.error("[findings] summary: could not read every engagement's findings:", cause);
+      return void res.status(500).json({
+        message: "Could not read every engagement's findings, so no totals are given.",
+      });
+    }
+    res.json(summary);
+  }));
 
   app.get("/api/findings", asyncHandler(async (req, res) => {
     const clientId = typeof req.query.clientId === "string" ? req.query.clientId : null;

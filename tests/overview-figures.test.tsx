@@ -6,6 +6,9 @@ import { render, screen, cleanup, within } from "@testing-library/react";
 import Overview from "@/pages/Overview";
 import { overviewSample } from "@/sample";
 import { OVERVIEW_SAMPLE } from "@/sample/overview";
+// The server's own summarizer, so a fixture of raw findings reaches the page
+// exactly as GET /api/findings/summary would count it.
+import { summarizeFindings } from "../server/findings-summary";
 
 /**
  * The Overview used to be fixture data from top to bottom -- 42 AI systems, a
@@ -49,6 +52,15 @@ interface Seed {
   deployments: unknown[];
 }
 
+/** What GET /api/findings/summary answers for this record. */
+function summaryOf(seed: Seed) {
+  return summarizeFindings({
+    clients: seed.clients as { id: string; name: string }[],
+    sites: seed.sites as { id: string; environment: string }[],
+    findings: Object.values(seed.findings).flat() as Parameters<typeof summarizeFindings>[0]["findings"],
+  });
+}
+
 function mount(seed: Seed | null) {
   const client = new QueryClient({
     defaultOptions: {
@@ -67,9 +79,7 @@ function mount(seed: Seed | null) {
     client.setQueryData(["/api/sites"], seed.sites);
     client.setQueryData(["/api/tests"], seed.tests);
     client.setQueryData(["/api/assurance/deployments"], seed.deployments);
-    for (const [clientId, findings] of Object.entries(seed.findings)) {
-      client.setQueryData(["/api/findings", { clientId }], { findings, counts: {} });
-    }
+    client.setQueryData(["/api/findings/summary"], summaryOf(seed));
     client.setQueryData(["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 });
     client.setQueryData(["/api/auth/check"], { authenticated: true, user: null });
   }
@@ -245,8 +255,7 @@ describe("Overview with sample mode off (the default)", () => {
     client.setQueryData(["/api/clients"], POPULATED.clients);
     client.setQueryData(["/api/sites"], POPULATED.sites);
     client.setQueryData(["/api/tests"], POPULATED.tests);
-    client.setQueryData(["/api/findings", { clientId: "c1" }], { findings: POPULATED.findings.c1, counts: {} });
-    client.setQueryData(["/api/findings", { clientId: "c2" }], { findings: [], counts: {} });
+    client.setQueryData(["/api/findings/summary"], summaryOf(POPULATED));
     client.setQueryData(["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 });
     client.setQueryData(["/api/auth/check"], { authenticated: true, user: null });
     // The assurance control plane is the one source not seeded: its fetch
