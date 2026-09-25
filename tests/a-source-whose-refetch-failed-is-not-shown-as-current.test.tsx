@@ -82,6 +82,8 @@ async function nextReadFails(client: QueryClient, path: string, key: unknown[] =
 }
 
 const text = () => document.body.textContent ?? "";
+/** The Failsafe governor card's text: its label, then the state or why it is unread. */
+const governor = () => screen.getByText("Engine governor").parentElement?.textContent ?? "";
 
 const FAILSAFE_STATUS = { configured: true, reachable: true, authorized: true, url: "http://cp", detail: "", defaultEngineId: "athena-1" };
 const FAILSAFE_SEED = (): Array<[unknown[], unknown]> => [
@@ -96,12 +98,15 @@ const FAILSAFE_SEED = (): Array<[unknown[], unknown]> => [
 describe("Failsafe", () => {
   it("the governor state is not left reading 'running' after its read fails", async () => {
     const client = mount(<Failsafe />, FAILSAFE_SEED());
-    expect(text()).toMatch(/running/);
+    expect(governor()).toBe("Engine governorrunning");
     expect(text()).toMatch(/No commands awaiting signatures or waiting on the engine/);
 
     await nextReadFails(client, "/api/failsafe/state", ["/api/failsafe/state", "athena-1"]);
     expect(text(), "the failed state read is not mentioned anywhere").toMatch(/Could not read the engine state: bff unreachable/);
-    expect(text(), "the last governor state still reads as current").not.toMatch(/\brunning\b/);
+    // (Matched on the governor card itself: in the page's whole text the pill
+    // runs into its label, "governorrunning", which no \brunning\b matches.)
+    expect(governor(), "the last governor state still reads as current").not.toMatch(/running/);
+    expect(governor()).toMatch(/Not read/);
     // No "none in flight" from a read that failed, and the counts are unknown.
     expect(text()).not.toMatch(/No commands awaiting signatures or waiting on the engine/);
     expect(screen.getByTestId("text-inflight-unread").textContent).toMatch(/Could not read the engine state/);
@@ -120,8 +125,21 @@ describe("Failsafe", () => {
       expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(true);
     }
     // And nothing read under that status is shown as current either.
-    expect(text()).not.toMatch(/\brunning\b/);
+    expect(governor()).not.toMatch(/running/);
     expect(text()).not.toMatch(/command drafted/);
+  });
+
+  it("an engine the operator named keeps no state read under a status that can no longer be read", async () => {
+    const client = mount(<Failsafe />, FAILSAFE_SEED());
+    // Typed rather than defaulted, so the engine stays named when the status
+    // (which supplies the default) goes, and its state read stays cached.
+    fireEvent.change(screen.getByTestId("input-engine-id"), { target: { value: "athena-2" } });
+    fireEvent.change(screen.getByTestId("input-engine-id"), { target: { value: "athena-1" } });
+    await waitFor(() => expect(governor()).toBe("Engine governorrunning"));
+    await nextReadFails(client, "/api/failsafe/status");
+    expect((screen.getByTestId("input-engine-id") as HTMLInputElement).value).toBe("athena-1");
+    expect(governor()).not.toMatch(/running/);
+    expect(governor()).toMatch(/Not read: the failsafe control plane is not ready/);
   });
 
   it("an open draft dialog cannot confirm once the status it was opened under can no longer be read", async () => {

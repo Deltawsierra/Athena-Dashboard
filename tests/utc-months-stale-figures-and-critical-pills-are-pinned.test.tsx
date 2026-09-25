@@ -87,12 +87,16 @@ describe("Overview figures (M3, M8)", () => {
     let failing = false;
     const client = mount(BASE, () => failing);
     const tile = () => screen.getByTestId("overview-metric-findings").textContent ?? "";
-    expect(tile()).toMatch(/4/);
+    // The figure itself: in the tile's whole text it runs into its label
+    // ("Open Findings4"), where no \b4\b would ever match.
+    const value = () => screen.getByTestId("overview-metric-findings").querySelector(".athena-figure")?.textContent;
+    expect(value()).toBe("4");
     failing = true;
     await act(async () => { await client.refetchQueries({ queryKey: ["/api/findings/summary"] }); });
     await waitFor(() => expect(client.getQueryState(["/api/findings/summary"])?.status).toBe("error"));
-    expect(tile()).toMatch(/—/);
-    expect(tile()).not.toMatch(/\b4\b/);
+    expect(value()).toBe("—");
+    expect(tile()).toMatch(/Could not load findings/);
+    expect(tile()).not.toMatch(/1 critical/);
   });
 
   it("M8: a client with an open critical finding is pilled Critical, not High", () => {
