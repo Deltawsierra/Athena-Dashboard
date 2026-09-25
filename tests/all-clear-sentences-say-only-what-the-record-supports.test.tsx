@@ -107,6 +107,15 @@ describe("an all-clear says only what the record supports", () => {
     expect(text).not.toMatch(/the latest completed scan reported no critical or high one/);
     expect(text).not.toMatch(/Nothing here needs attention/);
     expect(text).toMatch(/"RCE" — critical severity on https:\/\/app\.example\./);
+    // And the headline figures count it as open.
+    const tile = (label: string) => {
+      let node: Element | null = Array.from(document.querySelectorAll(".athena-label")).find((el) => el.textContent === label) ?? null;
+      while (node && !node.querySelector(".athena-figure")) node = node.parentElement;
+      return node?.querySelector(".athena-figure")?.textContent;
+    };
+    expect(tile("Total Open Risks")).toBe("1");
+    expect(tile("Critical Risks")).toBe("1");
+    expect(tile("Acknowledged")).toBe("1");
   });
 
   it("C: and the Overview flags the client with it", () => {
@@ -114,6 +123,38 @@ describe("an all-clear says only what the record supports", () => {
     const attention = screen.getByTestId("overview-panel-attention").textContent ?? "";
     expect(attention).not.toMatch(/Nothing flagged/);
     expect(attention).toMatch(/1 open critical\/high finding/);
+  });
+
+  it("several sites' latest scans with untracked results are said as several, and added up", () => {
+    const tests = [
+      { ...ENGINE_TEST, id: "p1", testType: "penetration-test", criticalCount: 1, highCount: 0, findings: null },
+      { ...ENGINE_TEST, id: "p2", siteId: "s2", testType: "penetration-test", criticalCount: 0, highCount: 4, findings: null },
+    ];
+    const summary = JSON.parse(JSON.stringify(summarizeFindings({
+      clients: CLIENTS, sites: SITES, findings: [],
+      tests: tests.map((t) => ({ ...t, startedAt: now, completedAt: now })) as never,
+    })));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity,
+        queryFn: async ({ queryKey }) => { throw new Error(`unexpected ${JSON.stringify(queryKey)}`); } } },
+    });
+    for (const [k, v] of [
+      [["/api/clients"], CLIENTS], [["/api/sites"], SITES], [["/api/tests"], tests],
+      [["/api/findings/summary"], summary], [["/api/assurance/deployments"], []],
+      [["/api/findings", { clientId: "c1" }], { findings: [], counts: { open: 0, acknowledged: 0, accepted: 0, fixed: 0 } }],
+      [["/api/users/assignable"], []],
+      [["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 }],
+      [["/api/auth/check"], { authenticated: true, user: null }],
+    ] as Array<[unknown[], unknown]>) client.setQueryData(k, v);
+    render(<QueryClientProvider client={client}><Overview /></QueryClientProvider>);
+    expect(screen.getByTestId("overview-panel-attention").textContent).toMatch(
+      /2 latest completed scans \(one per site\) reported 1 critical \/ 4 high that are not tracked as findings/,
+    );
+    cleanup();
+    render(<QueryClientProvider client={client}><Risks /></QueryClientProvider>);
+    expect(document.body.textContent).toMatch(
+      /but 2 latest completed scans \(one per site\) reported 1 critical \/ 4 high that are not tracked as findings/,
+    );
   });
 
   it("a critical that was filed and then verified fixed: the all-clear says what it covers, not that none was reported", () => {

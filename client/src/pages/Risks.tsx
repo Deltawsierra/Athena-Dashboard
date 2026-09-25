@@ -403,7 +403,7 @@ export default function Risks() {
                     : untracked.state !== "ready"
                       ? `"No open or in-review tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
                       : untracked.data
-                        ? `"No open or in-review tracked findings, but the ${(untracked.data.scans ?? 1) > 1 ? `latest completed scans of ${untracked.data.scans} sites` : "latest completed scan"} reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
+                        ? `"No open or in-review tracked findings, but ${(untracked.data.scans ?? 1) > 1 ? `${untracked.data.scans} latest completed scans (one per site)` : "the latest completed scan"} reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
                         // Exactly what it covers. Not "the latest scan reported
                         // no critical": one it reported and filed, then fixed
                         // or accepted, is not open and not untracked.

@@ -135,8 +135,10 @@ describe("a completed scan's counts that no finding stands behind are reported",
       clientId: client.id, testType: "penetration-test", status: "completed", completedAt: new Date(),
       criticalCount: 0, highCount: 2, vulnerabilitiesFound: 2,
     });
+    // A HIGH finding it went looking for and did not see: that stands behind
+    // none of the highs it reported.
     const finding = await storage.createFinding({
-      fingerprint: "unseen-1", clientId: client.id, engagementRef: client.id, type: "xss", severity: "low",
+      fingerprint: "unseen-1", clientId: client.id, engagementRef: client.id, type: "xss", severity: "high",
     });
     await storage.recordSighting(finding.id, "run-unseen", test.id, false);
 

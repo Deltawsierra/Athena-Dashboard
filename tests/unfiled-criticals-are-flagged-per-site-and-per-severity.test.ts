@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Express } from "express";
 import { makeApp, signIn } from "./helpers";
 import { reportedSerious, summarizeFindings } from "../server/findings-summary";
+import { latestCompletedBySite } from "@shared/latest-scans";
 
 /**
  * PR #52 round 3, F2 and F3. A client whose scans reported a critical or high
@@ -204,6 +205,35 @@ describe("what a completed test reported, in the ledger's unit", () => {
 
   it("is what a person recorded, when there are no engine results", () => {
     expect(reportedSerious(test({ criticalCount: 3, highCount: 2 }) as never)).toEqual({ critical: 3, high: 2 });
+  });
+
+  it("the latest per site is by completion time; a test with no readable time never displaces one that has one", () => {
+    const scoped = (id: string, over: Record<string, unknown>) => ({
+      id, clientId: "c1", siteId: "s1", status: "completed", startedAt: "2026-01-01T00:00:00Z", completedAt: null, ...over,
+    });
+    const undated = scoped("undated", { startedAt: "not a date" });
+    const dated = scoped("dated", { completedAt: "2026-02-01T00:00:00Z" });
+    const later = scoped("later", { startedAt: "2026-01-05T00:00:00Z", completedAt: "2026-03-01T00:00:00Z" });
+    const other = scoped("other", { siteId: "s2", completedAt: "2025-01-01T00:00:00Z" });
+    const pending = scoped("pending", { status: "pending", completedAt: "2027-01-01T00:00:00Z" });
+    const latest = latestCompletedBySite([undated, dated, other, pending]);
+    expect(Array.from(latest.values()).map((one) => one.id).sort()).toEqual(["dated", "other"]);
+    expect(latestCompletedBySite([dated, undated]).get("c1\u0000s1")?.id).toBe("dated");
+    expect(latestCompletedBySite([undated, later, dated]).get("c1\u0000s1")?.id).toBe("later");
+  });
+
+  it("takes off the repeats in its own results, at critical and at high: one place is one finding", () => {
+    const results = [
+      { type: "sqli", severity: "critical", evidence: { endpoint: "https://app.example/a", payload: 1 } },
+      { type: "sqli", severity: "critical", evidence: { endpoint: "https://app.example/a", payload: 2 } },
+      { type: "xss", severity: "high", evidence: { endpoint: "https://app.example/b", payload: 1 } },
+      { type: "xss", severity: "high", evidence: { endpoint: "https://app.example/b", payload: 2 } },
+      { type: "xss", severity: "high", evidence: { endpoint: "https://app.example/c" } },
+    ];
+    expect(reportedSerious(test({
+      criticalCount: 2, highCount: 3, vulnerabilitiesFound: 5,
+      findings: { runId: "r", target: "https://app.example", results },
+    }) as never)).toEqual({ critical: 1, high: 2 });
   });
 
   it("is what the results say for an engine test whose counts were never recorded", () => {

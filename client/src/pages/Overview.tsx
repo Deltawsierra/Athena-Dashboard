@@ -198,7 +198,9 @@ export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[]
  */
 export function untrackedNote(scan: UntrackedScan): string {
   const scans = scan.scans ?? 1;
-  const which = scans > 1 ? `latest completed scans of ${scans} sites` : "latest completed scan";
+  // One latest completed scan per site (a test recorded against the client
+  // alone counts as one more), so several can stand at once.
+  const which = scans > 1 ? `${scans} latest completed scans (one per site)` : "latest completed scan";
   return `${which} reported ${scan.critical} critical / ${scan.high} high that are not tracked as findings`;
 }
 

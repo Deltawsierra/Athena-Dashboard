@@ -147,12 +147,18 @@ describe("a failed failsafe status read never blocks a stop", () => {
     const client = mount([
       [["/api/failsafe/state", "athena-2"], {
         engineId: "athena-2", engineState: "running", engineStateAvailable: true,
-        awaitingSignatures: [], ready: [], recent: [],
+        awaitingSignatures: [command({ uuid: "cmd-2", engineId: "athena-2" })], ready: [], recent: [],
       }],
       [["/api/failsafe/audit"], []],
     ]);
     await waitFor(() => expect(client.getQueryState(["/api/failsafe/status"])?.status).toBe("error"));
+    // Nothing cached: the state below is there only if the page reads it.
+    client.removeQueries({ queryKey: ["/api/failsafe/state"] });
+    expect((screen.getByTestId("input-engine-id") as HTMLInputElement).disabled).toBe(false);
     fireEvent.change(screen.getByTestId("input-engine-id"), { target: { value: "athena-2" } });
+    // The state is still read, so the stand-down awaiting a second operator
+    // is reachable although no status has ever answered.
+    await waitFor(() => expect(screen.getByTestId("button-open-cmd-2")).toBeTruthy());
     for (const action of ["pause", "stand_down", "terminate"]) {
       expect(btn(`button-draft-${action}`).disabled, action).toBe(false);
     }

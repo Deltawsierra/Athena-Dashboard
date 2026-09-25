@@ -6,6 +6,10 @@ import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/re
 import Overview from "@/pages/Overview";
 import Tests from "@/pages/Tests";
 import AthenaScan from "@/pages/AthenaScan";
+import PentestScan from "@/pages/PentestScan";
+import DeletionManagement from "@/pages/DeletionManagement";
+import RetestPanel from "@/components/RetestPanel";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { queryClient } from "@/lib/queryClient";
 import { derivedFromTestsOrFindings } from "@/lib/invalidate";
 import { summarizeFindings } from "../server/findings-summary";
@@ -133,7 +137,8 @@ describe("a change to a test or a finding refreshes the findings summary", () =>
     await waitFor(() => expect(queryClient.getQueryState(["/api/findings/summary"])?.isInvalidated).toBe(true));
   });
 
-  it("a scan that finishes on a later poll refreshes it: that poll filed its findings", async () => {
+  for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", PentestScan]] as const) {
+  it(`${name}: a scan that finishes on a later poll refreshes it: that poll filed its findings`, async () => {
     serve([CLEAN]);
     let state = "running";
     server["/api/engine/status"] = { configured: true, reachable: true, authorized: true, url: "http://engine.test", detail: "" };
@@ -142,7 +147,7 @@ describe("a change to a test or a finding refreshes the findings summary", () =>
       enumerable: true,
       get: () => ({ test: { ...BASE, id: "t5", status: state }, state, engine: { findings: [] } }),
     });
-    mountApp(<AthenaScan />);
+    mountApp(<Page />);
     await waitFor(() => expect(document.querySelector('select option[value="c1"]')).toBeTruthy());
     fireEvent.change(document.querySelectorAll("select")[0], { target: { value: "c1" } });
     fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://acme.test" } });
@@ -155,6 +160,50 @@ describe("a change to a test or a finding refreshes the findings summary", () =>
     state = "completed";
     await waitFor(() => expect(screen.getByTestId("text-state").textContent).toMatch(/completed/), { timeout: 5_000 });
     await waitFor(() => expect(queryClient.getQueryState(["/api/findings/summary"])?.isInvalidated).toBe(true));
+  });
+  }
+
+  /** Seed a fresh summary, do `act`, and expect the summary marked stale by it. */
+  async function refreshedBy(act: () => Promise<void> | void) {
+    queryClient.setQueryData(["/api/findings/summary"], summaryOf([CLEAN]));
+    expect(queryClient.getQueryState(["/api/findings/summary"])?.isInvalidated).toBe(false);
+    await act();
+    await waitFor(() => expect(queryClient.getQueryState(["/api/findings/summary"])?.isInvalidated).toBe(true));
+  }
+
+  it("a retest refreshes it: its verdict may have closed or reopened a finding", async () => {
+    serve([CLEAN]);
+    server["/api/tests/t0/decisions"] = { decisions: [{
+      id: 7, runId: "run-0", target: "https://acme.test", findingType: "xss", severity: "high", tier: null,
+      confidence: null, endpoint: "https://acme.test/q", detail: null, capturedAt: null,
+    }], truncated: false, detail: "" };
+    stubApi(() => ({ twinId: 7, verdict: "closed", detail: "gone", target: null, findingType: "xss", inventoryDigest: null, runId: "r", checkedAt: null }));
+    mountApp(<RetestPanel testId="t0" />);
+    const button = await screen.findByTestId("button-retest-7");
+    await refreshedBy(() => { fireEvent.click(button); });
+  });
+
+  it("deleting a client or a test refreshes it", async () => {
+    serve([CLEAN]);
+    server["/api/documents"] = [];
+    stubApi(() => ({ success: true }));
+    mountApp(<DeletionManagement />);
+    const button = await screen.findByTestId("button-delete-tests-t0");
+    await refreshedBy(async () => {
+      fireEvent.click(button);
+      fireEvent.click(await screen.findByTestId("button-confirm-delete"));
+    });
+    expect(writes.map((one) => `${one.method} ${one.url}`)).toEqual(["DELETE /api/tests/t0"]);
+  });
+
+  it("removing the sample rows refreshes it: their counts reached the summary", async () => {
+    serve([CLEAN]);
+    server["/api/sample-data"] = { clients: 1, sites: 1, tests: 1, documents: 0, findings: 3 };
+    server["/api/auth/check"] = { authenticated: true, user: { id: "u", username: "admin", role: "admin", isActive: true } };
+    stubApi(() => ({ removed: { clients: 1, sites: 1, tests: 1, documents: 0, findings: 3 } }));
+    mountApp(<SampleDataNotice counts={["clients", "tests", "findings"]} />);
+    const button = await screen.findByTestId("button-remove-sample-data");
+    await refreshedBy(() => { fireEvent.click(button); });
   });
 
   it("names every answer computed from tests or findings, and nothing else", () => {
