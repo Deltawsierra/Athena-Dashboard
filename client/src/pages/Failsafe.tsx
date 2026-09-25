@@ -79,7 +79,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 
 /* ---- API shapes (mirror server/failsafe.ts) --------------------------- */
@@ -333,6 +333,10 @@ function CommandConsole({
   onClose: () => void;
 }) {
   const { toast } = useToast();
+  // The client the page is mounted on: the one this console's command is read
+  // through, so an invalidation here reaches the query that reads it. The
+  // module's app client is that client only when the page is mounted on it.
+  const client = useQueryClient();
   const [keyId, setKeyId] = useState("");
   const [signature, setSignature] = useState("");
 
@@ -384,9 +388,9 @@ function CommandConsole({
     onSuccess: (command) => {
       setSignature("");
       setKeyId("");
-      queryClient.invalidateQueries({ queryKey: failsafeCommandKey(uuid) });
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
+      client.invalidateQueries({ queryKey: failsafeCommandKey(uuid) });
+      client.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
+      client.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       toast(
         command.status === "ready"
           ? { title: "Command ready", description: "The engine will verify and apply it on its next poll." }
@@ -403,8 +407,8 @@ function CommandConsole({
       await apiRequest("POST", `/api/failsafe/commands/${uuid}/cancel`, {});
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
+      client.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
+      client.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       toast({ title: "Command canceled" });
       onClose();
     },
@@ -629,7 +633,8 @@ function CommandConsole({
 
 export default function Failsafe() {
   const { toast } = useToast();
-  // The client the console reads through, so a seeded command is the one it finds.
+  // The client the page is mounted on and reads through: what it seeds and
+  // invalidates reaches the queries it draws.
   const pageClient = useQueryClient();
   const [engineId, setEngineId] = useState("");
   const [engineIdTouched, setEngineIdTouched] = useState(false);
@@ -740,8 +745,8 @@ export default function Failsafe() {
       setPending(null);
       setReason("");
       setTypedId("");
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
+      pageClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
+      pageClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       // The draft route answered with the whole command -- the draft to sign
       // and its signing bytes -- and the console used to throw that away and
       // read it again. When that first read failed there was nothing to sign
