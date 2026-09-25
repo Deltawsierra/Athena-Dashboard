@@ -25,14 +25,17 @@ import { isAdmin } from "@/utils/auth";
 import { loaded } from "@/lib/loaded";
 import type { PublicUser, SampleDataCounts } from "@shared/schema";
 
-/** Everything a removal changes, so no screen keeps showing what is gone. */
+/**
+ * Everything a removal changes, so no screen keeps showing what is gone. Each
+ * is a key a page reads (tests/every-page-query-key-reaches-a-route.test.ts):
+ * "/api/activity-logs" was listed here, and nothing reads or serves it.
+ */
 const AFFECTED = [
   "/api/sample-data",
   "/api/clients",
   "/api/sites",
   "/api/tests",
   "/api/documents",
-  "/api/activity-logs",
 ];
 
 interface SampleDataNoticeProps {
