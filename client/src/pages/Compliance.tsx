@@ -2,8 +2,16 @@
  * Compliance: where an engagement stands against OWASP ASVS 4.0.3, read from
  * `/api/compliance/:clientId`. Every requirement's state -- tested, failing,
  * not run, or not covered by any scanner we have -- comes from the engine's own
- * mapping. The readiness ring, the gap list and the counts are all derived from
+ * mapping. The coverage ring, the gap list and the counts are all derived from
  * that; nothing here is a placeholder framework badge.
+ *
+ * The mapping is pinned to ASVS 4.0.3 while 5.0.0 is the current release, and
+ * it maps what was tested; it is not a conformance claim. The page used to
+ * show neither fact -- a green "Active" badge beside the framework name, a
+ * "Readiness" ring, and "nothing is currently in breach" when no mapped
+ * requirement failed -- so it read as a verdict against the current standard.
+ * It now states the edition, that 5.0.0 is current, and what the mapping is,
+ * beside every panel that renders it. See shared/asvs-edition.ts.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -13,6 +21,7 @@ import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
 import { Divider, Corners } from "@/components/mythos/Ornament";
 import { cn } from "@/lib/utils";
+import { ASVS_CURRENT_RELEASE, ASVS_MAPPED_VERSION } from "@shared/asvs-edition";
 
 type ControlState = "failing" | "tested" | "not_covered" | "not_run";
 interface AsvsReq { id: string; chapter: string; section: string; cwe: string | null; l1: boolean; l2: boolean; l3: boolean }
@@ -33,6 +42,19 @@ function StatePill({ s }: { s: ControlState }) {
 }
 function levels(r: AsvsReq): string {
   return [r.l1 && "L1", r.l2 && "L2", r.l3 && "L3"].filter(Boolean).join(" ") || "—";
+}
+
+/** What the mapping is, said wherever it is rendered. */
+function MappingStatement({ version }: { version: string }) {
+  return (
+    <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground" data-testid="asvs-mapping-statement">
+      Pinned to OWASP ASVS <span className="text-foreground">{version}</span>. This maps the
+      requirements this engine&apos;s tests bear on, and what they found; it is{" "}
+      <span className="text-foreground">not a conformance claim</span>, and a requirement no scan
+      reaches is untested, not met. ASVS {ASVS_CURRENT_RELEASE} is the current release and numbers its
+      requirements differently, so the IDs here are {version} IDs.
+    </p>
+  );
 }
 
 function ReadinessDonut({ pct }: { pct: number }) {
@@ -68,6 +90,9 @@ export default function Compliance() {
   const rows = data?.rows ?? [];
   const summary = data?.summary;
   const total = summary?.total ?? 0;
+  // The server reports the edition it mapped against; before it answers, the
+  // edition this build's mapping is pinned to -- the same constant it reads.
+  const version = summary?.version ?? ASVS_MAPPED_VERSION;
   const testedPct = total ? Math.round(((summary?.tested ?? 0) / total) * 100) : 0;
 
   // show the requirements that matter first: failing, then not-run, then tested
@@ -102,7 +127,7 @@ export default function Compliance() {
 
       {/* stats -- live from the ASVS mapping */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard layout="tile" label="Controls Mapped" value={total} icon={Layers} />
+        <StatCard layout="tile" label={`ASVS ${version} Requirements`} value={total} icon={Layers} />
         <StatCard layout="tile" label="Tested" value={summary?.tested ?? 0} icon={FileCheck2} />
         <StatCard layout="tile" label="Open Gaps" value={summary?.failing ?? 0} icon={AlertTriangle} accent="var(--sev-high)" />
         <StatCard layout="tile" label="Not Run" value={summary?.notRun ?? 0} icon={CircleSlash} />
@@ -115,7 +140,7 @@ export default function Compliance() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <p className="athena-label">Framework</p>
-                <p className="mt-1 text-[13px] text-foreground">OWASP ASVS <span className="text-muted-foreground">{summary?.version ?? "4.0.3"}</span></p>
+                <p className="mt-1 text-[13px] text-foreground" data-testid="asvs-version">OWASP ASVS <span className="text-muted-foreground">{version}</span></p>
               </div>
               <div className="flex items-center gap-2">
                 {clients.length > 0 && (
@@ -126,7 +151,7 @@ export default function Compliance() {
                     <ChevronDown className="pointer-events-none absolute right-2 h-3.5 w-3.5 text-muted-foreground" />
                   </span>
                 )}
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Active</span>
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface-1/50 px-2.5 py-0.5 text-[11px] text-muted-foreground" title={`ASVS ${ASVS_CURRENT_RELEASE} is the current release`}>Pinned · {version}</span>
               </div>
             </div>
             <p className="mt-2 text-[12px] text-muted-foreground">
@@ -134,13 +159,14 @@ export default function Compliance() {
                 ? `${data.scannersLoaded} scanners loaded, bearing on the application-security verification standard.`
                 : "The application-security verification standard the engine maps its findings onto."}
             </p>
+            <MappingStatement version={version} />
           </GlassCard>
 
           <GlassCard hover={false} bodyClassName="p-0">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/50 px-5 py-3">
               <div>
                 <p className="athena-label">Control Mapping</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">Findings mapped to ASVS requirements.</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">Findings mapped to ASVS {version} requirements. A mapping of what was tested, not a conformance claim.</p>
               </div>
               <label className="hidden items-center gap-2 rounded-lg border border-border/60 bg-surface-1/50 px-3 py-1.5 text-[12px] text-muted-foreground md:flex">
                 <Search className="h-3.5 w-3.5" />
@@ -179,11 +205,12 @@ export default function Compliance() {
 
         {/* right rail */}
         <div className="space-y-5">
-          <GlassCard hover={false} ruling className="relative overflow-hidden">
+          {/* Not `ruling`: gold is for judgements, and this is a measurement. */}
+          <GlassCard hover={false} className="relative overflow-hidden" data-testid="asvs-coverage">
             <Corners />
             <div className="mb-3 flex items-center justify-between">
-              <p className="athena-label">Readiness</p>
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> ASVS</span>
+              <p className="athena-label">Test Coverage</p>
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-surface-1/50 px-2 py-0.5 text-[10px] text-muted-foreground">ASVS {version}</span>
             </div>
             <div className="flex items-center gap-4">
               <ReadinessDonut pct={testedPct} />
@@ -197,12 +224,16 @@ export default function Compliance() {
                 ))}
               </ul>
             </div>
+            <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground" data-testid="asvs-coverage-note">
+              Share of ASVS {version} requirements in the Tested state. A mapping of what was tested,
+              not a conformance score; ASVS {ASVS_CURRENT_RELEASE} is the current release.
+            </p>
           </GlassCard>
 
           <GlassCard hover={false}>
             <p className="athena-label mb-2">High-Priority Control Gaps</p>
             {gaps.length === 0 ? (
-              <p className="text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No failing controls — nothing is currently in breach."}</p>
+              <p className="text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No mapped requirement is failing in the tests considered. Requirements not run or not covered were not checked."}</p>
             ) : (
               <ul className="space-y-2.5">
                 {gaps.map((g) => (
