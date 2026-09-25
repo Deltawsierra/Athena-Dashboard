@@ -106,18 +106,22 @@ function figureOf(testId: string): string {
 }
 
 describe("the Overview's computed figures", () => {
-  it("counts only open findings as open: not acknowledged, accepted or fixed", () => {
+  // Round 3 (F3 case C): acknowledged means "in review", and an issue in
+  // review is still there -- it counts as open. This pinned the opposite; an
+  // acknowledged critical vanished from every open figure and the Overview
+  // could clear its client. Accepted and fixed are still not open.
+  it("counts open and acknowledged (in review) findings as open: not accepted or fixed", () => {
     mount();
-    expect(figureOf("overview-metric-findings")).toBe("2");
-    expect(screen.getByText("0 critical · 1 high")).toBeTruthy();
+    expect(figureOf("overview-metric-findings")).toBe("3");
+    expect(screen.getByText("1 critical · 1 high")).toBeTruthy();
     const posture = screen.getByTestId("overview-panel-posture");
-    expect(Array.from(posture.querySelectorAll(".athena-figure")).map((el) => el.textContent)).toEqual(["2", "0", "1"]);
+    expect(Array.from(posture.querySelectorAll(".athena-figure")).map((el) => el.textContent)).toEqual(["3", "1", "1"]);
     const issues = screen.getByTestId("overview-panel-issues");
-    expect(within(issues).queryByText("Acknowledged one")).toBeNull();
     expect(within(issues).queryByText("Accepted one")).toBeNull();
     expect(within(issues).queryByText("Fixed one")).toBeNull();
-    // Worst first: the open high before the open medium.
+    // Worst first: the critical in review, then the open high, then the medium.
     expect(Array.from(issues.querySelectorAll("li")).map((li) => li.textContent)).toEqual([
+      expect.stringContaining("Acknowledged one"),
       expect.stringContaining("Open on production"),
       expect.stringContaining("Open on staging"),
     ]);
@@ -127,8 +131,9 @@ describe("the Overview's computed figures", () => {
     mount();
     const panel = screen.getByTestId("overview-panel-environments");
     const rows = Array.from(panel.querySelectorAll("li")).map((li) => li.textContent);
-    // Three non-open findings sit on production too; none of them is counted.
-    expect(rows.sort()).toEqual(["Production1", "Staging1"]);
+    // Three more findings sit on production: the one in review counts, the
+    // accepted and the fixed one do not.
+    expect(rows.sort()).toEqual(["Production2", "Staging1"]);
   });
 
   it("counts a ready decision as ready, and a not-recommended one as not", () => {

@@ -98,6 +98,67 @@ export function fingerprint(scope: string, sighting: Sighting): string {
     .slice(0, 32);
 }
 
+/**
+ * Worst first. When one issue arrives at several severities within a scan --
+ * a weak payload reads "medium", a confirmed one "critical", at the same
+ * endpoint -- it is filed once, at the worst. An unrecognised severity ranks
+ * below all of these.
+ */
+const SEVERITY_RANK = ["critical", "high", "medium", "low", "info"];
+function severityRank(severity: string | null): number {
+  const at = SEVERITY_RANK.indexOf((severity ?? "").toLowerCase());
+  return at === -1 ? SEVERITY_RANK.length : at;
+}
+
+/** A scan's results folded into the issues they are, as ingest files them. */
+export interface FoldedResults {
+  /** One sighting per fingerprint, carrying the worst severity any of its results had. */
+  distinct: Map<string, Sighting>;
+  /** Every result that was an object at all. */
+  raw: number;
+  /**
+   * Per lower-cased severity, how many typed results were folded into another
+   * result's finding: the repeats. A test's recorded counts include them (they
+   * are counted per result), and the finding ledger, by design, does not.
+   */
+  foldedAway: Record<string, number>;
+}
+
+/**
+ * Fold a scan's results into distinct issues. The one place that decides it:
+ * ingest files what this returns, and the findings summary uses the same fold
+ * to tell a test's repeats from results that were never filed.
+ */
+export function foldResults(results: unknown[], scope: string, target: string | null): FoldedResults {
+  const distinct = new Map<string, Sighting>();
+  const typed: Record<string, number> = {};
+  let raw = 0;
+  for (const one of results) {
+    if (!one || typeof one !== "object") continue;
+    raw += 1;
+    const sighting = sightingOf(one as Record<string, unknown>, target);
+    if (!sighting) continue;
+    const severity = (sighting.severity ?? "").toLowerCase();
+    typed[severity] = (typed[severity] ?? 0) + 1;
+    const key = fingerprint(scope, sighting);
+    const kept = distinct.get(key);
+    // Keep the worst. They are the same issue, and the fields that differ
+    // between them (payload, wording) are not part of what it is -- but how
+    // bad it is is: filing the first of a medium and a critical at one place
+    // as "medium" left a scan that reported a critical with no critical
+    // finding anywhere, and the screens clearing the client. The worst
+    // sighting's own wording goes with it, so the message describes the
+    // severity filed. Ties keep the first.
+    if (!kept || severityRank(sighting.severity) < severityRank(kept.severity)) distinct.set(key, sighting);
+  }
+  const foldedAway: Record<string, number> = { ...typed };
+  for (const sighting of Array.from(distinct.values())) {
+    const severity = (sighting.severity ?? "").toLowerCase();
+    foldedAway[severity] -= 1;
+  }
+  return { distinct, raw, foldedAway };
+}
+
 export type SightingOutcome = "created" | "updated" | "reopened";
 
 /**
@@ -216,18 +277,11 @@ export async function ingest(
 
   // Fold within the scan first. One scan reports the same endpoint several
   // times when several payloads land, and writing each one would defeat the
-  // deduplication before it reached the database.
-  const bySignature = new Map<string, Sighting>();
-  for (const one of results) {
-    if (!one || typeof one !== "object") continue;
-    result.raw += 1;
-    const sighting = sightingOf(one as Record<string, unknown>, context.target);
-    if (!sighting) continue;
-    const key = fingerprint(context.clientId, sighting);
-    // Keep the first: they are the same issue, and the fields that differ
-    // between them (payload, wording) are not part of what it is.
-    if (!bySignature.has(key)) bySignature.set(key, sighting);
-  }
+  // deduplication before it reached the database. Each issue is filed at the
+  // worst severity it was reported at (see foldResults).
+  const folded = foldResults(results, context.clientId, context.target);
+  const bySignature = folded.distinct;
+  result.raw = folded.raw;
   result.distinct = bySignature.size;
 
   const now = new Date();

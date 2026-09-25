@@ -1,10 +1,14 @@
 /**
  * Deployments: the systems under assessment, read from `/api/clients` and the
  * tests run against them. Each row is a client system; its risk and findings
- * are what its latest COMPLETED test reported, and a system with no completed
- * test says "Not scanned". Columns the backend has no source for -- model
- * provider, data-sensitivity tags -- are omitted rather than filled with
- * fiction.
+ * are what the latest COMPLETED test of each of its sites reported (the same
+ * tests the findings summary reads: shared/latest-scans.ts), and a system
+ * with no completed test says "Not scanned". A later scan of one site says
+ * nothing about another, so it no longer replaces that site's result. An
+ * engine test whose counts were never recorded (all zero beside real results,
+ * from before the inline-count fix) says "Counts not recorded", never "0".
+ * Columns the backend has no source for -- model provider, data-sensitivity
+ * tags -- are omitted rather than filled with fiction.
  *
  * This page used to call a never-scanned system "Clean", give every system a
  * 0-100 "risk score" from a hard-coded table (Clean was 8, High 72), count a
@@ -40,19 +44,22 @@ import { SeverityPill, StatusPill, Timeline, type StatusTone, type TimelineStep 
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import type { FindingsSummary } from "@shared/findings-summary";
+import { completedTime, countsNotRecorded, latestCompletedBySite } from "@shared/latest-scans";
 
 interface ApiClient { id: string; name: string; company: string; status: string; lastTestDate: string | null; notes: string | null }
 interface ApiTest {
-  id: string; clientId: string; testType: string; status: string; severity: string | null;
+  id: string; clientId: string; siteId?: string | null; testType: string; status: string; severity: string | null;
   completedAt: string | null; startedAt: string; vulnerabilitiesFound: number;
   criticalCount: number; highCount: number; mediumCount: number; lowCount: number;
+  findings?: unknown;
 }
 
-/** What a system's latest completed test reported, worst first. */
-type Band = "critical" | "high" | "medium" | "low" | "none" | "unscanned";
-const BAND_ORDER: Band[] = ["critical", "high", "medium", "low", "none", "unscanned"];
+/** What a system's latest completed tests reported, worst first. */
+type Band = "critical" | "high" | "medium" | "low" | "unrecorded" | "none" | "unscanned";
+const BAND_ORDER: Band[] = ["critical", "high", "medium", "low", "unrecorded", "none", "unscanned"];
 function bandOf(test: ApiTest | undefined): Band {
   if (!test) return "unscanned";
+  if (countsNotRecorded(test)) return "unrecorded";
   const v = (test.severity || "").toLowerCase();
   if (v === "critical") return "critical";
   if (v === "high") return "high";
@@ -62,17 +69,21 @@ function bandOf(test: ApiTest | undefined): Band {
 }
 const BAND_DOT: Record<Band, string> = {
   critical: "bg-sev-critical", high: "bg-sev-high", medium: "bg-sev-medium", low: "bg-emerald-400",
-  none: "bg-muted-foreground/40", unscanned: "bg-muted-foreground/20",
+  unrecorded: "bg-muted-foreground/40", none: "bg-muted-foreground/40", unscanned: "bg-muted-foreground/20",
 };
 const BAND_TEXT: Record<Band, string> = {
   critical: "text-sev-critical", high: "text-sev-high", medium: "text-sev-medium", low: "text-emerald-400",
-  none: "text-muted-foreground", unscanned: "text-muted-foreground",
+  unrecorded: "text-muted-foreground", none: "text-muted-foreground", unscanned: "text-muted-foreground",
 };
 // "None reported", not "Clean": a scan that reported nothing has not shown
-// that nothing is there.
+// that nothing is there. "Not recorded": results came back, and their counts
+// were never written down -- which is not "none".
 const BAND_LABEL: Record<Band, string> = {
-  critical: "Critical", high: "High", medium: "Medium", low: "Low", none: "None reported", unscanned: "Not scanned",
+  critical: "Critical", high: "High", medium: "Medium", low: "Low", unrecorded: "Not recorded",
+  none: "None reported", unscanned: "Not scanned",
 };
+/** The worse of two bands. */
+const worse = (a: Band, b: Band) => (BAND_ORDER.indexOf(a) <= BAND_ORDER.indexOf(b) ? a : b);
 
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
@@ -87,10 +98,14 @@ function readinessLabel(status: string): string {
 const when = (t: ApiTest) => new Date(t.completedAt || t.startedAt).getTime();
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** Whether a completed test reported any finding at all, by its total or any severity. */
+/**
+ * Whether a completed test reported any finding at all, by its total or any
+ * severity -- or returned results whose counts were never recorded.
+ */
 function reportsFindings(test: ApiTest): boolean {
   return test.vulnerabilitiesFound > 0 ||
-    test.criticalCount + test.highCount + test.mediumCount + test.lowCount > 0;
+    test.criticalCount + test.highCount + test.mediumCount + test.lowCount > 0 ||
+    countsNotRecorded(test);
 }
 
 /**
@@ -146,7 +161,7 @@ function readinessSteps(
     } else {
       review = {
         title: "Review Evidence",
-        detail: "No open tracked findings, and no system's latest completed scan reported any.",
+        detail: "No open or in-review tracked findings, and no site's latest completed scan reported any.",
         state: "done",
       };
     }
@@ -174,33 +189,37 @@ export default function Deployments() {
   const tests = testsQ.state === "ready" ? testsQ.data : [];
 
   // Per client: the newest test of any status (what is happening now), and the
-  // newest COMPLETED one (the only one whose counts are a result).
+  // latest COMPLETED test of each of its sites (the only ones whose counts are
+  // a result, and each the result for its own site).
   const latest = new Map<string, ApiTest>();
-  const latestDone = new Map<string, ApiTest>();
   for (const t of tests) {
     const cur = latest.get(t.clientId);
     if (!cur || when(t) > when(cur)) latest.set(t.clientId, t);
-    if (t.status === "completed") {
-      const done = latestDone.get(t.clientId);
-      if (!done || when(t) > when(done)) latestDone.set(t.clientId, t);
-    }
+  }
+  const latestDone = new Map<string, ApiTest[]>();
+  for (const t of Array.from(latestCompletedBySite(tests).values())) {
+    latestDone.set(t.clientId, [...(latestDone.get(t.clientId) ?? []), t]);
   }
 
   const rows = clients.map((c) => {
     const t = latest.get(c.id);
-    const done = latestDone.get(c.id);
+    const done = latestDone.get(c.id) ?? [];
+    const recorded = done.filter((one) => !countsNotRecorded(one));
+    const newest = done.slice().sort((a, b) => completedTime(b) - completedTime(a))[0];
     // The latest completed scan on record; a date typed onto the client only
     // when there is none.
-    const lastScan = done?.completedAt || c.lastTestDate || null;
+    const lastScan = newest?.completedAt || c.lastTestDate || null;
     return {
       id: c.id, system: c.name, company: c.company, status: c.status,
       readiness: t ? readinessLabel(t.status) : "Not scanned",
       readinessTone: t ? (READINESS_TONE[t.status] ?? "neutral") : ("neutral" as StatusTone),
-      band: bandOf(done),
-      scanned: done !== undefined,
-      vulns: done?.vulnerabilitiesFound ?? 0,
-      crit: done?.criticalCount ?? 0,
-      high: done?.highCount ?? 0,
+      band: done.map(bandOf).reduce(worse, "unscanned" as Band),
+      scanned: done.length > 0,
+      sites: done.length,
+      unrecorded: done.length - recorded.length,
+      vulns: recorded.reduce((n, one) => n + one.vulnerabilitiesFound, 0),
+      crit: recorded.reduce((n, one) => n + one.criticalCount, 0),
+      high: recorded.reduce((n, one) => n + one.highCount, 0),
       lastScan: lastScan ? new Date(lastScan).toLocaleString() : "—",
     };
   });
@@ -215,10 +234,7 @@ export default function Deployments() {
     const scanned = clientList.filter((c) => latestDone.has(c.id)).length;
     const inFlight = new Set(testList.filter((t) => IN_FLIGHT.has(t.status) && ids.has(t.clientId)).map((t) => t.clientId)).size;
     // The same scans the table's Risk and Findings columns read.
-    const reporting = clientList.filter((c) => {
-      const done = latestDone.get(c.id);
-      return done !== undefined && reportsFindings(done);
-    }).length;
+    const reporting = clientList.filter((c) => (latestDone.get(c.id) ?? []).some(reportsFindings)).length;
     return { state: "ready", data: { scanned, inFlight, reporting } };
   })();
   const withOpen: Loaded<number> = (() => {
@@ -251,7 +267,7 @@ export default function Deployments() {
 
   // Worst latest-completed result first, then most critical, then most high.
   const highestRisk = rows
-    .filter((r) => r.band !== "none" && r.band !== "unscanned")
+    .filter((r) => r.band !== "none" && r.band !== "unscanned" && r.band !== "unrecorded")
     .sort((a, b) =>
       BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band) || b.crit - a.crit || b.high - a.high || b.vulns - a.vulns)
     .slice(0, 3);
@@ -349,12 +365,22 @@ export default function Deployments() {
                           <span className={cn("h-2 w-2 rounded-full", BAND_DOT[d.band])} />
                           <span className="leading-tight">
                             <span className={cn("block text-[12px] font-medium", BAND_TEXT[d.band])}>{BAND_LABEL[d.band]}</span>
-                            <span className="block text-[11px] text-muted-foreground">{d.scanned ? "Latest completed scan" : "—"}</span>
+                            <span className="block text-[11px] text-muted-foreground">
+                              {!d.scanned ? "—" : d.sites > 1 ? `Latest completed scan of each of ${d.sites} sites` : "Latest completed scan"}
+                            </span>
                           </span>
                         </div>
                       </td>
                       <td className="px-4 py-4 text-[12px] text-muted-foreground">
-                        {!d.scanned ? "—" : d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : "0 reported"}
+                        {!d.scanned ? "—" : d.vulns > 0 ? <><span className="font-medium text-foreground">{d.vulns}</span> ({d.crit}C / {d.high}H)</> : d.unrecorded === 0 ? "0 reported" : null}
+                        {d.unrecorded > 0 && (
+                          <span className="block text-[11px]" data-testid={`text-counts-not-recorded-${d.id}`}>
+                            {d.unrecorded === d.sites
+                              ? "Counts not recorded"
+                              : `Counts not recorded for ${plural(d.unrecorded, "scan")}`}
+                            : results came back, but the scan&apos;s counts were never written down.
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-4 text-[12px] text-muted-foreground">{d.lastScan}</td>
                       <td className="px-4 py-4 text-muted-foreground"><MoreHorizontal className="h-4 w-4" /></td>

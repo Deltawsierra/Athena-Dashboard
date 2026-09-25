@@ -70,11 +70,15 @@ export interface IStorage {
   recordSighting(findingId: string, runId: string | null, testId: string | null, seen: boolean): Promise<void>;
   getSightings(findingId: string): Promise<FindingSighting[]>;
   /**
-   * Whether this test filed any of its results as a finding: a sighting it
-   * recorded as seen. The engine's scans file every result they return; a
-   * test a person records on the Tests screen files none.
+   * How many distinct findings this test sighted as seen, at critical and at
+   * high (by each finding's severity, case-insensitively). The engine's scans
+   * file every result they return, folded into distinct issues at the worst
+   * severity each was reported at; a test a person records on the Tests
+   * screen files none. The findings summary compares these with what the test
+   * reported: a boolean "filed anything" read a scan that reported a critical
+   * and filed only a medium as fully tracked.
    */
-  testFiledFindings(testId: string): Promise<boolean>;
+  filedSeriousFindings(testId: string): Promise<{ critical: number; high: number }>;
   /** A retest, appended. Never replaces an earlier one. */
   recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">): Promise<FindingCheck>;
   getChecks(findingId: string): Promise<FindingCheck[]>;
@@ -384,8 +388,16 @@ export class MemStorage implements IStorage {
   async getSightings(findingId: string) {
     return this.sightings.filter((one) => one.findingId === findingId);
   }
-  async testFiledFindings(testId: string) {
-    return this.sightings.some((one) => one.testId === testId && one.seen);
+  async filedSeriousFindings(testId: string) {
+    const ids = new Set(
+      this.sightings.filter((one) => one.testId === testId && one.seen).map((one) => one.findingId),
+    );
+    const counts = { critical: 0, high: 0 };
+    for (const id of Array.from(ids)) {
+      const severity = (this.findings.get(id)?.severity ?? "").toLowerCase();
+      if (severity === "critical" || severity === "high") counts[severity] += 1;
+    }
+    return counts;
   }
   async recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">) {
     const row: FindingCheck = { ...check, id: randomUUID(), checkedAt: new Date() };

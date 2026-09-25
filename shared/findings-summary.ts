@@ -5,10 +5,34 @@
 export const SUMMARY_SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
 export type SummarySeverity = (typeof SUMMARY_SEVERITIES)[number];
 
+/**
+ * The finding statuses that count as open: the issue is still there and
+ * nobody has settled it.
+ *
+ * "acknowledged" is here. It means a person has looked and it is in review --
+ * an opinion about progress, not about the customer's system -- and counting
+ * it as closed let a scan's critical, once acknowledged, drop out of every
+ * open total while the screens said nothing needed attention. What is NOT
+ * open: "fixed", which only a retest the engine answered `closed` may set,
+ * and "accepted", a named person's recorded decision to carry the risk (a
+ * rescan leaves it accepted; a retest that finds it again reopens it). The
+ * screens that give an all-clear say that accepted risks and verified fixes
+ * are not counted in it.
+ */
+export const OPEN_FINDING_STATUSES = ["open", "acknowledged"] as const;
+
+/** Whether a finding with this status is open (see OPEN_FINDING_STATUSES). */
+export function isOpenStatus(status: string | null | undefined): boolean {
+  return (OPEN_FINDING_STATUSES as readonly string[]).includes(status ?? "");
+}
+
 export interface FindingsSummary {
   /** How many engagements' findings this covers: every client on record. */
   clients: number;
-  /** Findings whose status is "open" -- not acknowledged, accepted or fixed. */
+  /**
+   * Open findings: status "open" or "acknowledged" (in review) -- not
+   * accepted or fixed. See OPEN_FINDING_STATUSES.
+   */
   open: Record<SummarySeverity | "total", number>;
   /**
    * Open findings by the environment of the site each was recorded on, most
@@ -37,12 +61,14 @@ export interface FindingsSummary {
    * when a critical or high one was last seen (null when there is none).
    *
    * Findings are lifecycle rows, which only the engine's scans file. So each
-   * client also carries its latest completed test's reported counts when that
-   * test reported something critical or high and filed none of it as a
-   * finding -- a scan a person recorded on the Tests screen, say. Those counts
-   * are what the scan reported, not open findings: nothing tracks whether they
-   * were fixed, so a screen must neither add them into the open totals nor
-   * clear the client while they stand. null when there is no such test.
+   * client also carries the critical and high results of its latest completed
+   * tests -- one per site (see shared/latest-scans.ts) -- that no finding row
+   * stands behind: all of them for a scan a person recorded on the Tests
+   * screen, and the shortfall for a scan that filed fewer critical or high
+   * findings than it reported. Those are what the scans reported, not open
+   * findings: nothing tracks whether they were fixed, so a screen must neither
+   * add them into the open totals nor clear the client while they stand. null
+   * when there are none.
    */
   byClient: Array<{
     clientId: string;
@@ -54,11 +80,19 @@ export interface FindingsSummary {
   }>;
 }
 
-/** A latest completed test's reported critical/high counts with no finding row behind them. */
+/**
+ * Critical and high results of a client's latest completed tests (one per
+ * site) that no finding row stands behind, added up over those tests.
+ */
 export interface UntrackedScan {
+  /** The most recently completed of those tests. */
   testId: string;
   /** When it completed (ISO), or null when no completion time is recorded. */
   completedAt: string | null;
+  /** Critical results reported and not filed as critical findings, over every such test. */
   critical: number;
+  /** High results reported and not filed as high findings, over every such test. */
   high: number;
+  /** How many of the client's latest completed tests (one per site) have any. */
+  scans: number;
 }

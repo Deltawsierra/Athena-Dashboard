@@ -178,7 +178,7 @@ describe("Deployments (default build) states only what the record says", () => {
     // Done only when neither the tracked findings nor the latest completed
     // scan reports anything, and the sentence says it covers both.
     expect(step("Review Evidence")).toContain(
-      "No open tracked findings, and no system's latest completed scan reported any.",
+      "No open or in-review tracked findings, and no site's latest completed scan reported any.",
     );
     expect(step("Review Evidence")).toContain("✓");
   });

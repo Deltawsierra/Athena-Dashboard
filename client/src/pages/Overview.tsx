@@ -21,11 +21,15 @@
  *                                  lifecycle record (one row per issue, not per
  *                                  sighting) counted once on the server, for
  *                                  every client or not at all
- * - a latest completed scan whose critical/high counts no finding stands
- *   behind (one a person recorded on the Tests screen)
+ * - critical/high results of a site's latest completed scan that no finding
+ *   stands behind (all of a scan a person recorded on the Tests screen; the
+ *   shortfall of one that filed fewer than it reported)
  *                                  the same summary's `untrackedScan`: flagged
  *                                  in Systems Needing Attention, never added to
  *                                  the open totals and never cleared
+ *
+ * "Open" is open or acknowledged (in review); accepted risks and verified
+ * fixes are not open, and every all-clear on this page says so.
  * - assurance decisions            /api/assurance/deployments
  * - overall risk score, compliance readiness, the review schedule
  *                                  nothing computes these, so they say so
@@ -187,21 +191,27 @@ export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[]
   });
 }
 
-/** "latest completed scan reported 3 critical / 5 high; not tracked as findings". */
+/**
+ * "latest completed scan reported 3 critical / 5 high that are not tracked as
+ * findings" -- the scans' own results no finding stands behind, not their
+ * whole counts: a scan that filed some of them is flagged for the rest.
+ */
 export function untrackedNote(scan: UntrackedScan): string {
-  return `latest completed scan reported ${scan.critical} critical / ${scan.high} high; not tracked as findings`;
+  const scans = scan.scans ?? 1;
+  const which = scans > 1 ? `latest completed scans of ${scans} sites` : "latest completed scan";
+  return `${which} reported ${scan.critical} critical / ${scan.high} high that are not tracked as findings`;
 }
 
 /**
- * The clients whose latest completed scan reported critical or high findings
+ * The clients with critical or high results of a site's latest completed scan
  * that no finding row stands behind. Every sentence on this page that sounds
  * like an all-clear is about tracked findings only, and says so; this is what
- * it adds while such scans stand.
+ * it adds while such results stand.
  */
 function untrackedCaveat(summary: FindingsSummary): string {
   const n = summary.byClient.filter((one) => one.untrackedScan).length;
   if (n === 0) return "";
-  return ` ${n === 1 ? "1 client's" : `${n} clients'`} latest completed scan reported critical or high findings that are not tracked as findings; see Systems Needing Attention.`;
+  return ` ${n === 1 ? "1 client has" : `${n} clients have`} critical or high results from a latest completed scan that are not tracked as findings; see Systems Needing Attention.`;
 }
 
 function useLiveOverview(): OverviewModel {
@@ -363,11 +373,16 @@ function useLiveOverview(): OverviewModel {
     flagged.sort((a, b) => b.rank - a.rank);
     // Only when neither source reports anything, and saying what it covers:
     // tracked findings, and what each client's latest completed scan reported.
+    // Exactly what it covers: tracked findings open or in review, the results
+    // of each site's latest completed scan, and completed scans. It does not
+    // say those scans reported nothing -- a scan whose critical was filed and
+    // later fixed or accepted reported one -- only that nothing they
+    // reported at critical or high is without a finding.
     return rowsOr(
       flagged.slice(0, 5).map((one) => one.row),
       clientData.length === 0
         ? "No clients registered yet."
-        : "Nothing flagged: no client has an open tracked critical or high finding, no client's latest completed scan reported one, and every client has a completed scan.",
+        : "Nothing flagged: no client has an open or in-review critical or high finding, every critical or high result of each site's latest completed scan is tracked as a finding, and every client has a completed scan. Accepted risks and verified fixes are not counted as open.",
     );
   })();
 
@@ -679,7 +694,7 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
         <Panel
           id="attention"
           title="Systems Needing Attention"
-          caption="Open critical or high findings, or no completed scan."
+          caption="Open or in-review critical or high findings, scan results no finding stands behind, or no completed scan."
           link={{ href: "/clients", label: "View all" }}
           sample={sample}
         >

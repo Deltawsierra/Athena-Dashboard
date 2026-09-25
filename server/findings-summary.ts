@@ -18,9 +18,22 @@
  * test a person records on the Tests screen -- "completed, 3 critical, 5 high"
  * -- files none, so counting lifecycle rows alone answered "no open critical
  * or high finding" for a client whose latest completed scan said otherwise.
- * Each client therefore also carries that scan's reported counts whenever none
- * of its results were filed as findings (`untrackedScan`), and the screens
- * flag it rather than clearing the client.
+ * Each client therefore also carries what its latest completed tests reported
+ * at critical and high that no finding stands behind (`untrackedScan`), and
+ * the screens flag it rather than clearing the client.
+ *
+ * "Stands behind" is counted per severity, per test. It used to be one bit --
+ * "did this test file anything?" -- so a scan that reported a critical and
+ * filed only a medium (one issue seen at two severities, filed at the first)
+ * read as fully tracked, and the client as clear. Now storage says how many
+ * distinct critical and high findings each test sighted, and any shortfall
+ * against what the test reported is untracked. The test's own recorded
+ * repeats (several payloads at one place: one finding by design) are taken
+ * off first, using the very fold ingest files with.
+ *
+ * "Latest" is per site, by completion time (shared/latest-scans.ts): a later
+ * scan of another site, or an older scan that happens to have been created
+ * later, no longer replaces the scan that reported the criticals.
  *
  * Everything is counted in single passes. The first version spread every
  * finding into Math.max/Math.min (a RangeError past ~125k arguments, so the
@@ -32,9 +45,13 @@ import type { Client, Finding, Site, Test } from "@shared/schema";
 import type { IStorage } from "./storage";
 import {
   SUMMARY_SEVERITIES,
+  isOpenStatus,
   type FindingsSummary,
   type SummarySeverity,
+  type UntrackedScan,
 } from "@shared/findings-summary";
+import { completedTime, countsNotRecorded, latestCompletedBySite } from "@shared/latest-scans";
+import { foldResults } from "./findings";
 
 export { SUMMARY_SEVERITIES, type FindingsSummary, type SummarySeverity };
 
@@ -66,26 +83,61 @@ const monthLabel = (key: number) =>
 export type SummaryTest = Pick<
   Test,
   "id" | "clientId" | "status" | "startedAt" | "completedAt" | "criticalCount" | "highCount"
->;
+> &
+  Partial<Pick<Test, "siteId" | "findings" | "vulnerabilitiesFound" | "mediumCount" | "lowCount">>;
+
+/** Critical and high counts. */
+export interface SeriousCounts {
+  critical: number;
+  high: number;
+}
 
 /**
- * Each client's latest COMPLETED test -- by when it completed, or started when
- * no completion time is recorded -- the same test the Deployments table reads
- * its risk and counts from. A test still pending or running has no result.
+ * The distinct critical and high issues a test reported: the unit the finding
+ * ledger files in.
+ *
+ * A test's counts are counted per result, so several payloads landing on one
+ * endpoint are several criticals there and one finding in the ledger. Those
+ * repeats are counted from the test's own recorded results, with the fold
+ * ingest files by, and taken off -- so an engine scan that filed everything
+ * it found shows no shortfall, and anything a person added by editing the
+ * counts still does. A test with no recorded results (one a person recorded)
+ * reports what its counts say. A completed engine test whose counts were never
+ * recorded (all zero beside real results) reports what its results say.
  */
-export function latestCompletedByClient<T extends SummaryTest>(tests: readonly T[]): Map<string, T> {
-  const latest = new Map<string, T>();
-  const when = (test: T) => time(test.completedAt ?? test.startedAt);
-  for (const test of tests) {
-    if (test.status !== "completed") continue;
-    const current = latest.get(test.clientId);
-    if (!current || when(test) > when(current)) latest.set(test.clientId, test);
+export function reportedSerious(test: SummaryTest): SeriousCounts {
+  const recorded = (test.findings ?? {}) as Record<string, unknown>;
+  const results = Array.isArray(recorded.results) ? (recorded.results as unknown[]) : null;
+  const stored = { critical: test.criticalCount ?? 0, high: test.highCount ?? 0 };
+  if (!results) return stored;
+  const folded = foldResults(results, test.clientId, typeof recorded.target === "string" ? recorded.target : null);
+  const counts = {
+    status: test.status,
+    findings: test.findings,
+    vulnerabilitiesFound: test.vulnerabilitiesFound ?? 0,
+    criticalCount: stored.critical,
+    highCount: stored.high,
+    mediumCount: test.mediumCount ?? 0,
+    lowCount: test.lowCount ?? 0,
+  };
+  if (countsNotRecorded(counts)) {
+    const distinct = Array.from(folded.distinct.values());
+    return {
+      critical: distinct.filter((one) => severityOf(one.severity) === "critical").length,
+      high: distinct.filter((one) => severityOf(one.severity) === "high").length,
+    };
   }
-  return latest;
+  return {
+    critical: Math.max(0, stored.critical - (folded.foldedAway.critical ?? 0)),
+    high: Math.max(0, stored.high - (folded.foldedAway.high ?? 0)),
+  };
 }
 
 /** A test whose reported critical/high counts may need a finding row behind them. */
-const reportsSerious = (test: SummaryTest) => (test.criticalCount ?? 0) + (test.highCount ?? 0) > 0;
+const reportsSerious = (test: SummaryTest) => {
+  const reported = reportedSerious(test);
+  return reported.critical + reported.high > 0;
+};
 
 type SummaryFinding = Pick<
   Finding,
@@ -104,18 +156,18 @@ export function summarizeFindings(input: {
   sites: Pick<Site, "id" | "environment">[];
   findings: SummaryFinding[];
   /**
-   * Every test on record; only each client's latest completed one is read.
+   * Every test on record; only each site's latest completed one is read.
    * Omitted means no test is on record.
    */
   tests?: SummaryTest[];
   /**
-   * The tests that filed at least one of their results as a finding. A latest
-   * completed test missing from this set has counts no finding row stands
-   * behind, and they are reported as `untrackedScan`.
+   * Per test, how many distinct findings it sighted as seen at critical and at
+   * high. A latest completed test that reported more than it filed has the
+   * difference reported as `untrackedScan`. A test missing here filed none.
    */
-  filedTestIds?: ReadonlySet<string>;
+  filed?: ReadonlyMap<string, SeriousCounts>;
 }): FindingsSummary {
-  const { clients, sites, findings, tests = [], filedTestIds = new Set<string>() } = input;
+  const { clients, sites, findings, tests = [], filed = new Map<string, SeriousCounts>() } = input;
   const envOf = new Map(sites.map((site) => [site.id, site.environment]));
   const nameOf = new Map(clients.map((client) => [client.id, client.name]));
 
@@ -148,7 +200,7 @@ export function summarizeFindings(input: {
       if (key > lastMonth) lastMonth = key;
     }
 
-    if (finding.status !== "open") return;
+    if (!isOpenStatus(finding.status)) return;
     const sev = severityOf(finding.severity);
     openCounts.total += 1;
     openCounts[sev] += 1;
@@ -201,25 +253,38 @@ export function summarizeFindings(input: {
     });
   }
 
-  const latestDone = latestCompletedByClient(tests);
+  // Each site's latest completed test, and what it reported at critical and
+  // high that it did not file, gathered per client.
+  const untrackedOf = new Map<string, UntrackedScan>();
+  const newestOf = new Map<string, SummaryTest>();
+  for (const scan of Array.from(latestCompletedBySite(tests).values())) {
+    const reported = reportedSerious(scan);
+    const sighted = filed.get(scan.id) ?? { critical: 0, high: 0 };
+    const critical = Math.max(0, reported.critical - sighted.critical);
+    const high = Math.max(0, reported.high - sighted.high);
+    if (critical + high === 0) continue;
+    const sum = untrackedOf.get(scan.clientId);
+    const newest = newestOf.get(scan.clientId);
+    const lead = !newest || completedTime(scan) > completedTime(newest) ? scan : newest;
+    newestOf.set(scan.clientId, lead);
+    untrackedOf.set(scan.clientId, {
+      testId: lead.id,
+      completedAt: isoOf(lead.completedAt) || null,
+      critical: (sum?.critical ?? 0) + critical,
+      high: (sum?.high ?? 0) + high,
+      scans: (sum?.scans ?? 0) + 1,
+    });
+  }
+
   const byClient = clients.map((client) => {
     const own = perClient.get(client.id) as { open: number; critical: number; high: number; latestSerious: number };
-    const scan = latestDone.get(client.id);
     return {
       clientId: client.id,
       open: own.open,
       critical: own.critical,
       high: own.high,
       latestSeriousSeenAt: Number.isNaN(own.latestSerious) ? null : new Date(own.latestSerious).toISOString(),
-      untrackedScan:
-        scan && reportsSerious(scan) && !filedTestIds.has(scan.id)
-          ? {
-              testId: scan.id,
-              completedAt: isoOf(scan.completedAt) || null,
-              critical: scan.criticalCount ?? 0,
-              high: scan.highCount ?? 0,
-            }
-          : null,
+      untrackedScan: untrackedOf.get(client.id) ?? null,
     };
   });
 
@@ -266,16 +331,16 @@ export async function loadFindingsSummary(storage: IStorage): Promise<FindingsSu
       storage.getAllTests(),
     ]);
     const perClient = await Promise.all(clients.map((client) => storage.getFindingsByClient(client.id)));
-    // Only a client's latest completed test counts, and only when it reported
-    // something critical or high is it worth asking whether it filed anything.
-    const candidates = Array.from(latestCompletedByClient(tests).values()).filter(reportsSerious);
-    const filed = await Promise.all(candidates.map((test) => storage.testFiledFindings(test.id)));
+    // Only each site's latest completed test counts, and only when it reported
+    // something critical or high is it worth asking what it filed.
+    const candidates = Array.from(latestCompletedBySite(tests).values()).filter(reportsSerious);
+    const filed = await Promise.all(candidates.map((test) => storage.filedSeriousFindings(test.id)));
     read = {
       clients,
       sites,
       findings: perClient.flat(),
       tests,
-      filedTestIds: new Set(candidates.filter((_, index) => filed[index]).map((test) => test.id)),
+      filed: new Map(candidates.map((test, index) => [test.id, filed[index]])),
     };
   } catch (cause) {
     throw new SummaryReadError(cause);

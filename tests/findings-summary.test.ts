@@ -35,7 +35,11 @@ describe("summarizeFindings", () => {
     { id: "s2", environment: "staging" },
   ];
 
-  it("counts only open findings as open: not acknowledged, accepted or fixed", () => {
+  // Round 3 (F3 case C): an acknowledged finding is in review, not settled,
+  // and counts as open. This pinned the opposite -- an acknowledged critical
+  // dropped out of every open total -- which let a scan's critical, once
+  // acknowledged, leave its client with no flag at all.
+  it("counts open and acknowledged (in review) findings as open: not accepted or fixed", () => {
     const summary = summarizeFindings({
       clients, sites,
       findings: [
@@ -48,7 +52,8 @@ describe("summarizeFindings", () => {
       ],
     });
     expect(summary.clients).toBe(3);
-    expect(summary.open).toEqual({ total: 3, critical: 0, high: 1, medium: 0, low: 1, info: 1 });
+    expect(summary.open).toEqual({ total: 4, critical: 1, high: 1, medium: 0, low: 1, info: 1 });
+    expect(summary.byClient.find((one) => one.clientId === "c1")).toMatchObject({ open: 2, critical: 1, high: 1 });
   });
 
   it("splits open findings by the environment of their site, and nothing else", () => {

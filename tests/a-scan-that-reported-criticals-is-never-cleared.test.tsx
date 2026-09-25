@@ -60,7 +60,7 @@ function summaryFor(tests: Array<typeof MANUAL>) {
   const summary = summarizeFindings({
     clients: CLIENTS, sites: SITES, findings: [],
     tests: tests.map((t) => ({ ...t, startedAt: new Date(t.startedAt), completedAt: new Date(t.completedAt) })) as never,
-    filedTestIds: new Set(),
+    filed: new Map(),
   });
   return JSON.parse(JSON.stringify(summary));
 }
@@ -94,7 +94,7 @@ const ANY_ALL_CLEAR = /Nothing flagged|No open (tracked )?findings on record|No 
 describe("a completed scan that reported critical findings is not answered with an all-clear", () => {
   it("the summary the page reads carries the scan's counts, outside the open totals", () => {
     const summary = summaryFor([MANUAL]);
-    expect(summary.byClient[0].untrackedScan).toEqual({ testId: "t1", completedAt: now, critical: 3, high: 5 });
+    expect(summary.byClient[0].untrackedScan).toEqual({ testId: "t1", completedAt: now, critical: 3, high: 5, scans: 1 });
     expect(summary.open.total).toBe(0);
   });
 
@@ -107,7 +107,7 @@ describe("a completed scan that reported critical findings is not answered with 
     // by the worst it reported, and says they are not tracked findings.
     expect(attention.textContent).not.toMatch(ANY_ALL_CLEAR);
     expect(attention.textContent).toMatch(/Acme/);
-    expect(attention.textContent).toMatch(/Latest completed scan reported 3 critical \/ 5 high; not tracked as findings/);
+    expect(attention.textContent).toMatch(/Latest completed scan reported 3 critical \/ 5 high that are not tracked as findings/);
     expect(within(attention).getByText("Critical")).toBeTruthy();
   });
 
@@ -116,16 +116,20 @@ describe("a completed scan that reported critical findings is not answered with 
     const issues = screen.getByTestId("overview-panel-issues").textContent ?? "";
     expect(issues).not.toMatch(/No open findings on record\./);
     expect(issues).toMatch(/No open tracked findings on record\./);
-    expect(issues).toMatch(/1 client's latest completed scan reported critical or high findings that are not tracked as findings/);
+    expect(issues).toMatch(/1 client has critical or high results from a latest completed scan that are not tracked as findings/);
     // The headline figure is tracked findings; it says what it leaves out.
     expect(screen.getByTestId("overview-metric-findings").textContent).toMatch(/1 untracked scan result not counted/);
   });
 
+  // Reworded in round 3 (F5): it said "no client's latest completed scan
+  // reported one", which is not what an empty untracked list means -- a scan
+  // whose critical was filed and then fixed reported one. It now says exactly
+  // what it covers.
   it("Overview says nothing is flagged only when neither source reports anything, and says what that covers", () => {
     mount(<Overview />, [CLEAN]);
     const attention = screen.getByTestId("overview-panel-attention").textContent ?? "";
-    expect(attention).toMatch(
-      /Nothing flagged: no client has an open tracked critical or high finding, no client's latest completed scan reported one, and every client has a completed scan\./,
+    expect(attention).toContain(
+      "Nothing flagged: no client has an open or in-review critical or high finding, every critical or high result of each site's latest completed scan is tracked as a finding, and every client has a completed scan. Accepted risks and verified fixes are not counted as open.",
     );
     expect(screen.getByTestId("overview-panel-issues").textContent).toMatch(/^.*No open tracked findings on record\.$/);
   });
@@ -157,7 +161,7 @@ describe("a completed scan that reported critical findings is not answered with 
   it("Deployments ticks Review Evidence only when nothing tracked is open and no latest scan reported anything", () => {
     mount(<Deployments />, [CLEAN]);
     const review = step("Review Evidence");
-    expect(review).toContain("No open tracked findings, and no system's latest completed scan reported any.");
+    expect(review).toContain("No open or in-review tracked findings, and no site's latest completed scan reported any.");
     expect(review).toContain("✓");
   });
 
@@ -183,7 +187,7 @@ describe("a completed scan that reported critical findings is not answered with 
     render(<QueryClientProvider client={client}><Overview /></QueryClientProvider>);
     const attention = screen.getByTestId("overview-panel-attention");
     expect(attention.textContent).toMatch(
-      /1 open critical\/high finding · latest completed scan reported 0 critical \/ 2 high; not tracked as findings/,
+      /1 open critical\/high finding · latest completed scan reported 0 critical \/ 2 high that are not tracked as findings/,
     );
     expect(within(attention).getByText("High")).toBeTruthy();
     expect(within(attention).queryByText("Critical")).toBeNull();

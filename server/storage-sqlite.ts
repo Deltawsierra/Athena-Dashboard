@@ -1,6 +1,6 @@
 import { db } from "./db-sqlite";
 import * as schema from "@shared/schema";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import type { IStorage } from "./storage";
@@ -251,11 +251,21 @@ export class SqliteStorage implements IStorage {
     return db.select().from(schema.findingSightings)
       .where(eq(schema.findingSightings.findingId, findingId)).all();
   }
-  async testFiledFindings(testId: string): Promise<boolean> {
-    const one = db.select({ id: schema.findingSightings.id }).from(schema.findingSightings)
+  async filedSeriousFindings(testId: string): Promise<{ critical: number; high: number }> {
+    // Distinct findings: a finding sighted twice by one test is one finding.
+    // Served by idx_sightings_test, then the findings primary key.
+    const severity = sql<string>`lower(coalesce(${schema.findings.severity}, ''))`;
+    const rows = db.select({ severity, n: sql<number>`count(distinct ${schema.findings.id})` })
+      .from(schema.findingSightings)
+      .innerJoin(schema.findings, eq(schema.findings.id, schema.findingSightings.findingId))
       .where(and(eq(schema.findingSightings.testId, testId), eq(schema.findingSightings.seen, true)))
-      .limit(1).get();
-    return one !== undefined;
+      .groupBy(severity)
+      .all();
+    const counts = { critical: 0, high: 0 };
+    for (const row of rows) {
+      if (row.severity === "critical" || row.severity === "high") counts[row.severity] = Number(row.n);
+    }
+    return counts;
   }
   async recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">): Promise<FindingCheck> {
     const row: FindingCheck = { ...check, id: randomUUID(), checkedAt: new Date() };

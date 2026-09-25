@@ -11,6 +11,12 @@
  * source nobody read is not a zero and not an all-clear: every figure here
  * reads "…" while it loads and "—" with the reason when it failed, and the
  * all-clear appears only for a successful, empty answer.
+ *
+ * "Open" here is open or acknowledged (in review): an acknowledged critical
+ * is still there, and used to drop out of every open figure -- so the
+ * reasoning card said "nothing here needs attention" above a register row
+ * reading "Critical · Acknowledged". Accepted risks and verified fixes are
+ * not open, and the all-clear says it does not count them.
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -36,7 +42,7 @@ import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/comp
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
-import type { FindingsSummary, UntrackedScan } from "@shared/findings-summary";
+import { isOpenStatus, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
 /* ---- live types (subset of the API shapes) ---------------------------- */
 interface ApiClient { id: string; name: string; status: string; lastTestDate: string | null }
@@ -178,7 +184,7 @@ export default function Risks() {
   const userName = (id: string | null) => users.find((u) => u.id === id)?.username ?? (id ? "Assigned" : "Unassigned");
 
   // headline counts, from the full engagement record (unaffected by the filters)
-  const allOpen = findings.filter((f) => f.status === "open");
+  const allOpen = findings.filter((f) => isOpenStatus(f.status));
   const crit = allOpen.filter((f) => normSev(f.severity) === "critical").length;
   const high = allOpen.filter((f) => normSev(f.severity) === "high").length;
   const sharpest = allOpen.slice().sort((a, b) => SEV_ORDER.indexOf(normSev(a.severity)) - SEV_ORDER.indexOf(normSev(b.severity)))[0];
@@ -198,7 +204,7 @@ export default function Risks() {
   );
   const filtersActive = sevF !== "all" || statusF !== "all" || catF !== "all" || q !== "";
   const clearFilters = () => { setSevF("all"); setStatusF("all"); setCatF("all"); setSearch(""); };
-  const open = view.filter((f) => f.status === "open");
+  const open = view.filter((f) => isOpenStatus(f.status));
 
   // category (by finding type) breakdown for the donut + legend
   const byCat = new Map<string, number>();
@@ -252,8 +258,8 @@ export default function Risks() {
 
       {/* stats -- all live from the findings ledger */}
       <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
-        <StatCard label="Total Open Risks" value={count((v) => v.counts.open ?? 0)} icon={AlertTriangle}
-          sublabel={source.state === "error" ? "Not in hand" : "This engagement"} />
+        <StatCard label="Total Open Risks" value={count((v) => (v.counts.open ?? 0) + (v.counts.acknowledged ?? 0))} icon={AlertTriangle}
+          sublabel={source.state === "error" ? "Not in hand" : "Open or in review, this engagement"} />
         <StatCard label="Critical Risks" value={count(() => crit)} icon={Flame} accent="var(--sev-critical)" />
         <StatCard label="High Risks" value={count(() => high)} icon={TriangleAlert} accent="var(--sev-high)" />
         <StatCard label="Acknowledged" value={count((v) => v.counts.acknowledged ?? 0)} icon={ShieldCheck} sublabel="in review" />
@@ -395,10 +401,13 @@ export default function Risks() {
                   : sharpest
                     ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity)} severity on ${sharpest.target || "the target"}.`
                     : untracked.state !== "ready"
-                      ? `"No open tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
+                      ? `"No open or in-review tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
                       : untracked.data
-                        ? `"No open tracked findings, but the latest completed scan reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
-                        : "\"No open tracked findings, and the latest completed scan reported no critical or high one. Nothing here needs attention right now.\""}
+                        ? `"No open or in-review tracked findings, but the ${(untracked.data.scans ?? 1) > 1 ? `latest completed scans of ${untracked.data.scans} sites` : "latest completed scan"} reported ${untracked.data.critical} critical / ${untracked.data.high} high that are not tracked as findings."`
+                        // Exactly what it covers. Not "the latest scan reported
+                        // no critical": one it reported and filed, then fixed
+                        // or accepted, is not open and not untracked.
+                        : "\"No open or in-review tracked findings, and every critical or high result of this engagement's latest completed scans is tracked as a finding. Nothing here needs attention right now. Accepted risks and verified fixes are not counted.\""}
               </p>
             </div>
             <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">

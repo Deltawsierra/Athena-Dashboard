@@ -55,7 +55,7 @@ describe("a completed scan's counts that no finding stands behind are reported",
     const summary = (await agent.get("/api/findings/summary")).body;
     expect(mineIn(summary, client.id)).toEqual({
       clientId: client.id, open: 0, critical: 0, high: 0, latestSeriousSeenAt: null,
-      untrackedScan: { testId: created.body.id, completedAt: "2026-09-01T10:00:00.000Z", critical: 3, high: 5 },
+      untrackedScan: { testId: created.body.id, completedAt: "2026-09-01T10:00:00.000Z", critical: 3, high: 5, scans: 1 },
     });
     // Reported, not open: nothing tracks whether those were fixed.
     expect(summary.open.total).toBe(0);
@@ -91,16 +91,41 @@ describe("a completed scan's counts that no finding stands behind are reported",
       clientId: client.id, testType: "vulnerability-scan", status: "completed", completedAt: new Date(),
       criticalCount: 1, highCount: 1, vulnerabilitiesFound: 2, findings: { runId: "run-filed" },
     });
-    const finding = await storage.createFinding({
+    const critical = await storage.createFinding({
       fingerprint: "filed-1", clientId: client.id, engagementRef: client.id, type: "sqli", severity: "critical",
     });
-    await storage.updateFinding(finding.id, { status: "accepted" });
-    await storage.recordSighting(finding.id, "run-filed", test.id, true);
+    const high = await storage.createFinding({
+      fingerprint: "filed-2", clientId: client.id, engagementRef: client.id, type: "xss", severity: "high",
+    });
+    await storage.updateFinding(critical.id, { status: "accepted" });
+    await storage.updateFinding(high.id, { status: "fixed" });
+    await storage.recordSighting(critical.id, "run-filed", test.id, true);
+    await storage.recordSighting(high.id, "run-filed", test.id, true);
 
     const summary = (await agent.get("/api/findings/summary")).body;
-    // Its one filed finding was accepted, so nothing is open -- and the scan's
-    // own counts are not a second, untracked copy of it.
+    // Its critical was accepted and its high verified fixed, so nothing is
+    // open -- and the scan's own counts are not a second, untracked copy.
     expect(mineIn(summary, client.id)).toMatchObject({ open: 0, critical: 0, untrackedScan: null });
+  });
+
+  it("a test that filed fewer criticals or highs than it reported has the shortfall reported", async () => {
+    // Round 3, F2: "filed anything" used to count as "filed everything".
+    const agent = await signIn(app);
+    const client = await aClient(agent, "Short");
+    const test = await storage.createTest({
+      clientId: client.id, testType: "vulnerability-scan", status: "completed", completedAt: new Date(),
+      criticalCount: 2, highCount: 1, mediumCount: 1, vulnerabilitiesFound: 4, findings: { runId: "run-short" },
+    });
+    // It filed one critical and a medium; the second critical and the high
+    // stand behind nothing.
+    for (const [fp, severity] of [["short-1", "critical"], ["short-2", "medium"]]) {
+      const one = await storage.createFinding({ fingerprint: fp, clientId: client.id, engagementRef: client.id, type: fp, severity });
+      await storage.recordSighting(one.id, "run-short", test.id, true);
+    }
+    const summary = (await agent.get("/api/findings/summary")).body;
+    expect(mineIn(summary, client.id)).toMatchObject({
+      open: 2, critical: 1, untrackedScan: { testId: test.id, critical: 1, high: 1, scans: 1 },
+    });
   });
 
   it("a test that only recorded findings as NOT seen filed nothing, so its counts are still reported", async () => {
@@ -130,7 +155,7 @@ describe("a completed scan's counts that no finding stands behind are reported",
 
   it("gives no totals when whether a test filed anything cannot be read", async () => {
     const agent = await signIn(app);
-    const spy = vi.spyOn(storage, "testFiledFindings").mockRejectedValueOnce(new Error("sightings unreadable"));
+    const spy = vi.spyOn(storage, "filedSeriousFindings").mockRejectedValueOnce(new Error("sightings unreadable"));
     const res = await agent.get("/api/findings/summary");
     spy.mockRestore();
     expect(res.status).toBe(500);
@@ -157,7 +182,7 @@ describe("the untracked-scan rule, pure", () => {
       ] as never,
     });
     expect(summary.byClient.map((one) => one.untrackedScan)).toEqual([
-      { testId: "new", completedAt: null, critical: 0, high: 1 },
+      { testId: "new", completedAt: null, critical: 0, high: 1, scans: 1 },
       null,
     ]);
   });
@@ -181,33 +206,51 @@ describe("the untracked-scan rule, pure", () => {
     expect(summary.byClient[0].untrackedScan).toBeNull();
   });
 
-  it("names nothing untracked for a test in the filed set", () => {
+  it("names nothing untracked for a test that filed a finding for every critical and high it reported", () => {
     const summary = summarizeFindings({
       clients, sites: [], findings: [],
-      tests: [test({ id: "f", criticalCount: 2 })] as never,
-      filedTestIds: new Set(["f"]),
+      tests: [test({ id: "f", criticalCount: 2, highCount: 1 })] as never,
+      filed: new Map([["f", { critical: 2, high: 1 }]]),
     });
     expect(summary.byClient[0].untrackedScan).toBeNull();
   });
+
+  it("compares per severity: a filed high does not stand behind a reported critical", () => {
+    const summary = summarizeFindings({
+      clients, sites: [], findings: [],
+      tests: [test({ id: "f", criticalCount: 1, highCount: 0 })] as never,
+      filed: new Map([["f", { critical: 0, high: 3 }]]),
+    });
+    expect(summary.byClient[0].untrackedScan).toMatchObject({ testId: "f", critical: 1, high: 0 });
+  });
 });
 
-describe("whether a test filed anything, on the SQLite backend", () => {
+describe("what a test filed at critical and high, on the SQLite backend", () => {
   let sqlite: IStorage;
   beforeAll(async () => {
     process.env.ATHENA_DB_PATH = ":memory:";
     sqlite = (await import("../server/storage-sqlite")).storage;
   });
 
-  it("is true only for a test that recorded a seen sighting", async () => {
+  it("counts the distinct critical and high findings a test sighted as seen, and nothing it did not", async () => {
     const client = await sqlite.createClient({ name: "Q", company: "Q", email: "q@example.test" });
-    const finding = await sqlite.createFinding({
-      fingerprint: "q-1", clientId: client.id, engagementRef: client.id, type: "xss", severity: "high",
+    const make = (fp: string, severity: string | null) => sqlite.createFinding({
+      fingerprint: fp, clientId: client.id, engagementRef: client.id, type: "xss", severity,
     });
-    await sqlite.recordSighting(finding.id, "run-seen", "test-seen", true);
-    await sqlite.recordSighting(finding.id, "run-unseen", "test-unseen", false);
-    expect(await sqlite.testFiledFindings("test-seen")).toBe(true);
-    expect(await sqlite.testFiledFindings("test-unseen")).toBe(false);
-    expect(await sqlite.testFiledFindings("test-never")).toBe(false);
+    const high = await make("q-1", "high");
+    const critical = await make("q-2", "Critical");
+    const medium = await make("q-3", "medium");
+    const unrated = await make("q-4", null);
+    await sqlite.recordSighting(high.id, "run-seen", "test-seen", true);
+    // The same finding sighted again under another run of the same test is one finding.
+    await sqlite.recordSighting(high.id, "run-seen-2", "test-seen", true);
+    await sqlite.recordSighting(critical.id, "run-seen", "test-seen", true);
+    await sqlite.recordSighting(medium.id, "run-seen", "test-seen", true);
+    await sqlite.recordSighting(unrated.id, "run-seen", "test-seen", true);
+    await sqlite.recordSighting(high.id, "run-unseen", "test-unseen", false);
+    expect(await sqlite.filedSeriousFindings("test-seen")).toEqual({ critical: 1, high: 1 });
+    expect(await sqlite.filedSeriousFindings("test-unseen")).toEqual({ critical: 0, high: 0 });
+    expect(await sqlite.filedSeriousFindings("test-never")).toEqual({ critical: 0, high: 0 });
   });
 });
 

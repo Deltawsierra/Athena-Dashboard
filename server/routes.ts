@@ -48,6 +48,28 @@ function hostOf(url: string): string | null {
 const createTestSchema = insertTestSchema.omit({ executedBy: true, isSample: true });
 
 /**
+ * When a test becomes completed, it completed now -- unless the caller says
+ * when it did.
+ *
+ * Nothing stamped it. The Tests screen never sends a completion time, so a
+ * pentest recorded as completed today kept completedAt null, and every
+ * "latest completed test" rule fell back to when the row was created: a
+ * pentest opened as pending last week and finished today ranked behind an
+ * engine scan that finished yesterday, and that scan's clean result cleared
+ * the pentest's reported criticals. Stamped on create with status
+ * "completed", and on an update that moves a test to "completed" from
+ * anything else. A test already completed keeps the time it has: an edit to
+ * its summary is not a new completion.
+ */
+function completionStamp(
+  data: { status?: string | null; completedAt?: Date | null },
+  before: { status: string } | null,
+): { completedAt?: Date } {
+  const completing = data.status === "completed" && before?.status !== "completed";
+  return completing && data.completedAt == null ? { completedAt: new Date() } : {};
+}
+
+/**
  * `isSample` marks a row the installer wrote, and nothing else may claim it.
  * A caller who could set it could hide real findings behind a label that says
  * "not real", or dress invented ones up as measured. It is stripped from
@@ -609,7 +631,11 @@ export function registerRoutes(app: Express): void {
     if (forgedAttribution(res, req.body)) return;
     const data = createTestSchema.parse(req.body);
     if (await parentMissing(res, data.clientId, data.siteId)) return;
-    const test = await storage.createTest({ ...data, executedBy: req.session.userId ?? null });
+    const test = await storage.createTest({
+      ...data,
+      ...completionStamp(data, null),
+      executedBy: req.session.userId ?? null,
+    });
     await storage.createActivityLog({
       action: "created", entityType: "test", entityId: test.id,
       details: { testType: test.testType, clientId: test.clientId }, ...actor(req),
@@ -620,7 +646,9 @@ export function registerRoutes(app: Express): void {
   app.patch("/api/tests/:id", asyncHandler(async (req, res) => {
     if (forgedAttribution(res, req.body)) return;
     const data = updateTestSchema.parse(req.body);
-    const test = await storage.updateTest(req.params.id, data);
+    const before = await storage.getTest(req.params.id);
+    if (!before) return notFound(res, "Test");
+    const test = await storage.updateTest(req.params.id, { ...data, ...completionStamp(data, before) });
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
       await storage.createActivityLog({ action: "updated", entityType: "test", entityId: test.id, details: null, ...actor(req) });
