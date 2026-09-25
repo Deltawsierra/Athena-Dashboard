@@ -21,6 +21,7 @@ import { FlaskConical, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { isAdmin } from "@/utils/auth";
+import { loaded } from "@/lib/loaded";
 import type { PublicUser, SampleDataCounts } from "@shared/schema";
 
 /** Everything a removal changes, so no screen keeps showing what is gone. */
@@ -50,6 +51,12 @@ const NOUNS: Record<keyof SampleDataCounts, [string, string]> = {
   findings: ["finding", "findings"],
 };
 
+/** "clients, tests and findings": what this screen counts, by name. */
+function nounList(keys: Array<keyof SampleDataCounts>): string {
+  const names = keys.map((key) => NOUNS[key][1]);
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 /** "3 clients, 4 sites and 23 findings", or "" when none of them are seeded. */
 function phrase(counts: SampleDataCounts, keys: Array<keyof SampleDataCounts>) {
   const present = keys.filter((key) => counts[key] > 0);
@@ -75,7 +82,11 @@ export default function SampleDataNotice({
 }: SampleDataNoticeProps) {
   const { toast } = useToast();
 
-  const { data } = useQuery<SampleDataCounts>({ queryKey: ["/api/sample-data"] });
+  // Read error-first (lib/loaded.ts). A count that could not be read is not a
+  // count of zero: returning nothing on a failed read took the disclosure off
+  // every screen of a demo install at once, so the seeded rows rendered
+  // unlabelled. Nor is a count read before a refetch failed still current.
+  const counted = loaded(useQuery<SampleDataCounts>({ queryKey: ["/api/sample-data"] }));
 
   // Asked here rather than threaded down from the router, so the notice can be
   // dropped onto a screen without that screen having to know who is signed in.
@@ -105,8 +116,28 @@ export default function SampleDataNotice({
     },
   });
 
-  if (!data) return null;
-  const { said, plural, mentionsFindings } = phrase(data, counts);
+  if (counted.state === "loading") return null;
+  if (counted.state === "error") {
+    return (
+      <div
+        className={`athena-panel flex items-start gap-3 p-4 ${className ?? ""}`}
+        style={{ borderColor: "hsl(var(--gold) / 0.4)" }}
+        data-testid="notice-sample-data"
+        data-state="unchecked"
+      >
+        <FlaskConical className="athena-gold mt-0.5 h-4 w-4 shrink-0" />
+        <div className="min-w-0">
+          <div className="athena-label athena-gold">Sample data</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Could not check for installer sample rows: {counted.message}. If this install was seeded for a demo
+            (ATHENA_SEED_SAMPLE_DATA), some of the {nounList(counts)} on this screen may have been written by the
+            installer rather than recorded from any system.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  const { said, plural, mentionsFindings } = phrase(counted.data, counts);
   // Nothing seeded is still on this screen, so there is nothing to disclose.
   if (said === "") return null;
 

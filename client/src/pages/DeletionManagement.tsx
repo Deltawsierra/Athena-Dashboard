@@ -10,6 +10,7 @@ import { queryClient, apiRequest } from "@/lib/queryClient";
 import type { Client, Test, Document } from "@shared/schema";
 import AnimatedContainer from "@/components/AnimatedContainer";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -129,6 +130,10 @@ export default function DeletionManagement() {
             </motion.p>
           </div>
         </AnimatedContainer>
+
+        {/* This screen lists and counts every client, test and document --
+            seeded demo rows among them -- so it says how many are seeded. */}
+        <SampleDataNotice counts={["clients", "tests", "documents"]} />
 
         {/* Warning Banner */}
         <AnimatedContainer direction="up" delay={0.1}>

@@ -27,6 +27,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import GlassCard from "@/components/GlassCard";
+import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -232,6 +233,8 @@ export default function AthenaScan() {
       </div>
 
       <Divider variant="astrolabe" className="mt-5" />
+      {/* The deployment and site pickers list seeded demo rows like any other. */}
+      <SampleDataNotice counts={["clients", "sites"]} className="mt-5" />
 
       {/* ---- Engine status: the honest banner --------------------------- */}
       {engine$.state === "error" && (
