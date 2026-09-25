@@ -40,13 +40,17 @@ export default function Documents() {
   const { toast } = useToast();
 
   const {
-    data: documents = [],
+    data: held,
     isLoading,
     isError: documentsFailed,
     error: documentsError,
   } = useQuery<Document[]>({
     queryKey: ["/api/documents"],
   });
+  // Every create, edit and delete refetches the list. A refetch that failed
+  // keeps the last list in the cache; drawn under the error, it read as the
+  // current record. The error wins (lib/loaded.ts): no rows from a failed read.
+  const documents = documentsFailed ? [] : held ?? [];
 
   const { data: clients = [] } = useQuery<Client[]>({
     queryKey: ["/api/clients"],

@@ -26,7 +26,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { errorMessage } from "@/lib/loaded";
+import { loaded } from "@/lib/loaded";
 import {
   Snowflake,
   Play,
@@ -296,7 +296,7 @@ function CommandConsole({
   const [keyId, setKeyId] = useState("");
   const [signature, setSignature] = useState("");
 
-  const { data, isLoading } = useQuery<DraftedCommand>({
+  const commandQ = useQuery<DraftedCommand>({
     queryKey: ["/api/failsafe/commands", uuid],
     // Poll while the command is still collecting signatures, so a second
     // operator's paste-back shows up here and a fill-up to `ready` is visible.
@@ -305,6 +305,11 @@ function CommandConsole({
       return status === "awaiting_signatures" ? 3_000 : false;
     },
   });
+  // A poll that failed after one that succeeded leaves the last answer in the
+  // cache. Its status and signer count are then a reading nobody has taken
+  // since, so the error wins over it (see lib/loaded.ts).
+  const command$ = loaded(commandQ);
+  const data = command$.state === "ready" ? command$.data : undefined;
 
   const submit = useMutation({
     mutationFn: async () => {
@@ -355,7 +360,20 @@ function CommandConsole({
     },
   });
 
-  if (isLoading || !data) {
+  if (command$.state === "error") {
+    return (
+      <div className="space-y-4 py-6 text-center text-sm text-muted-foreground" data-testid="text-command-unread">
+        <p>
+          Could not read this command from the control plane: {command$.message}. Its status and signatures are
+          not shown, because the last ones read may no longer be current.
+        </p>
+        <Button type="button" variant="outline" onClick={onClose} data-testid="button-close-console">
+          Close
+        </Button>
+      </div>
+    );
+  }
+  if (!data) {
     return (
       <div className="py-10 text-center text-sm text-muted-foreground">Loading the command…</div>
     );
@@ -547,14 +565,20 @@ export default function Failsafe() {
   // The command whose console is open.
   const [openUuid, setOpenUuid] = useState<string | null>(null);
 
-  const {
-    data: status,
-    isError: statusFailed,
-    error: statusError,
-  } = useQuery<FailsafeStatus>({
+  // Every source on this console is polled, and React Query keeps the last
+  // answer after a poll fails. Read raw, that answer went on rendering as the
+  // current one: the governor said "running" and the counts held while every
+  // read of the engine state was failing. So each is read through loaded(),
+  // where an error wins over data it has since failed to refresh, and nothing
+  // is derived from a status or state that is not in hand -- including
+  // whether the controls are live.
+  const status$ = loaded(useQuery<FailsafeStatus>({
     queryKey: ["/api/failsafe/status"],
     refetchInterval: 30_000,
-  });
+  }));
+  const status = status$.state === "ready" ? status$.data : undefined;
+  const statusFailed = status$.state === "error";
+  const statusError = status$.state === "error" ? status$.message : "";
 
   // Default the engine id from the deployment, once, until the operator types.
   const effectiveEngineId = engineIdTouched ? engineId : engineId || status?.defaultEngineId || "";
@@ -562,27 +586,26 @@ export default function Failsafe() {
   const configured = status?.configured === true;
   const authorized = status?.authorized === true;
   const canOperate = configured && authorized;
+  const stateReadable = canOperate && effectiveEngineId.length > 0;
 
-  const {
-    data: state,
-    isError: stateFailed,
-    error: stateError,
-  } = useQuery<FailsafeStateView>({
+  const state$ = loaded(useQuery<FailsafeStateView>({
     queryKey: ["/api/failsafe/state", effectiveEngineId],
-    enabled: canOperate && effectiveEngineId.length > 0,
+    enabled: stateReadable,
     refetchInterval: 5_000,
-  });
+  }));
+  // Only while it can be read at all: a query switched off keeps its last
+  // answer too, and that answer is about a control plane this page can no
+  // longer vouch for.
+  const state = stateReadable && state$.state === "ready" ? state$.data : undefined;
+  const stateFailed = stateReadable && state$.state === "error";
 
-  const {
-    data: audit = [],
-    isSuccess: auditRead,
-    isError: auditFailed,
-    error: auditError,
-  } = useQuery<FailsafeAuditEvent[]>({
+  const audit$ = loaded(useQuery<FailsafeAuditEvent[]>({
     queryKey: ["/api/failsafe/audit"],
     enabled: canOperate,
     refetchInterval: 15_000,
-  });
+  }));
+  const audit = canOperate && audit$.state === "ready" ? audit$.data : undefined;
+  const auditFailed = canOperate && audit$.state === "error";
 
   // The command counts and the governor state come from the engine's state
   // read. Until it has answered -- the control plane not ready, no engine
@@ -590,7 +613,7 @@ export default function Failsafe() {
   const stateCount = (read: (view: FailsafeStateView) => number) =>
     state ? read(state) : stateFailed || !canOperate || effectiveEngineId.length === 0 ? "—" : "…";
   const stateUnread = stateFailed
-    ? `Could not read the engine state: ${errorMessage(stateError)}`
+    ? `Could not read the engine state: ${state$.state === "error" ? state$.message : ""}`
     : !canOperate
       ? "Not read: the failsafe control plane is not ready."
       : effectiveEngineId.length === 0
@@ -648,7 +671,7 @@ export default function Failsafe() {
             <div className="font-medium">The failsafe control plane is not ready</div>
             <p className="text-sm text-muted-foreground">
               {statusFailed
-                ? `Could not read the failsafe status: ${errorMessage(statusError)}`
+                ? `Could not read the failsafe status: ${statusError}`
                 : status?.detail ?? "Checking the control plane…"}
             </p>
           </div>
@@ -758,7 +781,12 @@ export default function Failsafe() {
       <div className="mt-8">
         <AthenaLabel>Commands in flight</AthenaLabel>
         <div className="mt-3 space-y-3">
-          {inFlight.length === 0 && (
+          {/* "None in flight" only about a state read that answered. */}
+          {!state ? (
+            <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground" data-testid="text-inflight-unread">
+              {stateUnread}
+            </GlassCard>
+          ) : inFlight.length === 0 && (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground">
               No commands awaiting signatures or waiting on the engine.
             </GlassCard>
@@ -806,10 +834,10 @@ export default function Failsafe() {
           <div className="divide-y divide-border/50">
             {/* "No activity recorded" only about an audit read that came back
                 empty -- not one that failed, has not run, or cannot run. */}
-            {!auditRead ? (
+            {!audit ? (
               <div className="py-8 text-center text-sm text-muted-foreground">
                 {auditFailed
-                  ? `Could not load failsafe activity: ${errorMessage(auditError)}`
+                  ? `Could not load failsafe activity: ${audit$.state === "error" ? audit$.message : ""}`
                   : !canOperate
                     ? "Failsafe activity is not readable until the control plane is ready."
                     : "Loading failsafe activity…"}
@@ -817,7 +845,7 @@ export default function Failsafe() {
             ) : audit.length === 0 && (
               <div className="py-8 text-center text-sm text-muted-foreground">No failsafe activity recorded yet.</div>
             )}
-            {audit.slice(0, 20).map((event) => (
+            {(audit ?? []).slice(0, 20).map((event) => (
               <div key={event.uuid} className="flex items-center justify-between gap-3 px-5 py-3">
                 <div className="min-w-0">
                   <span className="font-medium">{event.event.replace(/_/g, " ")}</span>
@@ -894,10 +922,11 @@ export default function Failsafe() {
             <AlertDialogCancel data-testid="button-cancel-draft">Cancel</AlertDialogCancel>
             <AlertDialogAction
               className={cn(pending?.weight === "critical" && "bg-sev-critical text-white hover:bg-sev-critical/90")}
-              disabled={!terminateArmed || draft.isPending}
+              disabled={!canOperate || !terminateArmed || draft.isPending}
               onClick={(e) => {
-                // Keep the dialog logic ours; only fire when armed.
-                if (!pending || !terminateArmed) {
+                // Keep the dialog logic ours; only fire when armed, and only
+                // while the control plane's status is in hand and says it can.
+                if (!pending || !terminateArmed || !canOperate) {
                   e.preventDefault();
                   return;
                 }

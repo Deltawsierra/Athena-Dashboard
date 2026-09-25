@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { errorMessage } from "@/lib/loaded";
+import { loaded } from "@/lib/loaded";
 import { motion } from "framer-motion";
 import { Shield, Power, AlertTriangle, Settings, Activity, Zap, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,14 +19,16 @@ export default function AIControlPanel() {
   const { toast } = useToast();
   const [isKillSwitchConfirmOpen, setIsKillSwitchConfirmOpen] = useState(false);
 
-  const {
-    data: settings,
-    isLoading,
-    isError: settingsFailed,
-    error: settingsError,
-  } = useQuery<AIControlSetting>({
+  // Read error-first (lib/loaded.ts). Every change below invalidates and
+  // refetches these settings, and a refetch that failed used to leave the last
+  // answer in place -- the kill switch drawn in a state nobody had read since,
+  // right under "Could not load the AI control settings".
+  const settings$ = loaded(useQuery<AIControlSetting>({
     queryKey: ["/api/ai-control"],
-  });
+  }));
+  const settings = settings$.state === "ready" ? settings$.data : undefined;
+  const isLoading = settings$.state === "loading";
+  const settingsFailed = settings$.state === "error";
   // Whether the settings are in hand. When they are not, no control is drawn
   // in a state nobody read: not the kill switch as off, not a system as
   // offline, not a limit at a default the record may not hold.
@@ -166,7 +168,7 @@ export default function AIControlPanel() {
         {settingsFailed && (
           <GlassCard className="border border-destructive/50">
             <CardContent className="pt-6 text-sm text-muted-foreground" data-testid="text-settings-failed">
-              Could not load the AI control settings: {errorMessage(settingsError)}
+              Could not load the AI control settings: {settings$.state === "error" ? settings$.message : ""}
             </CardContent>
           </GlassCard>
         )}

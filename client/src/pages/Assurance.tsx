@@ -23,6 +23,7 @@
  * human can make the release decision from them.
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { loaded } from "@/lib/loaded";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
@@ -7574,15 +7575,18 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const collapseSeeded = useRef(false);
 
-  const {
-    data: status,
-    isLoading: statusLoading,
-    isError: statusError,
-    error: statusErr,
-  } = useQuery<AssuranceStatus>({
+  // Polled. React Query keeps the last answer after a poll fails, and read
+  // raw that answer went on drawing the control plane as reachable -- the
+  // registries and every control under "Could not check the control plane".
+  // Read through loaded(), the failed check wins: nothing is drawn from a
+  // reachability this page could not confirm.
+  const status$ = loaded(useQuery<AssuranceStatus>({
     queryKey: ["/api/assurance/status"],
     refetchInterval: 30_000,
-  });
+  }));
+  const status = status$.state === "ready" ? status$.data : undefined;
+  const statusLoading = status$.state === "loading";
+  const statusError = status$.state === "error";
   const reachable = status?.configured === true && status?.reachable === true && status?.authorized === true;
 
   // Everything is fetched whole and grouped in the browser: the graph needs each
@@ -7927,7 +7931,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-foreground">Could not check the control plane.</p>
             <p className="mt-1 text-muted-foreground">
-              {statusErr instanceof Error ? statusErr.message : "The status request failed."}
+              {status$.state === "error" ? status$.message : "The status request failed."}
             </p>
           </div>
         </GlassCard>

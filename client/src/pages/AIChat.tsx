@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { errorMessage } from "@/lib/loaded";
+import { loaded } from "@/lib/loaded";
 import { motion, AnimatePresence } from "framer-motion";
 import { MessageSquare, Send, Paperclip, FileText, Copy, Check, Bot, User, Unplug } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,20 +27,24 @@ export default function AIChat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const {
-    data: messages = [],
-    isLoading,
-    isError: messagesFailed,
-    error: messagesError,
-  } = useQuery<AIChatMessage[]>({
+  // Read error-first (lib/loaded.ts): the conversation is refetched after
+  // every message sent, and a refetch that failed used to leave the last list
+  // on screen as if it were the whole conversation.
+  const messages$ = loaded(useQuery<AIChatMessage[]>({
     queryKey: ["/api/chat"],
-  });
+  }));
+  const messages = messages$.state === "ready" ? messages$.data : [];
+  const isLoading = messages$.state === "loading";
+  const messagesFailed = messages$.state === "error";
   // A failed read is not an empty conversation: its counts are unknown.
   const tally = (n: number) => (messagesFailed ? "—" : n);
 
-  const { data: assistant } = useQuery<AssistantStatus>({
+  // Whether an assistant is connected, as the server last said -- or unknown.
+  // A failed read is neither "connected" nor "not connected".
+  const assistant$ = loaded(useQuery<AssistantStatus>({
     queryKey: ["/api/assistant/status"],
-  });
+  }));
+  const assistant = assistant$.state === "ready" ? assistant$.data : undefined;
 
   const sendMutation = useMutation({
     mutationFn: async (text: string) => {
@@ -151,6 +155,14 @@ export default function AIChat() {
           </div>
         </AnimatedContainer>
 
+        {assistant$.state === "error" && (
+          <GlassCard ruling>
+            <p className="text-sm text-muted-foreground" data-testid="text-assistant-unread">
+              Could not check whether an assistant is connected: {assistant$.message}
+            </p>
+          </GlassCard>
+        )}
+
         {assistant && !assistant.configured && (
           <GlassCard ruling>
             <div className="flex gap-3 items-start">
@@ -201,7 +213,9 @@ export default function AIChat() {
                         : "hsl(var(--sev-info))",
                     }}
                   />
-                  {assistant?.configured ? assistant.model : "Not connected"}
+                  {assistant
+                    ? assistant.configured ? assistant.model : "Not connected"
+                    : assistant$.state === "error" ? "Status unknown" : "Checking…"}
                 </Badge>
               </div>
             </CardHeader>
@@ -283,8 +297,8 @@ export default function AIChat() {
                     <div className="text-center space-y-2">
                       <Bot className="w-16 h-16 text-muted-foreground mx-auto opacity-50" />
                       <p className="text-muted-foreground">
-                        {messagesFailed
-                          ? `Could not load the conversation: ${errorMessage(messagesError)}`
+                        {messages$.state === "error"
+                          ? `Could not load the conversation: ${messages$.message}`
                           : "No messages yet. Start a conversation with Athena AI"}
                       </p>
                     </div>

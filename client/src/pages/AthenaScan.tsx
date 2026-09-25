@@ -30,6 +30,7 @@ import GlassCard from "@/components/GlassCard";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
@@ -97,10 +98,15 @@ export default function AthenaScan() {
   const [target, setTarget] = useState("");
   const [testId, setTestId] = useState<string | null>(null);
 
-  const { data: engine } = useQuery<EngineStatus>({
+  // Polled, like the scan below. React Query keeps the last answer after a
+  // poll fails, and read raw that answer went on saying "engine at <url>"
+  // while the status could not be read. Read through loaded(), a failed read
+  // is said as one, and scanning is off until the status is in hand again.
+  const engine$ = loaded(useQuery<EngineStatus>({
     queryKey: ["/api/engine/status"],
     refetchInterval: 30_000,
-  });
+  }));
+  const engine = engine$.state === "ready" ? engine$.data : undefined;
 
   const { data: clients = [] } = useQuery<Client[]>({ queryKey: ["/api/clients"] });
   const { data: sites = [] } = useQuery<Site[]>({ queryKey: ["/api/sites"] });
@@ -113,7 +119,7 @@ export default function AthenaScan() {
     if (siteId && !sitesForClient.some((site) => site.id === siteId)) setSiteId("");
   }, [siteId, sitesForClient]);
 
-  const { data: scan } = useQuery<ScanView>({
+  const scan$ = loaded(useQuery<ScanView>({
     queryKey: [`/api/scans/${testId}`],
     enabled: testId !== null,
     // Polled while it moves, left alone once it has stopped.
@@ -121,7 +127,12 @@ export default function AthenaScan() {
       const state = (query.state.data as ScanView | undefined)?.state;
       return state && FINISHED.has(state) ? false : 2_000;
     },
-  });
+  }));
+  // The scan's last state, only while it is current. When a poll fails the
+  // run may still be going: the state is said to be unread, the stop stays
+  // within reach, and a second scan is not started over it.
+  const scan = scan$.state === "ready" ? scan$.data : undefined;
+  const scanUnread = testId !== null && scan$.state === "error" ? scan$.message : null;
 
   const start = useMutation({
     mutationFn: async () => {
@@ -169,6 +180,7 @@ export default function AthenaScan() {
   const findings = returned.filter((f) => !f.internal);
   const notes = returned.filter((f) => f.internal);
   const running = scan !== undefined && !FINISHED.has(scan.state);
+  const mayBeRunning = running || scanUnread !== null;
   const finished = scan !== undefined && FINISHED.has(scan.state);
 
   const counts: SeverityCounts = {
@@ -222,6 +234,19 @@ export default function AthenaScan() {
       <Divider variant="astrolabe" className="mt-5" />
 
       {/* ---- Engine status: the honest banner --------------------------- */}
+      {engine$.state === "error" && (
+        <GlassCard ruling className="mt-6">
+          <div className="flex items-start gap-3">
+            <Plug className="mt-0.5 h-5 w-5 shrink-0 text-gold" />
+            <div className="space-y-1">
+              <p className="athena-label">Could not check the engine</p>
+              <p className="text-[13px] text-muted-foreground" data-testid="text-engine-unread">
+                {engine$.message}. Scanning is off until the engine&apos;s status can be read again.
+              </p>
+            </div>
+          </div>
+        </GlassCard>
+      )}
       {engine?.reachable && engineReady && (
         <div className="mt-6 flex items-center gap-2 text-[11px] text-muted-foreground" data-testid="text-engine-connected">
           <span className="athena-live h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary)/0.9)]" />
@@ -250,7 +275,7 @@ export default function AthenaScan() {
           className="space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (canScan && !running) start.mutate();
+            if (canScan && !mayBeRunning) start.mutate();
           }}
         >
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -313,11 +338,11 @@ export default function AthenaScan() {
           </p>
 
           <div className="flex items-center gap-3">
-            <Button type="submit" data-testid="button-start-scan" disabled={!canScan || start.isPending || running}>
+            <Button type="submit" data-testid="button-start-scan" disabled={!canScan || start.isPending || mayBeRunning}>
               <Play className="mr-2 h-4 w-4" />
               {start.isPending ? "Asking the engine…" : "Start scan"}
             </Button>
-            {running && (
+            {mayBeRunning && (
               <Button
                 type="button"
                 variant="destructive"
@@ -339,6 +364,14 @@ export default function AthenaScan() {
       </GlassCard>
 
       {/* ---- Live scan: only real readings ------------------------------ */}
+      {scanUnread !== null && (
+        <GlassCard ruling className="mt-5">
+          <p className="text-[13px] text-muted-foreground" data-testid="text-scan-unread">
+            Could not read this scan&apos;s state: {scanUnread}. It may still be running; the page keeps asking,
+            and the stop stays available until the engine answers.
+          </p>
+        </GlassCard>
+      )}
       {scan && (
         <>
           {/* Top row: target + state */}
@@ -480,7 +513,7 @@ export default function AthenaScan() {
       )}
 
       {/* No scan yet: an honest prompt, not a fabricated run. */}
-      {!scan && engineReady && (
+      {testId === null && engineReady && (
         <GlassCard className="mt-5">
           <p className="text-[13px] text-muted-foreground">
             No scan running. Choose a deployment and a target above, and Athena dispatches a
