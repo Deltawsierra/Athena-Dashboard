@@ -155,7 +155,9 @@ describe("Deployments (default build) states only what the record says", () => {
     ]);
     const r = row("Unscanned App");
     expect(within(r).getByText("Running")).toBeTruthy();
-    expect(within(r).getByText("High")).toBeTruthy();
+    // The worse of the severity field ("high") and the counts (one critical):
+    // the record reports a critical, and the band says so.
+    expect(within(r).getByText("Critical")).toBeTruthy();
     expect(r.textContent).toContain("4 (1C / 2H)");
     expect(step("Scan")).toContain("1 of 1 with a completed scan · 1 in flight.");
     // Findings to review come from the open findings on record.

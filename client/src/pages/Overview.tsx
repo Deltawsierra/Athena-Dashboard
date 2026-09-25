@@ -75,6 +75,7 @@ import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from
 import { cn } from "@/lib/utils";
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import type { FindingsSummary, UntrackedScan } from "@shared/findings-summary";
+import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
 
 /* ---- the page's model: what every panel renders, live or sample ------- */
 
@@ -129,6 +130,7 @@ interface ApiSite { id: string; clientId: string; environment: string }
 interface ApiTest {
   id: string; clientId: string; siteId: string | null; testType: string; status: string;
   startedAt: string; completedAt: string | null; vulnerabilitiesFound: number;
+  criticalCount: number; highCount: number; mediumCount: number; lowCount: number; findings?: unknown;
 }
 interface ApiDeployment { uuid: string; decision: string | null }
 
@@ -403,7 +405,11 @@ function useLiveOverview(): OverviewModel {
           icon: done ? CheckCircle2 : failed ? XCircle : ScanLine,
           tone: done ? "text-emerald-400" : failed ? "text-sev-high" : "text-primary",
           text: `${humanize(t.status)}: ${humanize(t.testType)}`,
-          meta: [nameOf.get(t.clientId) ?? "Unknown client", done ? `${plural(t.vulnerabilitiesFound, "finding")} reported` : null]
+          // From the counts too, and never a 0 nobody recorded: a total left
+          // at 0 beside "Critical Count: 2" said "0 findings reported".
+          meta: [nameOf.get(t.clientId) ?? "Unknown client", !done ? null
+            : countsNotRecorded(t) ? "counts not recorded"
+            : `${plural(reportedTotal(t), "finding")} reported`]
             .filter(Boolean)
             .join(" · "),
           ago: ago(t.completedAt || t.startedAt),

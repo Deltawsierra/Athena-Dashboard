@@ -82,21 +82,34 @@ function summaryContext() {
     { critical: 0, high: 0, medium: 0, low: 0 },
   );
 
+  // shared/latest-scans.ts countsNotRecorded, restated for the raw row.
+  const countsNotRecorded = (t) => {
+    if (t.status !== "completed") return false;
+    if ((t.vulnerabilities_found ?? 0) + (t.critical_count ?? 0) + (t.high_count ?? 0)
+      + (t.medium_count ?? 0) + (t.low_count ?? 0) > 0) return false;
+    let recorded = t.findings;
+    try { recorded = typeof recorded === "string" ? JSON.parse(recorded) : recorded; } catch { return false; }
+    const results = recorded && typeof recorded === "object" ? recorded.results : undefined;
+    return Array.isArray(results) && results.some((one) => one !== null && typeof one === "object" && one.internal !== true);
+  };
+  const unrecorded = tests.filter(countsNotRecorded).length;
   const recent = tests
     .slice()
     .sort((a, b) => Number(b.started_at) - Number(a.started_at))
     .slice(0, 8)
     .map((t) => {
       const site = sites.find((s) => s.id === t.site_id);
-      return `- ${t.test_type} on ${site?.name ?? "an unnamed site"}: ${t.status}, `
-        + `${t.critical_count} critical / ${t.high_count} high `
-        + `/ ${t.medium_count} medium / ${t.low_count} low`;
+      const counts = t.status !== "completed" ? "no counts until it completes"
+        : countsNotRecorded(t) ? "counts not recorded"
+        : `${t.critical_count} critical / ${t.high_count} high / ${t.medium_count} medium / ${t.low_count} low`;
+      return `- ${t.test_type} on ${site?.name ?? "an unnamed site"}: ${t.status}, ${counts}`;
     });
 
   return [
     `${clients.length} clients, ${sites.length} sites, ${tests.length} tests recorded.`,
     `Across all tests: ${totals.critical} critical, ${totals.high} high, `
-      + `${totals.medium} medium, ${totals.low} low.`,
+      + `${totals.medium} medium, ${totals.low} low.`
+      + (unrecorded > 0 ? ` Counts were not recorded for ${unrecorded} completed scan${unrecorded === 1 ? "" : "s"}, so these totals leave them out.` : ""),
     recent.length ? "Most recent tests:" : "No tests have been recorded yet.",
     ...recent,
   ].join("\n");

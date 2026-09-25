@@ -41,6 +41,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
+import { reportedTotal } from "@shared/latest-scans";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -606,12 +607,14 @@ export default function Tests() {
                           )}
                         </div>
 
-                        {test.vulnerabilitiesFound > 0 && (
+                        {/* By the counts too: a test recorded with only "Critical
+                            Count: 2" has a total of 0, and hid its criticals here. */}
+                        {reportedTotal(test) > 0 && (
                           <div className="border-t border-border pt-4">
                             <div className="flex items-center gap-2 mb-3">
                               <AlertTriangle className="w-4 h-4 text-primary" />
-                              <span className="font-semibold">
-                                {test.vulnerabilitiesFound} Vulnerabilities Found
+                              <span className="font-semibold" data-testid={`text-found-${test.id}`}>
+                                {reportedTotal(test)} Vulnerabilities Found
                               </span>
                             </div>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

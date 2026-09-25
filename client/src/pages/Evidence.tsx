@@ -38,11 +38,15 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider } from "@/components/mythos/Ornament";
 import { StatusPill, Avatar } from "@/components/mythos/atoms";
 import { figure, loaded, notInHand } from "@/lib/loaded";
+import { countsNotRecorded } from "@shared/latest-scans";
 
 interface ApiDoc { id: string; title: string; description: string | null; documentType: string; fileUrl: string | null; createdAt: string; createdBy: string | null }
 interface ApiUser { id: string; username: string }
 interface ApiClient { id: string; name: string; status: string }
-interface ApiTest { id: string; clientId: string; status: string; severity: string | null; completedAt: string | null; startedAt: string; criticalCount: number; highCount: number }
+interface ApiTest {
+  id: string; clientId: string; status: string; severity: string | null; completedAt: string | null; startedAt: string;
+  vulnerabilitiesFound: number; criticalCount: number; highCount: number; mediumCount: number; lowCount: number; findings?: unknown;
+}
 
 const TYPE_ICON: Record<string, typeof FileText> = {
   Report: FileText, Policy: ClipboardList, Evidence: FileCheck2, Archive: FolderArchive,
@@ -205,8 +209,12 @@ export default function Evidence() {
                   <div>
                     <p className="text-[14px] font-semibold text-foreground">{latestClient?.name ?? "Unknown system"}</p>
                     <p className="mt-1 text-[12px] text-muted-foreground">
-                      Its latest completed scan reported {latestDone.criticalCount} critical and {latestDone.highCount} high
-                      finding{latestDone.criticalCount + latestDone.highCount === 1 ? "" : "s"}
+                      {/* An engine scan finished before the inline-count fix has
+                          results and no counts (shared/latest-scans.ts): its
+                          counts were never taken, so they are not read as 0. */}
+                      {countsNotRecorded(latestDone)
+                        ? "Its latest completed scan returned results, but its counts were not recorded"
+                        : `Its latest completed scan reported ${latestDone.criticalCount} critical and ${latestDone.highCount} high finding${latestDone.criticalCount + latestDone.highCount === 1 ? "" : "s"}`}
                       {latestDone.completedAt ? ` (${new Date(latestDone.completedAt).toLocaleDateString()})` : ""}.
                     </p>
                   </div>

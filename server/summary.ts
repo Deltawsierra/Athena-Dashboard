@@ -8,6 +8,7 @@
  */
 
 import { storage } from "./storage-unified";
+import { countsNotRecorded } from "@shared/latest-scans";
 
 /**
  * What the assistant is told about this deployment.
@@ -38,21 +39,28 @@ export async function deploymentSummary(): Promise<string> {
     { critical: 0, high: 0, medium: 0, low: 0 },
   );
 
+  // Counts nobody took are not handed to the model as zeros: a test still
+  // running has none yet, and an engine scan finished before the inline-count
+  // fix returned results whose counts were never written down
+  // (shared/latest-scans.ts). Told "0 critical", the assistant repeats it.
+  const unrecorded = tests.filter((test) => countsNotRecorded(test)).length;
   const recent = tests
     .slice()
     .sort((a, b) => Number(new Date(b.startedAt)) - Number(new Date(a.startedAt)))
     .slice(0, 8)
     .map((test) => {
       const site = sites.find((one) => one.id === test.siteId);
-      return `- ${test.testType} on ${site?.name ?? "an unnamed site"}: `
-        + `${test.status}, ${test.criticalCount} critical / ${test.highCount} high `
-        + `/ ${test.mediumCount} medium / ${test.lowCount} low`;
+      const counts = test.status !== "completed" ? "no counts until it completes"
+        : countsNotRecorded(test) ? "counts not recorded"
+        : `${test.criticalCount} critical / ${test.highCount} high / ${test.mediumCount} medium / ${test.lowCount} low`;
+      return `- ${test.testType} on ${site?.name ?? "an unnamed site"}: ${test.status}, ${counts}`;
     });
 
   return [
     `${clients.length} clients, ${sites.length} sites, ${tests.length} tests recorded.`,
     `Across all tests: ${totals.critical} critical, ${totals.high} high, `
-      + `${totals.medium} medium, ${totals.low} low.`,
+      + `${totals.medium} medium, ${totals.low} low.`
+      + (unrecorded > 0 ? ` Counts were not recorded for ${unrecorded} completed scan${unrecorded === 1 ? "" : "s"}, so these totals leave them out.` : ""),
     recent.length ? "Most recent tests:" : "No tests have been recorded yet.",
     ...recent,
   ].join("\n");

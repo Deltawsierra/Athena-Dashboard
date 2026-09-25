@@ -86,3 +86,33 @@ export function countsNotRecorded(test: CountedTest): boolean {
     (one) => one !== null && typeof one === "object" && (one as { internal?: unknown }).internal !== true,
   );
 }
+
+/** The severity bands a test's counts are recorded in, worst first. */
+export const COUNTED_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+export type CountedSeverity = (typeof COUNTED_SEVERITIES)[number];
+
+/**
+ * How many findings a test's record says it found: its total, or the sum of
+ * its per-severity counts when that is more.
+ *
+ * The Tests screen sends "Total Vulnerabilities" and each severity's count as
+ * separate fields, and a person who fills in only "Critical Count: 2" leaves
+ * the total at its default, 0. Read from the total alone, that test "reported
+ * 0" beside two recorded criticals -- which the findings summary itself flags.
+ */
+export function reportedTotal(test: Pick<CountedTest, "vulnerabilitiesFound" | "criticalCount" | "highCount" | "mediumCount" | "lowCount">): number {
+  return Math.max(test.vulnerabilitiesFound, test.criticalCount + test.highCount + test.mediumCount + test.lowCount);
+}
+
+/**
+ * The worst severity a test's record reports: the worse of its severity field
+ * and its worst non-zero count. null when neither says anything -- which is
+ * not "none": a total with no severity recorded is unrated, not medium.
+ */
+export function reportedSeverity(test: Pick<CountedTest, "criticalCount" | "highCount" | "mediumCount" | "lowCount"> & { severity?: string | null }): CountedSeverity | null {
+  const field = (test.severity ?? "").toLowerCase();
+  const counts: Record<CountedSeverity, number> = {
+    critical: test.criticalCount, high: test.highCount, medium: test.mediumCount, low: test.lowCount,
+  };
+  return COUNTED_SEVERITIES.find((one) => field === one || counts[one] > 0) ?? null;
+}
