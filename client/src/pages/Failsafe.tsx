@@ -35,7 +35,7 @@
  */
 
 import { useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { loaded } from "@/lib/loaded";
 import {
   Snowflake,
@@ -216,6 +216,23 @@ function isStop(action: string): boolean {
 /** How soon a failed status read is retried: seconds, not the next 30s poll. */
 const STATUS_RETRY_MS = 3_000;
 
+/**
+ * The query keys this page reads, as the app's default query function turns
+ * them into URLs (lib/queryClient.ts): a string after the path becomes a path
+ * segment, an object becomes the query string.
+ *
+ * The engine state was keyed ["/api/failsafe/state", engineId], which the
+ * default query function sent as GET /api/failsafe/state/athena-1 -- a path
+ * the server does not serve (404). The server reads the engine from
+ * ?engineId=, so in every build with an engine named the governor, the counts
+ * and the in-flight list -- the only way a second operator reaches a
+ * stand-down or a terminate to co-sign it -- never read. The prefix
+ * ["/api/failsafe/state"] still matches both for invalidation.
+ */
+export const failsafeStateKey = (engineId: string) => ["/api/failsafe/state", { engineId }] as const;
+/** GET /api/failsafe/commands/:uuid -- a path segment, as the server serves it. */
+export const failsafeCommandKey = (uuid: string) => ["/api/failsafe/commands", uuid] as const;
+
 function actionLabel(key: string): string {
   return ACTION_BY_KEY[key]?.label ?? key;
 }
@@ -320,13 +337,19 @@ function CommandConsole({
   const [signature, setSignature] = useState("");
 
   const commandQ = useQuery<DraftedCommand>({
-    queryKey: ["/api/failsafe/commands", uuid],
+    queryKey: failsafeCommandKey(uuid),
     // Poll while the command is still collecting signatures, so a second
-    // operator's paste-back shows up here and a fill-up to `ready` is visible.
+    // operator's paste-back shows up here and a fill-up to `ready` is visible;
+    // and while the read is failing, so it is read again without anyone asking.
     refetchInterval: (query) => {
+      if (query.state.status === "error") return 3_000;
       const status = (query.state.data as DraftedCommand | undefined)?.command.status;
       return status === "awaiting_signatures" ? 3_000 : false;
     },
+    // A command just drafted is seeded with the draft route's own answer (see
+    // the page's draft.onSuccess). It is still read from the control plane on
+    // opening, so what is shown is the authoritative command.
+    refetchOnMount: "always",
   });
   // A poll that failed after one that succeeded leaves the last answer in the
   // cache. Its status and signer count are then a reading nobody has taken
@@ -361,7 +384,7 @@ function CommandConsole({
     onSuccess: (command) => {
       setSignature("");
       setKeyId("");
-      queryClient.invalidateQueries({ queryKey: ["/api/failsafe/commands", uuid] });
+      queryClient.invalidateQueries({ queryKey: failsafeCommandKey(uuid) });
       queryClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
       queryClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       toast(
@@ -606,6 +629,8 @@ function CommandConsole({
 
 export default function Failsafe() {
   const { toast } = useToast();
+  // The client the console reads through, so a seeded command is the one it finds.
+  const pageClient = useQueryClient();
   const [engineId, setEngineId] = useState("");
   const [engineIdTouched, setEngineIdTouched] = useState(false);
 
@@ -630,8 +655,8 @@ export default function Failsafe() {
   // stand-down a second operator had to sign -- for up to 30 seconds after
   // the control plane was back. A stop is never gated on a read now (see the
   // header); a failed status is re-read within seconds; and only resume and
-  // release wait on the control plane having said, in its last answer, that
-  // it is ready.
+  // release wait on a status read that answered, now, that the control plane
+  // is ready.
   const statusQ = useQuery<FailsafeStatus>({
     queryKey: ["/api/failsafe/status"],
     refetchInterval: (query) => (query.state.status === "error" ? STATUS_RETRY_MS : 30_000),
@@ -640,7 +665,7 @@ export default function Failsafe() {
   const status = status$.state === "ready" ? status$.data : undefined;
   const statusFailed = status$.state === "error";
   const statusError = status$.state === "error" ? status$.message : "";
-  /** The last status that answered, even if a later read failed: for operating, never for showing. */
+  /** The last status that answered, even if a later read failed: for the engine id only, never for showing. */
   const lastStatus = statusQ.data;
 
   // Default the engine id from the deployment, once, until the operator types.
@@ -649,19 +674,24 @@ export default function Failsafe() {
   const effectiveEngineId = engineIdTouched ? engineId : engineId || lastStatus?.defaultEngineId || "";
   const engineNamed = effectiveEngineId.trim().length > 0;
 
-  /** Whether the status in hand NOW says the control plane is usable: what the page shows. */
+  /**
+   * Whether the status in hand NOW says the control plane is usable: what the
+   * page shows, and what resume and release wait on. They waited on the last
+   * status that ever answered, so while every status read was failing -- the
+   * page saying "Could not read the failsafe status" -- an engine could still
+   * be put back to work from here. Putting one back to work waits for a
+   * current read; a stop never does.
+   */
   const canOperate = status?.configured === true && status?.authorized === true;
-  /** Whether the last status that answered said so: what resume and release wait on. */
-  const lastReady = lastStatus?.configured === true && lastStatus?.authorized === true;
   /** Whether an action may be drafted and confirmed. A stop, whenever an engine is named. */
-  const operable = (action: string) => engineNamed && (isStop(action) || lastReady);
+  const operable = (action: string) => engineNamed && (isStop(action) || canOperate);
   const stateReadable = canOperate && engineNamed;
 
   // Read unless a status that answered said there is nothing to read. A status
   // that failed, or has not answered, does not stop the state being read: the
   // in-flight commands it lists are how a second operator reaches a stop.
   const stateQ = useQuery<FailsafeStateView>({
-    queryKey: ["/api/failsafe/state", effectiveEngineId],
+    queryKey: failsafeStateKey(effectiveEngineId),
     enabled: engineNamed && (status === undefined || canOperate),
     refetchInterval: 5_000,
   });
@@ -712,6 +742,13 @@ export default function Failsafe() {
       setTypedId("");
       queryClient.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
       queryClient.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
+      // The draft route answered with the whole command -- the draft to sign
+      // and its signing bytes -- and the console used to throw that away and
+      // read it again. When that first read failed there was nothing to sign
+      // and no Submit: a stop just drafted could not be relayed from here.
+      // Seeded, a failed first read leaves the drafted stop signable (the
+      // console's stale-stop path); the read still decides what is shown.
+      pageClient.setQueryData(failsafeCommandKey(drafted.command.uuid), drafted);
       setOpenUuid(drafted.command.uuid);
       toast({ title: "Command drafted", description: "Sign it out of band, then paste the signature back." });
     },

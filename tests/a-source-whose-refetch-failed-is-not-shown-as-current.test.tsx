@@ -4,7 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup, waitFor, act, fireEvent } from "@testing-library/react";
 import type { ReactElement } from "react";
 
-import Failsafe from "@/pages/Failsafe";
+import Failsafe, { failsafeStateKey } from "@/pages/Failsafe";
+// The engine state is seeded under the page's own key. This file's queryFn
+// answers any key it was seeded with, so it cannot tell whether that key
+// reaches a route: the state key used to become a URL the server does not
+// serve, and every test here passed. That is pinned where the real queryFn
+// runs: tests/every-page-query-key-reaches-a-route.test.ts.
 import AIHealth from "@/pages/AIHealth";
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
@@ -88,7 +93,7 @@ const governor = () => screen.getByText("Engine governor").parentElement?.textCo
 const FAILSAFE_STATUS = { configured: true, reachable: true, authorized: true, url: "http://cp", detail: "", defaultEngineId: "athena-1" };
 const FAILSAFE_SEED = (): Array<[unknown[], unknown]> => [
   [["/api/failsafe/status"], FAILSAFE_STATUS],
-  [["/api/failsafe/state", "athena-1"], {
+  [[...failsafeStateKey("athena-1")], {
     engineId: "athena-1", engineState: "running", engineStateAvailable: true,
     awaitingSignatures: [], ready: [], recent: [],
   }],
@@ -101,7 +106,7 @@ describe("Failsafe", () => {
     expect(governor()).toBe("Engine governorrunning");
     expect(text()).toMatch(/No commands awaiting signatures or waiting on the engine/);
 
-    await nextReadFails(client, "/api/failsafe/state", ["/api/failsafe/state", "athena-1"]);
+    await nextReadFails(client, "/api/failsafe/state", [...failsafeStateKey("athena-1")]);
     expect(text(), "the failed state read is not mentioned anywhere").toMatch(/Could not read the engine state: bff unreachable/);
     // (Matched on the governor card itself: in the page's whole text the pill
     // runs into its label, "governorrunning", which no \brunning\b matches.)
@@ -130,10 +135,12 @@ describe("Failsafe", () => {
     for (const action of ["pause", "stand_down", "terminate"]) {
       expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(false);
     }
-    // Resume and release go by the last status that answered, which said the
-    // control plane was ready; the draft route re-checks it either way.
+    // Inverted in round 4 (R4-6): this asserted that resume and release stay
+    // live on the last status that answered -- an engine put back to work on a
+    // status the page itself says it could not read. They wait for a current
+    // read now; the stops above do not.
     for (const action of ["resume", "release"]) {
-      expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(false);
+      expect((screen.getByTestId(`button-draft-${action}`) as HTMLButtonElement).disabled, action).toBe(true);
     }
     // And nothing read under that status is shown as current.
     expect(governor()).not.toMatch(/running/);
@@ -171,7 +178,7 @@ describe("Failsafe", () => {
       signers: ["alice"], requiredSignatures: 2, expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     };
     const seed = FAILSAFE_SEED();
-    seed[1] = [["/api/failsafe/state", "athena-1"], {
+    seed[1] = [[...failsafeStateKey("athena-1")], {
       engineId: "athena-1", engineState: "running", engineStateAvailable: true,
       awaitingSignatures: [command], ready: [], recent: [],
     }];

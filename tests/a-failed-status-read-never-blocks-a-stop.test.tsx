@@ -3,7 +3,12 @@ import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import { QueryClient, QueryClientProvider, type Query } from "@tanstack/react-query";
 import { render, screen, cleanup, waitFor, act, fireEvent } from "@testing-library/react";
 
-import Failsafe from "@/pages/Failsafe";
+import Failsafe, { failsafeStateKey } from "@/pages/Failsafe";
+// The engine state is seeded under the page's own key. This file's queryFn
+// answers any key it was seeded with, so it cannot tell whether that key
+// reaches a route: the state key used to become a URL the server does not
+// serve, and every test here passed. That is pinned where the real queryFn
+// runs: tests/every-page-query-key-reaches-a-route.test.ts.
 import AIControlPanel from "@/pages/AIControlPanel";
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
@@ -48,7 +53,7 @@ const drafted = (cmd: ReturnType<typeof command>) => ({
 
 function mount(seed: Array<[unknown[], unknown]> = [
   [["/api/failsafe/status"], STATUS],
-  [["/api/failsafe/state", "athena-1"], {
+  [[...failsafeStateKey("athena-1")], {
     engineId: "athena-1", engineState: "running", engineStateAvailable: true,
     awaitingSignatures: [standDown], ready: [], recent: [],
   }],
@@ -145,7 +150,7 @@ describe("a failed failsafe status read never blocks a stop", () => {
 
   it("keeps the stops live when the status has never answered: the engine can still be named", async () => {
     const client = mount([
-      [["/api/failsafe/state", "athena-2"], {
+      [[...failsafeStateKey("athena-2")], {
         engineId: "athena-2", engineState: "running", engineStateAvailable: true,
         awaitingSignatures: [command({ uuid: "cmd-2", engineId: "athena-2" })], ready: [], recent: [],
       }],
@@ -198,7 +203,7 @@ describe("a failed failsafe status read never blocks a stop", () => {
     const resume = command({ uuid: "cmd-rs", action: "resume", requiredSignatures: 1, signers: [] });
     const client = mount([
       [["/api/failsafe/status"], STATUS],
-      [["/api/failsafe/state", "athena-1"], {
+      [[...failsafeStateKey("athena-1")], {
         engineId: "athena-1", engineState: "paused", engineStateAvailable: true,
         awaitingSignatures: [resume], ready: [], recent: [],
       }],
