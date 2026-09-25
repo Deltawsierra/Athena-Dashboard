@@ -110,8 +110,14 @@ export default function AthenaScan() {
   }));
   const engine = engine$.state === "ready" ? engine$.data : undefined;
 
-  const { data: clients = [] } = useQuery<Client[]>({ queryKey: ["/api/clients"] });
-  const { data: sites = [] } = useQuery<Site[]>({ queryKey: ["/api/sites"] });
+  // Read error-first, like everything else here: a picker whose list failed
+  // to load used to show empty with no word of why, which reads as "there
+  // are no engagements" -- or, for the sites, "this client has no sites
+  // recorded", a claim about the record nobody had read.
+  const clients$ = loaded(useQuery<Client[]>({ queryKey: ["/api/clients"] }));
+  const sites$ = loaded(useQuery<Site[]>({ queryKey: ["/api/sites"] }));
+  const clients = clients$.state === "ready" ? clients$.data : [];
+  const sites = sites$.state === "ready" ? sites$.data : [];
 
   const sitesForClient = useMemo(
     () => sites.filter((site) => site.clientId === clientId),
@@ -301,7 +307,13 @@ export default function AthenaScan() {
               <Label htmlFor="client">Deployment owner</Label>
               <Select value={clientId} onValueChange={setClientId}>
                 <SelectTrigger id="client" data-testid="select-client">
-                  <SelectValue placeholder="Choose the engagement" />
+                  <SelectValue
+                    placeholder={
+                      clients$.state === "error"
+                        ? "Could not load the engagements"
+                        : clients$.state === "loading" ? "Loading the engagements…" : "Choose the engagement"
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {clients.map((client) => (
@@ -324,9 +336,11 @@ export default function AthenaScan() {
                     placeholder={
                       clientId === ""
                         ? "Choose an owner first"
-                        : sitesForClient.length === 0
-                          ? "No systems recorded"
-                          : "Optional"
+                        : sites$.state !== "ready"
+                          ? sites$.state === "error" ? "Could not load the sites" : "Loading the sites…"
+                          : sitesForClient.length === 0
+                            ? "No systems recorded"
+                            : "Optional"
                     }
                   />
                 </SelectTrigger>
@@ -350,6 +364,15 @@ export default function AthenaScan() {
               />
             </div>
           </div>
+          {(clients$.state === "error" || sites$.state === "error") && (
+            <p className="text-[12px] text-sev-high" data-testid="text-pickers-unread">
+              {[
+                clients$.state === "error" ? `Could not load the engagements: ${clients$.message}.` : null,
+                sites$.state === "error" ? `Could not load the sites: ${sites$.message}.` : null,
+              ].filter(Boolean).join(" ")}{" "}
+              The pickers are empty because the list could not be read, not because nothing is recorded.
+            </p>
+          )}
           <p className="text-[12px] text-muted-foreground">
             The engine checks the target against its own egress policy and refuses
             anything it may not reach; its reason is shown here unchanged.
