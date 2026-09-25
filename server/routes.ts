@@ -1584,8 +1584,9 @@ export function registerRoutes(app: Express): void {
   // — system, receipt version, policy, evidence root, result, per-assessment
   // digests — as one deterministic, portable, signable payload. The standardised
   // superset of the bare receipt above; computed, never stored. A read, behind
-  // requireAuth like the rest of the assurance reads. It attests integrity and
-  // provenance, never that the conclusions are true or the system is secure.
+  // requireAuth like the rest of the assurance reads. Served unsigned by the
+  // backend, which says so in the payload; its digests show a change only
+  // against an independently obtained copy, never that the conclusions are true.
   app.get("/api/assurance/deployments/:uuid/assurance-receipt", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.assuranceReceipt(req.params.uuid));
@@ -1618,7 +1619,7 @@ export function registerRoutes(app: Express): void {
   }));
 
   // The deployment's AI-BOM (Phase 1.7): the AI supply-chain bill of materials,
-  // an exportable, tamper-evident inventory. A read, behind requireAuth.
+  // an exportable inventory with an unsigned digest. A read, behind requireAuth.
   app.get("/api/assurance/deployments/:uuid/ai-bom", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.aiBom(req.params.uuid));

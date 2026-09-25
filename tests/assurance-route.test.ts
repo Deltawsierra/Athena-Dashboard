@@ -139,6 +139,11 @@ describe("assurance BFF", () => {
             algorithm: "sha256",
             digest: "9".repeat(64),
             computed_at: "2026-09-17T02:00:00Z",
+            // The backend's own self-report, outside the digest: this copy is
+            // unsigned, and why. dep-1 is the older shape that says nothing.
+            signed: false,
+            signature: null,
+            unsigned_reason: "THIS COPY is unsigned. This backend holds no signing key.",
           });
         }
 
@@ -1814,6 +1819,20 @@ describe("assurance BFF", () => {
       compliance: "c".repeat(64), capabilities: "d".repeat(64),
       boundary: "e".repeat(64), bom: "f".repeat(64),
     });
+  });
+
+  it("carries the receipt's signed/unsigned self-report, and a silence as null", async () => {
+    // dep-2 says it is unsigned and why: both reach the page as the backend said.
+    const said = await user.get("/api/assurance/deployments/dep-2/assurance-receipt");
+    expect(said.status).toBe(200);
+    expect(said.body.signed).toBe(false);
+    expect(said.body.unsignedReason).toBe("THIS COPY is unsigned. This backend holds no signing key.");
+    // dep-1 says nothing about signing. That is null, not false and not true:
+    // the page must not print "unsigned" -- or "signed" -- for a silence.
+    const silent = await user.get("/api/assurance/deployments/dep-1/assurance-receipt");
+    expect(silent.status).toBe(200);
+    expect(silent.body.signed).toBeNull();
+    expect(silent.body.unsignedReason).toBeNull();
   });
 
   it("carries a declared data boundary through the receipt policy, camelCased", async () => {

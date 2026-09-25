@@ -76,8 +76,9 @@ export interface AssuranceFinding {
   stale: boolean;
   /**
    * The finding's assurance receipt (spine): a recomputable digest binding it to
-   * its evidence hashes. Attests integrity/provenance — that the evidence is
-   * unaltered — not that the conclusion is true.
+   * its evidence hashes. Unsigned: it lets a reader detect a change against a
+   * copy obtained independently, and on its own attests nothing -- least of all
+   * that the conclusion is true.
    */
   receipt: AssuranceReceipt;
   firstSeen: string | null;
@@ -106,8 +107,10 @@ export interface AssuranceReceipt {
 // The full, versioned Assurance Receipt standard (spine): the roadmap tuple —
 // system, receipt version, policy, evidence root, result, per-assessment digests
 // — as one deterministic, portable, signable payload (backend RECEIPT_SCHEMA,
-// mythos.assurance.receipt/1.0). It attests INTEGRITY and PROVENANCE — that this
-// is the assurance state that was recorded, unaltered — never that the
+// mythos.assurance.receipt/1.0). Its digests let a reader detect a change
+// against a copy obtained independently, or one a verified signature covers;
+// this copy says itself whether it is signed (`signed`, `unsigned_reason`), and
+// the backend's assurance-receipt route always answers unsigned. Never that the
 // conclusions are true or the system is secure. Every field is carried at its
 // true strength; an undeclared policy reads as declared:false, never invented.
 export interface AssuranceReceiptStandard {
@@ -130,8 +133,8 @@ export interface AssuranceReceiptStandard {
   // The evidence set reduced to its Merkle-style root, with the finding count and
   // hash algorithm alongside.
   evidence: { algorithm: string; root: string; findingCount: number };
-  // A digest per computed assessment — a digest attests the assessment was
-  // recorded unaltered, never that it passes.
+  // A digest per computed assessment — it shows a change against an
+  // independently held copy, never that the assessment passes.
   assessments: { compliance: string; capabilities: string; boundary: string; bom: string };
   algorithm: string;
   // The top-level deterministic digest over the stable content (the value a
@@ -139,6 +142,13 @@ export interface AssuranceReceiptStandard {
   digest: string;
   // Metadata only, OUTSIDE the hash.
   computedAt: string | null;
+  // Whether this copy carries a signature, as the backend says -- outside the
+  // digest, like computedAt. null when the backend did not say, which is not
+  // the same as false: the page must not print "unsigned" for a silence any
+  // more than "signed".
+  signed: boolean | null;
+  // The backend's own reason this copy is unsigned, verbatim; null when none.
+  unsignedReason: string | null;
 }
 
 // AI System Capability Map (Phase 1.3): the ground truth of what a deployment
@@ -250,8 +260,9 @@ export interface AssuranceRouteMap {
   };
 }
 
-// AI-BOM (Phase 1.7): the AI supply-chain bill of materials — an exportable,
-// tamper-evident inventory of components and the providers behind them.
+// AI-BOM (Phase 1.7): the AI supply-chain bill of materials — an exportable
+// inventory of components and the providers behind them, with the backend's
+// (unsigned) digest over it.
 export interface BomComponent {
   uuid: string;
   name: string;
@@ -2215,6 +2226,8 @@ function mapAssuranceReceipt(raw: Record<string, unknown>): AssuranceReceiptStan
     algorithm: str(raw.algorithm),
     digest: str(raw.digest),
     computedAt: strOrNull(raw.computed_at),
+    signed: typeof raw.signed === "boolean" ? raw.signed : null,
+    unsignedReason: strOrNull(raw.unsigned_reason),
   };
 }
 
@@ -3014,8 +3027,9 @@ export async function listDeployments(): Promise<AssuranceDeployment[]> {
 
 /**
  * A deployment's assurance receipt: one recomputable digest over its findings'
- * evidence hashes, for an auditor to verify the evidence is unaltered. A read
- * (open), so a non-ok answer is genuine unavailability like the other reads.
+ * evidence hashes. Unsigned, so an auditor can use it to detect a change only
+ * against a copy obtained independently. A read (open), so a non-ok answer is
+ * genuine unavailability like the other reads.
  */
 export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/receipt/`);
@@ -3032,9 +3046,10 @@ export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt>
  * — system, receipt version, policy, evidence root, result, per-assessment
  * digests — as one deterministic, portable, signable payload (the standardised
  * superset of the bare `receipt` above). A read (open), so a non-ok answer is
- * genuine unavailability like the other reads. It attests integrity and
- * provenance — that this is the assurance state that was recorded, unaltered —
- * never that the conclusions are true or the system is secure.
+ * genuine unavailability like the other reads. The backend serves it unsigned
+ * and says so (`signed`, `unsigned_reason`, carried through); its digests show a
+ * change only against an independently obtained copy, and never that the
+ * conclusions are true or the system is secure.
  */
 export async function assuranceReceipt(uuid: string): Promise<AssuranceReceiptStandard> {
   const response = await call(
@@ -3083,7 +3098,7 @@ export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
 /**
  * A deployment's AI-BOM (Phase 1.7): the AI supply-chain bill of materials — its
  * components and the providers behind them, each provider fact evidence-graded,
- * with a tamper-evident digest. A read (open), so a non-ok answer is genuine
+ * with the backend's unsigned digest. A read (open), so a non-ok answer is genuine
  * unavailability like the other reads.
  */
 export async function aiBom(uuid: string): Promise<AssuranceAiBom> {
