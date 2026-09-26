@@ -86,6 +86,7 @@ let engine: Server;
 let agent: Awaited<ReturnType<typeof signIn>>;
 let storage: IStorage;
 let retests: typeof import("../server/retests");
+let watcher: import("../server/retests").RetestWatcher;
 let lifecycle: typeof import("../server/findings");
 
 beforeAll(async () => {
@@ -119,7 +120,9 @@ beforeAll(async () => {
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
   vi.resetModules();
-  agent = await signIn(await makeApp());
+  const app = await makeApp();
+  watcher = app.locals.retestWatcher;
+  agent = await signIn(app);
   storage = (await import("../server/storage-unified")).storage;
   retests = await import("../server/retests");
   lifecycle = await import("../server/findings");
@@ -142,8 +145,10 @@ beforeEach(() => {
   engineState.active = { status: 200, body: { active: [] } };
   engineState.abort = null;
   calls.length = 0;
-  // Several cases retest the same recorded run id; each starts with no watch.
-  retests.reset();
+  // Several cases retest the same recorded run id, which a real engine never
+  // reuses; each case starts with no watch of it, here or on the record.
+  watcher.reset();
+  (storage as unknown as { retestWatches: Map<string, unknown> }).retestWatches.clear();
 });
 
 let clientCount = 0;

@@ -207,6 +207,31 @@ function createSchema(handle: DatabaseType): void {
       checked_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_checks_finding ON finding_checks(finding_id);
+
+    -- A retest the engine answered 202 for, watched until it ends. On disk, so
+    -- a restart resumes it (server/retests.ts).
+    CREATE TABLE IF NOT EXISTS retest_watches (
+      engine_run_id TEXT PRIMARY KEY,
+      test_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      twin_id INTEGER NOT NULL,
+      finding_id TEXT,
+      engagement_ref TEXT,
+      requested_by TEXT,
+      requested_from TEXT,
+      started_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      engine_state TEXT,
+      reason TEXT,
+      error TEXT,
+      last_read_at INTEGER,
+      last_read_error TEXT,
+      stop_accepted_at INTEGER,
+      ended_at INTEGER,
+      result TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_retest_watches_state ON retest_watches(state);
     CREATE INDEX IF NOT EXISTS idx_tests_site_id ON tests(site_id);
 
     CREATE TABLE IF NOT EXISTS documents (
@@ -317,6 +342,12 @@ function createSchema(handle: DatabaseType): void {
     );
   `);
   addMissingColumns(handle);
+  // After the column exists on every database, old ones included: one retest
+  // run is filed as one check, whichever dashboard collected it.
+  handle.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_engine_run ON finding_checks(engine_run_id) " +
+    "WHERE engine_run_id IS NOT NULL",
+  );
   relaxHealthMetricColumns(handle);
 }
 
@@ -341,6 +372,9 @@ function addMissingColumns(handle: DatabaseType): void {
     ["documents", "is_sample", "INTEGER NOT NULL DEFAULT 0"],
     ["ai_health_metrics", "guards_checked", "INTEGER"],
     ["ai_health_metrics", "guards_failing", "INTEGER"],
+    ["finding_checks", "engine_run_id", "TEXT"],
+    ["finding_checks", "filed_via", "TEXT"],
+    ["finding_checks", "requested_at", "INTEGER"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

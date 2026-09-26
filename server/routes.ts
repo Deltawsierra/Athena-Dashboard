@@ -16,6 +16,8 @@ import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-re
 import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
+import type { RetestFiling } from "./storage";
+import type { Finding, RetestWatch } from "@shared/schema";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -418,15 +420,18 @@ function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
  * list that could not be read holds back no stop from the other. Each outcome
  * is reported, and one that could not be listed is said to be exactly that.
  */
-async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedStops; engineRuns: EngineSweep }> {
+async function stopEverythingRunning(
+  req: Request, watcher: retests.RetestWatcher,
+): Promise<{ stops: RecordedStops; engineRuns: EngineSweep }> {
   // The retests this dashboard is watching as running are no test rows; their
-  // engine run ids are held in memory (server/retests.ts). Their stops go
-  // first, before either read, so no read -- slow or failed -- holds one back.
-  const watchedRetests = retests.running();
+  // engine run ids are held in memory (server/retests.ts), so sending their
+  // stops reads nothing. They go first, before either read, so no read --
+  // slow or failed -- holds one back.
+  const watchedRetests = watcher.running();
   const watchedIds = new Set(watchedRetests.map((one) => one.engineRunId));
   const retestStops = Promise.all(watchedRetests.map(async (one): Promise<EngineRunStop> => {
     const outcome = await sendStop(req, { runId: one.engineRunId, target: null, testId: one.testId }, "kill_switch");
-    if (outcome.stopped) retests.stopAccepted(one.engineRunId);
+    if (outcome.stopped) watcher.stopAccepted(one.engineRunId);
     return { runId: one.engineRunId, target: null, testId: one.testId, ...outcome };
   }));
   const rowsRead = settle(storage.getAllTests());
@@ -1077,7 +1082,7 @@ function destroySession(req: Request): Promise<void> {
 
 // ==== RETEST: filing a verdict, and answering a status ====
 
-/** Who asked for a retest, kept so a verdict collected later is filed as theirs. */
+/** Who asked for a retest. A verdict collected later is filed as theirs, and says it was collected. */
 interface RetestAsker {
   userId: string | null;
   actor: { userId: string | null; ipAddress: string | null };
@@ -1091,60 +1096,102 @@ interface RetestContext {
 }
 
 /**
- * Carry a retest's VERDICT into the finding it is about: the finding's status,
- * a fix only on `closed`, and an appended check. Only ever called with a
- * verdict (engine.RetestAnswer `answer: "verdict"`), never with a status.
- *
- * The finding is identified from the twin's own recorded place, fetched from
- * the engine -- not from anything the caller sent. A caller who could name the
- * finding to mark fixed could mark any finding fixed, which is the one thing
- * this lifecycle exists to prevent. The fix and the check are filed against
- * the scan record the retest produced (`result.runId`: `scan_record_id` on
- * athena-engine #71), never against the registry id a stop names.
+ * The finding a retested twin is about, found from the twin's own recorded
+ * place, fetched from the engine -- not from anything the caller sent. A caller
+ * who could name the finding to mark fixed could mark any finding fixed, which
+ * is the one thing this lifecycle exists to prevent. Throws EngineUnavailable
+ * when the engine cannot be asked.
+ */
+async function findingOfTwin(
+  test: { findings: unknown }, clientId: string, twinId: number,
+): Promise<{ finding: Finding } | { missing: string }> {
+  const runId = runIdOf(test);
+  if (!runId) return { missing: "this test has no engine run recorded, so its finding cannot be found" };
+  const listed = await engine.listDecisions(runId);
+  const twin = listed.decisions.find((one) => one.id === twinId);
+  if (!twin) return { missing: `the engine no longer lists decision ${twinId} for this test's run` };
+  const key = lifecycle.fingerprint(clientId, {
+    type: twin.findingType,
+    severity: null, message: null,
+    target: twin.target,
+    endpoint: twin.endpoint,
+    header: null,
+  });
+  const finding = await storage.findFindingByFingerprint(clientId, key);
+  return finding ? { finding } : { missing: "no finding on record matches this decision" };
+}
+
+/**
+ * What a VERDICT changes: the finding's status, a fix on `closed` only, and
+ * an appended check -- filed against the scan record the retest produced
+ * (`result.runId`: `scan_record_id` on athena-engine #71), never against the
+ * registry id a stop names, which the check keeps as `engineRunId`.
+ */
+function retestFiling(
+  finding: Finding,
+  result: engine.RetestResult,
+  how: { requestedBy: string | null; requestedAt: Date; filedVia: "retest_request" | "retest_watch" },
+): { filing: RetestFiling; applied: retests.Applied } {
+  const decided = lifecycle.statusFromVerdict(result.verdict, finding.status);
+  // Said on the finding as well as on the check: a verdict the watch collected
+  // is the requester's retest, filed when the engine finished it -- not a
+  // status they set by hand at that moment.
+  const note = how.filedVia === "retest_watch"
+    ? `${decided.detail} (Filed by the dashboard when the engine finished the retest requested at ` +
+      `${how.requestedAt.toISOString()}.)`
+    : decided.detail;
+  return {
+    filing: {
+      findingId: finding.id,
+      findingPatch: {
+        status: decided.status,
+        statusNote: note,
+        statusChangedBy: how.requestedBy,
+        statusChangedAt: new Date(),
+        // Only a `closed` verdict writes these, and they are what makes
+        // the claim checkable afterwards.
+        ...(decided.fixed
+          ? { fixedAt: new Date(), fixedByRunId: result.runId, fixedVerdict: result.verdict }
+          : { fixedAt: null, fixedByRunId: null, fixedVerdict: null }),
+      },
+      // Appended, never replaced. The answer given today does not erase
+      // the answer given last month: a client asking whether March's
+      // findings are gone is owed the sequence, not the last word.
+      check: {
+        findingId: finding.id,
+        verdict: result.verdict,
+        detail: result.detail || decided.detail,
+        runId: result.runId,
+        inventoryDigest: result.inventoryDigest,
+        checkedBy: how.requestedBy,
+        engineRunId: result.engineRunId,
+        filedVia: how.filedVia,
+        requestedAt: how.requestedAt,
+      },
+    },
+    applied: { findingId: finding.id, status: decided.status, detail: decided.detail },
+  };
+}
+
+/**
+ * Carry a verdict the engine answered to the Retest request itself into the
+ * finding it is about. Only ever called with a verdict
+ * (engine.RetestAnswer `answer: "verdict"`), never with a status.
  */
 async function fileRetestVerdict(
   { test, client, twinId, who }: RetestContext,
   result: engine.RetestResult,
+  requestedAt: Date,
 ): Promise<{ applied: retests.Applied | null; notFiled: string | null }> {
-  const runId = runIdOf(test);
-  if (!runId) return { applied: null, notFiled: "this test has no engine run recorded, so its finding cannot be found" };
   try {
-    const listed = await engine.listDecisions(runId);
-    const twin = listed.decisions.find((one) => one.id === twinId);
-    if (!twin) return { applied: null, notFiled: `the engine no longer lists decision ${twinId} for this test's run` };
-    const key = lifecycle.fingerprint(client.id, {
-      type: twin.findingType,
-      severity: null, message: null,
-      target: twin.target,
-      endpoint: twin.endpoint,
-      header: null,
+    const found = await findingOfTwin(test, client.id, twinId);
+    if ("missing" in found) return { applied: null, notFiled: found.missing };
+    const { filing, applied } = retestFiling(found.finding, result, {
+      requestedBy: who.userId, requestedAt, filedVia: "retest_request",
     });
-    const finding = await storage.findFindingByFingerprint(client.id, key);
-    if (!finding) return { applied: null, notFiled: "no finding on record matches this decision" };
-    const decided = lifecycle.statusFromVerdict(result.verdict, finding.status);
-    await storage.updateFinding(finding.id, {
-      status: decided.status,
-      statusNote: decided.detail,
-      statusChangedBy: who.userId,
-      statusChangedAt: new Date(),
-      // Only a `closed` verdict writes these, and they are what makes
-      // the claim checkable afterwards.
-      ...(decided.fixed
-        ? { fixedAt: new Date(), fixedByRunId: result.runId, fixedVerdict: result.verdict }
-        : { fixedAt: null, fixedByRunId: null, fixedVerdict: null }),
-    });
-    // Appended, never replaced. The answer given today does not erase
-    // the answer given last month: a client asking whether March's
-    // findings are gone is owed the sequence, not the last word.
-    await storage.recordCheck({
-      findingId: finding.id,
-      verdict: result.verdict,
-      detail: result.detail || decided.detail,
-      runId: result.runId,
-      inventoryDigest: result.inventoryDigest,
-      checkedBy: who.userId,
-    });
-    return { applied: { findingId: finding.id, status: decided.status, detail: decided.detail }, notFiled: null };
+    await storage.updateFinding(filing.findingId, filing.findingPatch);
+    await storage.recordCheck(filing.check);
+    return { applied, notFiled: null };
   } catch (cause) {
     // The retest itself succeeded; failing to file it is worth saying but
     // is not worth throwing away the verdict the operator asked for.
@@ -1153,26 +1200,79 @@ async function fileRetestVerdict(
   }
 }
 
+/**
+ * How a watch (server/retests.ts) finds a finding, files a verdict and
+ * records its end. A verdict is filed as the user who pressed Retest --
+ * `checkedBy` on the check, `statusChangedBy` on the finding -- and says
+ * it was collected: `filedVia: "retest_watch"` and `requestedAt` on the
+ * check, a sentence on the finding, and a `retest_collected` log entry
+ * naming the requester and when they asked.
+ */
+const retestWatchHooks: retests.WatchHooks = {
+  async resolveFinding(watch) {
+    const test = await storage.getTest(watch.testId);
+    if (!test) return { missing: "the test this retest was run from is no longer on record" };
+    const found = await findingOfTwin(test, watch.clientId, watch.twinId);
+    return "missing" in found ? found : { findingId: found.finding.id };
+  },
+  async filingFor(watch, findingId, result) {
+    const finding = await storage.getFinding(findingId);
+    if (!finding) return { missing: "the finding this retest was about is no longer on record" };
+    return retestFiling(finding, result, {
+      requestedBy: watch.requestedBy, requestedAt: watch.startedAt, filedVia: "retest_watch",
+    });
+  },
+  async recordEnd(watch) {
+    const result = (watch.result ?? null) as (engine.RetestResult & { applied?: unknown; notFiled?: unknown }) | null;
+    await storage.createActivityLog({
+      action: watch.state === "verdict" ? "retest_collected" : `retest_${watch.state}`,
+      entityType: "test",
+      entityId: watch.testId,
+      details: {
+        twinId: watch.twinId,
+        engineRunId: watch.engineRunId,
+        engagementRef: watch.engagementRef,
+        state: watch.engineState,
+        // Filed on the requester's behalf, by the dashboard, when the engine
+        // finished: not an act of theirs at this moment.
+        filedBy: "retest_watch",
+        requestedBy: watch.requestedBy,
+        requestedAt: watch.startedAt.toISOString(),
+        ...(result
+          ? { verdict: result.verdict, findingType: result.findingType, target: result.target,
+            applied: result.applied ?? null, notFiled: result.notFiled ?? null }
+          : { reason: watch.reason, error: watch.error }),
+      },
+      userId: watch.requestedBy,
+      ipAddress: watch.requestedFrom,
+    });
+  },
+};
+
 /** Engine run states in which a retest is still doing something to the target. */
 const RETEST_LIVE_STATES = new Set(["queued", "running", "aborting"]);
 
-/** A watched retest as the page reads it: its phase, in words, and what stops it. */
-function retestView(watched: retests.WatchedRetest) {
-  const stoppable = watched.phase === "running" || watched.phase === "unwatched";
+/** A watch as the page reads it: its phase, in words, and what stops it. */
+function retestView(watched: RetestWatch) {
+  const phase = watched.state as retests.RetestPhase;
+  const stoppable = phase === "running" || phase === "unwatched";
   return {
-    answer: watched.phase === "verdict" ? "verdict" as const : "status" as const,
-    phase: watched.phase,
+    answer: phase === "verdict" ? "verdict" as const : "status" as const,
+    phase,
     engineRunId: watched.engineRunId,
     testId: watched.testId,
     twinId: watched.twinId,
-    state: watched.engineState,
+    findingId: watched.findingId,
+    state: watched.engineState ?? "unknown",
     reason: watched.reason,
     error: watched.error,
-    lastReadError: watched.lastReadError,
+    requestedBy: watched.requestedBy,
     startedAt: watched.startedAt,
+    lastReadAt: watched.lastReadAt,
+    lastReadError: watched.lastReadError,
     stopAcceptedAt: watched.stopAcceptedAt,
     stoppable,
-    detail: retestPhaseSentence(watched.phase, watched),
+    detail: retestPhaseSentence(phase, watched),
     ...(watched.result ? { result: watched.result } : {}),
   };
 }
@@ -1180,7 +1280,7 @@ function retestView(watched: retests.WatchedRetest) {
 /** What a retest's phase means, said so a status is never read as a verdict. */
 function retestPhaseSentence(
   phase: retests.RetestPhase | "refused",
-  about: { reason: string | null; error: string | null; engineState?: string; stopAcceptedAt?: string | null },
+  about: { reason: string | null; error: string | null; stopAcceptedAt?: Date | string | null },
 ): string {
   switch (phase) {
     case "running":
@@ -1212,10 +1312,11 @@ function retestPhaseSentence(
  */
 async function answerRetestStatus(
   res: Response,
+  watcher: retests.RetestWatcher,
   ctx: RetestContext & { engagementRef: string },
   status: engine.RetestStatus,
 ): Promise<void> {
-  const { test, twinId, engagementRef, who } = ctx;
+  const { test, client, twinId, engagementRef, who } = ctx;
   const log = async (action: string, extra: Record<string, unknown>) => {
     try {
       await storage.createActivityLog({
@@ -1238,28 +1339,21 @@ async function answerRetestStatus(
   }
 
   if (RETEST_LIVE_STATES.has(status.state)) {
-    let phase: retests.RetestPhase = "running";
+    let recorded: string | null = null;
     if (status.engineRunId !== null) {
-      const runId = status.engineRunId;
-      retests.watch(
-        { engineRunId: runId, testId: test.id, twinId, engineState: status.state },
-        (result) => fileRetestVerdict(ctx, result),
-        async (ended) => {
-          await log(ended.phase === "verdict" ? "retested" : `retest_${ended.phase}`, {
-            state: ended.engineState,
-            ...(ended.result
-              ? { verdict: ended.result.verdict, findingType: ended.result.findingType, target: ended.result.target,
-                applied: ended.result.applied }
-              : { reason: ended.reason, error: ended.error }),
-          });
-        },
-      );
-      phase = "running";
+      const started = await watcher.start({
+        engineRunId: status.engineRunId, testId: test.id, clientId: client.id, twinId, engagementRef,
+        requestedBy: who.userId, requestedFrom: who.actor.ipAddress, engineState: status.state,
+      });
+      recorded = started.lastReadError;
+      // The finding is found off the answer's path: the Stop's run id goes back first.
+      void watcher.noteFinding(status.engineRunId).catch(() => undefined);
     }
     await log("retest_started", {});
     return void res.status(202).json({
-      answer: "status", phase, engineRunId: status.engineRunId, testId: test.id, twinId, state: status.state,
+      answer: "status", phase: "running", engineRunId: status.engineRunId, testId: test.id, twinId, state: status.state,
       reason: status.reason, error: status.error, stoppable: status.engineRunId !== null,
+      ...(recorded !== null ? { lastReadError: recorded } : {}),
       detail: status.engineRunId !== null
         ? retestPhaseSentence("running", status)
         : "The engine is running this retest but gave it no run id, so nothing here can name it to stop it: " +
@@ -1277,8 +1371,12 @@ async function answerRetestStatus(
   });
 }
 
-
 export function registerRoutes(app: Express): void {
+  // This app's retest watches, resumed from the record in the background:
+  // a restart loses no verdict, and holds up no start-up and no stop.
+  const watcher = new retests.RetestWatcher(storage, retestWatchHooks);
+  app.locals.retestWatcher = watcher;
+  watcher.resume();
   // Allow the packaged Electron renderer (app://athena) to call the API with cookies.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -2116,6 +2214,8 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // When Retest was pressed: the check says so, however the verdict arrives.
+    const requestedAt = new Date();
     let answered: engine.RetestAnswer;
     try {
       answered = await engine.retest({ twinId: data.twinId, engagementRef, scope });
@@ -2132,12 +2232,12 @@ export function registerRoutes(app: Express): void {
     // finding is changed, and nothing is called fixed or inconclusive from it
     // (athena-engine #71). Read before anything reads a verdict.
     if (answered.answer === "status") {
-      return void (await answerRetestStatus(res, { test, client, twinId: data.twinId, engagementRef, who }, answered.status));
+      return void (await answerRetestStatus(res, watcher, { test, client, twinId: data.twinId, engagementRef, who }, answered.status));
     }
     const result = answered.result;
 
     // Carry the verdict into the finding it is about.
-    const { applied } = await fileRetestVerdict({ test, client, twinId: data.twinId, who }, result);
+    const { applied } = await fileRetestVerdict({ test, client, twinId: data.twinId, who }, result, requestedAt);
 
     // A retest sends real requests to somebody's system, so it is an act and
     // belongs in the record with the authority it ran under.
@@ -2163,7 +2263,7 @@ export function registerRoutes(app: Express): void {
    * `running`; its Stop does not wait on it.
    */
   app.get("/api/retests/:runId", asyncHandler(async (req, res) => {
-    const watched = retests.get(req.params.runId);
+    const watched = await watcher.view(req.params.runId);
     if (!watched) return notFound(res, "Retest");
     res.json(retestView(watched));
   }));
@@ -2192,8 +2292,10 @@ export function registerRoutes(app: Express): void {
         error: "the engine did not accept the stop; the retest may still be running",
       });
     }
-    retests.stopAccepted(runId);
-    const watched = retests.get(runId);
+    // After the stop, never before it: noted in memory at once, on the record
+    // when that write lands, and a write that fails unsends nothing.
+    watcher.stopAccepted(runId);
+    const watched = await watcher.view(runId).catch(() => undefined);
     try {
       await storage.createActivityLog({
         action: "aborted",
@@ -2445,7 +2547,7 @@ export function registerRoutes(app: Express): void {
     if (data.killSwitchEnabled === true) {
       // Neither list failing is a 500: what the page must say is which list
       // could not be read -- not that nothing ran.
-      ({ stops, engineRuns } = await stopEverythingRunning(req));
+      ({ stops, engineRuns } = await stopEverythingRunning(req, watcher));
     }
     const logged = stops === null || engineRuns === null ? data : {
       ...data,

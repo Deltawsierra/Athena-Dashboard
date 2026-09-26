@@ -4,7 +4,7 @@ import {
   type Site, type InsertSite,
   type Test, type InsertTest,
   type Finding, type InsertFinding,
-  type FindingSighting, type FindingCheck,
+  type FindingSighting, type FindingCheck, type RetestWatch,
   type Document, type InsertDocument,
   type ActivityLog, type InsertActivityLog,
   type AIHealthMetric, type InsertAIHealthMetric,
@@ -85,6 +85,24 @@ export interface IStorage {
   recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">): Promise<FindingCheck>;
   getChecks(findingId: string): Promise<FindingCheck[]>;
 
+  // Retest watches (server/retests.ts): a retest the engine answered 202 for,
+  // kept here so a restart resumes it and no verdict is lost.
+  /** Record a new watch. A second watch of the same engine run is refused (its primary key). */
+  createRetestWatch(watch: RetestWatch): Promise<RetestWatch>;
+  getRetestWatch(engineRunId: string): Promise<RetestWatch | undefined>;
+  /** Every watch still `running`: what a dashboard starting up resumes. */
+  getUnfinishedRetestWatches(): Promise<RetestWatch[]>;
+  /** Change a watch that is still `running`; answers whether it was. */
+  updateRunningRetestWatch(engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>): Promise<boolean>;
+  /**
+   * End a watch that is still `running`, and -- in the same step, all or
+   * nothing -- file its verdict when there is one. This is the claim: of two
+   * dashboards that collected the same verdict, only the one whose call finds
+   * the watch still running files it; the other's answers false and writes
+   * nothing. A check for an engine run already filed is refused as well.
+   */
+  endRetestWatch(engineRunId: string, end: RetestWatchEnd, filing?: RetestFiling): Promise<boolean>;
+
   // Documents
   getDocument(id: string): Promise<Document | undefined>;
   getAllDocuments(): Promise<Document[]>;
@@ -149,6 +167,20 @@ export interface IStorage {
   /** Revoke a key: it is kept for the audit trail but never authenticates again. */
   revokeApiKey(id: string): Promise<ApiKey | undefined>;
 }
+
+/** How a watch ended (RetestWatch fields). */
+export type RetestWatchEnd = Pick<RetestWatch, "state" | "engineState" | "reason" | "error" | "endedAt" | "result"> &
+  Partial<Pick<RetestWatch, "findingId" | "lastReadAt" | "lastReadError">>;
+
+/** A collected verdict's filing: the finding's change and its check, written with the watch's end. */
+export interface RetestFiling {
+  findingId: string;
+  findingPatch: Partial<Finding>;
+  check: Omit<FindingCheck, "id" | "checkedAt">;
+}
+
+/** Raised when a check for an engine run that already has one is filed: one retest, one check. */
+export class DuplicateRetestCheck extends Error {}
 
 function defaultControlSettings(): AIControlSetting {
   return {
@@ -406,12 +438,55 @@ export class MemStorage implements IStorage {
     return counts;
   }
   async recordCheck(check: Omit<FindingCheck, "id" | "checkedAt">) {
+    return this.appendCheck(check);
+  }
+  /** As SQLite's unique index on finding_checks(engine_run_id): one check per engine run. */
+  private appendCheck(check: Omit<FindingCheck, "id" | "checkedAt">): FindingCheck {
+    if (check.engineRunId && this.checks.some((one) => one.engineRunId === check.engineRunId)) {
+      throw new DuplicateRetestCheck(`a check is already filed for engine run ${check.engineRunId}`);
+    }
     const row: FindingCheck = { ...check, id: randomUUID(), checkedAt: new Date() };
     this.checks.push(row);
     return row;
   }
   async getChecks(findingId: string) {
     return this.checks.filter((one) => one.findingId === findingId);
+  }
+
+  private retestWatches = new Map<string, RetestWatch>();
+  async createRetestWatch(watch: RetestWatch) {
+    if (this.retestWatches.has(watch.engineRunId)) {
+      throw new Error(`engine run ${watch.engineRunId} is already watched`);
+    }
+    this.retestWatches.set(watch.engineRunId, { ...watch });
+    return { ...watch };
+  }
+  async getRetestWatch(engineRunId: string) {
+    const row = this.retestWatches.get(engineRunId);
+    return row ? { ...row } : undefined;
+  }
+  async getUnfinishedRetestWatches() {
+    return Array.from(this.retestWatches.values()).filter((one) => one.state === "running").map((one) => ({ ...one }));
+  }
+  async updateRunningRetestWatch(engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>) {
+    const row = this.retestWatches.get(engineRunId);
+    if (!row || row.state !== "running") return false;
+    this.retestWatches.set(engineRunId, { ...row, ...patch });
+    return true;
+  }
+  async endRetestWatch(engineRunId: string, end: RetestWatchEnd, filing?: RetestFiling) {
+    // Synchronous from the read to the last write: nothing else runs between
+    // them, so the check-and-set is the claim.
+    const row = this.retestWatches.get(engineRunId);
+    if (!row || row.state !== "running") return false;
+    if (filing) {
+      const finding = this.findings.get(filing.findingId);
+      if (!finding) throw new Error(`finding ${filing.findingId} is not on record`);
+      this.appendCheck(filing.check);
+      this.findings.set(finding.id, { ...finding, ...filing.findingPatch, id: finding.id });
+    }
+    this.retestWatches.set(engineRunId, { ...row, ...end });
+    return true;
   }
 
   async createTest(insertTest: InsertTest): Promise<Test> {

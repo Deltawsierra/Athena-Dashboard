@@ -220,8 +220,63 @@ export const findingChecks = sqliteTable("finding_checks", {
   runId: text("run_id"),
   /** The detector set it ran with, so two verdicts can be compared fairly. */
   inventoryDigest: text("inventory_digest"),
+  /**
+   * The user who pressed Retest. A verdict the dashboard's retest watch
+   * collected after the engine answered 202 is filed as theirs too, and
+   * `filedVia` says so: they asked for it, they did not file it by hand later.
+   */
   checkedBy: text("checked_by"),
   checkedAt: timestamp("checked_at").notNull(),
+  /**
+   * The engine's abort-registry id the retest ran under (athena-engine #71's
+   * top-level `run_id`); null on an engine that answers none. At most one
+   * check per id: a unique index holds it, so one retest is filed once.
+   */
+  engineRunId: text("engine_run_id"),
+  /**
+   * How the verdict reached this record: `retest_request` when the engine
+   * answered it to the Retest request itself, `retest_watch` when the
+   * dashboard's watch collected it from the engine after a 202. Null on checks
+   * filed before this was recorded.
+   */
+  filedVia: text("filed_via"),
+  /** When Retest was pressed. Null on checks filed before this was recorded. */
+  requestedAt: timestamp("requested_at"),
+});
+
+/**
+ * A retest the engine answered 202 for, watched until it ends
+ * (server/retests.ts). Kept in the database, not in the process, so a
+ * dashboard that restarts resumes every unfinished watch and no verdict is
+ * lost; and so two dashboards on one database file each verdict once.
+ */
+export const retestWatches = sqliteTable("retest_watches", {
+  /** The engine's abort-registry id: what a stop names, and what is read. */
+  engineRunId: text("engine_run_id").primaryKey(),
+  testId: text("test_id").notNull(),
+  clientId: text("client_id").notNull(),
+  /** The decision twin retested: with the test, it names the finding. */
+  twinId: integer("twin_id").notNull(),
+  /** The finding the twin is about, once resolved; null until then. */
+  findingId: text("finding_id"),
+  engagementRef: text("engagement_ref"),
+  /** Who pressed Retest, and from where. The verdict is filed as theirs. */
+  requestedBy: text("requested_by"),
+  requestedFrom: text("requested_from"),
+  startedAt: timestamp("started_at").notNull(),
+  /** After this the watch stops reading and says it is no longer watched. */
+  deadlineAt: timestamp("deadline_at").notNull(),
+  /** running | verdict | stopped | failed | no_verdict | unwatched */
+  state: text("state").notNull(),
+  engineState: text("engine_state"),
+  reason: text("reason"),
+  error: text("error"),
+  lastReadAt: timestamp("last_read_at"),
+  lastReadError: text("last_read_error"),
+  stopAcceptedAt: timestamp("stop_accepted_at"),
+  endedAt: timestamp("ended_at"),
+  /** The verdict the watch collected, with what filing it came to. */
+  result: json<Record<string, unknown>>("result"),
 });
 
 export const documents = sqliteTable("documents", {
@@ -505,6 +560,7 @@ export type Test = typeof tests.$inferSelect;
 export type InsertFinding = z.infer<typeof insertFindingSchema>;
 export type FindingSighting = typeof findingSightings.$inferSelect;
 export type FindingCheck = typeof findingChecks.$inferSelect;
+export type RetestWatch = typeof retestWatches.$inferSelect;
 export type Finding = typeof findings.$inferSelect;
 
 /**

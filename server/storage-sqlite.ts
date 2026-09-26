@@ -1,11 +1,11 @@
-import { db } from "./db-sqlite";
+import { db, sqlite } from "./db-sqlite";
 import * as schema from "@shared/schema";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
-import type { IStorage } from "./storage";
+import { DuplicateRetestCheck, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 import type {
@@ -14,7 +14,7 @@ import type {
   Site, InsertSite,
   Test, InsertTest,
   Finding, InsertFinding,
-  FindingSighting, FindingCheck,
+  FindingSighting, FindingCheck, RetestWatch,
   Document, InsertDocument,
   ActivityLog, InsertActivityLog,
   AIHealthMetric, InsertAIHealthMetric,
@@ -283,6 +283,53 @@ export class SqliteStorage implements IStorage {
   async getChecks(findingId: string): Promise<FindingCheck[]> {
     return db.select().from(schema.findingChecks)
       .where(eq(schema.findingChecks.findingId, findingId)).all();
+  }
+
+  async createRetestWatch(watch: RetestWatch): Promise<RetestWatch> {
+    db.insert(schema.retestWatches).values(watch).run();
+    return watch;
+  }
+  async getRetestWatch(engineRunId: string): Promise<RetestWatch | undefined> {
+    return db.select().from(schema.retestWatches).where(eq(schema.retestWatches.engineRunId, engineRunId)).get();
+  }
+  async getUnfinishedRetestWatches(): Promise<RetestWatch[]> {
+    return db.select().from(schema.retestWatches).where(eq(schema.retestWatches.state, "running")).all();
+  }
+  async updateRunningRetestWatch(
+    engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>,
+  ): Promise<boolean> {
+    if (definedKeys(patch).length === 0) return (await this.getRetestWatch(engineRunId))?.state === "running";
+    return db.update(schema.retestWatches).set(patch)
+      .where(and(eq(schema.retestWatches.engineRunId, engineRunId), eq(schema.retestWatches.state, "running")))
+      .run().changes === 1;
+  }
+  async endRetestWatch(engineRunId: string, end: RetestWatchEnd, filing?: RetestFiling): Promise<boolean> {
+    // One IMMEDIATE transaction, the claim first: the UPDATE that moves the
+    // watch off `running` takes the write lock, and a second dashboard on this
+    // file waits for it, then finds the watch ended and writes nothing. The
+    // filing is in the same transaction, so a claim is never left without its
+    // check, nor a check without its claim.
+    const run = sqlite.transaction((): boolean => {
+      const claimed = db.update(schema.retestWatches).set(end)
+        .where(and(eq(schema.retestWatches.engineRunId, engineRunId), eq(schema.retestWatches.state, "running")))
+        .run().changes === 1;
+      if (!claimed) return false;
+      if (filing) {
+        const changed = db.update(schema.findings).set(filing.findingPatch)
+          .where(eq(schema.findings.id, filing.findingId)).run().changes;
+        if (changed !== 1) throw new Error(`finding ${filing.findingId} is not on record`);
+        try {
+          db.insert(schema.findingChecks).values({ ...filing.check, id: randomUUID(), checkedAt: new Date() }).run();
+        } catch (cause) {
+          if (String(cause).includes("UNIQUE")) {
+            throw new DuplicateRetestCheck(`a check is already filed for engine run ${filing.check.engineRunId}`);
+          }
+          throw cause;
+        }
+      }
+      return true;
+    });
+    return run.immediate();
   }
 
   async updateFinding(id: string, patch: Partial<Finding>): Promise<Finding | undefined> {

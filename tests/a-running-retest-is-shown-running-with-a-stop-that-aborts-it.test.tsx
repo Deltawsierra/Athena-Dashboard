@@ -83,6 +83,8 @@ beforeAll(async () => {
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
   vi.resetModules();
   const app = await makeApp();
+  watcher = app.locals.retestWatcher;
+  storageOf = (await import("../server/storage-unified")).storage;
   agent = await signIn(app);
   const retests = await import("../server/retests");
   retests.retestWatch.intervalMs = 25;
@@ -111,6 +113,14 @@ afterEach(() => {
   queryClient.clear();
   Object.assign(state, { fixture: null, statusReads: [], hold: null, active: { status: 200, body: { active: [] } }, abort: null });
   calls.length = 0;
+});
+
+let watcher: import("../server/retests").RetestWatcher;
+let storageOf: unknown;
+afterEach(() => {
+  // The fixtures' run ids are reused across cases, which a real engine never does.
+  watcher.reset();
+  (storageOf as { retestWatches: Map<string, unknown> }).retestWatches.clear();
 });
 
 /** Every request the panel sends goes to the real routes, as the signed-in admin. */

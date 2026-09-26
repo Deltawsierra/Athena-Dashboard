@@ -52,7 +52,12 @@ interface FindingRow {
   fixedVerdict: string | null;
   reopenedAt: string | null;
   sightings: Array<{ id: string; runId: string | null; seen: boolean; observedAt: string }>;
-  checks: Array<{ id: string; verdict: string; detail: string | null; runId: string | null; checkedAt: string }>;
+  checks: Array<{
+    id: string; verdict: string; detail: string | null; runId: string | null; checkedAt: string;
+    /** `retest_watch`: collected from the engine after it answered 202, filed as the requester's retest. */
+    filedVia?: string | null;
+    requestedAt?: string | null;
+  }>;
 }
 
 interface FindingsView {
@@ -290,6 +295,13 @@ export default function Findings() {
                                 <span className="text-muted-foreground">
                                   {" "}· run {(one.runId ?? "unknown").slice(0, 8)} ·{" "}
                                   {new Date(one.checkedAt).toLocaleDateString()}
+                                  {/* Filed by the dashboard when the engine finished, on the requester's behalf. */}
+                                  {one.filedVia === "retest_watch" && (
+                                    <span data-testid={`text-check-collected-${one.id}`}>
+                                      {" "}· collected when the engine finished
+                                      {one.requestedAt ? `, requested ${new Date(one.requestedAt).toLocaleDateString()}` : ""}
+                                    </span>
+                                  )}
                                 </span>
                               </li>
                             ))}
