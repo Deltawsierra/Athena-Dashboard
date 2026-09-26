@@ -2473,6 +2473,17 @@ function nextPath(payload: unknown): string | null {
  * a page of one, a bare list after the first page, or more pages than MAX_PAGES,
  * is then unavailability too, rather than the rows that happened to arrive.
  */
+/** A whole read's rows must each be a record; any other row is a list read wrong. */
+function wholeRowsOf(list: unknown[], firstPath: string): void {
+  for (const row of list) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new ControlPlaneUnavailable(
+        `the Athena control plane answered ${firstPath} with a row that is not a record; the list cannot be read whole`,
+      );
+    }
+  }
+}
+
 async function pagedRows(
   firstPath: string,
   { whole = false }: { whole?: boolean } = {},
@@ -2496,10 +2507,22 @@ async function pagedRows(
           `the Athena control plane answered a later page of ${firstPath} with a bare list, not a page; the list cannot be read whole`,
         );
       }
+      if (whole) wholeRowsOf(payload, firstPath);
       return payload as Record<string, unknown>[];
     }
     if (whole && !Array.isArray(objOf(payload).results)) {
       throw new ControlPlaneUnavailable("the Athena control plane answered a list read with something that is not a list");
+    }
+    if (whole) {
+      wholeRowsOf(objOf(payload).results as unknown[], firstPath);
+      // DRF sends `next` as a URL or null. Anything else would read as the last
+      // page, and the rows read so far as the whole list.
+      const next = objOf(payload).next;
+      if (next !== undefined && next !== null && (typeof next !== "string" || next === "")) {
+        throw new ControlPlaneUnavailable(
+          `the Athena control plane answered a page of ${firstPath} whose next link is not a link; the list cannot be read whole`,
+        );
+      }
     }
     collected.push(...rows(payload));
     path = nextPath(payload);

@@ -3173,6 +3173,16 @@ describe("assurance BFF against a paginated control plane", () => {
           }
           // A bare empty list as the first answer: the backend's own "none open".
           if (retests[1] === "dep-none") return json(200, []);
+          // A row that is not a record: in a bare list, and in a page's results.
+          if (retests[1] === "dep-null-row") return json(200, [row("rr-a", "claim-a"), null]);
+          if (retests[1] === "dep-null-row-paged") {
+            return json(200, { count: 2, next: null, previous: null, results: [null, row("rr-a", "claim-a")] });
+          }
+          // A page whose `next` is not a link DRF would send: it must not read as the last page.
+          if (retests[1] === "dep-next-not-a-link" || retests[1] === "dep-next-empty") {
+            const next = retests[1] === "dep-next-not-a-link" ? 5 : "";
+            return json(200, { count: 2, next, previous: null, results: [row("rr-a", "claim-a")] });
+          }
           // A list of exactly n pages, one row on each, the last with no `next`.
           const pages = retests[1].match(/^dep-pages-(\d+)$/);
           if (pages) {
@@ -3264,6 +3274,22 @@ describe("assurance BFF against a paginated control plane", () => {
     const none = await user.get("/api/assurance/deployments/dep-none/retest-requirements");
     expect(none.status).toBe(200);
     expect(none.body).toEqual([]);
+  });
+
+  it("refuses a deployment's retest obligations holding a row that is not a record, or a next link that is not a link", async () => {
+    // A null row used to reach the row mapper and answer an unexplained 500.
+    for (const dep of ["dep-null-row", "dep-null-row-paged"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/a row that is not a record; the list cannot be read whole/);
+    }
+    // A `next` that is neither a URL nor null used to read as the last page, so the
+    // rows read so far answered as the whole list.
+    for (const dep of ["dep-next-not-a-link", "dep-next-empty"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/whose next link is not a link; the list cannot be read whole/);
+    }
   });
 
   it("reads a deployment's retest obligations of exactly 200 pages whole, and refuses one page more", async () => {
