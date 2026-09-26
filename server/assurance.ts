@@ -227,8 +227,20 @@ export interface RouteLayer {
  * `reason` says HOW it failed, and the three are different findings: "not_found"
  * names nothing discovery placed; "ambiguous" names more than one component, and
  * the backend followed it to every one; "names_a_principal" names an agent or a
- * service account where a tool or backend belongs. Null when the control plane
- * did not say -- it predates the field -- which is not any of the three.
+ * service account where a tool or backend belongs; "superseded_identity" was
+ * followed, to or from a component recorded under identity rules no scan has
+ * re-recorded since, and a rescan is what confirms it; "legacy_unnamed_agent"
+ * was declared by the one row the old identity rules wrote for every unnamed
+ * agent at once, which a rescan does not re-record: it records each unnamed
+ * agent under a row of its own. Null when the control plane did not
+ * say -- it predates the field -- which is none of these.
+ *
+ * `reasons` is every reason the reference is reported for, `reason` first. One
+ * reference is one row however many hold -- an ambiguous reference with a
+ * superseded candidate is both -- because a row per reason counted one reference
+ * twice in every total built on the list. A control plane that predates the list
+ * sends `reason` alone, and its list is that one reason, or empty when it sent
+ * none.
  */
 export interface UnresolvedReference {
   source: string;
@@ -236,6 +248,7 @@ export interface UnresolvedReference {
   reference: string;
   mechanism: string;
   reason: string | null;
+  reasons: string[];
 }
 export interface AssuranceRouteMap {
   layers: RouteLayer[];
@@ -1532,17 +1545,39 @@ function unresolvedReferences(raw: unknown): UnresolvedReference[] | null {
   // that cannot answer produced a response identical to a clean one.
   if (!Array.isArray(raw)) return null;
   return (raw as Record<string, unknown>[])
-    .map((u) => ({
-      source: str(u.source),
-      sourceKind: str(u.source_kind),
-      // Trimmed here rather than trusted: the backend strips these before it
-      // sends them, but this console is a separate deployable and a whitespace
-      // reference renders as a gap with no name.
-      reference: str(u.reference).trim(),
-      mechanism: str(u.mechanism),
-      reason: strOrNull(typeof u.reason === "string" ? u.reason.trim() : null),
-    }))
+    .map((u) => {
+      const reason = strOrNull(typeof u.reason === "string" ? u.reason.trim() : null);
+      return {
+        source: str(u.source),
+        sourceKind: str(u.source_kind),
+        // Trimmed here rather than trusted: the backend strips these before it
+        // sends them, but this console is a separate deployable and a whitespace
+        // reference renders as a gap with no name.
+        reference: str(u.reference).trim(),
+        mechanism: str(u.mechanism),
+        reason,
+        reasons: referenceReasons(reason, u.reasons),
+      };
+    })
     .filter((u) => u.reference !== "");
+}
+
+/**
+ * Every reason one unresolved reference is reported for, `reason` first, each
+ * once. A blank or non-string entry is the control plane not saying, never a
+ * reason -- the same rule `reason` itself is read under -- and a `reason` the
+ * list leaves out is still carried, so no reason the control plane gave is
+ * dropped on the way to the page.
+ */
+function referenceReasons(reason: string | null, raw: unknown): string[] {
+  const listed = Array.isArray(raw)
+    ? raw.filter((r): r is string => typeof r === "string").map((r) => r.trim()).filter((r) => r !== "")
+    : [];
+  const out: string[] = [];
+  for (const r of reason === null ? listed : [reason, ...listed]) {
+    if (!out.includes(r)) out.push(r);
+  }
+  return out;
 }
 
 /** A passthrough object of {string: number}, filtered to numeric values. */

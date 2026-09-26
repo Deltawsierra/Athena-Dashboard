@@ -228,12 +228,16 @@ interface RouteEdge {
 // metadata; both readers of that graph — the reach assessment and the route map —
 // report a miss in this one shape, so the console describes the same gap the same
 // way wherever it appears.
+//
+// `reasons` is every reason the reference is reported for, `reason` first: one
+// reference is one row however many reasons hold.
 interface UnresolvedReference {
   source: string;
   sourceKind: string;
   reference: string;
   mechanism: string;
   reason: string | null;
+  reasons: string[];
 }
 interface RouteMap {
   layers: { key: string; label: string; nodes: RouteNode[] }[];
@@ -2284,11 +2288,59 @@ const REASON_PHRASING: Record<string, string> = {
   ambiguous:
     "which more than one component answers to — the inventory does not say which, so every one of them was followed",
   names_a_principal: "which is an agent or a service account, not something this declaration can point at",
+  // Placed and followed -- its powers are counted -- but recorded under identity
+  // rules the control plane no longer writes, and no scan has recorded it since.
+  // "Could not be placed" would send the operator looking for a component that
+  // exists; what it needs is a rescan.
+  superseded_identity:
+    "which was followed, but is recorded under identity rules no scan has re-recorded since — rescan to confirm it",
+  // Declared by the one row the old identity rules wrote for every unnamed agent
+  // at once. Whether it was followed is the other reasons' to say -- a reference
+  // from that row can still name nothing -- so this does not claim it. What it
+  // does say is that a rescan does not re-record that row: the current rules
+  // record each unnamed agent under a row of its own, keyed by where it is, so
+  // "rescan" would send the operator to a scan that never clears it.
+  legacy_unnamed_agent:
+    "which comes from the row the old identity rules wrote for every unnamed agent at once — a rescan records each unnamed agent under a row of its own, not this one",
 };
+
+// From the old unnamed-agent row, an old row at the other end is said as what it
+// is and no more: that row's reference is never re-recorded, so "rescan to
+// confirm it" -- the superseded phrasing -- would promise the reference a rescan
+// that does not touch it.
+const SUPERSEDED_FROM_LEGACY_ROW = "which reaches a component also recorded under the old identity rules";
 
 export function unresolvedReason(reason: string | null): string {
   if (reason === null) return "which could not be placed as exactly one component";
   return REASON_PHRASING[reason] ?? `which could not be placed (the control plane says: ${reason})`;
+}
+
+// Every reason one reference is reported for, each said. An ambiguous reference
+// with a superseded candidate is both, and saying only the first would hide the
+// rescan the second asks for. From the old unnamed-agent row, a superseded
+// candidate is said without the rescan: none clears it.
+export function unresolvedReasons(row: Pick<UnresolvedReference, "reason" | "reasons">): string {
+  const reasons = row.reasons.length > 0 ? row.reasons : [row.reason];
+  const fromLegacyRow = reasons.includes("legacy_unnamed_agent");
+  return reasons
+    .map((r) => (fromLegacyRow && r === "superseded_identity" ? SUPERSEDED_FROM_LEGACY_ROW : unresolvedReason(r)))
+    .join("; and ");
+}
+
+// Followed and counted, and waiting only on a rescan: every reason it is
+// reported for is the superseded one. Not a reference that could not be placed.
+function awaitsRescanOnly(row: UnresolvedReference): boolean {
+  return row.reasons.length > 0 && row.reasons.every((r) => r === "superseded_identity");
+}
+
+// Followed and counted, from the old unnamed-agent row: that is the reason, and
+// the only other one is an old row at the other end. Neither a reference that
+// could not be placed nor one a rescan confirms -- no rescan re-records that row.
+function fromLegacyRowOnly(row: UnresolvedReference): boolean {
+  return (
+    row.reasons.includes("legacy_unnamed_agent") &&
+    row.reasons.every((r) => r === "legacy_unnamed_agent" || r === "superseded_identity")
+  );
 }
 
 // The references the inventory declares and discovery could not place, said
@@ -2327,6 +2379,14 @@ export function UnresolvedReferences({
   }
   if (rows.length === 0 && (reported === null || reported === 0)) return null;
   const undercount = reported !== null && reported > rows.length;
+  // A reference reported only as superseded was followed and its powers
+  // counted; "could not be placed" would send the operator looking for a
+  // component that exists, when what it needs is a rescan.
+  const rescan = rows.filter(awaitsRescanOnly).length;
+  // From the old unnamed-agent row, followed and counted, and not something a
+  // rescan confirms: counted apart from both.
+  const legacy = rows.filter(fromLegacyRowOnly).length;
+  const unplaced = rows.length - rescan - legacy;
   return (
     <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
@@ -2335,21 +2395,52 @@ export function UnresolvedReferences({
       <p className="mb-1.5 text-[11px] leading-relaxed text-muted-foreground">
         {undercount ? (
           <>
-            {reported} declared reference{reported === 1 ? "" : "s"} could not be placed against this
-            deployment&apos;s inventory, and{" "}
+            {reported} declared reference{reported === 1 ? " was" : "s were"} reported unresolved against
+            this deployment&apos;s inventory, and{" "}
             <span className="text-foreground">
               {rows.length === 0 ? "none of them" : `only ${rows.length} of them`}
             </span>{" "}
-            arrived with a reference this console can name.
+            arrived with a reference this console can name. So {what} was built over an incomplete
+            graph.
           </>
         ) : (
           <>
-            {rows.length} declared reference{rows.length === 1 ? "" : "s"} could not be placed against
-            this deployment&apos;s inventory.
+            {unplaced > 0 && (
+              <>
+                {unplaced} declared reference{unplaced === 1 ? "" : "s"} could not be placed as exactly
+                one component against this deployment&apos;s inventory.{" "}
+              </>
+            )}
+            {rescan > 0 && (
+              <>
+                {rescan} {unplaced > 0 ? "more" : `declared reference${rescan === 1 ? "" : "s"}`}{" "}
+                {rescan === 1 ? "was" : "were"} followed to or from a component recorded under identity
+                rules no scan has re-recorded since; a rescan is what confirms{" "}
+                {rescan === 1 ? "it" : "them"}.{" "}
+              </>
+            )}
+            {legacy > 0 && (
+              <>
+                {legacy}{" "}
+                {unplaced + rescan > 0 ? "more" : `declared reference${legacy === 1 ? "" : "s"}`}{" "}
+                {legacy === 1 ? "comes" : "come"} from the row the old identity rules wrote for every
+                unnamed agent at once; the reach through {legacy === 1 ? "it" : "them"} is counted as
+                the rows {legacy === 1 ? "it names" : "they name"} stand now, and a rescan records
+                each unnamed agent under a row of its own, keyed by where it is, not that one.{" "}
+              </>
+            )}
+            So {what} was built over{" "}
+            {unplaced > 0
+              ? "an incomplete graph"
+              : rescan > 0 && legacy > 0
+                ? "a graph a rescan has yet to confirm, and that still counts reach through the old unnamed-agent row"
+                : rescan > 0
+                  ? "a graph a rescan has yet to confirm"
+                  : "a graph that still counts reach through the old unnamed-agent row"}
+            .
           </>
         )}{" "}
-        So {what} was built over an incomplete graph. These are gaps to chase, not components to
-        assume away.
+        These are gaps to chase, not components to assume away.
       </p>
       <ul className="space-y-1">
         {rows.map((u, i) => (
@@ -2361,7 +2452,7 @@ export function UnresolvedReferences({
                 <span className="text-foreground">{u.mechanism || "an unnamed mechanism"}</span>)
               </>
             )}{" "}
-            <span className="text-amber-400/90">{u.reference}</span>, {unresolvedReason(u.reason)}.
+            <span className="text-amber-400/90">{u.reference}</span>, {unresolvedReasons(u)}.
           </li>
         ))}
       </ul>
