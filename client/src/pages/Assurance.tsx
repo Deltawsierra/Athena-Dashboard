@@ -5932,38 +5932,57 @@ const CLAIM_STATUS_LABEL: Record<string, string> = {
  * grade: a claim a person moved to contradicted or revoked still carries the
  * strength it had while supported, and one moved up from unknown carries none.
  * Printing that number beside such a status would say the opposite of the status.
+ *
+ * And it is a read of current evidence, so it is not shown once that evidence
+ * has expired (`isStale`: last observed longer ago than the backend's evidence
+ * TTL), even under a supporting status.
  */
 const SUPPORTING_STATUSES = new Set(["supported", "verified", "partially_verified"]);
 
+// What each status means in athena-backend, true on every path that sets it --
+// never a cause. A person can set contradicted or unknown over evidence that
+// supports the claim, and a derived unknown can be partly known, so neither
+// reason says anything about the evidence.
 const NO_STRENGTH_BECAUSE: Record<string, string> = {
-  contradicted: "the evidence contradicts this claim",
-  unknown: "nothing is known about this claim either way",
+  contradicted: "this claim is marked contradicted",
+  unknown: "this claim is marked unknown, neither supported nor contradicted",
   revoked: "this claim was withdrawn",
-  stale: "the evidence behind this claim has expired",
+  // Set by a system change, a declared condition coming true, or expiry; in
+  // every case it means a retest is due (assurance/invalidation.py).
+  stale: "a retest is due before this claim can be read as current",
   superseded: "a newer version of this claim replaces it",
   draft: "this claim has not been assessed",
 };
 
+// `isStale` on the backend (AssuranceClaim.is_stale): the claim's evidence was
+// last observed longer ago than EVIDENCE_TTL_DAYS.
+const EXPIRED_BECAUSE = "the evidence behind this claim has expired";
+
 export const CLAIM_STRENGTH_BASIS =
   "Ordinal: read from the weakest class of evidence supporting the claim. Not a probability that the claim is true.";
 
-function gradedStrength(status: string, confidence: number | null): number | null {
+/** What a claim's strength is read from. */
+type ClaimStrengthInput = Pick<Claim, "status" | "confidence" | "isStale">;
+
+function gradedStrength({ status, confidence, isStale }: ClaimStrengthInput): number | null {
   if (!SUPPORTING_STATUSES.has(status)) return null;
+  if (isStale) return null;
   if (typeof confidence !== "number" || !Number.isFinite(confidence)) return null;
   return confidence > 0 && confidence <= 1 ? confidence : null;
 }
 
-export function claimStrength(status: string, confidence: number | null): string {
-  const strength = gradedStrength(status, confidence);
+export function claimStrength(claim: ClaimStrengthInput): string {
+  const strength = gradedStrength(claim);
   return strength === null ? "strength —" : `strength ${strength.toFixed(2)}`;
 }
 
-export function claimStrengthBasis(status: string, confidence: number | null): string {
-  if (gradedStrength(status, confidence) !== null) return CLAIM_STRENGTH_BASIS;
-  if (!SUPPORTING_STATUSES.has(status)) {
-    const because = NO_STRENGTH_BECAUSE[status] ?? "this status does not stand on supporting evidence";
+export function claimStrengthBasis(claim: ClaimStrengthInput): string {
+  if (gradedStrength(claim) !== null) return CLAIM_STRENGTH_BASIS;
+  if (!SUPPORTING_STATUSES.has(claim.status)) {
+    const because = NO_STRENGTH_BECAUSE[claim.status] ?? "this status does not stand on supporting evidence";
     return `No strength: ${because}.`;
   }
+  if (claim.isStale) return `No strength: ${EXPIRED_BECAUSE}.`;
   return "No strength recorded for this claim.";
 }
 
@@ -6125,6 +6144,7 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
           {data.map((c) => {
             const isOpen = expanded.has(c.uuid);
             const nextStates = CLAIM_TRANSITIONS[c.status] ?? [];
+            const strengthBasis = claimStrengthBasis(c);
             return (
               <li key={c.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -6148,11 +6168,13 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
                   {c.isStale && <span className="text-[10px] text-amber-400/90">stale</span>}
                   <span
                     className="text-[10px] text-muted-foreground"
-                    title={claimStrengthBasis(c.status, c.confidence)}
+                    title={strengthBasis}
                     data-testid="text-claim-strength"
                   >
-                    {claimStrength(c.status, c.confidence)}
-                    <span className="sr-only"> ({claimStrengthBasis(c.status, c.confidence)})</span>
+                    <span data-testid="text-claim-strength-value">{claimStrength(c)}</span>
+                    <span className="sr-only" data-testid="text-claim-strength-sr">
+                      {` (${strengthBasis})`}
+                    </span>
                   </span>
                   {c.assetName && <span className="text-[10px] text-muted-foreground">· {c.assetName}</span>}
                   {c.receiptDigest && (
@@ -6172,7 +6194,7 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
                 {isOpen && (
                   <div className="mt-2">
                     <p className="mb-1.5 text-[10px] text-muted-foreground" data-testid="text-claim-strength-basis">
-                      {claimStrengthBasis(c.status, c.confidence)}
+                      {strengthBasis}
                     </p>
                     {c.invalidationConditions.length > 0 && (
                       <div className="mb-1.5 text-[10px] text-muted-foreground">
