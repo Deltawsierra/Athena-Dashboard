@@ -26,6 +26,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import FindingConfidence from "@/components/FindingConfidence";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import RunningScans from "@/components/RunningScans";
@@ -63,7 +64,10 @@ interface EngineFinding {
   message?: string;
   details?: string;
   severity?: string;
-  confidence?: number;
+  /** Ordinal, from mythos-core `evidence.annotate`: never a probability, never a percentage. */
+  confidence?: number | null;
+  /** The engine's own sentence for what `confidence` is, shown with it verbatim. */
+  confidence_basis?: string | null;
   internal?: boolean;
 }
 
@@ -523,11 +527,7 @@ export default function AthenaScan() {
                       </div>
                       <p className="text-[13px] font-medium text-foreground">{f.message}</p>
                       {f.details && <p className="text-[13px] text-muted-foreground">{f.details}</p>}
-                      {typeof f.confidence === "number" && (
-                        <p className="athena-mono text-[11px] text-muted-foreground">
-                          confidence {f.confidence.toFixed(2)}
-                        </p>
-                      )}
+                      <FindingConfidence finding={f} />
                     </li>
                   );
                 })}

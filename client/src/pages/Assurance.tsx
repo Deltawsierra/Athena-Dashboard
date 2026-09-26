@@ -2726,10 +2726,11 @@ function BoundaryForm({
  * remediation move feeds cross-deployment roll-ups — to refresh every
  * deployment's computed panels.
  *
- * A read of these panels in flight was asked before the change, so it is
- * cancelled first and asked again. Invalidating alone restarts only a read that
- * already has data: React Query keeps a first read in flight, and it could land
- * after the change's reads with the state from before it.
+ * A read of these panels or of the list in flight was asked before the change, so
+ * it is cancelled first and asked again. Invalidating alone restarts only a read
+ * that already has data: React Query keeps a first read in flight, and it could
+ * land after the change's reads with the state from before it -- for the list, the
+ * decision from before the change.
  */
 function invalidateAssuranceComputed(uuid?: string): void {
   const prefix = `/api/assurance/deployments/${uuid ? `${uuid}/` : ""}`;
@@ -2739,6 +2740,7 @@ function invalidateAssuranceComputed(uuid?: string): void {
   };
   void queryClient.cancelQueries({ predicate: computed });
   queryClient.invalidateQueries({ predicate: computed });
+  void queryClient.cancelQueries({ queryKey: ["/api/assurance/deployments"] });
   queryClient.invalidateQueries({ queryKey: ["/api/assurance/deployments"] });
 }
 
