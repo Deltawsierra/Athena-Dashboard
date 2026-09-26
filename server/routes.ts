@@ -169,6 +169,11 @@ function runIdOf(test: { findings: unknown }): string | null {
   return typeof runId === "string" && runId !== "" ? runId : null;
 }
 
+/** Whether one of a run's recorded results is a finding a screen can read: a record. */
+function isResultRow(row: unknown): boolean {
+  return row !== null && typeof row === "object" && !Array.isArray(row);
+}
+
 /** Engine run states after which nothing more happens. */
 const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
 
@@ -1417,8 +1422,30 @@ export function registerRoutes(app: Express): void {
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
     const runId = typeof recorded.runId === "string" ? recorded.runId : null;
-    if (!runId || test.status === "completed") {
-      return void res.json({ test, state: test.status, engine: null });
+    if (test.status === "completed") {
+      // The engine is not asked again about a run recorded as completed, so what
+      // it returned is what was recorded then: the last poll's findings, or the
+      // start's for a run the engine finished inline. They are answered in the
+      // shape the engine's own are, `confidence_basis` and all. This answered
+      // `engine: null`, and the scan screens read that as "returned no findings"
+      // beside the counts those same findings were counted into. Findings that
+      // cannot be read are said to be unread, never answered as none.
+      const results = recorded.results;
+      if (!Array.isArray(results) || !results.every(isResultRow)) {
+        return void res.json({
+          test, state: test.status, engine: null,
+          detail: "the findings recorded for this scan could not be read",
+        });
+      }
+      const answered: engine.EngineScan = {
+        runId, state: test.status, findings: results, detail: "the findings recorded when the run completed",
+      };
+      return void res.json({ test, state: test.status, engine: answered });
+    }
+    if (!runId) {
+      return void res.json({
+        test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
+      });
     }
 
     let current;

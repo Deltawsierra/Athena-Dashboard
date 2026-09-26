@@ -197,9 +197,12 @@ export default function AthenaScan() {
   const engagementReady = clientId !== "" && target.trim() !== "";
   const canScan = engineReady && engagementReady;
 
-  const returned = scan?.engine?.findings ?? [];
-  const findings = returned.filter((f) => !f.internal);
-  const notes = returned.filter((f) => f.internal);
+  // What the run returned. Null when this read carries none: the engine could
+  // not be reached, or the findings recorded for a finished run could not be
+  // read. Null is never drawn as "no findings".
+  const returned = scan?.engine && Array.isArray(scan.engine.findings) ? scan.engine.findings : null;
+  const findings = (returned ?? []).filter((f) => !f.internal);
+  const notes = (returned ?? []).filter((f) => f.internal);
   const running = scan !== undefined && !FINISHED.has(scan.state);
   // Until a read says the scan has stopped, it may be running, and its Stop is
   // on screen: while the first read is still on its way, and after a read
@@ -500,7 +503,12 @@ export default function AthenaScan() {
           {/* Findings themselves — real, non-internal engine findings */}
           <GlassCard hover={false} glow={false} className="mt-5">
             <p className="athena-label">Findings</p>
-            {findings.length === 0 && finished && (
+            {returned === null && (
+              <p className="mt-3 text-[13px] text-muted-foreground" data-testid="text-findings-unread">
+                The findings could not be read, so none are listed here. That is not the same as none found.
+              </p>
+            )}
+            {returned !== null && findings.length === 0 && finished && (
               <div className="mt-3 flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                 <p className="text-[13px] text-muted-foreground">
@@ -508,7 +516,7 @@ export default function AthenaScan() {
                 </p>
               </div>
             )}
-            {findings.length === 0 && running && (
+            {returned !== null && findings.length === 0 && running && (
               <p className="mt-3 text-[13px] text-muted-foreground">The engine has reported nothing yet.</p>
             )}
             {findings.length > 0 && (
