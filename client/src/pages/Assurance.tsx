@@ -5921,27 +5921,55 @@ const CLAIM_STATUS_LABEL: Record<string, string> = {
   revoked: "Revoked",
 };
 
+/**
+ * A claim's strength is the backend's ordinal: 1.00 down to 0.10 by the weakest
+ * class of evidence supporting the claim (athena-backend `claims._confidence`,
+ * documented once in mythos-core `evidence`). It is not a probability, so it is
+ * never printed as a percentage: "conf 52%" read as a 52% chance the claim is true.
+ *
+ * It is shown only for a claim whose status stands on supporting evidence. The
+ * backend grades the machine's reading, and a status a person set keeps that
+ * grade: a claim a person moved to contradicted or revoked still carries the
+ * strength it had while supported, and one moved up from unknown carries none.
+ * Printing that number beside such a status would say the opposite of the status.
+ */
+const SUPPORTING_STATUSES = new Set(["supported", "verified", "partially_verified"]);
+
+const NO_STRENGTH_BECAUSE: Record<string, string> = {
+  contradicted: "the evidence contradicts this claim",
+  unknown: "nothing is known about this claim either way",
+  revoked: "this claim was withdrawn",
+  stale: "the evidence behind this claim has expired",
+  superseded: "a newer version of this claim replaces it",
+  draft: "this claim has not been assessed",
+};
+
+export const CLAIM_STRENGTH_BASIS =
+  "Ordinal: read from the weakest class of evidence supporting the claim. Not a probability that the claim is true.";
+
+function gradedStrength(status: string, confidence: number | null): number | null {
+  if (!SUPPORTING_STATUSES.has(status)) return null;
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) return null;
+  return confidence > 0 && confidence <= 1 ? confidence : null;
+}
+
+export function claimStrength(status: string, confidence: number | null): string {
+  const strength = gradedStrength(status, confidence);
+  return strength === null ? "strength —" : `strength ${strength.toFixed(2)}`;
+}
+
+export function claimStrengthBasis(status: string, confidence: number | null): string {
+  if (gradedStrength(status, confidence) !== null) return CLAIM_STRENGTH_BASIS;
+  if (!SUPPORTING_STATUSES.has(status)) {
+    const because = NO_STRENGTH_BECAUSE[status] ?? "this status does not stand on supporting evidence";
+    return `No strength: ${because}.`;
+  }
+  return "No strength recorded for this claim.";
+}
+
 /** A claim's status, coloured by how it bears on assurance. A pass reads green
  *  only when actually supported/verified; contradicted is a mark against, and
  *  stale/unknown are honest gaps — never green-by-default. */
-/**
- * A claim's confidence is the backend's ordinal strength: 1.00 down to 0.10 by the
- * weakest class of evidence supporting the claim (athena-backend
- * `claims._confidence`, documented once in mythos-core `evidence`). It is not a
- * probability, so it is never printed as a percentage: "conf 52%" read as a 52%
- * chance the claim is true. Null means the claim is not standing on supporting
- * evidence (unknown or contradicted), which is not a strength of zero.
- */
-export function claimStrength(confidence: number | null): string {
-  return confidence === null ? "strength —" : `strength ${confidence.toFixed(2)}`;
-}
-
-export function claimStrengthBasis(confidence: number | null): string {
-  return confidence === null
-    ? "No strength: the claim is not standing on supporting evidence."
-    : "Ordinal: read from the weakest class of evidence supporting the claim. Not a probability that the claim is true.";
-}
-
 function ClaimStatusChip({ status, label }: { status: string; label?: string }) {
   const cls =
     status === "verified" || status === "supported"
@@ -6001,7 +6029,7 @@ function ClaimEventLedger({ claimUuid }: { claimUuid: string }) {
  * ledger; an admin transitions a claim (the backend enforces the state machine
  * and the verified-evidence gate) or recomputes the whole register. Self-fetching.
  */
-function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [noteFor, setNoteFor] = useState<Record<string, string>>({});
@@ -6120,10 +6148,11 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
                   {c.isStale && <span className="text-[10px] text-amber-400/90">stale</span>}
                   <span
                     className="text-[10px] text-muted-foreground"
-                    title={claimStrengthBasis(c.confidence)}
+                    title={claimStrengthBasis(c.status, c.confidence)}
                     data-testid="text-claim-strength"
                   >
-                    {claimStrength(c.confidence)}
+                    {claimStrength(c.status, c.confidence)}
+                    <span className="sr-only"> ({claimStrengthBasis(c.status, c.confidence)})</span>
                   </span>
                   {c.assetName && <span className="text-[10px] text-muted-foreground">· {c.assetName}</span>}
                   {c.receiptDigest && (
@@ -6142,6 +6171,9 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
                 )}
                 {isOpen && (
                   <div className="mt-2">
+                    <p className="mb-1.5 text-[10px] text-muted-foreground" data-testid="text-claim-strength-basis">
+                      {claimStrengthBasis(c.status, c.confidence)}
+                    </p>
                     {c.invalidationConditions.length > 0 && (
                       <div className="mb-1.5 text-[10px] text-muted-foreground">
                         <span className="uppercase tracking-wide">Invalidated when</span>
