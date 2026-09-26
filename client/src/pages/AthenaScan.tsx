@@ -41,11 +41,13 @@ import {
   SCAN_STAGES,
   SEVERITY_LABEL,
   SEVERITY_ORDER,
+  RESULT_LEVEL_LABEL,
   RISK_BAND_TONE,
   bandFromCounts,
+  levelTone,
   severityToken,
+  type ResultLevel,
   type SeverityCounts,
-  type Severity,
 } from "@/lib/athenaScan";
 import { isEngineInternal } from "@shared/engine-internal";
 import { countsNotRecorded, ratingOf, readScan, reportedTotal } from "@shared/latest-scans";
@@ -84,18 +86,21 @@ interface ScanView {
 /** States the engine reports for a run that has stopped moving. */
 const FINISHED = new Set(["completed", "aborted", "failed", "refused"]);
 
-function SeverityBadge({ severity }: { severity: Severity }) {
+/** A result's badge: its severity, or "Not rated" (muted) when it has none -- never "Info", which says "not a risk". */
+function SeverityBadge({ level }: { level: ResultLevel }) {
+  const tone = levelTone(level);
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold"
       style={{
-        color: `hsl(var(--sev-${severity}))`,
-        borderColor: `hsl(var(--sev-${severity}) / 0.4)`,
-        background: `hsl(var(--sev-${severity}) / 0.1)`,
+        color: `hsl(var(${tone}))`,
+        borderColor: `hsl(var(${tone}) / 0.4)`,
+        background: `hsl(var(${tone}) / 0.1)`,
       }}
+      data-testid="badge-severity"
     >
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(--sev-${severity}))` }} />
-      {severity === "info" ? "Info" : SEVERITY_LABEL[severity]}
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(${tone}))` }} />
+      {RESULT_LEVEL_LABEL[level]}
     </span>
   );
 }
@@ -248,6 +253,14 @@ export default function AthenaScan() {
   const reading = scan !== undefined ? readScan(scan.test) : null;
   const notRated = finished && !countsUnread && band === "Clear"
     && reading !== null && reading.total > 0 && reading.severity === null;
+  // "Clear" is never drawn beside findings this read could not show. It was,
+  // with "The scan returned no gradable findings.", beside "The findings could
+  // not be read" -- a verdict on a list nobody here could read. A record that
+  // rates every result it counted info is said as the record's reading, and
+  // the list as unread ("Informational", as Deployments reads that record);
+  // anything else is "Not read".
+  const clearOverUnread = finished && !countsUnread && !notRated && band === "Clear" && returned === null;
+  const infoOverUnread = clearOverUnread && reading !== null && reading.severity === "info";
   const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
@@ -487,12 +500,14 @@ export default function AthenaScan() {
               <div className="mt-2 flex items-baseline gap-3">
                 <span
                   className="whitespace-nowrap text-2xl font-semibold"
-                  style={{ color: `hsl(var(--${countsUnread || notRated ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
+                  style={{ color: `hsl(var(--${countsUnread || notRated || clearOverUnread ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
                   data-testid="text-risk-band"
                 >
                   {countsUnread
                     ? returned === null ? "Not read" : "Not recorded"
-                    : notRated ? "Not rated" : band === "Clear" && !finished ? "Assessing…" : band}
+                    : notRated ? "Not rated"
+                    : clearOverUnread ? infoOverUnread ? "Informational" : "Not read"
+                    : band === "Clear" && !finished ? "Assessing…" : band}
                 </span>
               </div>
               <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="text-risk-basis">
@@ -502,6 +517,11 @@ export default function AthenaScan() {
                     : "The counts were not recorded, so no band is derived from them."
                   : notRated
                     ? "Findings were recorded with no severity, so no band is derived from them."
+                  : clearOverUnread
+                    ? infoOverUnread
+                      ? "Every result the record counted was rated info. The findings themselves could not be read, " +
+                        "so none are shown to check it against."
+                      : "The findings could not be read, so no band is derived from them."
                   : band === "Clear"
                     ? finished
                       ? "The scan returned no gradable findings."
@@ -564,10 +584,10 @@ export default function AthenaScan() {
                     <li
                       key={i}
                       className="space-y-1 rounded-lg border p-4"
-                      style={{ borderColor: `hsl(var(--sev-${level}) / 0.35)` }}
+                      style={{ borderColor: `hsl(var(${levelTone(level)}) / 0.35)` }}
                     >
                       <div className="flex items-center gap-2">
-                        <SeverityBadge severity={level} />
+                        <SeverityBadge level={level} />
                         <span className="athena-mono text-[11px] text-muted-foreground">{f.type}</span>
                       </div>
                       <p className="text-[13px] font-medium text-foreground">{f.message}</p>

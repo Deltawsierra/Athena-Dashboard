@@ -162,6 +162,20 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       expect(await engineSaid()).not.toMatch(/listed no other live run/);
     });
 
+    it("the page says the switch stops the runs the engine lists by a run id, not every run it lists", () => {
+      mount(SETTINGS);
+      expect(document.body.textContent).toContain(
+        "Refuse every write except stops, and send a stop to every engine scan recorded as running and every run " +
+        "the engine lists as live by a run id",
+      );
+      fireEvent.click(screen.getByTestId("button-kill-switch"));
+      expect(document.body.textContent).toContain(
+        "every engine scan recorded as running -- and every other run the engine lists as live by a run id -- is " +
+        "sent a stop. This page then says which the engine accepted, which it could not be reached for, and any live " +
+        "run it listed with no run id, which no stop can name.",
+      );
+    });
+
     it("an empty list is the engine's word, said as that", async () => {
       mount(SETTINGS);
       engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [] });

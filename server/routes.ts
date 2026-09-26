@@ -12,6 +12,7 @@ import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
 import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
@@ -124,6 +125,12 @@ const startScanSchema = z.object({
  * record says "N results, severity never recorded": the screens drew a scan
  * whose every result the engine rated info as "Not rated" and listed it among
  * the highest risks.
+ *
+ * Each result's severity is read as every other reader reads it (shared/
+ * latest-scans.ts ratingOf: any case, surrounding space trimmed). Read here by
+ * lower-casing alone, a result the engine sent as " high" was counted as no
+ * band, the record's severity was left null -- "recorded with no severity" --
+ * while readScan read the same result as rated high.
  */
 function countSeverities(findings: unknown[]): {
   vulnerabilitiesFound: number;
@@ -145,9 +152,9 @@ function countSeverities(findings: unknown[]): {
     // (`if item.get("internal"):`), and as both scan screens list it.
     if (isEngineInternal(entry.internal)) continue;
     total += 1;
-    const severity = String(entry.severity ?? "").toLowerCase();
-    if (severity in counts) counts[severity as keyof typeof counts] += 1;
-    if (severity === "info") info += 1;
+    const rating = ratingOf(entry.severity);
+    if (rating === "info") info += 1;
+    else if (rating !== null) counts[rating] += 1;
   }
   const worst = counts.critical ? "critical"
     : counts.high ? "high"
@@ -237,6 +244,36 @@ function causeOf(cause: unknown): string {
 function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
   const runId = runIdOf(test);
   return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
+}
+
+/**
+ * Why a scan was not started at Max Concurrent Tests, and what can stop each
+ * run counted against it. A run with a run id is stopped by its Stop, where
+ * this app recorded it, or by the kill switch. A run with none is stopped by
+ * neither -- no stop can name it -- only by a failsafe, which stops the engine
+ * itself. "Stop one" was said over runs no Stop could reach.
+ */
+function concurrencyRefusal(
+  { running, unnamed, limit, unlisted }: { running: number; unnamed: number; limit: number; unlisted: string | null },
+): string {
+  const named = running - unnamed;
+  const counted = `${running} engine scan${running === 1 ? " is" : "s are"} ` +
+    (unlisted === null
+      ? "running"
+      : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
+    `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started.`;
+  const byStop = "with its Stop where this app recorded it, or with the kill switch on the AI Control page";
+  const byFailsafe = "pause, stand down or terminate the engine from the Failsafe console";
+  if (unnamed === 0) return `${counted} Stop one -- ${byStop} -- or raise the limit, to start another.`;
+  const them = (n: number) => (n === 1 ? "it" : "them");
+  const noId = (n: number) => `no run id, so no Stop and no kill switch can name ${them(n)}: to stop ` +
+    `${n === 1 ? "it" : "one"}, ${byFailsafe}`;
+  if (named === 0) {
+    return `${counted} ${running === 1 ? "It has" : "They have"} ${noId(running)}. ` +
+      "Or raise the limit, to start another.";
+  }
+  return `${counted} ${named} of them ${named === 1 ? "has" : "have"} a run id: stop ${named === 1 ? "it" : "one"} ${byStop}. ` +
+    `${unnamed} ${unnamed === 1 ? "has" : "have"} ${noId(unnamed)}. Or raise the limit, to start another.`;
 }
 
 /**
@@ -1289,27 +1326,33 @@ export function registerRoutes(app: Express): void {
     // scans that finished long ago and refuse every start once enough pages
     // were left -- and would miss a live run that has no row. Only when that
     // list cannot be read are the rows recorded as running counted instead.
-    // A run the engine lists with no run id is live all the same, and counts.
+    // A run with no run id is live all the same, and counts either way: listed
+    // by the engine with none, or recorded here as an unfinished engine scan
+    // (shared/engine-record.ts) that has none. The recorded rows were counted
+    // by run id alone, so the same running scan counted while the engine's
+    // list could be read and did not while it could not.
     const limit = control?.maxConcurrentTests ?? 5;
     let running: number;
+    let unnamed: number;
     let unlisted: string | null = null;
     try {
-      running = (await engine.activeRuns()).length;
+      const live = await engine.activeRuns();
+      running = live.length;
+      unnamed = live.filter((run) => run.runId === null).length;
     } catch (cause) {
       if (!(cause instanceof engine.EngineUnavailable)) throw cause;
       unlisted = cause.message;
-      running = (await storage.getAllTests()).filter((test) => unfinishedRunOf(test) !== null).length;
+      const recorded = (await storage.getAllTests())
+        .filter((test) => !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings));
+      running = recorded.length;
+      unnamed = recorded.filter((test) => unfinishedRunOf(test) === null).length;
     }
     if (running >= limit) {
       return void res.status(409).json({
-        error: `${running} engine scan${running === 1 ? " is" : "s are"} ` +
-          (unlisted === null
-            ? "running"
-            : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
-          `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started. Stop one, ` +
-          "or raise the limit, to start another.",
+        error: concurrencyRefusal({ running, unnamed, limit, unlisted }),
         reason: "concurrency_limit",
         running,
+        unnamed,
         counted: unlisted === null ? "engine" : "recorded",
         limit,
       });

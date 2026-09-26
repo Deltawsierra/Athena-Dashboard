@@ -20,6 +20,12 @@
  * screens now draw the recorded total, and Athena says "Not rated" where no
  * severity rates what was found. Nor is any of this drawn while a scan runs.
  *
+ * And never "Clear" beside findings it could not read. Over a record that rates
+ * every result info, Athena said "Clear" and "The scan returned no gradable
+ * findings." beside "The findings could not be read" -- a verdict on a list it
+ * had not read. It now says "Informational" (as Deployments reads that record)
+ * and that this is the record's reading, the findings themselves unread.
+ *
  * These drive each screen against the real routes, served over HTTP and signed
  * in, with an engine each test tells what to answer.
  */
@@ -270,7 +276,7 @@ const INFO_UNSHOWABLE = { type: "banner", severity: "info", message: { text: "Se
 const UNRATED_UNSHOWABLE = { type: "banner", message: { text: "Server header" } };
 
 describe("a finished scan whose findings could not be shown, but whose total was recorded", () => {
-  it("Athena draws the recorded total over a result rated info, and never says the counts were not recorded", async () => {
+  it("Athena draws the recorded total over a result rated info as the record's reading, never Clear or no findings", async () => {
     finishesInline([INFO_UNSHOWABLE]);
     let id = "";
     onStarted = async (testId) => { id = testId; };
@@ -282,9 +288,15 @@ describe("a finished scan whose findings could not be shown, but whose total was
     expect({ total: recorded.vulnerabilitiesFound, severity: recorded.severity }).toEqual({ total: 1, severity: "info" });
     expect(screen.getByTestId("text-total").textContent).toBe("1");
     for (const sev of COUNTED) expect(screen.getByTestId(`text-count-${sev}`).textContent).toBe("0");
-    expect(screen.getByTestId("text-risk-band").textContent).toBe("Clear");
-    expect(screen.getByTestId("text-risk-basis").textContent).toBe("The scan returned no gradable findings.");
-    expect(text()).not.toMatch(/not recorded|Not read/);
+    // Not "Clear" / "The scan returned no gradable findings." beside a list it could not read.
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Informational");
+    // Muted, as "Not read" and "Not rated" are: not Clear's colour.
+    expect(screen.getByTestId("text-risk-band").getAttribute("style")).toMatch(/--muted-foreground/);
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
+      "Every result the record counted was rated info. The findings themselves could not be read, so none are " +
+      "shown to check it against.",
+    );
+    expect(text()).not.toMatch(/not recorded|Not read|Clear|returned no (gradable )?findings/);
   });
 
   it("Athena draws the recorded total over a result with no severity, and says it is not rated, never Clear", async () => {
@@ -348,7 +360,9 @@ describe("a running scan with a result that has no severity", () => {
     await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
     await waitFor(() => expect(screen.getByTestId("text-total").textContent).toBe("1"));
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Assessing…");
-    expect(text()).not.toMatch(/Not rated/);
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe("No gradable findings yet.");
+    // The band says nothing of it until the scan finishes; the result's own badge says what it is, never "Info".
+    expect(screen.getByTestId("badge-severity").textContent).toBe("Not rated");
   });
 });
 

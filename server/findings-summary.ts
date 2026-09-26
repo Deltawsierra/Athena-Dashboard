@@ -60,9 +60,9 @@ export const TOP_OPEN = 5;
 /** How many months the trend covers, ending at the latest month with a finding. */
 export const TREND_MONTHS = 12;
 
+/** A finding's severity as the summary counts it: its rating (ratingOf: any case, trimmed), or info when it has none. */
 export function severityOf(value: string | null | undefined): SummarySeverity {
-  const v = (value ?? "").toLowerCase();
-  return (SUMMARY_SEVERITIES as readonly string[]).includes(v) ? (v as SummarySeverity) : "info";
+  return ratingOf(value) ?? "info";
 }
 
 function time(value: Date | string | number | null | undefined): number {

@@ -672,7 +672,8 @@ export interface ActiveRun {
 }
 
 /**
- * Every run the engine says is still touching a customer.
+ * Every run the engine says is still touching a customer: one per entry on its
+ * list, of whatever shape.
  *
  * The engine's own list, not this app's rows: a run whose row was deleted, or
  * never written, is on it all the same. An answer that cannot be read throws
@@ -690,15 +691,24 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   if (!Array.isArray(listed)) {
     throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
   }
-  // Every run listed, named or not. A run listed with no id was dropped here,
-  // so the kill switch said nothing of a run it could not stop.
-  return listed
-    .filter((one): one is Record<string, unknown> => one !== null && typeof one === "object" && !Array.isArray(one))
-    .map((one) => ({
-      runId: runIdFrom(one.run_id),
-      target: typeof one.target === "string" ? one.target : null,
-      state: typeof one.state === "string" ? one.state : "unknown",
-    }));
+  // Every entry listed is a live run, whatever its shape: none is dropped. A
+  // run listed with no id was dropped here, so the kill switch said nothing of
+  // a run it could not stop -- and so was any entry that was not an object: a
+  // list of bare ids (`["run-7", 77]`) was sent no stop, counted toward no
+  // limit, and read on the AI Control page as "no other live run". An entry
+  // that is a run id (text, or a whole number) is that run; any other entry
+  // is a live run with no id a stop can name.
+  return listed.map((one): ActiveRun => {
+    if (one === null || typeof one !== "object" || Array.isArray(one)) {
+      return { runId: runIdFrom(one), target: null, state: "unknown" };
+    }
+    const run = one as Record<string, unknown>;
+    return {
+      runId: runIdFrom(run.run_id),
+      target: typeof run.target === "string" ? run.target : null,
+      state: typeof run.state === "string" ? run.state : "unknown",
+    };
+  });
 }
 
 /** Ask a running scan to stop. */

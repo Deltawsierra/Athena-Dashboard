@@ -30,6 +30,7 @@
 import { createHash } from "node:crypto";
 
 import { isEngineInternal } from "@shared/engine-internal";
+import { ratingOf } from "@shared/latest-scans";
 import type { Finding } from "@shared/schema";
 
 /** A finding as it comes off a scan result, with where it came from. */
@@ -65,7 +66,11 @@ export function sightingOf(raw: Record<string, unknown>, target: string | null):
 
   return {
     type,
-    severity: typeof raw.severity === "string" ? raw.severity : null,
+    // A rating is filed as the word every reader reads it as (shared/latest-scans.ts
+    // ratingOf): " high" and "HIGH" are high. Filed as sent, " high" was a finding
+    // the ledger read as info beside a test whose counts said high. A word that
+    // is no rating is kept as the engine sent it.
+    severity: typeof raw.severity === "string" ? ratingOf(raw.severity) ?? raw.severity : null,
     message: typeof raw.message === "string" ? raw.message : null,
     target,
     endpoint: pick("endpoint"),
