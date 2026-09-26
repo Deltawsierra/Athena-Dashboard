@@ -38,8 +38,12 @@ interface EngineRunStop {
   detail: string;
 }
 
-/** What the server did about the other runs the engine itself listed as live. */
-type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+/**
+ * What the server did about the other runs the engine itself listed as live.
+ * `unnamed`, when present, counts the live runs it listed with no run id: no
+ * stop could name them, so none was sent.
+ */
+type EngineSweep = { listed: true; runs: EngineRunStop[]; unnamed?: number } | { listed: false; detail: string };
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
@@ -88,7 +92,20 @@ function engineSweepSentence(sweep: EngineSweep): string {
       "records may still be running: pause the engine from the Failsafe console to be sure.";
   }
   const { runs } = sweep;
-  if (runs.length === 0) return "The engine listed no other live run.";
+  const unnamed = sweep.unnamed ?? 0;
+  // A live run listed with no run id: nothing here can name it to stop it.
+  const unnamedSentence = unnamed === 0 ? "" :
+    `The engine listed ${count(unnamed, "live run")} with no run id, so no stop could name ${unnamed === 1 ? "it" : "them"} ` +
+    `and none was sent: ${unnamed === 1 ? "it" : "they"} may still be running. Pause, stand down or terminate the engine ` +
+    "from the Failsafe console.";
+  const namedSentence = namedSweepSentence(runs);
+  if (namedSentence === null) return unnamedSentence || "The engine listed no other live run.";
+  return unnamedSentence ? `${namedSentence} ${unnamedSentence}` : namedSentence;
+}
+
+/** What came of the stops sent to the named runs the engine listed that no running scan here recorded; null for none. */
+function namedSweepSentence(runs: EngineRunStop[]): string | null {
+  if (runs.length === 0) return null;
   const unrecorded = runs.filter((one) => one.testId === null).length;
   const failed = runs.filter((one) => !one.stopped);
   const accepted = runs.length - failed.length;
@@ -108,7 +125,8 @@ const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill 
 /** Whether every stop the report names was accepted, and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
   const recorded = report.stops.listed && report.stops.scans.every((one) => one.stopped);
-  const engine = report.engineRuns === undefined || (report.engineRuns.listed && report.engineRuns.runs.every((one) => one.stopped));
+  const engine = report.engineRuns === undefined
+    || (report.engineRuns.listed && report.engineRuns.runs.every((one) => one.stopped) && !report.engineRuns.unnamed);
   return recorded && engine;
 }
 
@@ -326,7 +344,7 @@ export default function AIControlPanel() {
               </CardTitle>
               <CardDescription>
                 Refuse every write except stops, and send a stop to every engine scan recorded as running and
-                every run the engine lists as live
+                every run the engine lists as live by a run id
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -417,8 +435,9 @@ export default function AIControlPanel() {
                         </p>
                         <p className="text-sm text-muted-foreground mt-1">
                           Every write except a stop is refused, and every engine scan recorded as running -- and every
-                          other run the engine lists as live -- is sent a stop. This page then says which the engine
-                          accepted and which it could not be reached for.
+                          other run the engine lists as live by a run id -- is sent a stop. This page then says which the
+                          engine accepted, which it could not be reached for, and any live run it listed with no run id,
+                          which no stop can name.
                         </p>
                       </div>
                       <div className="flex gap-2">

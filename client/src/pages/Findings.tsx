@@ -30,6 +30,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Client } from "@shared/schema";
+import { ratingOf } from "@shared/latest-scans";
 
 interface FindingRow {
   id: string;
@@ -197,14 +198,13 @@ export default function Findings() {
                             <span className="athena-mono text-xs text-muted-foreground">
                               {finding.type}
                             </span>
-                            {finding.severity && (
-                              <span
-                                className="athena-label"
-                                style={{ color: `hsl(var(--sev-${finding.severity}))` }}
-                              >
-                                {finding.severity}
-                              </span>
-                            )}
+                            {/* Its rating as every reader reads it (any case, trimmed), or "not rated" -- never a bare word, never nothing. */}
+                            <span
+                              className="athena-label"
+                              style={{ color: `hsl(var(${ratingOf(finding.severity) ? `--sev-${ratingOf(finding.severity)}` : "--muted-foreground"}))` }}
+                            >
+                              {ratingOf(finding.severity) ?? "not rated"}
+                            </span>
                           </div>
                           <div className="mt-1 truncate text-sm">
                             {finding.endpoint ?? finding.header ?? finding.target}

@@ -4,6 +4,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
+import { ratingOf } from "@shared/latest-scans";
 import type { IStorage } from "./storage";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
@@ -255,7 +256,12 @@ export class SqliteStorage implements IStorage {
   async filedSeriousFindings(testId: string): Promise<{ critical: number; high: number }> {
     // Distinct findings: a finding sighted twice by one test is one finding.
     // Served by idx_sightings_test, then the findings primary key.
-    const severity = sql<string>`lower(coalesce(${schema.findings.severity}, ''))`;
+    // Grouped by the severity as stored, and read here as every reader reads it
+    // (shared/latest-scans.ts ratingOf: any case, trimmed). Lower-cased alone, a
+    // row filed as " high" before filing normalised it was no filed high, while
+    // the summary counted it as an open one. Each finding has one severity, so
+    // the distinct counts of its stored spellings add up.
+    const severity = sql<string>`coalesce(${schema.findings.severity}, '')`;
     const rows = db.select({ severity, n: sql<number>`count(distinct ${schema.findings.id})` })
       .from(schema.findingSightings)
       .innerJoin(schema.findings, eq(schema.findings.id, schema.findingSightings.findingId))
@@ -264,7 +270,8 @@ export class SqliteStorage implements IStorage {
       .all();
     const counts = { critical: 0, high: 0 };
     for (const row of rows) {
-      if (row.severity === "critical" || row.severity === "high") counts[row.severity] = Number(row.n);
+      const rating = ratingOf(row.severity);
+      if (rating === "critical" || rating === "high") counts[rating] += Number(row.n);
     }
     return counts;
   }

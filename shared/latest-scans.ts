@@ -17,6 +17,9 @@
  * separate creation time.
  */
 
+import { isEngineInternal } from "./engine-internal";
+import { isEngineRecord } from "./engine-record";
+
 /** The fields of a test these rules read. */
 export interface ScopedTest {
   clientId: string;
@@ -68,11 +71,20 @@ export interface CountedTest {
 }
 
 /**
- * A completed engine test whose results are on record but whose counts are
- * not: every count zero beside a list of real (non-internal) results. Rows the
- * engine finished inline were written like that before the inline-count fix,
- * and the status route never revisits a completed row, so they read "0" --
- * which is a measurement nobody took. Their counts are "not recorded", never 0.
+ * A completed engine test whose counts are not on record: every count zero
+ * beside results that no zero measures. Two records are written like that, and
+ * both read "0" -- which is a measurement nobody took. Their counts are "not
+ * recorded", never 0.
+ *
+ * - A list of real (non-internal) results. Rows the engine finished inline were
+ *   written like that before the inline-count fix, and the status route never
+ *   revisits a completed row.
+ * - Results that could not be read: anything present that is not a list. The
+ *   scan route records results the engine sent that it could not read as
+ *   `results: null`, counts nothing from them, and clears any count an earlier
+ *   poll left, so no count stands that the final findings do not back. An
+ *   engine record is told apart from a person's (whose run keys, if sent, were
+ *   null) by shared/engine-record.ts.
  */
 export function countsNotRecorded(test: CountedTest): boolean {
   if (test.status !== "completed") return false;
@@ -82,8 +94,9 @@ export function countsNotRecorded(test: CountedTest): boolean {
   const recorded = test.findings;
   if (!recorded || typeof recorded !== "object") return false;
   const results = (recorded as { results?: unknown }).results;
+  if (results !== undefined && !Array.isArray(results)) return isEngineRecord(recorded);
   return Array.isArray(results) && results.some(
-    (one) => one !== null && typeof one === "object" && (one as { internal?: unknown }).internal !== true,
+    (one) => one !== null && typeof one === "object" && !isEngineInternal((one as { internal?: unknown }).internal),
   );
 }
 
@@ -149,7 +162,10 @@ export type ReadableTest = CountedTest & { severity?: string | null };
  * countSeverities).
  */
 export interface ScanReading {
-  /** Results came back and no count was written down (countsNotRecorded): nothing below is a reading of them. */
+  /**
+   * Results came back and no count was written down, or the results could not
+   * be read (countsNotRecorded): nothing below is a reading of them.
+   */
   countsNotRecorded: boolean;
   /**
    * The worst severity on record: the severity field or a non-zero count
@@ -185,7 +201,7 @@ function resultsOf(test: Pick<CountedTest, "findings">): Array<Record<string, un
   if (!Array.isArray(results)) return null;
   return results.filter(
     (one): one is Record<string, unknown> =>
-      one !== null && typeof one === "object" && (one as { internal?: unknown }).internal !== true,
+      one !== null && typeof one === "object" && !isEngineInternal((one as { internal?: unknown }).internal),
   );
 }
 

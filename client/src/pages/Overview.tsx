@@ -70,7 +70,7 @@ import mythosGlyph from "@assets/mythos/mark-glyph.webp";
 import PageHero from "@/components/mythos/PageHero";
 import { Divider, RingFrame } from "@/components/mythos/Ornament";
 import StatCard from "@/components/mythos/StatCard";
-import { Label, SeverityPill, type Severity } from "@/components/mythos/atoms";
+import { Label, SeverityPill, severityFrom, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
@@ -98,6 +98,8 @@ export interface TrendRow {
   high: number;
   medium: number;
   low: number;
+  /** Findings with no severity recorded that month: counted, not drawn, and said beneath the chart. */
+  unrated?: number;
 }
 
 export interface OverviewModel {
@@ -136,7 +138,7 @@ interface ApiDeployment { uuid: string; decision: string | null }
 
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
-const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
+const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "unrated", "info"];
 /** How many clients the coverage panel lists. */
 const COVERAGE_ROWS = 6;
 
@@ -149,9 +151,9 @@ function rowsOr<T>(rows: T[], empty: string): PanelRows<T> {
   return rows.length > 0 ? { rows } : { note: empty };
 }
 
+/** A severity as the pills read it (any case, trimmed); "unrated" -- "Not rated" -- when it has none, never info. */
 function normSev(value: string | null): Severity {
-  const v = (value || "").toLowerCase();
-  return (SEV_ORDER as string[]).includes(v) ? (v as Severity) : "info";
+  return severityFrom(value);
 }
 
 function humanize(value: string): string {
@@ -184,12 +186,12 @@ function ago(iso: string | null | undefined, now = Date.now()): string | null {
  * latest twelve; this only labels them.
  */
 export function trendFromSummary(months: FindingsSummary["byMonth"]): TrendRow[] {
-  return months.map(({ month, critical, high, medium, low }) => {
+  return months.map(({ month, critical, high, medium, low, unrated }) => {
     const [year, mon] = month.split("-").map(Number);
     const m = new Date(Date.UTC(year, mon - 1, 1)).toLocaleString("en-US", {
       month: "short", year: "2-digit", timeZone: "UTC",
     });
-    return { m, critical, high, medium, low };
+    return { m, critical, high, medium, low, ...(unrated ? { unrated } : {}) };
   });
 }
 
@@ -652,6 +654,17 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
                   </LineChart>
                 </ResponsiveContainer>
               </div>
+              {/* Never dropped silently: findings no severity rates are not a series here, and are said. */}
+              {(() => {
+                const rows = (model.trend as { rows: TrendRow[] }).rows;
+                const unrated = rows.reduce((sum, row) => sum + (row.unrated ?? 0), 0);
+                return unrated > 0 ? (
+                  <p className="mt-2 text-[11px] text-muted-foreground" data-testid="text-trend-unrated">
+                    {plural(unrated, "finding")} with no severity recorded in these months {unrated === 1 ? "is" : "are"}{" "}
+                    not drawn: {unrated === 1 ? "it is" : "they are"} not rated, and may be critical.
+                  </p>
+                ) : null;
+              })()}
             </>
           ) : (
             <Note text={model.trend.note} />

@@ -55,7 +55,7 @@ describe("the findings summary at estate scale", () => {
     const inMonth = (m: number, sev: string) =>
       findings.filter((one) => one.firstSeenAt.getUTCMonth() === m && one.firstSeenAt.getUTCFullYear() === 2025 && one.severity === sev).length;
     expect(summary.byMonth[0]).toEqual({
-      month: "2025-07", critical: inMonth(6, "critical"), high: inMonth(6, "high"), medium: inMonth(6, "medium"), low: inMonth(6, "low"),
+      month: "2025-07", critical: inMonth(6, "critical"), high: inMonth(6, "high"), medium: inMonth(6, "medium"), low: inMonth(6, "low"), unrated: 0,
     });
     // Every client's counts, each from its own findings.
     const c7 = open.filter((one) => one.clientId === "c7");

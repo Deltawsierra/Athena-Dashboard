@@ -162,11 +162,10 @@ bg-gradient-to-r from-primary via-blue-500 to-purple bg-clip-text text-transpare
 - Label support with percentage
 - Height: `h-2 md:h-3`, rounded ends
 
-### 8. Confidence Meter (ConfidenceMeter)
-- Circular progress indicator for AI confidence
-- Animated stroke with gradient
-- Central percentage display
-- Color changes based on confidence level
+### 8. Confidence (FindingConfidence)
+- No meter, bar or percentage: the engine's confidence is an ordinal, not a probability
+- The number is printed with the engine's own basis for it, verbatim, as text
+- Where the engine sent no basis, or no number, the line says so
 
 ### 9. Status Indicator (StatusIndicator)
 - Compact status pills with pulsing animation

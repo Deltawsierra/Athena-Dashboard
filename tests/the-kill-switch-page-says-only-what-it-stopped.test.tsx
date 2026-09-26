@@ -162,11 +162,47 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       expect(await engineSaid()).not.toMatch(/listed no other live run/);
     });
 
+    it("the page says the switch stops the runs the engine lists by a run id, not every run it lists", () => {
+      mount(SETTINGS);
+      expect(document.body.textContent).toContain(
+        "Refuse every write except stops, and send a stop to every engine scan recorded as running and every run " +
+        "the engine lists as live by a run id",
+      );
+      fireEvent.click(screen.getByTestId("button-kill-switch"));
+      expect(document.body.textContent).toContain(
+        "every engine scan recorded as running -- and every other run the engine lists as live by a run id -- is " +
+        "sent a stop. This page then says which the engine accepted, which it could not be reached for, and any live " +
+        "run it listed with no run id, which no stop can name.",
+      );
+    });
+
     it("an empty list is the engine's word, said as that", async () => {
       mount(SETTINGS);
       engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [] });
       await engage();
       expect(await engineSaid()).toBe("The engine listed no other live run.");
+    });
+
+    it("a live run the engine listed with no run id is said to be unstopped, never read as no other live run", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [], unnamed: 1 });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine listed 1 live run with no run id, so no stop could name it and none was sent: it may still be " +
+        "running. Pause, stand down or terminate the engine from the Failsafe console.",
+      );
+      expect(await engineSaid()).not.toMatch(/listed no other live run/);
+    });
+
+    it("says both what came of the named runs' stops and that the unnamed ones got none", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [run("r1", null, true)], unnamed: 2 });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine also listed 1 live run that no running scan here recorded (1 with no record here at all); it was " +
+        "sent a stop, and the engine accepted it. The engine listed 2 live runs with no run id, so no stop could name " +
+        "them and none was sent: they may still be running. Pause, stand down or terminate the engine from the Failsafe console.",
+      );
     });
   });
 

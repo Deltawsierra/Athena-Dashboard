@@ -62,8 +62,16 @@ function typeIcon(t: string) { return TYPE_ICON[t] ?? FileText; }
 export function latestScanReport(test: ReadableTest): string {
   const read = readScan(test);
   // An engine scan finished before the inline-count fix has results and no
-  // counts: they were never taken, so they are not read as 0.
-  if (read.countsNotRecorded) return "Its latest completed scan returned results, but its counts were not recorded";
+  // counts: they were never taken, so they are not read as 0. Nor are the
+  // counts of one whose results could not be read, which were never taken either.
+  if (read.countsNotRecorded) {
+    const results = test.findings && typeof test.findings === "object"
+      ? (test.findings as { results?: unknown }).results
+      : undefined;
+    return results !== undefined && !Array.isArray(results)
+      ? "Its latest completed scan's results could not be read, so its counts were not recorded"
+      : "Its latest completed scan returned results, but its counts were not recorded";
+  }
   const n = (count: number, what: string) => `${count} ${what}${count === 1 ? "" : "s"}`;
   const counted = read.counts.critical + read.counts.high + read.counts.medium + read.counts.low;
   // Nothing broken down by severity: no "0 critical" the record never said.

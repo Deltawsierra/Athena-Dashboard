@@ -28,6 +28,7 @@ import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
+import { ratingOf } from "@shared/latest-scans";
 
 interface DecisionTwin {
   id: number;
@@ -189,14 +190,13 @@ export default function RetestPanel({ testId }: { testId: string }) {
                     <span className="athena-mono text-xs text-muted-foreground">
                       {twin.findingType}
                     </span>
-                    {twin.severity && (
-                      <span
-                        className="athena-label"
-                        style={{ color: `hsl(var(--sev-${twin.severity}))` }}
-                      >
-                        {twin.severity}
-                      </span>
-                    )}
+                    {/* Its rating as every reader reads it (any case, trimmed), or "not rated" -- never a bare word, never nothing. */}
+                    <span
+                      className="athena-label"
+                      style={{ color: `hsl(var(${ratingOf(twin.severity) ? `--sev-${ratingOf(twin.severity)}` : "--muted-foreground"}))` }}
+                    >
+                      {ratingOf(twin.severity) ?? "not rated"}
+                    </span>
                   </div>
                   <div className="truncate text-sm">{twin.endpoint ?? twin.target}</div>
                   {twin.detail && (

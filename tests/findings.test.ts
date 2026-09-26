@@ -146,7 +146,9 @@ describe("filing a scan's results", () => {
     const filed = await ingest(db, results, context);
     expect(filed).toMatchObject({ raw: 3, distinct: 1, created: 1 });
     const row = Array.from(db.rows.values())[0];
-    expect(row.severity).toBe("Critical");
+    // Filed as the rating every reader reads it as (shared/latest-scans.ts ratingOf), not the engine's spelling:
+    // "Critical" and " critical" are both critical, and a reader that did not normalise read one of them as info.
+    expect(row.severity).toBe("critical");
     // The worst sighting's own words go with it.
     expect(row.message).toBe("Time-based SQL injection confirmed");
     // One sighting of one finding, as before.

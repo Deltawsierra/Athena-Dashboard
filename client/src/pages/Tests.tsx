@@ -39,10 +39,12 @@ import { Textarea } from "@/components/ui/textarea";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { unfinishedRunOf } from "@/lib/engineRuns";
+import NoStopPanel from "@/components/NoStopPanel";
+import { failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
+import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -53,11 +55,20 @@ function normalizeOptional(value: FormDataEntryValue | null): string | null {
   return text === "" || text === "none" ? null : text;
 }
 
-/** The engine run a test records, or null when no engine run stands behind it. */
+/**
+ * The engine run behind a test, as a person reads it: "run <id>", or what is
+ * said of a run the engine gave no id. null when the test is a person's.
+ *
+ * Decided by the rule the server guards an edit by (shared/engine-record.ts),
+ * never by the run id alone: read by its run id, a scan the engine finished
+ * without one was offered to edit as a person's test -- its counts and severity
+ * editable, the run's JSON in its notes box -- and its summary-only edit sent a
+ * severity the server then refused.
+ */
 function engineRunOf(findings: unknown): string | null {
-  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return null;
-  const runId = (findings as { runId?: unknown }).runId;
-  return typeof runId === "string" && runId !== "" ? runId : null;
+  if (!isEngineRecord(findings)) return null;
+  const runId = engineRunIdOf(findings);
+  return runId !== null ? `run ${runId}` : "a run it gave no id";
 }
 
 /** A person's notes on a test: the `details` of its findings, when there are any. */
@@ -69,13 +80,16 @@ function notesOf(findings: unknown): string | null {
 
 /** `findings` is free-form JSON; show the details field when there is one. */
 function renderFindings(findings: unknown): string {
-  const runId = engineRunOf(findings);
-  if (runId) {
+  if (isEngineRecord(findings)) {
     // An engine scan's results are the engine's; its notes are a person's.
     const results = (findings as { results?: unknown }).results;
-    const n = Array.isArray(results) ? results.length : 0;
     const notes = notesOf(findings);
-    return `Engine run ${runId}: ${n} result${n === 1 ? "" : "s"} recorded by the engine.${notes ? ` Notes: ${notes}` : ""}`;
+    const n = Array.isArray(results) ? results.length : 0;
+    const recorded = results !== undefined && !Array.isArray(results)
+      ? "its results could not be read"
+      : `${n} result${n === 1 ? "" : "s"} recorded by the engine`;
+    const runId = engineRunIdOf(findings);
+    return `${runId !== null ? `Engine run ${runId}` : "Engine run with no id"}: ${recorded}.${notes ? ` Notes: ${notes}` : ""}`;
   }
   const notes = notesOf(findings);
   if (notes !== null) return notes;
@@ -137,9 +151,11 @@ export default function Tests() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: async (id: string) => {
-      const response = await apiRequest("DELETE", `/api/tests/${id}`);
-      return (await response.json().catch(() => ({}))) as { stops?: Array<{ runId: string; stopped: boolean }> };
+    // `force`: a scan no Stop can reach (failsafeOnly) is deleted only when
+    // asked in so many words; the server refuses it otherwise.
+    mutationFn: async ({ id, force }: { id: string; force?: boolean }) => {
+      const response = await apiRequest("DELETE", `/api/tests/${id}${force ? "?force=1" : ""}`);
+      return (await response.json().catch(() => ({}))) as { stops?: Array<{ runId: string; stopped: boolean }>; detail?: string };
     },
     onSuccess: (result) => {
       void invalidateTestsAndFindings();
@@ -149,7 +165,7 @@ export default function Tests() {
         title: "Test deleted successfully",
         ...(stopped.length > 0
           ? { description: `Its engine run ${stopped.join(", ")} was sent a stop first, and the engine accepted it.` }
-          : {}),
+          : result.detail ? { description: `Its record is deleted; ${result.detail}.` } : {}),
       });
     },
     onError: (error) => {
@@ -648,7 +664,18 @@ export default function Tests() {
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>Delete Test</AlertDialogTitle>
                                   <AlertDialogDescription data-testid={`text-delete-warning-${test.id}`}>
-                                    {unfinishedRunOf(test)
+                                    {failsafeOnly(test) && !noStopCanBeSent(test)
+                                      ? "This scan may still be running. The engine gave it an id no Stop is offered " +
+                                        "for (only space), but a stop can still reach it by that id: deleting it sends " +
+                                        "that stop first, and deletes the test only once the engine accepts it; if it " +
+                                        "does not, nothing is deleted. This action cannot be undone."
+                                      : noStopCanBeSent(test)
+                                      ? "This scan may still be running, and the engine gave it no run id a stop can " +
+                                        "name, so no stop can be sent: deleting it only removes its record here, and " +
+                                        "the run, if it is running, goes on. Stop it from the Failsafe console first " +
+                                        "(pause, stand down or terminate the engine). Deleting it anyway sends no stop. " +
+                                        "This action cannot be undone."
+                                      : unfinishedRunOf(test)
                                       ? `This scan's engine run ${unfinishedRunOf(test)} may still be running. Deleting ` +
                                         "it sends the engine a stop first, and deletes the test only once the engine " +
                                         "accepts the stop; if it does not, nothing is deleted and the scan keeps its " +
@@ -659,16 +686,30 @@ export default function Tests() {
                                 <AlertDialogFooter>
                                   <AlertDialogCancel>Cancel</AlertDialogCancel>
                                   <AlertDialogAction
-                                    onClick={() => deleteMutation.mutate(test.id)}
+                                    onClick={() => deleteMutation.mutate({ id: test.id, force: noStopCanBeSent(test) })}
                                     data-testid={`button-confirm-delete-${test.id}`}
                                   >
-                                    Delete
+                                    {noStopCanBeSent(test) ? "Delete without a stop" : "Delete"}
                                   </AlertDialogAction>
                                 </AlertDialogFooter>
                               </AlertDialogContent>
                             </AlertDialog>
                           </div>
                         </div>
+
+                        {/* The engine gave this scan no run id a stop can name: no
+                            Stop here, and what stops it said in its place. */}
+                        {failsafeOnly(test) && (
+                          <div className="space-y-2">
+                            <NoStopPanel testId={test.id} />
+                            <p className="text-sm text-muted-foreground" data-testid={`text-no-stop-record-${test.id}`}>
+                              This app cannot ask the engine about a scan with no run id, so its record stays running
+                              after the engine has stopped it, and counts toward Max Concurrent Tests whenever the
+                              engine&apos;s list of live runs cannot be read. Once it has stopped, delete this record to
+                              free its place.
+                            </p>
+                          </div>
+                        )}
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div className="flex items-center gap-2 text-sm">
@@ -807,7 +848,7 @@ export default function Tests() {
 
                 {editingRun && (
                   <p className="text-sm text-muted-foreground rounded-lg border border-border p-3" data-testid="text-edit-engine-owned">
-                    Recorded by the engine from run {editingRun}: its status, severity and counts
+                    Recorded by the engine from {editingRun}: its status, severity and counts
                     {editingTest.status !== "completed"
                       ? " (none until it completes)"
                       : countsNotRecorded(editingTest)

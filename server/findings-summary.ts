@@ -60,9 +60,14 @@ export const TOP_OPEN = 5;
 /** How many months the trend covers, ending at the latest month with a finding. */
 export const TREND_MONTHS = 12;
 
+/**
+ * A finding's severity as the summary counts it: its rating (ratingOf: any
+ * case, trimmed), or "unrated" when it has none or one that is no rating. It
+ * was counted as info -- "not a risk" -- beside an untracked-scan note that
+ * read the same result as "no severity recorded, may be critical".
+ */
 export function severityOf(value: string | null | undefined): SummarySeverity {
-  const v = (value ?? "").toLowerCase();
-  return (SUMMARY_SEVERITIES as readonly string[]).includes(v) ? (v as SummarySeverity) : "info";
+  return ratingOf(value) ?? "unrated";
 }
 
 function time(value: Date | string | number | null | undefined): number {
@@ -196,7 +201,7 @@ export function summarizeFindings(input: {
   const envOf = new Map(sites.map((site) => [site.id, site.environment]));
   const nameOf = new Map(clients.map((client) => [client.id, client.name]));
 
-  const openCounts: FindingsSummary["open"] = { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  const openCounts: FindingsSummary["open"] = { total: 0, critical: 0, high: 0, medium: 0, low: 0, unrated: 0, info: 0 };
   const envCounts = new Map<string | null, number>();
   // One entry per client on record, filled in the same pass as everything
   // else: a finding finds its client by key, not by a filter over every
@@ -268,12 +273,14 @@ export function summarizeFindings(input: {
   if (lastMonth >= firstMonth) {
     const first = Math.max(firstMonth, lastMonth - (TREND_MONTHS - 1));
     for (let key = first; key <= lastMonth; key += 1) {
-      byMonth.push({ month: monthLabel(key), critical: 0, high: 0, medium: 0, low: 0 });
+      byMonth.push({ month: monthLabel(key), critical: 0, high: 0, medium: 0, low: 0, unrated: 0 });
     }
     findings.forEach((finding, index) => {
       const key = monthOf[index];
       if (Number.isNaN(key) || key < first) return;
       const sev = severityOf(finding.severity);
+      // Info is not charted. A finding with no severity recorded is counted in
+      // its own column, never dropped: the chart says how many it does not draw.
       if (sev !== "info") byMonth[key - first][sev] += 1;
     });
   }

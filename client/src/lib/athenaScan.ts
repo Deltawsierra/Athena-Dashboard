@@ -9,6 +9,8 @@
  * and the risk band **derived** from the counts (not an invented score).
  */
 
+import { ratingOf } from "@shared/latest-scans";
+
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
 /** The gradable severities, worst first — the order counts are read in. */
@@ -21,10 +23,33 @@ export const SEVERITY_LABEL: Record<Exclude<Severity, "info">, string> = {
   low: "Low",
 };
 
-/** Lowercase and validate a severity from the engine; anything unknown is info. */
-export function severityToken(severity: string | undefined): Severity {
-  const value = (severity ?? "info").toLowerCase();
-  return (["critical", "high", "medium", "low", "info"].includes(value) ? value : "info") as Severity;
+/** A result's rating as its badge reads it: a severity, or "unrated" when it has none. */
+export type ResultLevel = Severity | "unrated";
+
+/**
+ * A result's severity from the engine, read as every other reader reads it
+ * (shared/latest-scans.ts ratingOf: any case, surrounding space trimmed), or
+ * "unrated" when it is missing or not a rating -- never info. Anything unknown
+ * was badged "Info", which says "not a risk", beside a risk band that said the
+ * same result was recorded with no severity and may be critical.
+ */
+export function severityToken(severity: unknown): ResultLevel {
+  return ratingOf(severity) ?? "unrated";
+}
+
+/** The words a result's badge says. */
+export const RESULT_LEVEL_LABEL: Record<ResultLevel, string> = {
+  critical: "Critical",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  info: "Info",
+  unrated: "Not rated",
+};
+
+/** The colour a result's badge is drawn in: its severity's, or muted when it is not rated. */
+export function levelTone(level: ResultLevel): string {
+  return level === "unrated" ? "--muted-foreground" : `--sev-${level}`;
 }
 
 /** The four verbs of the pitch, used in the hero rail. */

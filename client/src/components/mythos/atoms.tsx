@@ -4,6 +4,7 @@
  */
 import { ArrowDown, ArrowUp, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ratingOf } from "@shared/latest-scans";
 
 /* --- labels ------------------------------------------------------------- */
 export function Label({ children, className }: { children: React.ReactNode; className?: string }) {
@@ -37,25 +38,40 @@ export function Delta({
 }
 
 /* --- severity pill (reserved colours only) ----------------------------- */
-export type Severity = "critical" | "high" | "medium" | "low" | "info";
-const SEV_LABEL: Record<Severity, string> = {
+/**
+ * "unrated": no severity recorded, or a word that is no rating. It may be
+ * critical, so it is "Not rated" (muted), never "Info", which says "not a risk".
+ */
+export type Severity = "critical" | "high" | "medium" | "low" | "unrated" | "info";
+export const SEV_LABEL: Record<Severity, string> = {
   critical: "Critical",
   high: "High",
   medium: "Medium",
   low: "Low",
+  unrated: "Not rated",
   info: "Info",
 };
+/**
+ * A recorded severity as a pill reads it, by the rule every reader uses
+ * (shared/latest-scans.ts ratingOf: any case, trimmed), and "unrated" when it
+ * is none. Each screen had its own lower-casing that read anything else as info.
+ */
+export function severityFrom(value: unknown): Severity {
+  return ratingOf(value) ?? "unrated";
+}
 export function SeverityPill({ severity }: { severity: Severity }) {
+  const tone = severity === "unrated" ? "--muted-foreground" : `--sev-${severity}`;
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold"
       style={{
-        color: `hsl(var(--sev-${severity}))`,
-        borderColor: `hsl(var(--sev-${severity}) / 0.4)`,
-        background: `hsl(var(--sev-${severity}) / 0.1)`,
+        color: `hsl(var(${tone}))`,
+        borderColor: `hsl(var(${tone}) / 0.4)`,
+        background: `hsl(var(${tone}) / 0.1)`,
       }}
+      data-testid="pill-severity"
     >
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(--sev-${severity}))` }} />
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(${tone}))` }} />
       {SEV_LABEL[severity]}
     </span>
   );

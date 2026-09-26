@@ -10,6 +10,9 @@ import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
+import { isEngineInternal } from "@shared/engine-internal";
+import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
@@ -122,6 +125,12 @@ const startScanSchema = z.object({
  * record says "N results, severity never recorded": the screens drew a scan
  * whose every result the engine rated info as "Not rated" and listed it among
  * the highest risks.
+ *
+ * Each result's severity is read as every other reader reads it (shared/
+ * latest-scans.ts ratingOf: any case, surrounding space trimmed). Read here by
+ * lower-casing alone, a result the engine sent as " high" was counted as no
+ * band, the record's severity was left null -- "recorded with no severity" --
+ * while readScan read the same result as rated high.
  */
 function countSeverities(findings: unknown[]): {
   vulnerabilitiesFound: number;
@@ -138,12 +147,14 @@ function countSeverities(findings: unknown[]): {
     if (!finding || typeof finding !== "object") continue;
     const entry = finding as Record<string, unknown>;
     // The engine marks its own diagnostics `internal`. They are worth showing
-    // and they are not vulnerabilities, so they are not counted as any.
-    if (entry.internal === true) continue;
+    // and they are not vulnerabilities, so they are not counted as any. Any
+    // truthy mark is one, as athena-engine's `engine/utils/scoring.py` reads it
+    // (`if item.get("internal"):`), and as both scan screens list it.
+    if (isEngineInternal(entry.internal)) continue;
     total += 1;
-    const severity = String(entry.severity ?? "").toLowerCase();
-    if (severity in counts) counts[severity as keyof typeof counts] += 1;
-    if (severity === "info") info += 1;
+    const rating = ratingOf(entry.severity);
+    if (rating === "info") info += 1;
+    else if (rating !== null) counts[rating] += 1;
   }
   const worst = counts.critical ? "critical"
     : counts.high ? "high"
@@ -161,16 +172,57 @@ function countSeverities(findings: unknown[]): {
   };
 }
 
-/** The engine run a test records, or null for a test no engine run stands behind. */
+/** The engine run a test records, or null when it names none (shared/engine-record.ts). */
 function runIdOf(test: { findings: unknown }): string | null {
-  const recorded = test.findings;
-  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
-  const runId = (recorded as Record<string, unknown>).runId;
-  return typeof runId === "string" && runId !== "" ? runId : null;
+  return engineRunIdOf(test.findings);
+}
+
+/** The fields of a finding the scan screens print as text. */
+const RESULT_TEXT_FIELDS = ["type", "message", "details", "severity"] as const;
+
+/**
+ * Whether one of a run's results is a finding a screen can read: a record whose
+ * text fields are text, or absent (null is absent). The screens print them as
+ * they are, and a `message` that is an object threw "Objects are not valid as a
+ * React child" and blanked the whole page.
+ */
+function isResultRow(row: unknown): boolean {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+  const entry = row as Record<string, unknown>;
+  return RESULT_TEXT_FIELDS.every(
+    (field) => entry[field] === undefined || entry[field] === null || typeof entry[field] === "string",
+  );
+}
+
+/**
+ * A run's results, when every one can be shown; null when they cannot be read:
+ * not a list, or with a row that is not a readable finding. One row that cannot
+ * be shown makes the list unread, said to be so, and never a shorter list.
+ */
+function readableResults(results: unknown): unknown[] | null {
+  return Array.isArray(results) && results.every(isResultRow) ? results : null;
 }
 
 /** Engine run states after which nothing more happens. */
 const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+
+/** What a finished run whose results could not be read records as its counts: none, read as "not recorded". */
+const UNREAD_COUNTS = {
+  severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+} as const;
+
+/** Said of an engine scan the engine accepted without a run id, read before it is recorded as completed. */
+const NO_RUN_ID_TO_ASK = "the engine accepted this scan without a run id, so the engine cannot be asked about it";
+
+/**
+ * Said when such a scan's own Stop is sent: nothing names it to the engine. The
+ * kill switch reaches it only if the engine lists it by a run id; a run listed
+ * with none is stopped by a failsafe, which stops the engine itself.
+ */
+const NO_RUN_ID_TO_STOP =
+  "the engine accepted this scan without a run id, so its own stop has nothing to name it by; " +
+  "the kill switch sends a stop to every run the engine lists by a run id, and a run it lists with none " +
+  "cannot be stopped from here: pause, stand down or terminate the engine from the Failsafe console";
 
 /** What one stop sent to the engine came to. */
 interface ScanStop {
@@ -188,10 +240,88 @@ function causeOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/**
+ * The id the kill switch stops a test's unfinished run by (shared/engine-record.ts
+ * stopIdFrom): its run id, or a non-empty id blank after trimming, which no
+ * screen offers a Stop for but a stop still reaches exactly. null otherwise.
+ */
+function unfinishedStopIdOf(test: { findings: unknown; status: string }): string | null {
+  const stopId = stopIdOf(test);
+  return stopId !== null && !FINISHED_RUN_STATES.has(test.status) ? stopId : null;
+}
+
+/**
+ * The id a stop can address a test's engine run by exactly: its run id, or, for
+ * an engine scan, a non-empty id blank after trimming (shared/engine-record.ts
+ * stopIdFrom). Every stop -- the kill switch, a delete, the abort route -- is
+ * sent by this, so none is sent fewer times than a stop can reach; only what a
+ * screen offers (a Stop, or the failsafe panel) goes by the run id alone.
+ */
+function stopIdOf(test: { findings: unknown }): string | null {
+  return runIdOf(test) ?? (isEngineRecord(test.findings) ? engineStopIdOf(test.findings) : null);
+}
+
 /** The run of a test whose engine run may still be running, or null. */
 function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
   const runId = runIdOf(test);
   return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
+}
+
+/** A record counted against Max Concurrent Tests that no stop can name, as the refusal names it. */
+interface UnnamedRecord { testId: string; target: string | null }
+
+/**
+ * Why a scan was not started at Max Concurrent Tests, and what can stop each
+ * run counted against it. A run with a run id is stopped by its Stop, where
+ * this app recorded it, or by the kill switch. So is a run the engine lists
+ * with no run id that this app recorded with one (`recordedById`): its Stop
+ * names it by the recorded id. A run with none is stopped by neither -- no stop
+ * can name it -- only by a failsafe, which stops the engine itself. "Stop one"
+ * was said over runs no Stop could reach, and "no Stop can name it" over a run
+ * whose own Stop worked.
+ *
+ * Counted from the recorded rows (the engine's list could not be read), a scan
+ * with no run id stays recorded as running after the engine has stopped it:
+ * this app cannot ask the engine about it. A failsafe stops the engine, not
+ * the count. So the refusal names each such record (`unnamedRecords`), and says
+ * that deleting it frees its place.
+ */
+function concurrencyRefusal(
+  { running, unnamed, limit, unlisted, recordedById = 0, unnamedRecords = [] }: {
+    running: number; unnamed: number; limit: number; unlisted: string | null;
+    recordedById?: number; unnamedRecords?: UnnamedRecord[];
+  },
+): string {
+  const named = running - unnamed;
+  const counted = `${running} engine scan${running === 1 ? " is" : "s are"} ` +
+    (unlisted === null
+      ? "running"
+      : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
+    `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started.` +
+    (recordedById > 0
+      ? ` ${recordedById} of them ${recordedById === 1 ? "is" : "are"} listed by the engine with no run id but ` +
+        `recorded here with one, and ${recordedById === 1 ? "its" : "their"} Stop names ` +
+        `${recordedById === 1 ? "it" : "them"} by that id.`
+      : "");
+  const byStop = "with its Stop where this app recorded it, or with the kill switch on the AI Control page";
+  const byFailsafe = "pause, stand down or terminate the engine from the Failsafe console";
+  const n = unnamedRecords.length;
+  const stale = n === 0 ? "" :
+    ` This app cannot ask the engine about a scan with no run id, so its record stays running after the engine ` +
+    `has stopped it, and a failsafe stops the engine but does not clear the record. If ` +
+    `${n === 1 ? "it has" : "they have"} stopped, delete ${n === 1 ? "its record" : "their records"} on the Tests ` +
+    `screen to free ${n === 1 ? "its place" : "their places"}: ` +
+    `${unnamedRecords.map((one) => `${one.target ?? "a scan with no target"} (test ${one.testId})`).join(", ")}.`;
+  if (unnamed === 0) return `${counted} Stop one -- ${byStop} -- or raise the limit, to start another.${stale}`;
+  const them = (k: number) => (k === 1 ? "it" : "them");
+  const noId = (k: number) => `no run id, so no Stop and no kill switch can name ${them(k)}: to stop ` +
+    `${k === 1 ? "it" : "one"}, ${byFailsafe}`;
+  if (named === 0) {
+    return `${counted} ${running === 1 ? "It has" : "They have"} ${noId(running)}.${stale} ` +
+      "Or raise the limit, to start another.";
+  }
+  return `${counted} ${named} of them ${named === 1 ? "has" : "have"} a run id: stop ${named === 1 ? "it" : "one"} ${byStop}. ` +
+    `${unnamed} ${unnamed === 1 ? "has" : "have"} ${noId(unnamed)}.${stale} Or raise the limit, to start another.`;
 }
 
 /**
@@ -252,8 +382,13 @@ interface EngineRunStop {
 
 /** The stops sent to the scans recorded here as running, or why they could not be listed. */
 type RecordedStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
-/** The stops sent to the other runs the engine listed as live, or why its list could not be read. */
-type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+/**
+ * The stops sent to the other runs the engine listed as live, or why its list
+ * could not be read. `unnamed`, present only when there are any, counts the
+ * live runs it listed with no run id: no stop can name them, so none was sent,
+ * and they may still be running.
+ */
+type EngineSweep = { listed: true; runs: EngineRunStop[]; unnamed?: number } | { listed: false; detail: string };
 
 type Settled<T> = { ok: true; value: T } | { ok: false; detail: string };
 function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
@@ -262,7 +397,8 @@ function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
 
 /**
  * Send a stop to everything that may still be running: every engine scan
- * recorded here as running, and every run the ENGINE lists as live.
+ * recorded here as running, and every run the ENGINE lists as live by a run id.
+ * A live run it lists with none is counted and said, since no stop can name it.
  *
  * Engaging the kill switch used to store a flag and nothing else; then it
  * stopped the scans this app had rows for -- and only those. A run whose row
@@ -281,7 +417,7 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
   const rows = await rowsRead;
   const running = rows.ok
     ? rows.value
-      .map((test) => ({ test, runId: unfinishedRunOf(test) }))
+      .map((test) => ({ test, runId: unfinishedStopIdOf(test) }))
       .filter((one): one is { test: (typeof one)["test"]; runId: string } => one.runId !== null)
     : [];
   const scansStopped = Promise.all(running.map(({ test, runId }) => stopScan(req, test, runId, "kill_switch")));
@@ -294,17 +430,25 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
     const covered = new Set(running.map((one) => one.runId));
     const recordedBy = new Map<string, string>();
     for (const test of rows.ok ? rows.value : []) {
-      const runId = runIdOf(test);
+      const runId = stopIdOf(test);
       if (runId !== null) recordedBy.set(runId, test.id);
     }
+    // Every run a stop can address exactly is sent one (stopIdFrom): a
+    // blank-looking id too, which the screens read as no run id but a stop
+    // still reaches. Only a run no stop can address is left unnamed.
+    const named = listed.value
+      .filter((run): run is engine.ActiveRun & { stopId: string } => run.stopId !== null)
+      .map((run) => ({ ...run, runId: run.stopId }));
+    const unnamed = listed.value.length - named.length;
     engineRuns = {
       listed: true,
-      runs: await Promise.all(listed.value
+      runs: await Promise.all(named
         .filter((run) => !covered.has(run.runId))
         .map(async (run): Promise<EngineRunStop> => {
           const testId = recordedBy.get(run.runId) ?? null;
           return { runId: run.runId, target: run.target, testId, ...(await sendStop(req, { ...run, testId }, "kill_switch")) };
         })),
+      ...(unnamed > 0 ? { unnamed } : {}),
     };
   }
 
@@ -323,7 +467,8 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
  */
 function stopBeforeDeleting(req: Request, tests: Array<{ id: string; findings: unknown; status: string }>): Promise<ScanStop[]> {
   return Promise.all(tests.flatMap((test) => {
-    const runId = unfinishedRunOf(test);
+    // By any id a stop can address exactly, blank-looking ones included.
+    const runId = unfinishedStopIdOf(test);
     return runId === null ? [] : [stopScan(req, test, runId, "delete")];
   }));
 }
@@ -340,6 +485,49 @@ function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): 
       `Stop ${failed.length === 1 ? "it" : "them"} first -- the scan's Stop on the Tests screen, the kill switch, ` +
       `or a failsafe pause -- then delete ${what}.` +
       (accepted > 0 ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} stopped: the engine accepted the stop.` : ""),
+    stops,
+  });
+  return true;
+}
+
+/** An engine scan that may still be running and that no stop can name: the engine gave it no run id a stop can address. */
+function unfinishedWithoutRunId(test: { findings: unknown; status: string }): boolean {
+  return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && stopIdOf(test) === null;
+}
+
+/**
+ * Refuse, unless forced (`?force=1`), a delete that takes with it a scan that
+ * may still be running and that no stop can name.
+ *
+ * Such a scan was deleted at once (200): no stop was sent -- none can name it --
+ * and no warning given, and a run that may still be scanning disappeared from
+ * this app. It is deleted now only when asked in so many words, and the answer
+ * says no stop was sent. This refuses a delete, never a stop: every stop the
+ * delete could send was sent before this is asked.
+ */
+function refuseUnforcedDeleteWithoutStop(
+  req: Request, res: Response, what: string, tests: Array<{ id: string; findings: unknown; status: string }>, stops: ScanStop[],
+): boolean {
+  if (req.query.force === "1" || req.query.force === "true") return false;
+  const unnamed = tests.filter(unfinishedWithoutRunId);
+  if (unnamed.length === 0) return false;
+  const targets = unnamed.map((one) => {
+    const target = (one.findings as { target?: unknown }).target;
+    return typeof target === "string" ? target : `test ${one.id}`;
+  });
+  const n = unnamed.length;
+  const accepted = stops.filter((one) => one.stopped).length;
+  res.status(409).json({
+    message:
+      `Nothing was deleted. ${n === 1 ? "A scan" : `${n} scans`} (${targets.join(", ")}) may still be running, and the ` +
+      `engine gave ${n === 1 ? "it" : "them"} no run id a stop can name, so no stop can be sent. Stop ` +
+      `${n === 1 ? "it" : "them"} from the Failsafe console first (pause, stand down or terminate the engine), or ` +
+      `delete ${what} with force: ${n === 1 ? "its record goes" : "their records go"}, and no stop is sent.` +
+      (accepted > 0
+        ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} sent a stop, and the engine accepted ${accepted === 1 ? "it" : "each"}.`
+        : ""),
+    reason: "no_stop_possible",
+    noStop: unnamed.map((one, index) => ({ testId: one.id, target: targets[index] })),
     stops,
   });
   return true;
@@ -449,7 +637,11 @@ function engineRecordEdited(
   const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
     ? (data.findings as Record<string, unknown>)
     : null;
-  if (runIdOf(before) === null) return suppliedEngineKeys(res, data.findings);
+  // An engine scan by the one rule the status route and the Tests screen use
+  // (shared/engine-record.ts): a run id, a target or a run's results. Guarded by
+  // its run id alone, a run the engine finished inline without one could have
+  // its counts edited to disagree with the findings the scan screens list.
+  if (!isEngineRecord(before.findings)) return suppliedEngineKeys(res, data.findings);
 
   const recorded = before.findings as Record<string, unknown>;
   const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
@@ -1008,6 +1200,8 @@ export function registerRoutes(app: Express): void {
     // while one of them could not be (stopBeforeDeleting).
     const stops = await stopBeforeDeleting(req, tests);
     if (refuseUnstoppedDelete(res, "the client", stops)) return;
+    if (refuseUnforcedDeleteWithoutStop(req, res, "the client", tests, stops)) return;
+    const withoutStop = tests.filter(unfinishedWithoutRunId).map((one) => one.id);
 
     let success: boolean;
     try {
@@ -1026,7 +1220,11 @@ export function registerRoutes(app: Express): void {
     try {
       await storage.createActivityLog({
         action: "deleted", entityType: "client", entityId: req.params.id,
-        details: { cascaded, ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}) }, ...actor(req),
+        details: {
+          cascaded,
+          ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}),
+          ...(withoutStop.length > 0 ? { deletedWithoutStop: withoutStop } : {}),
+        }, ...actor(req),
       });
     } catch (cause) {
       if (stops.length === 0) throw cause;
@@ -1126,6 +1324,8 @@ export function registerRoutes(app: Express): void {
     // accepted the stop (stopBeforeDeleting): its row is its Stop.
     const stops = await stopBeforeDeleting(req, [test]);
     if (refuseUnstoppedDelete(res, "the test", stops)) return;
+    if (refuseUnforcedDeleteWithoutStop(req, res, "the test", [test], stops)) return;
+    const withoutStop = unfinishedWithoutRunId(test);
 
     let success: boolean;
     try {
@@ -1142,12 +1342,18 @@ export function registerRoutes(app: Express): void {
     try {
       await storage.createActivityLog({
         action: "deleted", entityType: "test", entityId: req.params.id,
-        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : null, ...actor(req),
+        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) }
+          : withoutStop ? { deletedWithoutStop: true } : null,
+        ...actor(req),
       });
     } catch (cause) {
-      if (stops.length === 0) throw cause;
+      if (stops.length === 0 && !withoutStop) throw cause;
     }
-    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
+    res.json({
+      success: true,
+      ...(stops.length > 0 ? { stops } : {}),
+      ...(withoutStop ? { detail: "deleted with force: the engine gave this scan no run id a stop can name, so no stop was sent" } : {}),
+    });
   }));
 
   // ==== SCANS: the engine, and what it found ====
@@ -1231,26 +1437,70 @@ export function registerRoutes(app: Express): void {
     // scans that finished long ago and refuse every start once enough pages
     // were left -- and would miss a live run that has no row. Only when that
     // list cannot be read are the rows recorded as running counted instead.
+    // A run with no run id is live all the same, and counts either way: listed
+    // by the engine with none, or recorded here as an unfinished engine scan
+    // (shared/engine-record.ts) that has none. The recorded rows were counted
+    // by run id alone, so the same running scan counted while the engine's
+    // list could be read and did not while it could not.
     const limit = control?.maxConcurrentTests ?? 5;
     let running: number;
+    let unnamed: number;
     let unlisted: string | null = null;
+    let live: engine.ActiveRun[] = [];
+    let unnamedRecords: UnnamedRecord[] = [];
     try {
-      running = (await engine.activeRuns()).length;
+      live = await engine.activeRuns();
+      running = live.length;
+      // Unnamed: a run no stop can address, so neither a Stop nor the kill
+      // switch reaches it (stopIdFrom). A blank-looking id is reached by the
+      // kill switch, and counted as one it names.
+      unnamed = live.filter((run) => run.stopId === null).length;
     } catch (cause) {
       if (!(cause instanceof engine.EngineUnavailable)) throw cause;
       unlisted = cause.message;
-      running = (await storage.getAllTests()).filter((test) => unfinishedRunOf(test) !== null).length;
+      const recorded = (await storage.getAllTests())
+        .filter((test) => !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings));
+      running = recorded.length;
+      unnamedRecords = recorded.filter((test) => unfinishedRunOf(test) === null).map((test) => {
+        const target = (test.findings as { target?: unknown }).target;
+        return { testId: test.id, target: typeof target === "string" ? target : null };
+      });
+      unnamed = recorded.filter((test) => unfinishedStopIdOf(test) === null).length;
     }
     if (running >= limit) {
+      // A run the engine lists with no run id, at the target of a scan recorded
+      // here as running with a run id the engine did not list: that scan's own
+      // Stop names it by the recorded id, so it is stoppable, and said so. Only
+      // read when refusing, and a read that fails matches nothing.
+      let recordedById = 0;
+      if (unlisted === null && unnamed > 0) {
+        const listedIds = new Set(live.map((run) => run.stopId).filter((id): id is string => id !== null));
+        let rows: Awaited<ReturnType<typeof storage.getAllTests>> = [];
+        try {
+          rows = await storage.getAllTests();
+        } catch {
+          rows = [];
+        }
+        const unlistedTargets = rows
+          .filter((test) => { const id = unfinishedRunOf(test); return id !== null && !listedIds.has(id); })
+          .map((test) => (test.findings as { target?: unknown }).target)
+          .filter((target): target is string => typeof target === "string");
+        for (const run of live) {
+          if (run.stopId !== null || run.target === null) continue;
+          const at = unlistedTargets.indexOf(run.target);
+          if (at === -1) continue;
+          unlistedTargets.splice(at, 1);
+          recordedById += 1;
+        }
+        unnamed -= recordedById;
+      }
       return void res.status(409).json({
-        error: `${running} engine scan${running === 1 ? " is" : "s are"} ` +
-          (unlisted === null
-            ? "running"
-            : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
-          `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started. Stop one, ` +
-          "or raise the limit, to start another.",
+        error: concurrencyRefusal({ running, unnamed, limit, unlisted, recordedById, unnamedRecords }),
         reason: "concurrency_limit",
         running,
+        unnamed,
+        ...(recordedById > 0 ? { recordedById } : {}),
+        ...(unnamedRecords.length > 0 ? { unnamedRecords } : {}),
         counted: unlisted === null ? "engine" : "recorded",
         limit,
       });
@@ -1296,7 +1546,12 @@ export function registerRoutes(app: Express): void {
         status: completedInline ? "completed" : "running",
         completedAt: completedInline ? new Date() : null,
         summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
-        findings: { runId: started.runId, target: data.target, results: started.findings },
+        // The id as a stop can address it (stopIdFrom): the run id, or a
+        // non-empty id blank after trimming. The screens read the latter as no
+        // run id (runIdFrom); the kill switch still sends it its stop.
+        findings: { runId: started.stopId ?? started.runId, target: data.target, results: started.findings },
+        // Results the engine sent that could not be read (null) count as
+        // nothing here; the status route answers them as unread, never as none.
         ...(completedInline
           ? countSeverities(started.findings ?? [])
           : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
@@ -1308,15 +1563,17 @@ export function registerRoutes(app: Express): void {
       // start failed" left the run going with nothing here able to stop it.
       // So the run just started is stopped, and the answer says what came of
       // that.
-      if (!started.runId || completedInline) throw cause;
-      const stop = await sendStop(req, { runId: started.runId, target: data.target, testId: null }, "start_not_recorded");
+      // By any id a stop can address exactly, blank-looking ones included.
+      const stopId = started.stopId ?? started.runId;
+      if (!stopId || completedInline) throw cause;
+      const stop = await sendStop(req, { runId: stopId, target: data.target, testId: null }, "start_not_recorded");
       return void res.status(500).json({
-        error: `the engine started run ${started.runId} but it could not be recorded here (${causeOf(cause)}); ` +
+        error: `the engine started run ${stopId} but it could not be recorded here (${causeOf(cause)}); ` +
           (stop.stopped
             ? "the run was sent a stop, and the engine accepted it"
             : `the run was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
               "stop it with the kill switch or a failsafe pause"),
-        runId: started.runId,
+        runId: stopId,
         stopped: stop.stopped,
       });
     }
@@ -1326,20 +1583,26 @@ export function registerRoutes(app: Express): void {
     // log write that fails is reported, and the page still gets its test.
     let filed: lifecycle.IngestResult | null = null;
     let notFiled: string | null = null;
-    try {
-      // File what came back as findings with a life of their own. A scan that
-      // completes inline has its results now; one still running is filed when
-      // it finishes, on the status route.
-      filed = await lifecycle.ingest(storage, started.findings ?? [], {
-        clientId: data.clientId,
-        siteId: data.siteId ?? null,
-        engagementRef,
-        target: data.target,
-        testId: test.id,
-        runId: started.runId ?? null,
-      });
-    } catch (cause) {
-      notFiled = causeOf(cause);
+    if (started.findings === null) {
+      // Results the engine sent that could not be read are filed as nothing,
+      // and said so; the record holds them as unread.
+      notFiled = "the engine's results for this run could not be read";
+    } else {
+      try {
+        // File what came back as findings with a life of their own. A scan that
+        // completes inline has its results now; one still running is filed when
+        // it finishes, on the status route.
+        filed = await lifecycle.ingest(storage, started.findings, {
+          clientId: data.clientId,
+          siteId: data.siteId ?? null,
+          engagementRef,
+          target: data.target,
+          testId: test.id,
+          runId: started.runId ?? null,
+        });
+      } catch (cause) {
+        notFiled = causeOf(cause);
+      }
     }
 
     try {
@@ -1354,6 +1617,10 @@ export function registerRoutes(app: Express): void {
 
     res.status(201).json({
       test, runId: started.runId, state: started.state, filed,
+      // A run the engine started without a run id a stop can name breaks the
+      // engine's contract: no Stop can reach it, and the screens say what can
+      // (the Failsafe console) in place of a Stop that would answer 409.
+      ...(started.runId === null && !completedInline ? { stop: "failsafe" as const } : {}),
       ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
     });
   }));
@@ -1371,7 +1638,16 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const runId = runIdOf(test);
+    // By any id a stop can address exactly: a blank-looking id the screens
+    // offer no Stop for is still sent this stop, if asked (stopIdOf).
+    const runId = stopIdOf(test);
+    if (!runId && isEngineRecord(test.findings)) {
+      // An engine scan the engine accepted without a run id: a stop has nothing
+      // to name it by. It is not "no engine run". It is pointed at the kill
+      // switch, which stops every run the engine lists by a run id, and at the
+      // failsafes, which stop the engine whatever it lists.
+      return void res.status(409).json({ error: NO_RUN_ID_TO_STOP, stop: "failsafe" });
+    }
     if (!runId) {
       return void res.status(409).json({
         error: "this test has no engine run recorded against it, so there is nothing to stop",
@@ -1416,9 +1692,45 @@ export function registerRoutes(app: Express): void {
     if (!test) return notFound(res, "Test");
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
-    if (!runId || test.status === "completed") {
-      return void res.json({ test, state: test.status, engine: null });
+    const runId = runIdOf(test);
+    // A test no engine run stands behind -- a person's, or a sample row -- has
+    // no findings of a run's to answer, completed or not. Decided by the one
+    // rule the edit guard and the Tests screen use (shared/engine-record.ts):
+    // only the scan route writes a run id, a target or a run's results.
+    if (!isEngineRecord(test.findings)) {
+      return void res.json({
+        test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
+      });
+    }
+    if (test.status === "completed") {
+      // The engine is not asked again about a run recorded as completed, so what
+      // it returned is what was recorded then: the last poll's findings, or the
+      // start's for a run the engine finished inline. They are answered in the
+      // shape the engine's own are, `confidence_basis` and all. This answered
+      // `engine: null`, and the scan screens read that as "returned no findings"
+      // beside the counts those same findings were counted into. Findings that
+      // cannot be read are said to be unread, never answered as none.
+      const results = readableResults(recorded.results);
+      if (results === null) {
+        return void res.json({
+          test, state: test.status, engine: null,
+          detail: "the findings recorded for this scan could not be read",
+        });
+      }
+      const answered: engine.EngineScan = {
+        runId, state: test.status, findings: results, detail: "the findings recorded when the run completed",
+      };
+      return void res.json({ test, state: test.status, engine: answered });
+    }
+    if (!runId) {
+      // An engine scan the engine accepted without a run id, not recorded as
+      // completed: the engine cannot be asked about it, and it is never told it
+      // has no engine run. No Stop can reach it either: every read says so, so
+      // the screens show what stops it in place of a Stop.
+      return void res.json({
+        test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK,
+        ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
+      });
     }
 
     let current;
@@ -1435,10 +1747,18 @@ export function registerRoutes(app: Express): void {
       throw cause;
     }
 
-    // Counted from what came back, never from what was asked for.
-    const counts = countSeverities(current.findings);
     const finished = current.state === "completed" || current.state === "aborted"
       || current.state === "failed";
+    // Counted from what came back, never from what was asked for. Results the
+    // engine sent that could not be read (null: not a list) are recorded as
+    // unread and not counted. While the run goes on, the counts stay as the last
+    // readable poll left them. On the poll that finishes it they are cleared: a
+    // count from a poll before is not what the run found, and left standing it
+    // would be read as the finished scan's own. Zero beside unread results is
+    // read as "not recorded", never as none (shared/latest-scans.ts).
+    const counts = current.findings !== null
+      ? countSeverities(current.findings)
+      : finished ? UNREAD_COUNTS : {};
 
     const updated = await storage.updateTest(test.id, {
       status: current.state,
@@ -1451,11 +1771,11 @@ export function registerRoutes(app: Express): void {
     // would record half a picture as the current state of the engagement,
     // and the next poll would file the same findings again.
     let filed: lifecycle.IngestResult | null = null;
-    if (finished) {
+    if (finished && current.findings !== null) {
       const client = await storage.getClient(test.clientId);
       const site = test.siteId ? await storage.getSite(test.siteId) : null;
       if (client) {
-        filed = await lifecycle.ingest(storage, current.findings ?? [], {
+        filed = await lifecycle.ingest(storage, current.findings, {
           clientId: client.id,
           siteId: test.siteId ?? null,
           engagementRef: site ? `${client.id}:${site.id}` : client.id,
@@ -1466,6 +1786,15 @@ export function registerRoutes(app: Express): void {
       }
     }
 
+    // Findings the screens cannot show are said to be unread, with the reason,
+    // and never answered as a list: not as none, and not as a row that blanks the
+    // page. The same rule answers them once the run is recorded as completed.
+    if (readableResults(current.findings) === null) {
+      return void res.json({
+        test: updated ?? test, state: current.state, engine: null, filed,
+        detail: "the findings the engine sent for this run could not be read",
+      });
+    }
     res.json({ test: updated ?? test, state: current.state, engine: current, filed });
   }));
 
@@ -1488,8 +1817,18 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    // By the one rule (shared/engine-record.ts), as every other route reads it.
+    const runId = runIdOf(test);
+    if (!runId && isEngineRecord(test.findings)) {
+      // An engine scan the engine gave no run id -- one it finished inline, say.
+      // It has an engine run behind it; nothing names that run to ask for its
+      // decisions. It was told it had no engine run.
+      return void res.json({
+        decisions: [],
+        truncated: false,
+        detail: "the engine gave this scan no run id, so its decisions cannot be asked for, and nothing can be retested",
+      });
+    }
     if (!runId) {
       // A test with no engine run behind it -- a sample row, or one recorded
       // before the engine was wired up -- has nothing to retest. Said plainly
@@ -1561,8 +1900,7 @@ export function registerRoutes(app: Express): void {
     // name the finding to mark fixed could mark any finding fixed, which is
     // the one thing this lifecycle exists to prevent.
     let applied: { findingId: string; status: string; detail: string } | null = null;
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    const runId = runIdOf(test);
     if (runId) {
       try {
         const listed = await engine.listDecisions(runId);
@@ -1857,7 +2195,10 @@ export function registerRoutes(app: Express): void {
         ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
         : { listed: false, detail: stops.detail },
       engineRuns: engineRuns.listed
-        ? { sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length }
+        ? {
+          sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length,
+          ...(engineRuns.unnamed !== undefined ? { unnamed: engineRuns.unnamed } : {}),
+        }
         : { listed: false, detail: engineRuns.detail },
     };
     try {
@@ -2014,8 +2355,7 @@ export function registerRoutes(app: Express): void {
       if (test.clientId !== data.clientId) {
         return void res.status(400).json({ error: "that test belongs to a different client" });
       }
-      const recorded = (test.findings ?? {}) as Record<string, unknown>;
-      if (typeof recorded.runId === "string") runId = recorded.runId;
+      runId = runIdOf(test) ?? undefined;
     }
 
     let pack;
@@ -3564,7 +3904,7 @@ export function registerRoutes(app: Express): void {
           header,
           severity: typeof finding.severity === "string" ? finding.severity : undefined,
           message: typeof finding.message === "string" ? finding.message : undefined,
-          internal: finding.internal === true,
+          internal: isEngineInternal(finding.internal),
         });
       }
     }

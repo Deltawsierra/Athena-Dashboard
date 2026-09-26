@@ -5,14 +5,36 @@
  * server would stop.
  */
 
+import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+
 /** Engine run states after which nothing more happens. */
 export const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
 
 /** The run id of a test whose engine run may still be running, or null. */
 export function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
-  const recorded = test.findings;
-  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
-  const runId = (recorded as { runId?: unknown }).runId;
-  if (typeof runId !== "string" || runId === "") return null;
+  // The run id by the server's own rule (shared/engine-record.ts), so a run id
+  // recorded as a number is offered a Stop here as the server would stop it.
+  const runId = engineRunIdOf(test.findings);
+  if (runId === null) return null;
   return FINISHED_RUN_STATES.has(test.status) ? null : runId;
+}
+
+/**
+ * Whether a test is an engine scan that may still be running and that no Stop
+ * can reach: the engine gave it no run id a stop can name (shared/engine-record.ts
+ * runIdFrom), which its contract does not allow. The server marks such a scan
+ * `stop: "failsafe"`; the screens show NoStopPanel for it in place of a Stop.
+ */
+export function failsafeOnly(test: { findings: unknown; status: string }): boolean {
+  return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && engineRunIdOf(test.findings) === null;
+}
+
+/**
+ * Whether no stop at all can be sent to such a scan: its id is none a stop can
+ * address exactly (shared/engine-record.ts stopIdFrom). A blank-looking id is
+ * no run id to the screens, but the server still sends a stop by it -- on a
+ * delete, and from the kill switch -- so deleting that scan needs no force.
+ */
+export function noStopCanBeSent(test: { findings: unknown; status: string }): boolean {
+  return failsafeOnly(test) && engineStopIdOf(test.findings) === null;
 }

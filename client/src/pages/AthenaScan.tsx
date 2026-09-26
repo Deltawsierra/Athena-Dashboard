@@ -26,8 +26,10 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import FindingConfidence from "@/components/FindingConfidence";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
+import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
@@ -40,12 +42,16 @@ import {
   SCAN_STAGES,
   SEVERITY_LABEL,
   SEVERITY_ORDER,
+  RESULT_LEVEL_LABEL,
   RISK_BAND_TONE,
   bandFromCounts,
+  levelTone,
   severityToken,
+  type ResultLevel,
   type SeverityCounts,
-  type Severity,
 } from "@/lib/athenaScan";
+import { isEngineInternal } from "@shared/engine-internal";
+import { countsNotRecorded, ratingOf, readScan, reportedTotal } from "@shared/latest-scans";
 import type { Client, Site, Test } from "@shared/schema";
 
 interface EngineStatus {
@@ -63,32 +69,41 @@ interface EngineFinding {
   message?: string;
   details?: string;
   severity?: string;
-  confidence?: number;
-  internal?: boolean;
+  /** Ordinal, from mythos-core `evidence.annotate`: never a probability, never a percentage. */
+  confidence?: number | null;
+  /** The engine's own sentence for what `confidence` is, shown with it verbatim. */
+  confidence_basis?: string | null;
+  /** The engine's own diagnostic when truthy, as the engine reads it (shared/engine-internal). */
+  internal?: unknown;
 }
 
 interface ScanView {
   test: Test;
   state: string;
   detail?: string;
+  /** "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel). */
+  stop?: "failsafe";
   engine: { findings?: EngineFinding[]; detail?: string } | null;
 }
 
 /** States the engine reports for a run that has stopped moving. */
 const FINISHED = new Set(["completed", "aborted", "failed", "refused"]);
 
-function SeverityBadge({ severity }: { severity: Severity }) {
+/** A result's badge: its severity, or "Not rated" (muted) when it has none -- never "Info", which says "not a risk". */
+function SeverityBadge({ level }: { level: ResultLevel }) {
+  const tone = levelTone(level);
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold"
       style={{
-        color: `hsl(var(--sev-${severity}))`,
-        borderColor: `hsl(var(--sev-${severity}) / 0.4)`,
-        background: `hsl(var(--sev-${severity}) / 0.1)`,
+        color: `hsl(var(${tone}))`,
+        borderColor: `hsl(var(${tone}) / 0.4)`,
+        background: `hsl(var(${tone}) / 0.1)`,
       }}
+      data-testid="badge-severity"
     >
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(--sev-${severity}))` }} />
-      {severity === "info" ? "Info" : SEVERITY_LABEL[severity]}
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: `hsl(var(${tone}))` }} />
+      {RESULT_LEVEL_LABEL[level]}
     </span>
   );
 }
@@ -157,7 +172,7 @@ export default function AthenaScan() {
         siteId: siteId || undefined,
         target: target.trim(),
       });
-      return (await response.json()) as { test: Test; runId: string | null; state?: string };
+      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe" };
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
@@ -193,9 +208,13 @@ export default function AthenaScan() {
   const engagementReady = clientId !== "" && target.trim() !== "";
   const canScan = engineReady && engagementReady;
 
-  const returned = scan?.engine?.findings ?? [];
-  const findings = returned.filter((f) => !f.internal);
-  const notes = returned.filter((f) => f.internal);
+  // What the run returned. Null when this read carries none: the engine could
+  // not be reached, or the findings recorded for a finished run could not be
+  // read. Null is never drawn as "no findings".
+  const returned = scan?.engine && Array.isArray(scan.engine.findings) ? scan.engine.findings : null;
+  // Notes by the rule the counts use, so a note is never counted as a finding.
+  const findings = (returned ?? []).filter((f) => !isEngineInternal(f.internal));
+  const notes = (returned ?? []).filter((f) => isEngineInternal(f.internal));
   const running = scan !== undefined && !FINISHED.has(scan.state);
   // Until a read says the scan has stopped, it may be running, and its Stop is
   // on screen: while the first read is still on its way, and after a read
@@ -204,6 +223,12 @@ export default function AthenaScan() {
   const startedAs = start.data && start.data.test.id === testId ? start.data.state : undefined;
   const knownStopped = scan !== undefined ? FINISHED.has(scan.state) : startedAs !== undefined && FINISHED.has(startedAs);
   const mayBeRunning = testId !== null && !knownStopped;
+  // A scan the server says no Stop can reach (the engine gave it no run id a
+  // stop can name): NoStopPanel stands in place of the Stop, and says what
+  // stops it. Only when the server said so, in the start's answer or a read;
+  // where the page does not know, the normal Stop stays.
+  const failsafeOnly = testId !== null
+    && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
   const finished = scan !== undefined && FINISHED.has(scan.state);
 
   const counts: SeverityCounts = {
@@ -214,6 +239,37 @@ export default function AthenaScan() {
   };
   const totalFindings = counts.critical + counts.high + counts.medium + counts.low;
   const band = bandFromCounts(counts);
+  // Nothing at all on record: no count, no total and no severity. A result the
+  // engine rated info, or sent with no severity, is counted in the total alone,
+  // and a list the screens cannot show may hold one: that total is a recorded
+  // count, and it is drawn.
+  const nothingRecorded = scan !== undefined && reportedTotal(scan.test) === 0 && ratingOf(scan.test.severity) === null;
+  // Counts that are not a reading of what the run found: the record's counts
+  // were not recorded (shared/latest-scans.ts countsNotRecorded, which reads
+  // unread results so), or a finished run's findings could not be read and
+  // nothing is on record beside them. No band is derived from them and no total
+  // is drawn: "Clear" and 0 over findings nobody could read said the scan had
+  // returned no gradable findings.
+  const countsUnread = scan !== undefined
+    && (countsNotRecorded(scan.test) || (finished && returned === null && nothingRecorded));
+  // The total the record says, as Overview and the Tests screen read it
+  // (reportedTotal): results rated info, or with no severity, are counted in it
+  // and in no band.
+  const recordedTotal = scan !== undefined ? reportedTotal(scan.test) : 0;
+  // A finished scan whose findings no band counts and no severity rates -- at
+  // least one has no severity on record, and may be critical. Not "Clear", which
+  // says nothing gradable came back; Deployments reads it "Not rated" too.
+  const reading = scan !== undefined ? readScan(scan.test) : null;
+  const notRated = finished && !countsUnread && band === "Clear"
+    && reading !== null && reading.total > 0 && reading.severity === null;
+  // "Clear" is never drawn beside findings this read could not show. It was,
+  // with "The scan returned no gradable findings.", beside "The findings could
+  // not be read" -- a verdict on a list nobody here could read. A record that
+  // rates every result it counted info is said as the record's reading, and
+  // the list as unread ("Informational", as Deployments reads that record);
+  // anything else is "Not read".
+  const clearOverUnread = finished && !countsUnread && !notRated && band === "Clear" && returned === null;
+  const infoOverUnread = clearOverUnread && reading !== null && reading.severity === "info";
   const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
@@ -384,7 +440,7 @@ export default function AthenaScan() {
               <Play className="mr-2 h-4 w-4" />
               {start.isPending ? "Asking the engine…" : "Start scan"}
             </Button>
-            {mayBeRunning && (
+            {mayBeRunning && !failsafeOnly && (
               <Button
                 type="button"
                 variant="destructive"
@@ -402,6 +458,19 @@ export default function AthenaScan() {
               </span>
             )}
           </div>
+          {mayBeRunning && failsafeOnly && (
+            <div className="mt-3 flex flex-wrap items-center gap-3" data-testid="text-start-held">
+              <p className="text-[12px] text-muted-foreground">
+                Start is off while this scan may still be running. The engine never named it, so this page cannot
+                learn when it stops, and it still counts toward Max Concurrent Tests. Stop it as said below; to start
+                another scan here, set this one aside: it stays listed under Scans running now, with what stops it.
+              </p>
+              <Button type="button" variant="outline" size="sm" onClick={() => setTestId(null)} data-testid="button-set-aside">
+                Set this scan aside
+              </Button>
+            </div>
+          )}
+          {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
         </form>
       </GlassCard>
 
@@ -453,18 +522,37 @@ export default function AthenaScan() {
               <div className="mt-2 flex items-baseline gap-3">
                 <span
                   className="whitespace-nowrap text-2xl font-semibold"
-                  style={{ color: `hsl(var(--${RISK_BAND_TONE[band]}))` }}
+                  style={{ color: `hsl(var(--${countsUnread || notRated || clearOverUnread ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
                   data-testid="text-risk-band"
                 >
-                  {band === "Clear" && !finished ? "Assessing…" : band}
+                  {countsUnread
+                    ? returned === null ? "Not read" : "Not recorded"
+                    : notRated ? "Not rated"
+                    : clearOverUnread ? infoOverUnread ? "Informational" : "Not read"
+                    : band === "Clear" && !finished ? "Assessing…" : band}
                 </span>
               </div>
-              <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
-                {band === "Clear"
-                  ? finished
-                    ? "The scan returned no gradable findings."
-                    : "No gradable findings yet."
-                  : "Derived from the worst severity found — not a score."}
+              <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="text-risk-basis">
+                {countsUnread
+                  ? returned === null
+                    ? "The findings could not be read, so no band is derived from them."
+                    : "The counts were not recorded, so no band is derived from them."
+                  : notRated
+                    ? "Findings were recorded with no severity, so no band is derived from them."
+                  : clearOverUnread
+                    ? infoOverUnread
+                      ? "Every result the record counted was rated info. The findings themselves could not be read, " +
+                        "so none are shown to check it against."
+                      : "The findings could not be read, so no band is derived from them."
+                  : band === "Clear"
+                    ? finished
+                      ? "The scan returned no gradable findings."
+                      : returned === null
+                        // Not "No gradable findings yet." beside "The findings could not be read".
+                        ? "The findings could not be read, so this reads only the counts recorded so far: none " +
+                          "of them is gradable."
+                        : "No gradable findings yet."
+                    : "Derived from the worst severity found — not a score."}
               </p>
             </GlassCard>
           </div>
@@ -474,9 +562,11 @@ export default function AthenaScan() {
             <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
               <div className="shrink-0">
                 <span className="athena-figure text-[40px] font-semibold leading-none text-foreground" data-testid="text-total">
-                  {totalFindings}
+                  {countsUnread ? "—" : recordedTotal}
                 </span>
-                <p className="mt-1 text-[11px] text-muted-foreground">Total findings</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  {countsUnread ? "Total findings: not recorded" : "Total findings"}
+                </p>
               </div>
               {SEVERITY_ORDER.map((sev) => (
                 <div key={sev}>
@@ -486,7 +576,7 @@ export default function AthenaScan() {
                     style={{ color: `hsl(var(--sev-${sev}))` }}
                     data-testid={`text-count-${sev}`}
                   >
-                    {counts[sev]}
+                    {countsUnread ? "—" : counts[sev]}
                   </p>
                 </div>
               ))}
@@ -496,7 +586,12 @@ export default function AthenaScan() {
           {/* Findings themselves — real, non-internal engine findings */}
           <GlassCard hover={false} glow={false} className="mt-5">
             <p className="athena-label">Findings</p>
-            {findings.length === 0 && finished && (
+            {returned === null && (
+              <p className="mt-3 text-[13px] text-muted-foreground" data-testid="text-findings-unread">
+                The findings could not be read, so none are listed here. That is not the same as none found.
+              </p>
+            )}
+            {returned !== null && findings.length === 0 && finished && (
               <div className="mt-3 flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                 <p className="text-[13px] text-muted-foreground">
@@ -504,7 +599,7 @@ export default function AthenaScan() {
                 </p>
               </div>
             )}
-            {findings.length === 0 && running && (
+            {returned !== null && findings.length === 0 && running && (
               <p className="mt-3 text-[13px] text-muted-foreground">The engine has reported nothing yet.</p>
             )}
             {findings.length > 0 && (
@@ -515,19 +610,15 @@ export default function AthenaScan() {
                     <li
                       key={i}
                       className="space-y-1 rounded-lg border p-4"
-                      style={{ borderColor: `hsl(var(--sev-${level}) / 0.35)` }}
+                      style={{ borderColor: `hsl(var(${levelTone(level)}) / 0.35)` }}
                     >
                       <div className="flex items-center gap-2">
-                        <SeverityBadge severity={level} />
+                        <SeverityBadge level={level} />
                         <span className="athena-mono text-[11px] text-muted-foreground">{f.type}</span>
                       </div>
                       <p className="text-[13px] font-medium text-foreground">{f.message}</p>
                       {f.details && <p className="text-[13px] text-muted-foreground">{f.details}</p>}
-                      {typeof f.confidence === "number" && (
-                        <p className="athena-mono text-[11px] text-muted-foreground">
-                          confidence {f.confidence.toFixed(2)}
-                        </p>
-                      )}
+                      <FindingConfidence finding={f} />
                     </li>
                   );
                 })}

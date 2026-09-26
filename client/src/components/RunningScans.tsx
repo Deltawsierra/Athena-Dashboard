@@ -11,6 +11,10 @@
  * may still be running (read as the server reads it, lib/engineRuns.ts). The
  * Stop asks the abort route, which asks the engine and says if it did not
  * stop; nothing here decides that a scan has stopped.
+ *
+ * A scan the engine started with no run id a stop can name was left out of
+ * this list altogether, while Max Concurrent Tests counted it. It is listed,
+ * with NoStopPanel in place of a Stop: what stops it is the Failsafe console.
  */
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Square } from "lucide-react";
@@ -20,7 +24,8 @@ import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
-import { unfinishedRunOf } from "@/lib/engineRuns";
+import NoStopPanel from "@/components/NoStopPanel";
+import { failsafeOnly, unfinishedRunOf } from "@/lib/engineRuns";
 import { loaded } from "@/lib/loaded";
 import type { Client, Test } from "@shared/schema";
 
@@ -55,7 +60,9 @@ export default function RunningScans({ exclude, className }: { exclude: string |
     );
   }
 
-  const running = tests$.data.filter((test) => test.id !== exclude && unfinishedRunOf(test) !== null);
+  const running = tests$.data.filter(
+    (test) => test.id !== exclude && (unfinishedRunOf(test) !== null || failsafeOnly(test)),
+  );
   if (running.length === 0) return null;
   const clientName = (id: string) =>
     (clients$.state === "ready" ? clients$.data.find((one) => one.id === id)?.name : undefined) ?? "an engagement";
@@ -64,18 +71,33 @@ export default function RunningScans({ exclude, className }: { exclude: string |
     <GlassCard className={className} data-testid="list-running-scans">
       <p className="athena-label">Scans running now</p>
       <p className="mt-1 text-[12px] text-muted-foreground">
-        Recorded as running, and not started from this page. Each can be stopped here.
+        Recorded as running, and not started from this page. Each is stopped here, or says what stops it.
       </p>
       <ul className="mt-3 space-y-2">
         {running.map((test) => {
           const recorded = test.findings as { target?: unknown };
-          const target = typeof recorded.target === "string" ? recorded.target : `run ${unfinishedRunOf(test)}`;
+          const runId = unfinishedRunOf(test);
+          const target = typeof recorded.target === "string" ? recorded.target : runId !== null ? `run ${runId}` : "a scan";
+          if (runId === null) {
+            return (
+              <li key={test.id} className="space-y-2 rounded-lg border p-3" data-testid={`running-scan-${test.id}`}>
+                <div className="min-w-0 text-[13px]">
+                  <p className="break-all font-medium text-foreground">{target}</p>
+                  <p className="text-muted-foreground">
+                    {clientName(test.clientId)} · no run id from the engine · {test.status} · started{" "}
+                    {new Date(test.startedAt).toLocaleString()}
+                  </p>
+                </div>
+                <NoStopPanel testId={test.id} />
+              </li>
+            );
+          }
           return (
             <li key={test.id} className="flex items-center justify-between gap-3 rounded-lg border p-3" data-testid={`running-scan-${test.id}`}>
               <div className="min-w-0 text-[13px]">
                 <p className="break-all font-medium text-foreground">{target}</p>
                 <p className="text-muted-foreground">
-                  {clientName(test.clientId)} · engine run {unfinishedRunOf(test)} · {test.status} · started{" "}
+                  {clientName(test.clientId)} · engine run {runId} · {test.status} · started{" "}
                   {new Date(test.startedAt).toLocaleString()}
                 </p>
               </div>

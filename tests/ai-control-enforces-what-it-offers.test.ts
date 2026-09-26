@@ -146,7 +146,8 @@ describe("Max Concurrent Tests is a limit", () => {
     expect(third.body).toMatchObject({ reason: "concurrency_limit", running: 2, counted: "engine", limit: 2 });
     expect(third.body.error).toBe(
       "2 engine scans are running, and Max Concurrent Tests on the AI Control page is 2, so this scan was " +
-      "not started. Stop one, or raise the limit, to start another.",
+      "not started. Stop one -- with its Stop where this app recorded it, or with the kill switch on the AI Control " +
+      "page -- or raise the limit, to start another.",
     );
     expect(started.length).toBe(before);
     await stopped(one.body.test.id);

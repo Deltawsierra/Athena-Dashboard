@@ -2,7 +2,12 @@
  * The shape of GET /api/findings/summary, shared by the server that computes
  * it (server/findings-summary.ts) and the screens that draw it.
  */
-export const SUMMARY_SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+/**
+ * Worst first. "unrated" is a finding with no severity recorded, or one that is
+ * no rating: it may be critical, so it ranks above info and is never counted
+ * as info -- which says "not a risk" -- as it was.
+ */
+export const SUMMARY_SEVERITIES = ["critical", "high", "medium", "low", "unrated", "info"] as const;
 export type SummarySeverity = (typeof SUMMARY_SEVERITIES)[number];
 
 /**
@@ -45,7 +50,11 @@ export interface FindingsSummary {
    * the first and the latest are present with zeros -- a month with no new
    * findings is a measurement -- and the window is the latest twelve.
    */
-  byMonth: Array<{ month: string; critical: number; high: number; medium: number; low: number }>;
+  byMonth: Array<{
+    month: string; critical: number; high: number; medium: number; low: number;
+    /** Findings with no severity recorded, counted by month; the chart does not draw them, and says how many. */
+    unrated: number;
+  }>;
   /** The worst open findings: by severity, then the most recently seen. */
   topOpen: Array<{
     id: string;

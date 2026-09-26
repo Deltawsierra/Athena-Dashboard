@@ -16,6 +16,7 @@
  */
 
 import * as settings from "./settings";
+import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
@@ -51,13 +52,35 @@ export interface EngineStatus {
 export interface EngineScan {
   runId: string | null;
   state: string;
-  findings: unknown[];
+  /**
+   * The run's results as the engine sent them. An empty list when it sent none
+   * (a run still going has no `result`); null when it sent a `results` that is
+   * not a list, which could not be read and is never read as none.
+   */
+  findings: unknown[] | null;
   detail: string;
   /** The engine's own refusal, when it refused. Shown verbatim. */
   refused?: string;
+  /**
+   * The id a stop can address this run by exactly (shared/engine-record.ts
+   * stopIdFrom): `runId`, or a non-empty id that is blank after trimming, which
+   * the screens treat as none but a stop still reaches. Set by startScan only.
+   */
+  stopId?: string | null;
 }
 
 export class EngineUnavailable extends Error {}
+
+/**
+ * The engine's `results`, read. Absent is none sent. Present and not a list is
+ * an answer that could not be read: null, never an empty list. It was `[]`, so
+ * a garbled answer was recorded, counted and shown as a scan that returned no
+ * findings.
+ */
+function resultsOf(results: unknown): unknown[] | null {
+  if (results === undefined) return [];
+  return Array.isArray(results) ? results : null;
+}
 
 function baseUrl(): string | null {
   // From the settings row if an operator saved one, else from the
@@ -317,11 +340,13 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   // `runState` has always read the nested form; both agree now.
   const inline = (payload.result ?? {}) as Record<string, unknown>;
   return {
-    runId: (payload.run_id as string) ?? null,
+    // Read as every run id is (shared/engine-record.ts runIdFrom): a number is
+    // its digits. Cast as a string, `run_id: 42` was recorded as the number and
+    // then read as no run id at all, so nothing could name the run to stop it.
+    runId: runIdFrom(payload.run_id),
+    stopId: stopIdFrom(payload.run_id),
     state: (payload.state as string) ?? "running",
-    findings: Array.isArray(inline.results)
-      ? inline.results
-      : Array.isArray(payload.results) ? payload.results : [],
+    findings: inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
   };
 }
@@ -635,20 +660,33 @@ export async function runState(runId: string): Promise<EngineScan> {
   return {
     runId,
     state: (payload.state as string) ?? "unknown",
-    findings: Array.isArray(result.results) ? result.results : [],
+    findings: resultsOf(result.results),
     detail: (payload.reason as string) ?? "",
   };
 }
 
 /** One run the engine lists as still live: queued, running or aborting. */
 export interface ActiveRun {
-  runId: string;
+  /**
+   * The run's id (shared/engine-record.ts runIdFrom), or null when the engine
+   * listed it with none a stop can name. Such a run is still live, and still
+   * listed: it counts toward the concurrency limit, and the kill switch says it
+   * could not be stopped from here.
+   */
+  runId: string | null;
+  /**
+   * The id the kill switch sends its stop by (shared/engine-record.ts
+   * stopIdFrom): `runId`, or a non-empty id blank after trimming, which a stop
+   * still reaches exactly. null only when no stop can address the run.
+   */
+  stopId: string | null;
   target: string | null;
   state: string;
 }
 
 /**
- * Every run the engine says is still touching a customer.
+ * Every run the engine says is still touching a customer: one per entry on its
+ * list, of whatever shape.
  *
  * The engine's own list, not this app's rows: a run whose row was deleted, or
  * never written, is on it all the same. An answer that cannot be read throws
@@ -666,14 +704,25 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   if (!Array.isArray(listed)) {
     throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
   }
-  return listed
-    .map((one) => (one && typeof one === "object" ? (one as Record<string, unknown>) : {}))
-    .filter((one) => typeof one.run_id === "string" && one.run_id !== "")
-    .map((one) => ({
-      runId: one.run_id as string,
-      target: typeof one.target === "string" ? one.target : null,
-      state: typeof one.state === "string" ? one.state : "unknown",
-    }));
+  // Every entry listed is a live run, whatever its shape: none is dropped. A
+  // run listed with no id was dropped here, so the kill switch said nothing of
+  // a run it could not stop -- and so was any entry that was not an object: a
+  // list of bare ids (`["run-7", 77]`) was sent no stop, counted toward no
+  // limit, and read on the AI Control page as "no other live run". An entry
+  // that is a run id (text, or a whole number) is that run; any other entry
+  // is a live run with no id a stop can name.
+  return listed.map((one): ActiveRun => {
+    if (one === null || typeof one !== "object" || Array.isArray(one)) {
+      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown" };
+    }
+    const run = one as Record<string, unknown>;
+    return {
+      runId: runIdFrom(run.run_id),
+      stopId: stopIdFrom(run.run_id),
+      target: typeof run.target === "string" ? run.target : null,
+      state: typeof run.state === "string" ? run.state : "unknown",
+    };
+  });
 }
 
 /** Ask a running scan to stop. */
@@ -721,7 +770,7 @@ function decisionTwin(raw: Record<string, unknown>): DecisionTwin {
   const inputs = (raw.inputs ?? {}) as Record<string, unknown>;
   return {
     id: Number(raw.id),
-    runId: typeof raw.run_id === "string" ? raw.run_id : null,
+    runId: runIdFrom(raw.run_id),
     target: String(raw.target ?? ""),
     findingType: String(raw.finding_type ?? "unknown"),
     severity: typeof decision.severity === "string" ? decision.severity : null,
@@ -825,9 +874,7 @@ export async function retest(request: RetestRequest): Promise<RetestResult> {
       typeof payload.inventory_digest === "string" ? payload.inventory_digest : null,
     // Measured: the engine sends this as a number at the top level and as a
     // string inside `check`. Both are the same run.
-    runId: payload.run_id === null || payload.run_id === undefined
-      ? null
-      : String(payload.run_id),
+    runId: runIdFrom(payload.run_id),
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
   };
 }

@@ -28,6 +28,9 @@
  */
 
 import { createHash } from "node:crypto";
+
+import { isEngineInternal } from "@shared/engine-internal";
+import { ratingOf } from "@shared/latest-scans";
 import type { Finding } from "@shared/schema";
 
 /** A finding as it comes off a scan result, with where it came from. */
@@ -49,7 +52,8 @@ export interface Sighting {
  * map. Both places are read, evidence first.
  */
 export function sightingOf(raw: Record<string, unknown>, target: string | null): Sighting | null {
-  if (raw.internal === true) return null;
+  // The engine's own diagnostic, by the rule the counts use (shared/engine-internal).
+  if (isEngineInternal(raw.internal)) return null;
   const type = typeof raw.type === "string" ? raw.type : null;
   if (!type) return null;
 
@@ -62,7 +66,11 @@ export function sightingOf(raw: Record<string, unknown>, target: string | null):
 
   return {
     type,
-    severity: typeof raw.severity === "string" ? raw.severity : null,
+    // A rating is filed as the word every reader reads it as (shared/latest-scans.ts
+    // ratingOf): " high" and "HIGH" are high. Filed as sent, " high" was a finding
+    // the ledger read as info beside a test whose counts said high. A word that
+    // is no rating is kept as the engine sent it.
+    severity: typeof raw.severity === "string" ? ratingOf(raw.severity) ?? raw.severity : null,
     message: typeof raw.message === "string" ? raw.message : null,
     target,
     endpoint: pick("endpoint"),
@@ -101,13 +109,15 @@ export function fingerprint(scope: string, sighting: Sighting): string {
 /**
  * Worst first. When one issue arrives at several severities within a scan --
  * a weak payload reads "medium", a confirmed one "critical", at the same
- * endpoint -- it is filed once, at the worst. An unrecognised severity ranks
- * below all of these.
+ * endpoint -- it is filed once, at the worst. A severity that is missing or no
+ * rating ranks below low and ABOVE info: it may be critical, so it is never
+ * folded into an info sighting of the same issue. It ranked below everything,
+ * and an issue seen rated info and unrated at one place was filed as info.
  */
 const SEVERITY_RANK = ["critical", "high", "medium", "low", "info"];
 function severityRank(severity: string | null): number {
-  const at = SEVERITY_RANK.indexOf((severity ?? "").toLowerCase());
-  return at === -1 ? SEVERITY_RANK.length : at;
+  const at = SEVERITY_RANK.indexOf(ratingOf(severity) ?? "");
+  return at === -1 ? SEVERITY_RANK.indexOf("info") - 0.5 : at;
 }
 
 /** A scan's results folded into the issues they are, as ingest files them. */
