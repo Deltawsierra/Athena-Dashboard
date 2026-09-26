@@ -12,6 +12,14 @@
  * Now neither screen draws a band, a total or a count over them: Athena says
  * "Not read" and why, and both draw each count as "—".
  *
+ * Only when nothing at all is on record. A result the engine rated info, or
+ * sent with no severity, is counted in the record's total and in no band, and a
+ * list holding one the screens cannot show (an object `message`) was drawn as
+ * "counts not recorded" beside that recorded total -- which Overview reads as
+ * "1 finding reported" and the Tests row as "1 Vulnerabilities Found". Both
+ * screens now draw the recorded total, and Athena says "Not rated" where no
+ * severity rates what was found. Nor is any of this drawn while a scan runs.
+ *
  * These drive each screen against the real routes, served over HTTP and signed
  * in, with an engine each test tells what to answer.
  */
@@ -254,5 +262,141 @@ describe("Evidence: a latest completed scan whose findings could not be read", (
       "Its latest completed scan's results could not be read, so its counts were not recorded",
     );
     expect(latestScanReport(unread)).not.toMatch(/0 critical/);
+  });
+});
+
+// A result the screens cannot show (an object message) that the counts count: rated info, or with no severity.
+const INFO_UNSHOWABLE = { type: "banner", severity: "info", message: { text: "Server header" } };
+const UNRATED_UNSHOWABLE = { type: "banner", message: { text: "Server header" } };
+
+describe("a finished scan whose findings could not be shown, but whose total was recorded", () => {
+  it("Athena draws the recorded total over a result rated info, and never says the counts were not recorded", async () => {
+    finishesInline([INFO_UNSHOWABLE]);
+    let id = "";
+    onStarted = async (testId) => { id = testId; };
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+    const recorded = (await storage.getTest(id))!;
+    expect({ total: recorded.vulnerabilitiesFound, severity: recorded.severity }).toEqual({ total: 1, severity: "info" });
+    expect(screen.getByTestId("text-total").textContent).toBe("1");
+    for (const sev of COUNTED) expect(screen.getByTestId(`text-count-${sev}`).textContent).toBe("0");
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Clear");
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe("The scan returned no gradable findings.");
+    expect(text()).not.toMatch(/not recorded|Not read/);
+  });
+
+  it("Athena draws the recorded total over a result with no severity, and says it is not rated, never Clear", async () => {
+    finishesInline([UNRATED_UNSHOWABLE]);
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+    expect(screen.getByTestId("text-total").textContent).toBe("1");
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Not rated");
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
+      "Findings were recorded with no severity, so no band is derived from them.",
+    );
+    expect(text()).not.toMatch(/not recorded|Not read|Clear|returned no (gradable )?findings/);
+  });
+
+  for (const [label, row] of [["rated info", INFO_UNSHOWABLE], ["with no severity", UNRATED_UNSHOWABLE]] as const) {
+    it(`Penetration testing draws the recorded total and counts over a result ${label}, and never says none was recorded`, async () => {
+      finishesInline([row]);
+      realRoutes();
+      render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
+      await startAScan("completed");
+      await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+      expect(screen.queryByTestId("text-counts-unrecorded")).toBeNull();
+      for (const sev of COUNTED) expect(screen.getByTestId(`text-count-${sev}`).textContent).toBe("0");
+      expect(screen.getByTestId("text-count-total").textContent).toBe("1");
+    });
+  }
+});
+
+describe("a readable finish rated info, or with no severity", () => {
+  it("Athena counts a result rated info in the total, and still says Clear", async () => {
+    finishesInline([{ type: "banner", severity: "info", message: "Server header" }]);
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
+    expect(screen.getByTestId("text-total").textContent).toBe("1");
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Clear");
+  });
+
+  it("Athena says Not rated over a result with no severity, never Clear", async () => {
+    finishesInline([{ type: "banner", message: "Server header" }]);
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
+    expect(screen.getByTestId("text-total").textContent).toBe("1");
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Not rated");
+    expect(text()).not.toMatch(/Clear/);
+  });
+});
+
+describe("a running scan with a result that has no severity", () => {
+  it("Athena is still assessing, and says Not rated only once the scan has finished", async () => {
+    startBody = (runId) => ({ run_id: runId, state: "running" });
+    pollAnswer = () => [200, { state: "running", result: { results: [{ type: "banner", message: "Server header" }] } }];
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("running");
+    await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("text-total").textContent).toBe("1"));
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Assessing…");
+    expect(text()).not.toMatch(/Not rated/);
+  });
+});
+
+describe("Penetration testing: readable findings whose counts were never recorded", () => {
+  it("draws no count or total, and says none was recorded, as Athena does", async () => {
+    finishesInline([HIGH]);
+    // As an inline finish was recorded before the inline-count fix: its results, and every count 0.
+    onStarted = async (testId) => {
+      await storage.updateTest(testId, {
+        severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+      });
+    };
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
+    for (const sev of COUNTED) expect(screen.getByTestId(`text-count-${sev}`).textContent).toBe("—");
+    expect(screen.getByTestId("text-counts-unrecorded").textContent).toBe(
+      "No counts were recorded for this scan, so none are shown. That is not the same as a count of 0.",
+    );
+    expect(screen.getByTestId("text-count-total").textContent).toBe("—");
+  });
+});
+
+describe("a running scan whose engine cannot be reached mid-run", () => {
+  const unreachableMidRun = () => {
+    startBody = (runId) => ({ run_id: runId, state: "running" });
+    pollAnswer = () => [503, { detail: "the engine is restarting" }];
+  };
+
+  it("Athena is still assessing: it draws the counts recorded so far, not Not read", async () => {
+    unreachableMidRun();
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("running");
+    await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Assessing…");
+    expect(screen.getByTestId("text-total").textContent).toBe("0");
+    expect(text()).not.toMatch(/Not read|not recorded/);
+  });
+
+  it("Penetration testing draws the counts recorded so far, and never says none was recorded", async () => {
+    unreachableMidRun();
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
+    await startAScan("running");
+    await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+    for (const sev of COUNTED) expect(screen.getByTestId(`text-count-${sev}`).textContent).toBe("0");
+    expect(screen.queryByTestId("text-counts-unrecorded")).toBeNull();
   });
 });

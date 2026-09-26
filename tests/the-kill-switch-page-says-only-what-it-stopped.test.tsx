@@ -168,6 +168,28 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       await engage();
       expect(await engineSaid()).toBe("The engine listed no other live run.");
     });
+
+    it("a live run the engine listed with no run id is said to be unstopped, never read as no other live run", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [], unnamed: 1 });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine listed 1 live run with no run id, so no stop could name it and none was sent: it may still be " +
+        "running. Pause, stand down or terminate the engine from the Failsafe console.",
+      );
+      expect(await engineSaid()).not.toMatch(/listed no other live run/);
+    });
+
+    it("says both what came of the named runs' stops and that the unnamed ones got none", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [run("r1", null, true)], unnamed: 2 });
+      await engage();
+      expect(await engineSaid()).toBe(
+        "The engine also listed 1 live run that no running scan here recorded (1 with no record here at all); it was " +
+        "sent a stop, and the engine accepted it. The engine listed 2 live runs with no run id, so no stop could name " +
+        "them and none was sent: they may still be running. Pause, stand down or terminate the engine from the Failsafe console.",
+      );
+    });
   });
 
   it("a switch that could not be stored says it is NOT engaged, and still says what each stop came to", async () => {

@@ -16,6 +16,14 @@
  * and the guard refused it (409), naming a field nobody touched. The body the
  * screen sends now is accepted here.
  *
+ * The decisions route (the scan screens' retest panel) kept a rule of its own,
+ * a run id alone, and told a scan the engine finished without one that it had
+ * no engine run. A run id the engine sent as a number was recorded as the
+ * number and then read as no run id: its Stop sent nothing, the kill switch's
+ * list dropped it, and it was told the engine gave it no id. A run the engine
+ * lists with no run id was dropped from that list too, while the Stop of a scan
+ * with no run id promised the kill switch would reach it.
+ *
  * These run the real routes against a fake engine.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -23,7 +31,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { engineRunIdOf, isEngineRecord, runIdFrom } from "@shared/engine-record";
+import { unfinishedRunOf } from "@/lib/engineRuns";
 import type { IStorage } from "../server/storage";
 import { makeApp, signIn } from "./helpers";
 
@@ -58,6 +67,10 @@ beforeAll(async () => {
     }
     if (req.method === "POST" && url.endsWith("/abort")) return json(res, 200, {});
     if (req.method === "GET" && url.startsWith("/api/scans/")) return json(res, 200, { state: "running" });
+    if (req.method === "GET" && url.startsWith("/api/decisions?")) {
+      const runId = new URL(url, "http://engine").searchParams.get("run_id");
+      return json(res, 200, { decisions: [{ id: 1, run_id: Number(runId), target: "https://one.example/", finding_type: "xss", decision: {}, inputs: {} }] });
+    }
     return json(res, 404, { detail: "not here" });
   });
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
@@ -95,7 +108,23 @@ describe("the rule", () => {
     expect(isEngineRecord([{ runId: "run-1" }])).toBe(false);
     expect(engineRunIdOf({ runId: "run-1" })).toBe("run-1");
     expect(engineRunIdOf({ runId: "" })).toBeNull();
-    expect(engineRunIdOf({ runId: 7 })).toBeNull();
+    // A whole number is a run id, as its digits; nothing else that is not text is one.
+    expect(engineRunIdOf({ runId: 7 })).toBe("7");
+    expect(isEngineRecord({ runId: 7 })).toBe(true);
+    for (const notAnId of [true, false, Number.NaN, Infinity, 1.5, 2 ** 53, {}, [], [7], null, undefined, ""]) {
+      expect(runIdFrom(notAnId), String(notAnId)).toBeNull();
+      expect(engineRunIdOf({ runId: notAnId }), String(notAnId)).toBeNull();
+    }
+    expect(runIdFrom(0)).toBe("0");
+    expect(runIdFrom(-3)).toBe("-3");
+    expect(runIdFrom(" run ")).toBe(" run ");
+  });
+
+  it("offers a Stop on the screens for the same runs the server stops, a run id recorded as a number included", () => {
+    expect(unfinishedRunOf({ findings: { runId: 42 }, status: "running" })).toBe("42");
+    expect(unfinishedRunOf({ findings: { runId: "run-1" }, status: "in-progress" })).toBe("run-1");
+    expect(unfinishedRunOf({ findings: { runId: 42 }, status: "completed" })).toBeNull();
+    expect(unfinishedRunOf({ findings: { runId: true }, status: "running" })).toBeNull();
   });
 });
 
@@ -140,8 +169,127 @@ describe("a running scan the engine accepted without a run id", () => {
     const stopped = await agent.post(`/api/scans/${test.id}/abort`);
     expect(stopped.status).toBe(409);
     expect(stopped.body.error).toMatch(/^the engine accepted this scan without a run id/);
-    expect(stopped.body.error).toMatch(/kill switch sends a stop to every run the engine lists as running/);
+    // The kill switch reaches a run the engine lists by a run id, and only that; a failsafe stops the rest.
+    expect(stopped.body.error).toMatch(/kill switch sends a stop to every run the engine lists by a run id/);
+    expect(stopped.body.error).toMatch(/a run it lists with none cannot be stopped from here: pause, stand down or terminate the engine from the Failsafe console$/);
     expect(stopped.body.error).not.toMatch(/no engine run/);
+  });
+
+  it("is said, when the engine lists it with no run id too, to be a live run the kill switch could not stop", async () => {
+    startBody = () => ({ state: "running" });
+    await startScan();
+    active = [{ target: "https://one.example/", state: "running" }];
+    const before = calls.length;
+    try {
+      const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
+      expect(engaged.status, JSON.stringify(engaged.body)).toBe(200);
+      // No stop can name it, so none is sent -- and the answer says it is live, not that the engine listed nothing.
+      expect(engaged.body.engineRuns).toEqual({ listed: true, runs: [], unnamed: 1 });
+      expect(calls.slice(before).filter((one) => one.endsWith("/abort"))).toEqual([]);
+    } finally {
+      active = [];
+      await agent.patch("/api/ai-control").send({ killSwitchEnabled: false });
+    }
+  });
+
+  it("counts toward the concurrency limit when the engine lists it with no run id", async () => {
+    active = [{ target: "https://one.example/", state: "running" }];
+    try {
+      expect((await agent.patch("/api/ai-control").send({ maxConcurrentTests: 1 })).status).toBe(200);
+      const refused = await agent.post("/api/scans").send({ clientId, target: "https://one.example/" });
+      expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+      expect(refused.body).toMatchObject({ reason: "concurrency_limit", running: 1, counted: "engine", limit: 1 });
+    } finally {
+      active = [];
+      await agent.patch("/api/ai-control").send({ maxConcurrentTests: 5 });
+    }
+  });
+});
+
+describe("a run id the engine sent as a number", () => {
+  it("is recorded as its digits, asked about, and stopped by its own Stop", async () => {
+    startBody = () => ({ run_id: 42, state: "running" });
+    const { test, runId } = await startScan();
+    expect(runId).toBe("42");
+    expect(engineRunIdOf((await storage.getTest(test.id))!.findings)).toBe("42");
+
+    const read = await agent.get(`/api/scans/${test.id}`);
+    expect(read.status).toBe(200);
+    expect(JSON.stringify(read.body)).not.toMatch(/without a run id|no engine run/);
+    expect(read.body.engine?.runId).toBe("42");
+    expect(calls).toContain("GET /api/scans/42");
+
+    const stopped = await agent.post(`/api/scans/${test.id}/abort`);
+    expect(stopped.status, JSON.stringify(stopped.body)).toBe(200);
+    expect(calls).toContain("POST /api/scans/42/abort");
+  });
+
+  it("is reached by the kill switch, recorded here or only listed by the engine", async () => {
+    startBody = () => ({ run_id: 43, state: "running" });
+    const { test } = await startScan();
+    active = [{ run_id: 43, target: "https://one.example/", state: "running" }, { run_id: 44, target: null, state: "running" }];
+    const before = calls.length;
+    try {
+      const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
+      expect(engaged.status, JSON.stringify(engaged.body)).toBe(200);
+      expect(engaged.body.stops.scans).toContainEqual(expect.objectContaining({ testId: test.id, runId: "43", stopped: true }));
+      expect(engaged.body.engineRuns).toEqual({
+        listed: true, runs: [{ runId: "44", target: null, testId: null, stopped: true, detail: "" }],
+      });
+      const aborts = calls.slice(before).filter((one) => one.endsWith("/abort"));
+      expect(aborts).toContain("POST /api/scans/43/abort");
+      expect(aborts).toContain("POST /api/scans/44/abort");
+    } finally {
+      active = [];
+      await agent.patch("/api/ai-control").send({ killSwitchEnabled: false });
+    }
+  });
+
+  it("is the run its decisions are asked for, and each decision names it as its digits", async () => {
+    startBody = () => ({ run_id: 45, state: "completed", result: { results: [HIGH] } });
+    const { test } = await startScan();
+    const decisions = await agent.get(`/api/tests/${test.id}/decisions`);
+    expect(decisions.status, JSON.stringify(decisions.body)).toBe(200);
+    expect(calls.some((one) => one.startsWith("GET /api/decisions?run_id=45&"))).toBe(true);
+    expect(decisions.body.decisions[0].runId).toBe("45");
+  });
+
+  it("recorded as the number, before this was read as a run id, is still the run its decisions are asked for", async () => {
+    startBody = () => ({ run_id: 46, state: "completed", result: { results: [HIGH] } });
+    const { test } = await startScan();
+    const recorded = (await storage.getTest(test.id))!.findings as Record<string, unknown>;
+    await storage.updateTest(test.id, { findings: { ...recorded, runId: 46 } });
+    const decisions = await agent.get(`/api/tests/${test.id}/decisions`);
+    expect(decisions.status, JSON.stringify(decisions.body)).toBe(200);
+    expect(calls.some((one) => one.startsWith("GET /api/decisions?run_id=46&"))).toBe(true);
+    expect(decisions.body.detail).toBe("");
+  });
+});
+
+describe("the decisions route (the scan screens' retest panel)", () => {
+  it("tells a scan the engine finished without a run id that its decisions cannot be asked for, never that it has no engine run", async () => {
+    startBody = () => ({ state: "completed", result: { results: [HIGH] } });
+    const { test } = await startScan();
+    const read = await agent.get(`/api/scans/${test.id}`);
+    expect(read.body.engine?.findings).toEqual([HIGH]);
+    const before = calls.length;
+    const decisions = await agent.get(`/api/tests/${test.id}/decisions`);
+    expect(decisions.status).toBe(200);
+    expect(decisions.body).toEqual({
+      decisions: [], truncated: false,
+      detail: "the engine gave this scan no run id, so its decisions cannot be asked for, and nothing can be retested",
+    });
+    expect(calls.slice(before)).toEqual([]);
+  });
+
+  it("still tells a person's test it has no engine run behind it", async () => {
+    const made = await agent.post("/api/tests").send({
+      clientId, testType: "penetration-test", status: "completed", summary: "by hand",
+      findings: { runId: null, target: null, results: null },
+    });
+    expect(made.status, JSON.stringify(made.body)).toBe(201);
+    const decisions = await agent.get(`/api/tests/${made.body.id}/decisions`);
+    expect(decisions.body.detail).toBe("this test has no engine run behind it, so there is nothing to retest");
   });
 
   it("is reached by the kill switch when the engine lists its run", async () => {

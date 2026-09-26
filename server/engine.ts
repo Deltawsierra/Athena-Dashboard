@@ -16,6 +16,7 @@
  */
 
 import * as settings from "./settings";
+import { runIdFrom } from "@shared/engine-record";
 
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
@@ -333,7 +334,10 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   // `runState` has always read the nested form; both agree now.
   const inline = (payload.result ?? {}) as Record<string, unknown>;
   return {
-    runId: (payload.run_id as string) ?? null,
+    // Read as every run id is (shared/engine-record.ts runIdFrom): a number is
+    // its digits. Cast as a string, `run_id: 42` was recorded as the number and
+    // then read as no run id at all, so nothing could name the run to stop it.
+    runId: runIdFrom(payload.run_id),
     state: (payload.state as string) ?? "running",
     findings: inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
@@ -656,7 +660,13 @@ export async function runState(runId: string): Promise<EngineScan> {
 
 /** One run the engine lists as still live: queued, running or aborting. */
 export interface ActiveRun {
-  runId: string;
+  /**
+   * The run's id (shared/engine-record.ts runIdFrom), or null when the engine
+   * listed it with none a stop can name. Such a run is still live, and still
+   * listed: it counts toward the concurrency limit, and the kill switch says it
+   * could not be stopped from here.
+   */
+  runId: string | null;
   target: string | null;
   state: string;
 }
@@ -680,11 +690,12 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   if (!Array.isArray(listed)) {
     throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
   }
+  // Every run listed, named or not. A run listed with no id was dropped here,
+  // so the kill switch said nothing of a run it could not stop.
   return listed
-    .map((one) => (one && typeof one === "object" ? (one as Record<string, unknown>) : {}))
-    .filter((one) => typeof one.run_id === "string" && one.run_id !== "")
+    .filter((one): one is Record<string, unknown> => one !== null && typeof one === "object" && !Array.isArray(one))
     .map((one) => ({
-      runId: one.run_id as string,
+      runId: runIdFrom(one.run_id),
       target: typeof one.target === "string" ? one.target : null,
       state: typeof one.state === "string" ? one.state : "unknown",
     }));
@@ -735,7 +746,7 @@ function decisionTwin(raw: Record<string, unknown>): DecisionTwin {
   const inputs = (raw.inputs ?? {}) as Record<string, unknown>;
   return {
     id: Number(raw.id),
-    runId: typeof raw.run_id === "string" ? raw.run_id : null,
+    runId: runIdFrom(raw.run_id),
     target: String(raw.target ?? ""),
     findingType: String(raw.finding_type ?? "unknown"),
     severity: typeof decision.severity === "string" ? decision.severity : null,
@@ -839,9 +850,7 @@ export async function retest(request: RetestRequest): Promise<RetestResult> {
       typeof payload.inventory_digest === "string" ? payload.inventory_digest : null,
     // Measured: the engine sends this as a number at the top level and as a
     // string inside `check`. Both are the same run.
-    runId: payload.run_id === null || payload.run_id === undefined
-      ? null
-      : String(payload.run_id),
+    runId: runIdFrom(payload.run_id),
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
   };
 }

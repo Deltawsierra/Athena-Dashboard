@@ -3,8 +3,9 @@
  *
  * One rule, read by every part of the app that decides it: the status route
  * (`GET /api/scans/:testId`), the edit guard (`PATCH /api/tests/:id`), the
- * abort route's answer, the counts (shared/latest-scans.ts) and the Tests
- * screen. They disagreed. The status route told a record holding a run's
+ * abort route's answer, the decisions and retest routes, the evidence pack, the
+ * kill switch, the counts (shared/latest-scans.ts), the Tests screen and the
+ * scans offered a Stop (client/src/lib/engineRuns.ts). They disagreed. The status route told a record holding a run's
  * results that it had "no engine run recorded against it" while the edit guard
  * refused its counts as an engine scan's, and the Tests screen offered those
  * same counts for editing, decided by the run id alone.
@@ -14,6 +15,12 @@
  * `target` or `results` (a person's test that sends either is refused), so a run
  * the engine finished or accepted without a run id is an engine scan all the
  * same. A key recorded as null is none.
+ *
+ * A run id is read the same way wherever the engine sends one (server/engine.ts)
+ * and wherever a record holds one: text as sent, and a whole number as its
+ * digits. An engine that sent `run_id: 42` was recorded as the number 42, and
+ * then told it had no run id: its own Stop sent nothing, the kill switch's list
+ * dropped it, and the Tests screen offered no Stop for it.
  */
 
 /** The findings object of a record, or null when it has none. */
@@ -23,10 +30,20 @@ function recordOf(findings: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/**
+ * A run id as the engine sent it, or as a record holds it: a non-empty string
+ * as it is, a whole number (a safe integer) as its digits, and anything else --
+ * "", a boolean, NaN, a fraction, an object -- null, which names no run.
+ */
+export function runIdFrom(value: unknown): string | null {
+  if (typeof value === "string") return value !== "" ? value : null;
+  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+  return null;
+}
+
 /** The engine run a record names, or null when it names none. */
 export function engineRunIdOf(findings: unknown): string | null {
-  const runId = recordOf(findings)?.runId;
-  return typeof runId === "string" && runId !== "" ? runId : null;
+  return runIdFrom(recordOf(findings)?.runId);
 }
 
 /** Whether a record is an engine scan's: a run id, a target, or a run's results (see above). */

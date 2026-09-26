@@ -207,10 +207,15 @@ const UNREAD_COUNTS = {
 /** Said of an engine scan the engine accepted without a run id, read before it is recorded as completed. */
 const NO_RUN_ID_TO_ASK = "the engine accepted this scan without a run id, so the engine cannot be asked about it";
 
-/** Said when such a scan's own Stop is sent: nothing names it to the engine, and the kill switch still reaches it. */
+/**
+ * Said when such a scan's own Stop is sent: nothing names it to the engine. The
+ * kill switch reaches it only if the engine lists it by a run id; a run listed
+ * with none is stopped by a failsafe, which stops the engine itself.
+ */
 const NO_RUN_ID_TO_STOP =
   "the engine accepted this scan without a run id, so its own stop has nothing to name it by; " +
-  "the kill switch sends a stop to every run the engine lists as running";
+  "the kill switch sends a stop to every run the engine lists by a run id, and a run it lists with none " +
+  "cannot be stopped from here: pause, stand down or terminate the engine from the Failsafe console";
 
 /** What one stop sent to the engine came to. */
 interface ScanStop {
@@ -292,8 +297,13 @@ interface EngineRunStop {
 
 /** The stops sent to the scans recorded here as running, or why they could not be listed. */
 type RecordedStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
-/** The stops sent to the other runs the engine listed as live, or why its list could not be read. */
-type EngineSweep = { listed: true; runs: EngineRunStop[] } | { listed: false; detail: string };
+/**
+ * The stops sent to the other runs the engine listed as live, or why its list
+ * could not be read. `unnamed`, present only when there are any, counts the
+ * live runs it listed with no run id: no stop can name them, so none was sent,
+ * and they may still be running.
+ */
+type EngineSweep = { listed: true; runs: EngineRunStop[]; unnamed?: number } | { listed: false; detail: string };
 
 type Settled<T> = { ok: true; value: T } | { ok: false; detail: string };
 function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
@@ -302,7 +312,8 @@ function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
 
 /**
  * Send a stop to everything that may still be running: every engine scan
- * recorded here as running, and every run the ENGINE lists as live.
+ * recorded here as running, and every run the ENGINE lists as live by a run id.
+ * A live run it lists with none is counted and said, since no stop can name it.
  *
  * Engaging the kill switch used to store a flag and nothing else; then it
  * stopped the scans this app had rows for -- and only those. A run whose row
@@ -337,14 +348,17 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
       const runId = runIdOf(test);
       if (runId !== null) recordedBy.set(runId, test.id);
     }
+    const named = listed.value.filter((run): run is engine.ActiveRun & { runId: string } => run.runId !== null);
+    const unnamed = listed.value.length - named.length;
     engineRuns = {
       listed: true,
-      runs: await Promise.all(listed.value
+      runs: await Promise.all(named
         .filter((run) => !covered.has(run.runId))
         .map(async (run): Promise<EngineRunStop> => {
           const testId = recordedBy.get(run.runId) ?? null;
           return { runId: run.runId, target: run.target, testId, ...(await sendStop(req, { ...run, testId }, "kill_switch")) };
         })),
+      ...(unnamed > 0 ? { unnamed } : {}),
     };
   }
 
@@ -1275,6 +1289,7 @@ export function registerRoutes(app: Express): void {
     // scans that finished long ago and refuse every start once enough pages
     // were left -- and would miss a live run that has no row. Only when that
     // list cannot be read are the rows recorded as running counted instead.
+    // A run the engine lists with no run id is live all the same, and counts.
     const limit = control?.maxConcurrentTests ?? 5;
     let running: number;
     let unlisted: string | null = null;
@@ -1426,8 +1441,9 @@ export function registerRoutes(app: Express): void {
     const runId = runIdOf(test);
     if (!runId && isEngineRecord(test.findings)) {
       // An engine scan the engine accepted without a run id: a stop has nothing
-      // to name it by. It is not "no engine run", and it is pointed at the kill
-      // switch, which stops every run the engine lists as well as every recorded one.
+      // to name it by. It is not "no engine run". It is pointed at the kill
+      // switch, which stops every run the engine lists by a run id, and at the
+      // failsafes, which stop the engine whatever it lists.
       return void res.status(409).json({ error: NO_RUN_ID_TO_STOP });
     }
     if (!runId) {
@@ -1595,8 +1611,18 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    // By the one rule (shared/engine-record.ts), as every other route reads it.
+    const runId = runIdOf(test);
+    if (!runId && isEngineRecord(test.findings)) {
+      // An engine scan the engine gave no run id -- one it finished inline, say.
+      // It has an engine run behind it; nothing names that run to ask for its
+      // decisions. It was told it had no engine run.
+      return void res.json({
+        decisions: [],
+        truncated: false,
+        detail: "the engine gave this scan no run id, so its decisions cannot be asked for, and nothing can be retested",
+      });
+    }
     if (!runId) {
       // A test with no engine run behind it -- a sample row, or one recorded
       // before the engine was wired up -- has nothing to retest. Said plainly
@@ -1668,8 +1694,7 @@ export function registerRoutes(app: Express): void {
     // name the finding to mark fixed could mark any finding fixed, which is
     // the one thing this lifecycle exists to prevent.
     let applied: { findingId: string; status: string; detail: string } | null = null;
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    const runId = runIdOf(test);
     if (runId) {
       try {
         const listed = await engine.listDecisions(runId);
@@ -1964,7 +1989,10 @@ export function registerRoutes(app: Express): void {
         ? { sent: stops.scans.length, accepted: stops.scans.filter((one) => one.stopped).length }
         : { listed: false, detail: stops.detail },
       engineRuns: engineRuns.listed
-        ? { sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length }
+        ? {
+          sent: engineRuns.runs.length, accepted: engineRuns.runs.filter((one) => one.stopped).length,
+          ...(engineRuns.unnamed !== undefined ? { unnamed: engineRuns.unnamed } : {}),
+        }
         : { listed: false, detail: engineRuns.detail },
     };
     try {
@@ -2121,8 +2149,7 @@ export function registerRoutes(app: Express): void {
       if (test.clientId !== data.clientId) {
         return void res.status(400).json({ error: "that test belongs to a different client" });
       }
-      const recorded = (test.findings ?? {}) as Record<string, unknown>;
-      if (typeof recorded.runId === "string") runId = recorded.runId;
+      runId = runIdOf(test) ?? undefined;
     }
 
     let pack;
