@@ -24,7 +24,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loaded } from "@/lib/loaded";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { type Query, useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   Boxes,
@@ -2725,15 +2725,20 @@ function BoundaryForm({
  * deployment — a provider fact feeds every deployment that uses it, a
  * remediation move feeds cross-deployment roll-ups — to refresh every
  * deployment's computed panels.
+ *
+ * A read of these panels in flight was asked before the change, so it is
+ * cancelled first and asked again. Invalidating alone restarts only a read that
+ * already has data: React Query keeps a first read in flight, and it could land
+ * after the change's reads with the state from before it.
  */
 function invalidateAssuranceComputed(uuid?: string): void {
   const prefix = `/api/assurance/deployments/${uuid ? `${uuid}/` : ""}`;
-  queryClient.invalidateQueries({
-    predicate: (query) => {
-      const key = query.queryKey[0];
-      return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length;
-    },
-  });
+  const computed = (query: Query) => {
+    const key = query.queryKey[0];
+    return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length;
+  };
+  void queryClient.cancelQueries({ predicate: computed });
+  queryClient.invalidateQueries({ predicate: computed });
   queryClient.invalidateQueries({ queryKey: ["/api/assurance/deployments"] });
 }
 
@@ -6133,7 +6138,14 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [noteFor, setNoteFor] = useState<Record<string, string>>({});
 
-  const { data, isLoading, isError, error, dataUpdatedAt: claimsReadAt } = useQuery<Claim[]>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    dataUpdatedAt: claimsReadAt,
+    isFetching: claimsFetching,
+  } = useQuery<Claim[]>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-claims`],
   });
   // The deployment's open retest requirements, read once for every claim: a
@@ -6145,12 +6157,19 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
   });
   const retestDue = retestDueByClaim(retests.isError ? undefined : retests.data, data ?? []);
   // Whether a retest is due is still being read while the requirements have never
-  // been read, and while they are being read again and the read in hand is older
-  // than the claims. A change here re-reads both (`invalidateAssuranceComputed`),
-  // and the claims can land first: a claim a person moved back to supported would
-  // otherwise stand beside requirements read before its retest opened. A read that
-  // landed before the claims, with none in flight, is the newest one asked for.
-  const retestsReading = retests.isPending || (retests.isFetching && retests.dataUpdatedAt < claimsReadAt);
+  // been read, and while either they or the claims are being read again and the
+  // read of it in hand is older than the other. A change cancels any read of the
+  // two in flight and reads both again (`invalidateAssuranceComputed`), and either
+  // can land first. The claims first: a claim a person moved back to supported
+  // would otherwise stand beside requirements read before its retest opened. The
+  // requirements first: a claim read while its retest was open would stand beside
+  // requirements read after a recompute resolved it and replaced the claim. A read
+  // that has landed, with none of either in flight, was asked after the last change
+  // made here.
+  const retestsReading =
+    retests.isPending ||
+    (retests.isFetching && retests.dataUpdatedAt < claimsReadAt) ||
+    (claimsFetching && claimsReadAt < retests.dataUpdatedAt);
 
   const recompute = useMutation({
     mutationFn: async () =>
@@ -6653,7 +6672,7 @@ function RetestRequirementsPanel({ deploymentUuid }: { deploymentUuid: string })
  * shows what it changed (SPINE Phase 2). Idempotent — a re-run opens no duplicate
  * obligation. It reports counts; it does not, by itself, assert a system is fixed.
  */
-function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [last, setLast] = useState<{ invalidated: number; retestsOpened: number; retestsResolved: number } | null>(null);
   const check = useMutation({

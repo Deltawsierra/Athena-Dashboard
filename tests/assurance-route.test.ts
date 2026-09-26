@@ -3178,6 +3178,32 @@ describe("assurance BFF against a paginated control plane", () => {
           if (retests[1] === "dep-null-row-paged") {
             return json(200, { count: 2, next: null, previous: null, results: [null, row("rr-a", "claim-a")] });
           }
+          // A row that is a number, and a row that is itself a list of rows.
+          if (retests[1] === "dep-number-row") return json(200, [5]);
+          if (retests[1] === "dep-list-row") return json(200, [[row("rr-a", "claim-a")]]);
+          // Pages no DRF paginator sends: no `next` at all, on the only page or a
+          // later one, and a first page counting rows its pages do not hold.
+          if (retests[1] === "dep-no-next") return json(200, { results: [] });
+          if (retests[1] === "dep-no-next-detail") return json(200, { detail: "degraded", results: [] });
+          if (retests[1] === "dep-no-next-later") {
+            if (page === 2) return json(200, { results: [row("rr-b", "claim-b")] });
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          if (retests[1] === "dep-count-short") return json(200, { count: 3, next: null, previous: null, results: [] });
+          // One row a page, and a row opened at the top between reads: the first
+          // page's row moves onto the second, and the list is read one row too long.
+          if (retests[1] === "dep-count-drift") {
+            if (page === 1) return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+            if (page === 2) return json(200, { count: 3, next: at(3), previous: at(1), results: [row("rr-a", "claim-a")] });
+            return json(200, { count: 3, next: null, previous: at(2), results: [row("rr-b", "claim-b")] });
+          }
+          // Pages every DRF paginator does send: an empty counted page, and cursor
+          // pages, which carry `next` but no count.
+          if (retests[1] === "dep-drf-empty") return json(200, { count: 0, next: null, previous: null, results: [] });
+          if (retests[1] === "dep-cursor") {
+            if (page === 2) return json(200, { next: null, previous: at(1), results: [row("rr-b", "claim-b")] });
+            return json(200, { next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
           // A page whose `next` is not a link DRF would send: it must not read as the last page.
           if (retests[1] === "dep-next-not-a-link" || retests[1] === "dep-next-empty") {
             const next = retests[1] === "dep-next-not-a-link" ? 5 : "";
@@ -3189,6 +3215,22 @@ describe("assurance BFF against a paginated control plane", () => {
             const n = Number(pages[1]);
             return json(200, { count: n, next: page < n ? at(page + 1) : null, previous: null, results: [row(`rr-${page}`, `claim-${page}`)] });
           }
+        }
+
+        // The retest-obligation register, which is not read whole: a page with no
+        // `next`, counting more rows than it holds.
+        if (path === "/api/assurance/retest-requirements/" && method === "GET") {
+          return json(200, {
+            count: 3,
+            results: [{
+              uuid: "rr-a", deployment_uuid: "dep-register", claim_uuid: "claim-a",
+              claim_type: "data_boundary", claim_type_label: "Data boundary",
+              resolving_claim_uuid: null, reason: "the bound system state drifted",
+              triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+              opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+              created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+            }],
+          });
         }
 
         return json(404, { detail: `no route ${method} ${path}` });
@@ -3277,8 +3319,9 @@ describe("assurance BFF against a paginated control plane", () => {
   });
 
   it("refuses a deployment's retest obligations holding a row that is not a record, or a next link that is not a link", async () => {
-    // A null row used to reach the row mapper and answer an unexplained 500.
-    for (const dep of ["dep-null-row", "dep-null-row-paged"]) {
+    // A null row used to reach the row mapper and answer an unexplained 500; a
+    // number, or a list of rows, would be mapped into a requirement naming no claim.
+    for (const dep of ["dep-null-row", "dep-null-row-paged", "dep-number-row", "dep-list-row"]) {
       const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
       expect(res.status).toBe(503);
       expect(String(res.body.error)).toMatch(/a row that is not a record; the list cannot be read whole/);
@@ -3290,6 +3333,42 @@ describe("assurance BFF against a paginated control plane", () => {
       expect(res.status).toBe(503);
       expect(String(res.body.error)).toMatch(/whose next link is not a link; the list cannot be read whole/);
     }
+  });
+
+  it("refuses a deployment's retest obligations whose pages do not say where they end, or hold other than they count", async () => {
+    // Every DRF paginator sends `next`, as a link or null. A page without it, first
+    // or later, ended the read, and the rows read so far answered as the whole list
+    // (for an empty first page, 200 []).
+    for (const dep of ["dep-no-next", "dep-no-next-detail", "dep-no-next-later"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(
+        /with no next field, so it does not say whether the list ends there; the list cannot be read whole/,
+      );
+    }
+    // A first page that counts three rows, holding none, answered 200 [].
+    const short = await user.get("/api/assurance/deployments/dep-count-short/retest-requirements");
+    expect(short.status).toBe(503);
+    expect(String(short.body.error)).toMatch(/counted 3 rows at .* but its pages held 0; the list cannot be read whole/);
+    // Rows moved between pages as they were read: one is read twice.
+    const drift = await user.get("/api/assurance/deployments/dep-count-drift/retest-requirements");
+    expect(drift.status).toBe(503);
+    expect(String(drift.body.error)).toMatch(/counted 2 rows at .* but its pages held 3; the list cannot be read whole/);
+  });
+
+  it("reads every page a DRF paginator sends whole: counted, empty, or by cursor with no count", async () => {
+    const empty = await user.get("/api/assurance/deployments/dep-drf-empty/retest-requirements");
+    expect(empty.status).toBe(200);
+    expect(empty.body).toEqual([]);
+
+    const cursor = await user.get("/api/assurance/deployments/dep-cursor/retest-requirements");
+    expect(cursor.status).toBe(200);
+    expect(cursor.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a", "claim-b"]);
+
+    // A reader that does not read whole is unchanged: the register answers the rows it was sent.
+    const register = await user.get("/api/assurance/retest-requirements");
+    expect(register.status).toBe(200);
+    expect(register.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a"]);
   });
 
   it("reads a deployment's retest obligations of exactly 200 pages whole, and refuses one page more", async () => {
