@@ -146,3 +146,99 @@ describe("a reference that was followed and waits only on a rescan", () => {
     expect(text).toContain("built over an incomplete graph");
   });
 });
+
+/**
+ * The old identity rules wrote one row for every unnamed agent at once, and the
+ * current rules key each unnamed agent by where it is -- so no rescan re-records
+ * that row, and the references it declares are not ones a rescan confirms. The
+ * page used to have two buckets, and a reference from that row fell into
+ * "could not be placed" (false: it was followed and counted) or, reaching an
+ * old row too, would have been told "rescan to confirm it" (false: none does).
+ */
+describe("a reference from the old row for every unnamed agent", () => {
+  it("is not told it could not be placed, nor that a rescan confirms it", () => {
+    render(
+      <UnresolvedReferences
+        rows={[
+          row("files-mcp", "tools", "legacy_unnamed_agent"),
+          row("github", "tools", "legacy_unnamed_agent", ["legacy_unnamed_agent", "superseded_identity"]),
+        ]}
+        reported={2}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain(
+      "2 declared references come from the row the old identity rules wrote for every unnamed agent at once",
+    );
+    expect(text).toContain("the reach through them is counted");
+    expect(text).toContain("no rescan re-records that row");
+    expect(text).toContain("built over a graph that still counts reach through the old unnamed-agent row.");
+    expect(text).not.toContain("could not be placed");
+    expect(text).not.toContain("incomplete graph");
+    expect(text).not.toContain("a rescan is what confirms");
+    expect(text).not.toContain("yet to confirm");
+    const items = screen.getAllByRole("listitem").map((li) => li.textContent ?? "");
+    for (const item of items) {
+      expect(item).toContain("no rescan re-records that row");
+      expect(item).not.toContain("rescan to confirm");
+      expect(item).not.toContain("could not place");
+    }
+    expect(items[1]).toContain("which reaches a component also recorded under the old identity rules");
+  });
+
+  it("does not claim a reference was followed when its other reason says it names nothing", () => {
+    const said = unresolvedReasons({ reason: "not_found", reasons: ["not_found", "legacy_unnamed_agent"] });
+    expect(said).toContain("which discovery could not place");
+    expect(said).toContain("no rescan re-records that row");
+    expect(said).not.toContain("followed");
+    render(
+      <UnresolvedReferences
+        rows={[row("ghost", "tools", "not_found", ["not_found", "legacy_unnamed_agent"])]}
+        reported={1}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain("1 declared reference could not be placed as exactly one component");
+    expect(text).not.toContain("come from the row");
+    expect(text).not.toContain("comes from the row");
+    expect(text).toContain("built over an incomplete graph");
+  });
+
+  it("is counted apart from the references a rescan confirms", () => {
+    render(
+      <UnresolvedReferences
+        rows={[
+          row("reader", "tools", "superseded_identity"),
+          row("files-mcp", "tools", "legacy_unnamed_agent"),
+        ]}
+        reported={2}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain("1 declared reference was followed to or from a component");
+    expect(text).toContain("a rescan is what confirms it");
+    expect(text).toContain("1 more comes from the row the old identity rules wrote");
+    expect(text).toContain("the reach through it is counted");
+    expect(text).toContain(
+      "built over a graph a rescan has yet to confirm, and that still counts reach through the old unnamed-agent row.",
+    );
+    expect(text).not.toContain("could not be placed");
+  });
+
+  it("follows the references that could not be placed as more", () => {
+    render(
+      <UnresolvedReferences
+        rows={[row("ghost", "tools", "not_found"), row("files-mcp", "tools", "legacy_unnamed_agent")]}
+        reported={2}
+        what="this map"
+      />,
+    );
+    const text = header();
+    expect(text).toContain("1 declared reference could not be placed as exactly one component");
+    expect(text).toContain("1 more comes from the row");
+    expect(text).toContain("built over an incomplete graph");
+  });
+});

@@ -229,8 +229,10 @@ export interface RouteLayer {
  * the backend followed it to every one; "names_a_principal" names an agent or a
  * service account where a tool or backend belongs; "superseded_identity" was
  * followed, to or from a component recorded under identity rules no scan has
- * re-recorded since, and a rescan is what confirms it. Null when the control
- * plane did not say -- it predates the field -- which is none of these.
+ * re-recorded since, and a rescan is what confirms it; "legacy_unnamed_agent"
+ * was declared by the one row the old identity rules wrote for every unnamed
+ * agent at once, which no rescan re-records. Null when the control plane did not
+ * say -- it predates the field -- which is none of these.
  *
  * `reasons` is every reason the reference is reported for, `reason` first. One
  * reference is one row however many hold -- an ambiguous reference with a

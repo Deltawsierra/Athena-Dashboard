@@ -2294,7 +2294,20 @@ const REASON_PHRASING: Record<string, string> = {
   // exists; what it needs is a rescan.
   superseded_identity:
     "which was followed, but is recorded under identity rules no scan has re-recorded since — rescan to confirm it",
+  // Declared by the one row the old identity rules wrote for every unnamed agent
+  // at once. Whether it was followed is the other reasons' to say -- a reference
+  // from that row can still name nothing -- so this does not claim it. What it
+  // does say is that no rescan re-records that row: the current rules key each
+  // unnamed agent by where it is, so "rescan" would send the operator to a scan
+  // that never clears it.
+  legacy_unnamed_agent:
+    "which comes from the row the old identity rules wrote for every unnamed agent at once — no rescan re-records that row",
 };
+
+// From the old unnamed-agent row, an old row at the other end is not one a rescan
+// confirms either: the old unnamed-agent row still names it, so it stays. Said
+// without the rescan the superseded phrasing asks for.
+const SUPERSEDED_FROM_LEGACY_ROW = "which reaches a component also recorded under the old identity rules";
 
 export function unresolvedReason(reason: string | null): string {
   if (reason === null) return "which could not be placed as exactly one component";
@@ -2303,16 +2316,30 @@ export function unresolvedReason(reason: string | null): string {
 
 // Every reason one reference is reported for, each said. An ambiguous reference
 // with a superseded candidate is both, and saying only the first would hide the
-// rescan the second asks for.
+// rescan the second asks for. From the old unnamed-agent row, a superseded
+// candidate is said without the rescan: none clears it.
 export function unresolvedReasons(row: Pick<UnresolvedReference, "reason" | "reasons">): string {
   const reasons = row.reasons.length > 0 ? row.reasons : [row.reason];
-  return reasons.map(unresolvedReason).join("; and ");
+  const fromLegacyRow = reasons.includes("legacy_unnamed_agent");
+  return reasons
+    .map((r) => (fromLegacyRow && r === "superseded_identity" ? SUPERSEDED_FROM_LEGACY_ROW : unresolvedReason(r)))
+    .join("; and ");
 }
 
 // Followed and counted, and waiting only on a rescan: every reason it is
 // reported for is the superseded one. Not a reference that could not be placed.
 function awaitsRescanOnly(row: UnresolvedReference): boolean {
   return row.reasons.length > 0 && row.reasons.every((r) => r === "superseded_identity");
+}
+
+// Followed and counted, from the old unnamed-agent row: that is the reason, and
+// the only other one is an old row at the other end. Neither a reference that
+// could not be placed nor one a rescan confirms -- no rescan re-records that row.
+function fromLegacyRowOnly(row: UnresolvedReference): boolean {
+  return (
+    row.reasons.includes("legacy_unnamed_agent") &&
+    row.reasons.every((r) => r === "legacy_unnamed_agent" || r === "superseded_identity")
+  );
 }
 
 // The references the inventory declares and discovery could not place, said
@@ -2355,7 +2382,10 @@ export function UnresolvedReferences({
   // counted; "could not be placed" would send the operator looking for a
   // component that exists, when what it needs is a rescan.
   const rescan = rows.filter(awaitsRescanOnly).length;
-  const unplaced = rows.length - rescan;
+  // From the old unnamed-agent row, followed and counted, and not something a
+  // rescan confirms: counted apart from both.
+  const legacy = rows.filter(fromLegacyRowOnly).length;
+  const unplaced = rows.length - rescan - legacy;
   return (
     <div className="mt-3 rounded-lg border border-amber-500/25 bg-amber-500/[0.04] p-2.5">
       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-amber-400">
@@ -2388,8 +2418,25 @@ export function UnresolvedReferences({
                 {rescan === 1 ? "it" : "them"}.{" "}
               </>
             )}
+            {legacy > 0 && (
+              <>
+                {legacy}{" "}
+                {unplaced + rescan > 0 ? "more" : `declared reference${legacy === 1 ? "" : "s"}`}{" "}
+                {legacy === 1 ? "comes" : "come"} from the row the old identity rules wrote for every
+                unnamed agent at once; the reach through {legacy === 1 ? "it" : "them"} is counted, and
+                no rescan re-records that row — the current rules key each unnamed agent by where it
+                is.{" "}
+              </>
+            )}
             So {what} was built over{" "}
-            {unplaced > 0 ? "an incomplete graph" : "a graph a rescan has yet to confirm"}.
+            {unplaced > 0
+              ? "an incomplete graph"
+              : rescan > 0 && legacy > 0
+                ? "a graph a rescan has yet to confirm, and that still counts reach through the old unnamed-agent row"
+                : rescan > 0
+                  ? "a graph a rescan has yet to confirm"
+                  : "a graph that still counts reach through the old unnamed-agent row"}
+            .
           </>
         )}{" "}
         These are gaps to chase, not components to assume away.
