@@ -143,7 +143,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       await waitFor(() => expect(screen.getByTestId("text-findings-unread").textContent).toBe(UNREAD));
       expect(text()).toMatch(/the findings recorded for this scan could not be read/);
       expect(screen.queryByTestId("list-findings")).toBeNull();
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
       // Counted, not dropped: both rows are highs.
       expect(screen.getByTestId("text-count-high").textContent).toBe("2");
     });
@@ -156,7 +156,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
 
       await waitFor(() => expect(screen.getByTestId("text-findings-unread").textContent).toBe(UNREAD));
       expect(text()).toMatch(/the findings recorded for this scan could not be read/);
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
       expect(screen.queryByTestId("list-findings")).toBeNull();
     });
 
@@ -182,7 +182,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       expect(text()).toContain("a note marked yes");
       expect(text()).toContain("a note marked true");
       expect(list.textContent).not.toContain("a note marked");
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
       expect(screen.queryByTestId("text-findings-unread")).toBeNull();
     });
 
@@ -196,7 +196,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       await waitFor(() => expect(screen.getByTestId("text-findings-unread").textContent).toBe(UNREAD));
       expect(text()).toMatch(/the engine answered 503/);
       expect(text()).not.toMatch(/reported nothing yet/);
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
     });
   });
 }

@@ -11,6 +11,7 @@ import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
+import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
@@ -164,12 +165,9 @@ function countSeverities(findings: unknown[]): {
   };
 }
 
-/** The engine run a test records, or null for a test no engine run stands behind. */
+/** The engine run a test records, or null when it names none (shared/engine-record.ts). */
 function runIdOf(test: { findings: unknown }): string | null {
-  const recorded = test.findings;
-  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
-  const runId = (recorded as Record<string, unknown>).runId;
-  return typeof runId === "string" && runId !== "" ? runId : null;
+  return engineRunIdOf(test.findings);
 }
 
 /** The fields of a finding the scan screens print as text. */
@@ -200,6 +198,19 @@ function readableResults(results: unknown): unknown[] | null {
 
 /** Engine run states after which nothing more happens. */
 const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+
+/** What a finished run whose results could not be read records as its counts: none, read as "not recorded". */
+const UNREAD_COUNTS = {
+  severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
+} as const;
+
+/** Said of an engine scan the engine accepted without a run id, read before it is recorded as completed. */
+const NO_RUN_ID_TO_ASK = "the engine accepted this scan without a run id, so the engine cannot be asked about it";
+
+/** Said when such a scan's own Stop is sent: nothing names it to the engine, and the kill switch still reaches it. */
+const NO_RUN_ID_TO_STOP =
+  "the engine accepted this scan without a run id, so its own stop has nothing to name it by; " +
+  "the kill switch sends a stop to every run the engine lists as running";
 
 /** What one stop sent to the engine came to. */
 interface ScanStop {
@@ -470,22 +481,6 @@ function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-/**
- * Whether a test is an engine scan: its findings carry a run id, the target the
- * scan route recorded, or the run's results. Only `POST /api/scans` writes a
- * `target` or `results` (a person's test that sends either is refused), so a run
- * the engine finished inline without a run id is an engine scan all the same:
- * guarded by its run id alone, its counts could be edited to disagree with the
- * findings the scan screens list from it. A key recorded as null is none.
- */
-function isEngineRecord(test: { findings: unknown }): boolean {
-  if (runIdOf(test) !== null) return true;
-  const recorded = test.findings;
-  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return false;
-  const { target, results } = recorded as Record<string, unknown>;
-  return typeof target === "string" || (results !== undefined && results !== null);
-}
-
 function engineRecordEdited(
   res: Response,
   before: { findings: unknown } & Record<string, unknown>,
@@ -494,7 +489,11 @@ function engineRecordEdited(
   const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
     ? (data.findings as Record<string, unknown>)
     : null;
-  if (!isEngineRecord(before)) return suppliedEngineKeys(res, data.findings);
+  // An engine scan by the one rule the status route and the Tests screen use
+  // (shared/engine-record.ts): a run id, a target or a run's results. Guarded by
+  // its run id alone, a run the engine finished inline without one could have
+  // its counts edited to disagree with the findings the scan screens list.
+  if (!isEngineRecord(before.findings)) return suppliedEngineKeys(res, data.findings);
 
   const recorded = before.findings as Record<string, unknown>;
   const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
@@ -1425,6 +1424,12 @@ export function registerRoutes(app: Express): void {
     if (!test) return notFound(res, "Test");
 
     const runId = runIdOf(test);
+    if (!runId && isEngineRecord(test.findings)) {
+      // An engine scan the engine accepted without a run id: a stop has nothing
+      // to name it by. It is not "no engine run", and it is pointed at the kill
+      // switch, which stops every run the engine lists as well as every recorded one.
+      return void res.status(409).json({ error: NO_RUN_ID_TO_STOP });
+    }
     if (!runId) {
       return void res.status(409).json({
         error: "this test has no engine run recorded against it, so there is nothing to stop",
@@ -1469,11 +1474,12 @@ export function registerRoutes(app: Express): void {
     if (!test) return notFound(res, "Test");
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    const runId = runIdOf(test);
     // A test no engine run stands behind -- a person's, or a sample row -- has
-    // no findings of a run's to answer, completed or not. Only the scan route
-    // writes a run id or a target, so a record with neither was never a run.
-    if (!runId && typeof recorded.target !== "string") {
+    // no findings of a run's to answer, completed or not. Decided by the one
+    // rule the edit guard and the Tests screen use (shared/engine-record.ts):
+    // only the scan route writes a run id, a target or a run's results.
+    if (!isEngineRecord(test.findings)) {
       return void res.json({
         test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
       });
@@ -1499,9 +1505,10 @@ export function registerRoutes(app: Express): void {
       return void res.json({ test, state: test.status, engine: answered });
     }
     if (!runId) {
-      return void res.json({
-        test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
-      });
+      // An engine scan the engine accepted without a run id, not recorded as
+      // completed: the engine cannot be asked about it, and it is never told it
+      // has no engine run.
+      return void res.json({ test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK });
     }
 
     let current;
@@ -1518,12 +1525,18 @@ export function registerRoutes(app: Express): void {
       throw cause;
     }
 
-    // Counted from what came back, never from what was asked for. Results the
-    // engine sent that could not be read (null: not a list) are recorded as
-    // unread and not counted: the counts stay as the last readable ones left them.
-    const counts = current.findings === null ? {} : countSeverities(current.findings);
     const finished = current.state === "completed" || current.state === "aborted"
       || current.state === "failed";
+    // Counted from what came back, never from what was asked for. Results the
+    // engine sent that could not be read (null: not a list) are recorded as
+    // unread and not counted. While the run goes on, the counts stay as the last
+    // readable poll left them. On the poll that finishes it they are cleared: a
+    // count from a poll before is not what the run found, and left standing it
+    // would be read as the finished scan's own. Zero beside unread results is
+    // read as "not recorded", never as none (shared/latest-scans.ts).
+    const counts = current.findings !== null
+      ? countSeverities(current.findings)
+      : finished ? UNREAD_COUNTS : {};
 
     const updated = await storage.updateTest(test.id, {
       status: current.state,

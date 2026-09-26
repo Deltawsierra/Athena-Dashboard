@@ -47,6 +47,8 @@ const HTML_BASIS =
 
 /** A basis with text in it among characters nobody sees. */
 const VISIBLE_AMONG_INVISIBLE = "\u200bordinal:\u00ad derived\u2060 from signals\u0007";
+/** A basis with text in it among default-ignorable characters, shown as sent. */
+const AMONG_IGNORABLE = "\u3164ordinal\u034f: derived\ufe0f";
 /** A basis with spaces around it, which is shown as the engine sent it. */
 const PADDED_BASIS = "  ordinal: padded  ";
 
@@ -81,9 +83,21 @@ const FINDINGS = [
   finding("a basis of controls", { confidence: 0.45, confidence_basis: "\u0000\u0007" }),
   finding("a basis of format characters", { confidence: 0.45, confidence_basis: "\u00ad\u2060\ufeff\u200d" }),
   finding("a basis of separators", { confidence: 0.45, confidence_basis: "\u00a0\u2028\u3000 \t\n" }),
+  // Nothing to read either: default-ignorable characters, which render as nothing
+  // and are neither a control, a format character nor a separator.
+  finding("a combining grapheme joiner", { confidence: 0.45, confidence_basis: "\u034f" }),
+  finding("variation selectors", { confidence: 0.45, confidence_basis: "\ufe00\ufe0f\u{e0100}" }),
+  finding("Mongolian free variation selectors", { confidence: 0.45, confidence_basis: "\u180b\u180c\u180d" }),
+  finding("Hangul fillers", { confidence: 0.45, confidence_basis: "\u3164\uffa0\u115f\u1160" }),
+  finding("Khmer inherent vowels", { confidence: 0.45, confidence_basis: "\u17b4\u17b5" }),
+  // Nothing to read: private-use and unassigned code points, which no font draws as text.
+  finding("a private-use basis", { confidence: 0.45, confidence_basis: "\ue000\uf8ff\u{f0000}" }),
+  finding("an unassigned basis", { confidence: 0.45, confidence_basis: "\u0378\u{2fffe}" }),
   // Something to read, with invisible characters and padding around it: shown as sent.
   finding("text among invisible characters", { confidence: 0.45, confidence_basis: VISIBLE_AMONG_INVISIBLE }),
   finding("a padded basis", { confidence: 0.45, confidence_basis: PADDED_BASIS }),
+  finding("text among default-ignorable characters", { confidence: 0.45, confidence_basis: AMONG_IGNORABLE }),
+  finding("a braille blank", { confidence: 0.45, confidence_basis: "\u2800" }),
 ];
 
 const SEED = (): Array<[unknown[], unknown]> => [
@@ -242,6 +256,21 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       }
       expectConfidence("text among invisible characters", "confidence 0.45", engines(VISIBLE_AMONG_INVISIBLE));
       expectConfidence("a padded basis", "confidence 0.45", engines(PADDED_BASIS));
+    });
+
+    it("says the engine sent no basis where its basis is only default-ignorable, private-use or unassigned characters", async () => {
+      mount(<Page />);
+      await startAScan();
+      for (const message of [
+        "a combining grapheme joiner", "variation selectors", "Mongolian free variation selectors", "Hangul fillers",
+        "Khmer inherent vowels", "a private-use basis", "an unassigned basis",
+      ]) {
+        expectConfidence(message, "confidence 0.45", NO_BASIS);
+        expect(row(message).textContent).not.toContain("The engine's basis for this number:");
+      }
+      expectConfidence("text among default-ignorable characters", "confidence 0.45", engines(AMONG_IGNORABLE));
+      // A braille pattern blank is a symbol (So), and is shown as sent.
+      expectConfidence("a braille blank", "confidence 0.45", engines("\u2800"));
     });
 
     it("says no confidence was recorded where there is no number, and never prints a zero for it", async () => {

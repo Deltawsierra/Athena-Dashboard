@@ -214,8 +214,13 @@ describe("results the engine sent that are not a list", () => {
     expect(completing.body.detail).toBe(SENT_UNREAD);
     expect(completing.body.filed).toBeNull();
     expect(completing.body.test.findings.results).toBeNull();
-    // Not counted from what could not be read: the last readable counts stand.
-    expect(completing.body.test.highCount).toBe(1);
+    // Not counted from what could not be read, and the earlier poll's high does
+    // not stand as the finished scan's: no count is on record, and that is read
+    // as "not recorded", never as none.
+    expect(completing.body.test.highCount).toBe(0);
+    expect(completing.body.test.vulnerabilitiesFound).toBe(0);
+    expect(completing.body.test.severity).toBeNull();
+    expect(countsNotRecorded(completing.body.test)).toBe(true);
     expect(completing.body.test.status).toBe("completed");
 
     const asked = polls.length;

@@ -3,9 +3,10 @@
  * vulnerability, read the way the engine reads its own mark.
  *
  * athena-engine decides it with Python truthiness, `if item.get("internal"):`,
- * in `engine/utils/scoring.py` (384ac4d): `score_finding` and
- * `score_and_tier_findings` score such a finding 0 and "info", and the worst-tier
- * pass skips it. So any truthy `internal` is internal, not only `true`.
+ * in `engine/utils/scoring.py` (a7131b2, on athena-engine's main):
+ * `score_finding` and `score_and_tier_findings` score such a finding 0 and
+ * "info", and the worst-tier pass skips it. So any truthy `internal` is
+ * internal, not only `true`.
  *
  * The BFF's severity counts and both scan screens use this one rule. They
  * disagreed: the counts skipped only `internal === true`, and the screens filed

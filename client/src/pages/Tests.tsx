@@ -43,6 +43,7 @@ import { unfinishedRunOf } from "@/lib/engineRuns";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
+import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -53,11 +54,20 @@ function normalizeOptional(value: FormDataEntryValue | null): string | null {
   return text === "" || text === "none" ? null : text;
 }
 
-/** The engine run a test records, or null when no engine run stands behind it. */
+/**
+ * The engine run behind a test, as a person reads it: "run <id>", or what is
+ * said of a run the engine gave no id. null when the test is a person's.
+ *
+ * Decided by the rule the server guards an edit by (shared/engine-record.ts),
+ * never by the run id alone: read by its run id, a scan the engine finished
+ * without one was offered to edit as a person's test -- its counts and severity
+ * editable, the run's JSON in its notes box -- and its summary-only edit sent a
+ * severity the server then refused.
+ */
 function engineRunOf(findings: unknown): string | null {
-  if (!findings || typeof findings !== "object" || Array.isArray(findings)) return null;
-  const runId = (findings as { runId?: unknown }).runId;
-  return typeof runId === "string" && runId !== "" ? runId : null;
+  if (!isEngineRecord(findings)) return null;
+  const runId = engineRunIdOf(findings);
+  return runId !== null ? `run ${runId}` : "a run it gave no id";
 }
 
 /** A person's notes on a test: the `details` of its findings, when there are any. */
@@ -69,13 +79,16 @@ function notesOf(findings: unknown): string | null {
 
 /** `findings` is free-form JSON; show the details field when there is one. */
 function renderFindings(findings: unknown): string {
-  const runId = engineRunOf(findings);
-  if (runId) {
+  if (isEngineRecord(findings)) {
     // An engine scan's results are the engine's; its notes are a person's.
     const results = (findings as { results?: unknown }).results;
-    const n = Array.isArray(results) ? results.length : 0;
     const notes = notesOf(findings);
-    return `Engine run ${runId}: ${n} result${n === 1 ? "" : "s"} recorded by the engine.${notes ? ` Notes: ${notes}` : ""}`;
+    const n = Array.isArray(results) ? results.length : 0;
+    const recorded = results !== undefined && !Array.isArray(results)
+      ? "its results could not be read"
+      : `${n} result${n === 1 ? "" : "s"} recorded by the engine`;
+    const runId = engineRunIdOf(findings);
+    return `${runId !== null ? `Engine run ${runId}` : "Engine run with no id"}: ${recorded}.${notes ? ` Notes: ${notes}` : ""}`;
   }
   const notes = notesOf(findings);
   if (notes !== null) return notes;
@@ -807,7 +820,7 @@ export default function Tests() {
 
                 {editingRun && (
                   <p className="text-sm text-muted-foreground rounded-lg border border-border p-3" data-testid="text-edit-engine-owned">
-                    Recorded by the engine from run {editingRun}: its status, severity and counts
+                    Recorded by the engine from {editingRun}: its status, severity and counts
                     {editingTest.status !== "completed"
                       ? " (none until it completes)"
                       : countsNotRecorded(editingTest)

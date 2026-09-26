@@ -151,7 +151,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       render(<QueryClientProvider client={queryClient}><Page /></QueryClientProvider>);
       await startAScan();
 
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
       const list = await screen.findByTestId("list-findings");
       expect(list.querySelectorAll("li")).toHaveLength(2);
       const xss = within(list).getByText("Reflected input on /search").closest("li") as HTMLElement;
@@ -172,7 +172,7 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
       render(<QueryClientProvider client={queryClient}><Page /></QueryClientProvider>);
       await startAScan();
 
-      expect(text()).not.toMatch(/returned no findings/);
+      expect(text()).not.toMatch(/returned no (gradable )?findings/);
       expect(screen.getByTestId("text-findings-unread").textContent).toBe(
         "The findings could not be read, so none are listed here. That is not the same as none found.",
       );

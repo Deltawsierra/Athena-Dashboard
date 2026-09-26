@@ -48,6 +48,7 @@ import {
   type Severity,
 } from "@/lib/athenaScan";
 import { isEngineInternal } from "@shared/engine-internal";
+import { countsNotRecorded } from "@shared/latest-scans";
 import type { Client, Site, Test } from "@shared/schema";
 
 interface EngineStatus {
@@ -224,6 +225,14 @@ export default function AthenaScan() {
   };
   const totalFindings = counts.critical + counts.high + counts.medium + counts.low;
   const band = bandFromCounts(counts);
+  // Counts that are not a reading of what the run found: the record's counts
+  // were not recorded (shared/latest-scans.ts countsNotRecorded, which reads
+  // unread results so), or a finished run's findings could not be read and no
+  // count stands beside them. No band is derived from them and no total is
+  // drawn: "Clear" and 0 over findings nobody could read said the scan had
+  // returned no gradable findings.
+  const countsUnread = scan !== undefined
+    && (countsNotRecorded(scan.test) || (finished && returned === null && totalFindings === 0));
   const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
@@ -463,18 +472,24 @@ export default function AthenaScan() {
               <div className="mt-2 flex items-baseline gap-3">
                 <span
                   className="whitespace-nowrap text-2xl font-semibold"
-                  style={{ color: `hsl(var(--${RISK_BAND_TONE[band]}))` }}
+                  style={{ color: `hsl(var(--${countsUnread ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
                   data-testid="text-risk-band"
                 >
-                  {band === "Clear" && !finished ? "Assessing…" : band}
+                  {countsUnread
+                    ? returned === null ? "Not read" : "Not recorded"
+                    : band === "Clear" && !finished ? "Assessing…" : band}
                 </span>
               </div>
-              <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
-                {band === "Clear"
-                  ? finished
-                    ? "The scan returned no gradable findings."
-                    : "No gradable findings yet."
-                  : "Derived from the worst severity found — not a score."}
+              <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="text-risk-basis">
+                {countsUnread
+                  ? returned === null
+                    ? "The findings could not be read, so no band is derived from them."
+                    : "The counts were not recorded, so no band is derived from them."
+                  : band === "Clear"
+                    ? finished
+                      ? "The scan returned no gradable findings."
+                      : "No gradable findings yet."
+                    : "Derived from the worst severity found — not a score."}
               </p>
             </GlassCard>
           </div>
@@ -484,9 +499,11 @@ export default function AthenaScan() {
             <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
               <div className="shrink-0">
                 <span className="athena-figure text-[40px] font-semibold leading-none text-foreground" data-testid="text-total">
-                  {totalFindings}
+                  {countsUnread ? "—" : totalFindings}
                 </span>
-                <p className="mt-1 text-[11px] text-muted-foreground">Total findings</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  {countsUnread ? "Total findings: not recorded" : "Total findings"}
+                </p>
               </div>
               {SEVERITY_ORDER.map((sev) => (
                 <div key={sev}>
@@ -496,7 +513,7 @@ export default function AthenaScan() {
                     style={{ color: `hsl(var(--sev-${sev}))` }}
                     data-testid={`text-count-${sev}`}
                   >
-                    {counts[sev]}
+                    {countsUnread ? "—" : counts[sev]}
                   </p>
                 </div>
               ))}
