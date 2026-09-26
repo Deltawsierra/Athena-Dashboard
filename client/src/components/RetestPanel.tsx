@@ -18,10 +18,10 @@
  * is not proof of a fix.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { loaded } from "@/lib/loaded";
-import { AlertTriangle, RotateCcw, ShieldCheck, ShieldX } from "lucide-react";
+import { AlertTriangle, Loader2, RotateCcw, ShieldCheck, ShieldX, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
@@ -43,7 +43,9 @@ interface DecisionTwin {
   capturedAt: string | null;
 }
 
+/** A verdict (server/engine.ts RetestResult). `runId` is the scan record id; `engineRunId` the id a stop names. */
 interface RetestResult {
+  answer?: "verdict";
   twinId: number | null;
   verdict: string;
   detail: string;
@@ -51,8 +53,52 @@ interface RetestResult {
   findingType: string | null;
   inventoryDigest: string | null;
   runId: string | null;
+  engineRunId?: string | null;
   checkedAt: string | null;
 }
+
+/**
+ * Where a retest is when the engine has not answered it with a verdict
+ * (server/routes.ts answerRetestStatus and retestView). Never a verdict:
+ * nothing is filed from it, and it is never drawn as fixed or inconclusive.
+ */
+interface RetestStatusView {
+  answer: "status";
+  phase: "running" | "stopped" | "failed" | "no_verdict" | "unwatched";
+  engineRunId: string | null;
+  twinId: number;
+  state: string;
+  reason: string | null;
+  error: string | null;
+  stoppable: boolean;
+  detail: string;
+  lastReadError?: string | null;
+  stopAcceptedAt?: string | null;
+}
+
+/** A watched retest as the poll route answers it: a status, or -- once it completed with one -- the verdict. */
+type RetestWatchView =
+  | RetestStatusView
+  | (Omit<RetestStatusView, "answer" | "phase"> & { answer: "verdict"; phase: "verdict"; result: RetestResult });
+
+type RetestAnswer = RetestResult | RetestStatusView;
+
+/** Read `answer` before `verdict`: a status is never a verdict. */
+function isStatus(answer: RetestAnswer): answer is RetestStatusView {
+  return answer.answer === "status";
+}
+
+/** How often a running retest is read, and for how long this page keeps reading it. The server bounds its own watch. */
+const POLL_MS = 2_000;
+const POLL_FOR_MS = 65 * 60_000;
+
+const PHASE_LABEL: Record<RetestStatusView["phase"], string> = {
+  running: "Running",
+  stopped: "Stopped",
+  failed: "Failed",
+  no_verdict: "No verdict",
+  unwatched: "No longer watched",
+};
 
 interface DecisionsView {
   decisions: DecisionTwin[];
@@ -97,9 +143,111 @@ function verdictStyle(verdict: string): {
   }
 }
 
+/** The verdict, drawn as the engine said it. */
+function VerdictView({ twinId, result }: { twinId: number; result: RetestResult }) {
+  const style = verdictStyle(result.verdict);
+  const Icon = style.icon;
+  return (
+    <div className="mt-3 flex items-start gap-2 border-t border-border/60 pt-3" data-testid={`verdict-${twinId}`}>
+      <Icon className="mt-0.5 h-4 w-4 shrink-0" style={{ color: style.colour }} />
+      <div className="min-w-0 space-y-1">
+        <div className="athena-label" style={{ color: style.colour }} data-testid={`text-verdict-${twinId}`}>
+          {style.label}
+        </div>
+        {/* The engine's sentence, then what the verdict means.
+            The detail carries the reason -- a connection refused,
+            an unapproved detector set -- and summarising it away
+            is how "inconclusive" starts reading as "fine". */}
+        <p className="text-sm text-muted-foreground">{result.detail}</p>
+        <p className="text-xs text-muted-foreground">{style.meaning}</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A retest the engine answered with a status: running, stopped, failed, or
+ * ended without a verdict. While it runs it is read every POLL_MS, and its
+ * Stop is a separate request by the engine run id -- it never waits on a
+ * read, and a read that failed never takes it away.
+ */
+function RetestStatusPanel({ twinId, initial, onVerdict }: {
+  twinId: number;
+  initial: RetestStatusView;
+  onVerdict: (result: RetestResult) => void;
+}) {
+  const { toast } = useToast();
+  const [since] = useState(() => Date.now());
+  const runId = initial.engineRunId;
+  const watch = useQuery<RetestWatchView>({
+    queryKey: [`/api/retests/${runId}`],
+    enabled: runId !== null && initial.phase === "running",
+    retry: false,
+    refetchInterval: (query) => {
+      const phase = query.state.data?.phase;
+      if (phase !== undefined && phase !== "running") return false;
+      return Date.now() - since < POLL_FOR_MS ? POLL_MS : false;
+    },
+  });
+  const latest = watch.data;
+
+  useEffect(() => {
+    if (latest && latest.answer === "verdict") onVerdict(latest.result);
+  }, [latest, onVerdict]);
+
+  const stop = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId as string)}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean; runId: string };
+    },
+    onSuccess: (result) => {
+      toast({ title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
+    },
+    onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
+  });
+
+  const view: RetestStatusView = latest && latest.answer === "status" ? latest : initial;
+  const stoppable = runId !== null && (view.phase === "running" || view.phase === "unwatched");
+  const colour = view.phase === "running" ? "hsl(var(--primary))" : view.phase === "stopped" ? "hsl(var(--muted-foreground))" : "hsl(var(--gold))";
+
+  return (
+    <div className="mt-3 flex flex-wrap items-start justify-between gap-3 border-t border-border/60 pt-3" data-testid={`retest-status-${twinId}`}>
+      <div className="min-w-0 space-y-1">
+        <div className="athena-label flex items-center gap-2" style={{ color: colour }} data-testid={`text-retest-phase-${twinId}`}>
+          {view.phase === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {PHASE_LABEL[view.phase]}
+        </div>
+        <p className="text-sm text-muted-foreground" data-testid={`text-retest-status-${twinId}`}>{view.detail}</p>
+        {runId !== null && (
+          <p className="athena-mono text-xs text-muted-foreground">engine run {runId}</p>
+        )}
+        {watch.isError && (
+          <p className="text-xs text-muted-foreground" data-testid={`text-retest-unread-${twinId}`}>
+            Could not read where this retest is: {watch.error instanceof Error ? watch.error.message : "request failed"}.
+            {stoppable ? " Its Stop still works." : ""}
+          </p>
+        )}
+      </div>
+      {stoppable && (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={() => stop.mutate()}
+          disabled={stop.isPending}
+          data-testid={`button-stop-retest-${twinId}`}
+        >
+          <Square className="mr-2 h-3.5 w-3.5" />
+          {stop.isPending ? "Stopping…" : "Stop"}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export default function RetestPanel({ testId }: { testId: string }) {
   const { toast } = useToast();
-  const [results, setResults] = useState<Record<number, RetestResult>>({});
+  const [results, setResults] = useState<Record<number, RetestAnswer>>({});
 
   // Read error-first: a failed read is not "the engine kept no decisions",
   // and a refetch that failed does not leave the last list standing as current.
@@ -111,9 +259,15 @@ export default function RetestPanel({ testId }: { testId: string }) {
   const run = useMutation({
     mutationFn: async (twinId: number) => {
       const response = await apiRequest("POST", `/api/tests/${testId}/retest`, { twinId });
-      return (await response.json()) as RetestResult;
+      return (await response.json()) as RetestAnswer;
     },
-    onSuccess: (result) => {
+    onSuccess: (result, twinId) => {
+      // Read `answer` first: a status is where the run is, not a verdict, and
+      // changed no finding.
+      if (isStatus(result)) {
+        setResults((previous) => ({ ...previous, [twinId]: result }));
+        return;
+      }
       // The verdict may have closed or reopened a finding.
       void invalidateTestsAndFindings();
       if (typeof result.twinId === "number") {
@@ -176,8 +330,7 @@ export default function RetestPanel({ testId }: { testId: string }) {
       <ul className="space-y-3" data-testid="list-decisions">
         {decisions.map((twin) => {
           const result = results[twin.id];
-          const style = result ? verdictStyle(result.verdict) : null;
-          const Icon = style?.icon;
+          const running = result !== undefined && isStatus(result) && (result.phase === "running" || result.phase === "unwatched");
           return (
             <li
               key={twin.id}
@@ -208,7 +361,7 @@ export default function RetestPanel({ testId }: { testId: string }) {
                   variant="secondary"
                   size="sm"
                   onClick={() => run.mutate(twin.id)}
-                  disabled={run.isPending}
+                  disabled={run.isPending || running}
                   data-testid={`button-retest-${twin.id}`}
                 >
                   <RotateCcw className="mr-2 h-3.5 w-3.5" />
@@ -216,28 +369,29 @@ export default function RetestPanel({ testId }: { testId: string }) {
                 </Button>
               </div>
 
-              {result && style && Icon && (
-                <div
-                  className="mt-3 flex items-start gap-2 border-t border-border/60 pt-3"
-                  data-testid={`verdict-${twin.id}`}
-                >
-                  <Icon className="mt-0.5 h-4 w-4 shrink-0" style={{ color: style.colour }} />
-                  <div className="min-w-0 space-y-1">
-                    <div
-                      className="athena-label"
-                      style={{ color: style.colour }}
-                      data-testid={`text-verdict-${twin.id}`}
-                    >
-                      {style.label}
-                    </div>
-                    {/* The engine's sentence, then what the verdict means.
-                        The detail carries the reason -- a connection refused,
-                        an unapproved detector set -- and summarising it away
-                        is how "inconclusive" starts reading as "fine". */}
-                    <p className="text-sm text-muted-foreground">{result.detail}</p>
-                    <p className="text-xs text-muted-foreground">{style.meaning}</p>
-                  </div>
-                </div>
+              {run.isPending && run.variables === twin.id && (
+                // The engine holds the request for up to 30 s for the verdict
+                // before it answers with a run id. Until then the run is on
+                // its live list: Scans running now lists it with a Stop, and
+                // the kill switch stops it.
+                <p className="mt-3 border-t border-border/60 pt-3 text-xs text-muted-foreground" data-testid={`text-retest-waiting-${twin.id}`}>
+                  Waiting up to 30 seconds for the engine to answer. While it does, this retest is on the engine&apos;s
+                  list of live runs: Scans running now lists it with its Stop, and the kill switch stops it.
+                </p>
+              )}
+
+              {result && !isStatus(result) && <VerdictView twinId={twin.id} result={result} />}
+
+              {result && isStatus(result) && (
+                <RetestStatusPanel
+                  key={result.engineRunId ?? `no-run-${twin.id}`}
+                  twinId={twin.id}
+                  initial={result}
+                  onVerdict={(verdict) => {
+                    void invalidateTestsAndFindings();
+                    setResults((previous) => ({ ...previous, [twin.id]: { ...verdict, answer: "verdict" } }));
+                  }}
+                />
               )}
             </li>
           );

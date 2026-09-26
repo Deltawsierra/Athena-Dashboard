@@ -43,7 +43,10 @@ interface EngineRunStop {
  * `unnamed`, when present, counts the live runs it listed with no run id: no
  * stop could name them, so none was sent.
  */
-type EngineSweep = { listed: true; runs: EngineRunStop[]; unnamed?: number } | { listed: false; detail: string };
+type EngineSweep =
+  | { listed: true; runs: EngineRunStop[]; unnamed?: number }
+  /** `retests`: the retests the server was watching as running, each sent a stop by its run id though the list was unread. */
+  | { listed: false; detail: string; retests?: EngineRunStop[] };
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
@@ -88,8 +91,9 @@ function stopSentence(report: KillSwitchStops, lead = "Kill switch engaged"): st
  */
 function engineSweepSentence(sweep: EngineSweep): string {
   if (!sweep.listed) {
-    return `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
+    const unread = `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
       "records may still be running: pause the engine from the Failsafe console to be sure.";
+    return sweep.retests && sweep.retests.length > 0 ? `${unread} ${retestSweepSentence(sweep.retests)}` : unread;
   }
   const { runs } = sweep;
   const unnamed = sweep.unnamed ?? 0;
@@ -101,6 +105,16 @@ function engineSweepSentence(sweep: EngineSweep): string {
   const namedSentence = namedSweepSentence(runs);
   if (namedSentence === null) return unnamedSentence || "The engine listed no other live run.";
   return unnamedSentence ? `${namedSentence} ${unnamedSentence}` : namedSentence;
+}
+
+/** What came of the stops sent, by their run ids, to the retests being watched while the engine's list was unread. */
+function retestSweepSentence(sent: EngineRunStop[]): string {
+  const failed = sent.filter((one) => !one.stopped);
+  const took = `the engine accepted ${failed.length === 0 ? (sent.length === 1 ? "it" : "all of them") : sent.length - failed.length}`;
+  const lead = `${count(sent.length, "retest")} this dashboard was watching ${sent.length === 1 ? "was" : "were"} sent a stop by ` +
+    `${sent.length === 1 ? "its" : "their"} run id all the same, and ${took}`;
+  if (failed.length === 0) return `${lead}.`;
+  return `${lead}; ${failed.length} could not be stopped (${failed.map((one) => `${one.runId}: ${one.detail}`).join("; ")}).`;
 }
 
 /** What came of the stops sent to the named runs the engine listed that no running scan here recorded; null for none. */

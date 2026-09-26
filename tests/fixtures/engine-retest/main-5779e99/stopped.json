@@ -1,0 +1,193 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "5779e99eae1085f96e6c27ce28dbd950d8200aba",
+    "contract": "main"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+  },
+  "scenario": "stopped",
+  "exchanges": [
+    {
+      "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ],
+          "wait_seconds": 10
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "fc8cf0ef-eb81-4b65-bf30-1ecc96dce4d2",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-26T23:01:33.001920+00:00",
+        "updated_at": "2026-09-26T23:01:33.029078+00:00",
+        "finished_at": "2026-09-26T23:01:33.029078+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 400,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        }
+      }
+    },
+    {
+      "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
+      "request": {
+        "method": "GET",
+        "path": "/api/decisions?run_id=fc8cf0ef-eb81-4b65-bf30-1ecc96dce4d2&limit=101"
+      },
+      "status": 200,
+      "body": {
+        "tenant": "default",
+        "decisions": [
+          {
+            "id": 1,
+            "tenant": "default",
+            "run_id": "fc8cf0ef-eb81-4b65-bf30-1ecc96dce4d2",
+            "target": "https://offline.invalid/",
+            "finding_type": "xss",
+            "inputs": {
+              "details": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            },
+            "decision": {
+              "blocked": null,
+              "confidence": 0.9,
+              "cvss_score": null,
+              "evidence_strength": null,
+              "exploit_like": null,
+              "internal": null,
+              "score": null,
+              "severity": "high",
+              "tier": "confirmed",
+              "type": "xss"
+            },
+            "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
+            "inventory_digest": null,
+            "captured_at": "2026-09-26T23:01:33.063733+00:00",
+            "scan_auth": {
+              "authenticated": false,
+              "configured": false,
+              "identities": [],
+              "verified": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "note": "the engine's live list while the synchronous retest runs",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/active"
+      },
+      "status": 200,
+      "body": {
+        "active": [
+          {
+            "run_id": "3d4de58b-822d-4f5a-8108-1ac22c0e65cc",
+            "target": "https://offline.invalid/",
+            "kind": "retest",
+            "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+            "state": "running",
+            "reason": null,
+            "started_at": "2026-09-26T23:01:33.108466+00:00",
+            "updated_at": "2026-09-26T23:01:33.108466+00:00",
+            "finished_at": null
+          }
+        ]
+      }
+    },
+    {
+      "note": "the retest's synchronous answer after it was stopped: a verdict, as main answers",
+      "request": {
+        "method": "POST",
+        "path": "/api/remediation/retest",
+        "body": {
+          "twin_id": 1,
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 201,
+      "body": {
+        "twin_id": 1,
+        "verdict": "inconclusive",
+        "detail": "xss was not reported, but the retest scan does not record whether it was authenticated, so it cannot be said to have looked where the finding was, so its absence does not establish that it was fixed",
+        "target": "https://offline.invalid/",
+        "finding_type": "xss",
+        "inventory_digest": null,
+        "run_id": 613,
+        "check": {
+          "id": 1,
+          "tenant": "default",
+          "twin_id": 1,
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "verdict": "inconclusive",
+          "detail": "xss was not reported, but the retest scan does not record whether it was authenticated, so it cannot be said to have looked where the finding was, so its absence does not establish that it was fixed",
+          "inventory_digest": null,
+          "run_id": 613,
+          "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+          "checked_at": "2026-09-26T23:01:33.156352+00:00"
+        }
+      }
+    },
+    {
+      "note": "the Stop sent by the id on the live list",
+      "request": {
+        "method": "POST",
+        "path": "/api/scans/3d4de58b-822d-4f5a-8108-1ac22c0e65cc/abort",
+        "body": {}
+      },
+      "status": 200,
+      "body": {
+        "run_id": "3d4de58b-822d-4f5a-8108-1ac22c0e65cc",
+        "state": "aborting",
+        "reason": "stopped by an operator"
+      }
+    }
+  ]
+}

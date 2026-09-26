@@ -106,7 +106,7 @@ function headers(): Record<string, string> {
   return out;
 }
 
-async function call(path: string, init?: RequestInit): Promise<Response> {
+async function call(path: string, init?: RequestInit, timeoutMs: number = TIMEOUT_MS): Promise<Response> {
   const base = baseUrl();
   if (!base) {
     throw new EngineUnavailable(
@@ -114,7 +114,7 @@ async function call(path: string, init?: RequestInit): Promise<Response> {
     );
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(`${base}${path}`, {
       ...init,
@@ -682,6 +682,13 @@ export interface ActiveRun {
   stopId: string | null;
   target: string | null;
   state: string;
+  /**
+   * What the engine says the run is -- `scan`, `retest`, `attestation` -- or
+   * null when it did not say. A retest is a registered run like any scan: it
+   * is on this list, the kill switch stops it, and "Scans running now" lists
+   * it by this.
+   */
+  kind: string | null;
 }
 
 /**
@@ -713,7 +720,7 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   // is a live run with no id a stop can name.
   return listed.map((one): ActiveRun => {
     if (one === null || typeof one !== "object" || Array.isArray(one)) {
-      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown" };
+      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown", kind: null };
     }
     const run = one as Record<string, unknown>;
     return {
@@ -721,6 +728,7 @@ export async function activeRuns(): Promise<ActiveRun[]> {
       stopId: stopIdFrom(run.run_id),
       target: typeof run.target === "string" ? run.target : null,
       state: typeof run.state === "string" ? run.state : "unknown",
+      kind: typeof run.kind === "string" ? run.kind : null,
     };
   });
 }
@@ -835,9 +843,47 @@ export interface RetestResult {
   findingType: string | null;
   /** The detector set the retest ran with, for comparing against the twin's. */
   inventoryDigest: string | null;
+  /**
+   * The id of the scan record the retest produced: what a check and a fix are
+   * filed against. The engine's `scan_record_id` on the contract that sends
+   * `answer` (athena-engine #71); its top-level `run_id` on the one that does
+   * not, where that key was the record id. Null when no scan ran.
+   */
   runId: string | null;
+  /**
+   * The abort-registry id the retest ran under: the id a stop names. The
+   * engine's top-level `run_id` on the contract that sends `answer`; null on
+   * the one that does not, which answers only once the retest is over.
+   */
+  engineRunId: string | null;
   checkedAt: string | null;
 }
+
+/**
+ * A retest the engine answered with where its run is, never with a verdict:
+ * still queued or running (202), stopped, failed or finished without a verdict
+ * (200), or refused by a full worker queue (429). Nothing may be filed, marked
+ * fixed or called inconclusive from this: the engine has not said whether the
+ * finding is there.
+ */
+export interface RetestStatus {
+  /** The abort-registry id a stop names (stopIdFrom), or null when none can. */
+  engineRunId: string | null;
+  /** The engine's run state: queued, running, aborting, aborted, failed, completed -- or "unknown". */
+  state: string;
+  reason: string | null;
+  error: string | null;
+  /** The HTTP status the engine answered with (202, 200 or 429; 200 for a status read). */
+  httpStatus: number;
+}
+
+/** Which of the two things a retest answer is. Read from `answer` before `verdict`. */
+export type RetestAnswer =
+  | { answer: "verdict"; result: RetestResult }
+  | { answer: "status"; status: RetestStatus };
+
+/** Run states after which the engine does nothing more to the target. */
+export const RETEST_DONE_STATES = new Set(["completed", "aborted", "failed"]);
 
 export interface RetestRequest {
   twinId: number;
@@ -846,21 +892,30 @@ export interface RetestRequest {
   scope: string[];
 }
 
-export async function retest(request: RetestRequest): Promise<RetestResult> {
-  const response = await call("/api/remediation/retest", {
-    method: "POST",
-    body: JSON.stringify({
-      twin_id: request.twinId,
-      engagement_ref: request.engagementRef,
-      scope: request.scope,
-    }),
-  });
-  if (!response.ok) {
-    throw new EngineUnavailable(
-      `the engine answered ${response.status}: ${await body(response)}`,
-    );
-  }
-  const payload = (await response.json()) as Record<string, unknown>;
+/**
+ * How long the retest request may take.
+ *
+ * athena-engine #71 holds the request for up to 30 s (its
+ * MAX_INLINE_WAIT_SECONDS) for the verdict, then answers 202 with the run id.
+ * The 20 s every other call gets would cut that wait off: the dashboard would
+ * report an unreachable engine while the retest ran on, with no run id to
+ * stop it by. So this call gets the engine's wait and room to answer.
+ * `wait_seconds` is never sent: engine main refuses the field (422), and
+ * omitted it means the engine's own ceiling.
+ */
+export const RETEST_CALL_TIMEOUT_MS = 45_000;
+
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+/**
+ * A verdict, read. `recordId` is the scan record id and `engineRunId` the
+ * registry id, each already read by the caller for its contract.
+ */
+function verdictOf(
+  payload: Record<string, unknown>,
+  recordId: unknown,
+  engineRunId: string | null,
+): RetestResult {
   const check = (payload.check ?? {}) as Record<string, unknown>;
   return {
     twinId: typeof payload.twin_id === "number" ? payload.twin_id : null,
@@ -872,10 +927,131 @@ export async function retest(request: RetestRequest): Promise<RetestResult> {
     findingType: typeof payload.finding_type === "string" ? payload.finding_type : null,
     inventoryDigest:
       typeof payload.inventory_digest === "string" ? payload.inventory_digest : null,
-    // Measured: the engine sends this as a number at the top level and as a
-    // string inside `check`. Both are the same run.
-    runId: runIdFrom(payload.run_id),
+    // Measured: the engine sends the record id as a number at the top level
+    // and as a string inside `check`. Both are the same run.
+    runId: runIdFrom(recordId),
+    engineRunId,
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
+  };
+}
+
+/** A status answer, read. */
+function statusOf(payload: Record<string, unknown>, httpStatus: number): RetestStatus {
+  return {
+    engineRunId: stopIdFrom(payload.run_id),
+    state: text(payload.state) ?? "unknown",
+    reason: text(payload.reason),
+    error: text(payload.error),
+    httpStatus,
+  };
+}
+
+/**
+ * Ask the engine to retest one decision.
+ *
+ * Two contracts are read, told apart by whether the answer carries `answer`:
+ *
+ *  - athena-engine #71: `answer: "verdict"` (201) is a verdict, its `run_id`
+ *    the registry id and its record id `scan_record_id`; `answer: "status"`
+ *    (202 running, 200 stopped / failed / no verdict, 429 queue full) is where
+ *    the run is and never a verdict.
+ *  - engine main (no `answer`): any 2xx is the verdict, answered once the
+ *    retest is over, and its `run_id` is the scan record id. Read exactly as
+ *    it always was.
+ *
+ * Any other answer throws: an `answer` this cannot read is not a verdict.
+ */
+export async function retest(request: RetestRequest): Promise<RetestAnswer> {
+  const response = await call("/api/remediation/retest", {
+    method: "POST",
+    body: JSON.stringify({
+      twin_id: request.twinId,
+      engagement_ref: request.engagementRef,
+      scope: request.scope,
+    }),
+  }, RETEST_CALL_TIMEOUT_MS);
+
+  if (response.status === 429) {
+    // #71 refuses a full queue with a status that names the run it recorded
+    // FAILED. Anything else on a 429 is the engine's words, as any refusal is.
+    const raw = await body(response);
+    let payload: unknown = null;
+    try { payload = JSON.parse(raw); } catch { payload = null; }
+    if (payload && typeof payload === "object" && (payload as Record<string, unknown>).answer === "status") {
+      return { answer: "status", status: statusOf(payload as Record<string, unknown>, 429) };
+    }
+    throw new EngineUnavailable(`the engine answered 429: ${raw}`);
+  }
+  if (!response.ok) {
+    throw new EngineUnavailable(
+      `the engine answered ${response.status}: ${await body(response)}`,
+    );
+  }
+  const payload = (await response.json()) as Record<string, unknown>;
+
+  if (!("answer" in payload)) {
+    // Engine main: the verdict, with the record id under `run_id` and no id a
+    // stop could name (the retest is over by the time it answers).
+    return { answer: "verdict", result: verdictOf(payload, payload.run_id, null) };
+  }
+  if (payload.answer === "verdict") {
+    return {
+      answer: "verdict",
+      result: verdictOf(payload, payload.scan_record_id, stopIdFrom(payload.run_id)),
+    };
+  }
+  if (payload.answer === "status") {
+    return { answer: "status", status: statusOf(payload, response.status) };
+  }
+  throw new EngineUnavailable(
+    `the engine answered the retest with answer ${JSON.stringify(payload.answer)}, which is neither a verdict nor a status`,
+  );
+}
+
+/**
+ * Where a retest run is now, read from the engine's `/api/scans/{run_id}` --
+ * the `status_url` #71 answers with, built here from the run id rather than
+ * followed, so a status read can only ever reach that route.
+ *
+ * A verdict only when the run COMPLETED and its stored result carries one,
+ * which is the rule the engine answers a waiting caller by. A run that was
+ * stopped or failed keeps the runner's inconclusive verdict as its stored
+ * result; that is not a verdict on the finding, and it is read as the status
+ * it is.
+ */
+export async function retestRun(engineRunId: string): Promise<RetestAnswer> {
+  const response = await call(`/api/scans/${encodeURIComponent(engineRunId)}`);
+  if (!response.ok) {
+    throw new EngineUnavailable(
+      `the engine answered ${response.status} when asked about retest run ${engineRunId}: ${await body(response)}`,
+    );
+  }
+  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!payload || typeof payload !== "object") {
+    throw new EngineUnavailable(`the engine's answer about retest run ${engineRunId} could not be read`);
+  }
+  const state = text(payload.state) ?? "unknown";
+  const result = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)
+    ? (payload.result as Record<string, unknown>)
+    : null;
+  if (payload.done === true && state === "completed" && result && typeof result.verdict === "string") {
+    return {
+      answer: "verdict",
+      result: verdictOf(result, result.scan_record_id, stopIdFrom(result.run_id) ?? engineRunId),
+    };
+  }
+  const error = state === "failed"
+    ? text(result?.error) ?? text(result?.detail) ?? text(payload.reason)
+    : null;
+  return {
+    answer: "status",
+    status: {
+      engineRunId,
+      state,
+      reason: text(payload.reason),
+      error,
+      httpStatus: response.status,
+    },
   };
 }
 
