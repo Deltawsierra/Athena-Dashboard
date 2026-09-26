@@ -5924,6 +5924,24 @@ const CLAIM_STATUS_LABEL: Record<string, string> = {
 /** A claim's status, coloured by how it bears on assurance. A pass reads green
  *  only when actually supported/verified; contradicted is a mark against, and
  *  stale/unknown are honest gaps — never green-by-default. */
+/**
+ * A claim's confidence is the backend's ordinal strength: 1.00 down to 0.10 by the
+ * weakest class of evidence supporting the claim (athena-backend
+ * `claims._confidence`, documented once in mythos-core `evidence`). It is not a
+ * probability, so it is never printed as a percentage: "conf 52%" read as a 52%
+ * chance the claim is true. Null means the claim is not standing on supporting
+ * evidence (unknown or contradicted), which is not a strength of zero.
+ */
+export function claimStrength(confidence: number | null): string {
+  return confidence === null ? "strength —" : `strength ${confidence.toFixed(2)}`;
+}
+
+export function claimStrengthBasis(confidence: number | null): string {
+  return confidence === null
+    ? "No strength: the claim is not standing on supporting evidence."
+    : "Ordinal: read from the weakest class of evidence supporting the claim. Not a probability that the claim is true.";
+}
+
 function ClaimStatusChip({ status, label }: { status: string; label?: string }) {
   const cls =
     status === "verified" || status === "supported"
@@ -6100,8 +6118,12 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
                     <span className="text-[10px] text-amber-400/90">vendor-asserted</span>
                   )}
                   {c.isStale && <span className="text-[10px] text-amber-400/90">stale</span>}
-                  <span className="text-[10px] text-muted-foreground">
-                    conf {c.confidence === null ? "—" : `${Math.round(c.confidence * 100)}%`}
+                  <span
+                    className="text-[10px] text-muted-foreground"
+                    title={claimStrengthBasis(c.confidence)}
+                    data-testid="text-claim-strength"
+                  >
+                    {claimStrength(c.confidence)}
                   </span>
                   {c.assetName && <span className="text-[10px] text-muted-foreground">· {c.assetName}</span>}
                   {c.receiptDigest && (
