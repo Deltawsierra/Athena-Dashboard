@@ -3154,6 +3154,31 @@ describe("assurance BFF against a paginated control plane", () => {
           if (retests[1] === "dep-not-a-list") {
             return json(200, { detail: "not a list" });
           }
+          // A page whose `results` is not a list.
+          if (retests[1] === "dep-results-not-a-list") {
+            return json(200, { count: 1, next: null, previous: null, results: "x" });
+          }
+          // A 200 whose body is not JSON at all: on the first page, and behind a page's `next` link.
+          if (retests[1] === "dep-not-json" || (retests[1] === "dep-not-json-later" && page === 2)) {
+            res.writeHead(200, { "Content-Type": "text/html" });
+            return res.end("<html>sign in</html>");
+          }
+          if (retests[1] === "dep-not-json-later") {
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A page, then a bare list behind its `next` link: holding a row, and empty.
+          if (retests[1] === "dep-then-bare" || retests[1] === "dep-then-bare-empty") {
+            if (page === 2) return json(200, retests[1] === "dep-then-bare" ? [row("rr-b", "claim-b")] : []);
+            return json(200, { count: 1, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A bare empty list as the first answer: the backend's own "none open".
+          if (retests[1] === "dep-none") return json(200, []);
+          // A list of exactly n pages, one row on each, the last with no `next`.
+          const pages = retests[1].match(/^dep-pages-(\d+)$/);
+          if (pages) {
+            const n = Number(pages[1]);
+            return json(200, { count: n, next: page < n ? at(page + 1) : null, previous: null, results: [row(`rr-${page}`, `claim-${page}`)] });
+          }
         }
 
         return json(404, { detail: `no route ${method} ${path}` });
@@ -3211,7 +3236,47 @@ describe("assurance BFF against a paginated control plane", () => {
     const notAList = await user.get("/api/assurance/deployments/dep-not-a-list/retest-requirements");
     expect(notAList.status).toBe(503);
     expect(String(notAList.body.error)).toMatch(/not a list/);
+
+    // A page whose `results` is there but is not a list is not a page of one.
+    const resultsNotAList = await user.get("/api/assurance/deployments/dep-results-not-a-list/retest-requirements");
+    expect(resultsNotAList.status).toBe(503);
+    expect(String(resultsNotAList.body.error)).toMatch(/not a list/);
+
+    // A body that is not JSON is unavailability, not a server error: on any page.
+    for (const dep of ["dep-not-json", "dep-not-json-later"]) {
+      const notJson = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(notJson.status).toBe(503);
+      expect(String(notJson.body.error)).toMatch(/not a list/);
+    }
   });
+
+  it("refuses a deployment's retest obligations whose pages turn into a bare list, rather than answer that list", async () => {
+    // Behind a page's `next` link, a bare list is not that list's next page, and
+    // beside the rows already read it is not provably the whole list. Answering it
+    // dropped the first page's row; answering it empty said no retest is due.
+    for (const dep of ["dep-then-bare", "dep-then-bare-empty"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/later page .* with a bare list, not a page; the list cannot be read whole/);
+    }
+
+    // As the first answer, a bare list is the whole list, and an empty one means none.
+    const none = await user.get("/api/assurance/deployments/dep-none/retest-requirements");
+    expect(none.status).toBe(200);
+    expect(none.body).toEqual([]);
+  });
+
+  it("reads a deployment's retest obligations of exactly 200 pages whole, and refuses one page more", async () => {
+    // MAX_PAGES in server/assurance.ts.
+    const most = await user.get("/api/assurance/deployments/dep-pages-200/retest-requirements");
+    expect(most.status).toBe(200);
+    expect(most.body).toHaveLength(200);
+    expect(most.body[199].claimUuid).toBe("claim-200");
+
+    const more = await user.get("/api/assurance/deployments/dep-pages-201/retest-requirements");
+    expect(more.status).toBe(503);
+    expect(String(more.body.error)).toMatch(/more than 200 pages .*incomplete/);
+  }, 60_000);
 });
 
 describe("assurance BFF against a control plane returning a non-object body", () => {

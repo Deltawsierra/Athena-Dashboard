@@ -15,8 +15,9 @@
  * beside a status that stands on supporting evidence, only while that evidence
  * has not expired, and only while no retest is due: a person can move a claim a
  * change invalidated back to supported before any retest, and it keeps its 0.52.
- * While the retest requirements are being read, or could not be read, it is not
- * shown either.
+ * While the retest requirements are being read -- for the first time, or again
+ * while the read in hand is older than the claims -- or could not be read, it is
+ * not shown either.
  *
  * Where it shows none, the reason it gives is what the status means in the
  * backend, true on every path that sets it -- never a cause. A person can mark a
@@ -26,7 +27,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import {
   CLAIM_STRENGTH_BASIS,
@@ -237,7 +238,19 @@ const REQUIREMENTS = [
 
 type Retests = "read" | "reading" | "error";
 
-function mount(rows: { uuid: string }[], retests: Retests = "read") {
+interface MountOptions {
+  /** The open retest requirements already read (with `retests` "read"). */
+  requirements?: unknown[];
+  /** When the claims and the requirements in hand were read: now, claims first, unless given. */
+  claimsReadAt?: number;
+  retestsReadAt?: number;
+  /** What reading them again answers: the same claims, and requirements that never come or fail. */
+  reread?: "slow" | "fail";
+  admin?: boolean;
+}
+
+function mount(rows: { uuid: string }[], retests: Retests = "read", options: MountOptions = {}) {
+  const { requirements = REQUIREMENTS, claimsReadAt, retestsReadAt, reread, admin = false } = options;
   const client = new QueryClient({
     defaultOptions: {
       queries: {
@@ -245,22 +258,26 @@ function mount(rows: { uuid: string }[], retests: Retests = "read") {
         staleTime: Infinity,
         gcTime: Infinity,
         queryFn: async ({ queryKey }) => {
-          if (queryKey[0] === RETESTS_KEY[0] && retests === "reading") return new Promise(() => {});
-          if (queryKey[0] === RETESTS_KEY[0] && retests === "error") throw new Error("the control plane is unavailable");
+          if (queryKey[0] === KEY && reread) return rows;
+          if (queryKey[0] === RETESTS_KEY[0] && (retests === "reading" || reread === "slow")) return new Promise(() => {});
+          if (queryKey[0] === RETESTS_KEY[0] && (retests === "error" || reread === "fail")) {
+            throw new Error("the control plane is unavailable");
+          }
           throw new Error(`unexpected fetch for ${String(queryKey[0])}`);
         },
       },
     },
   });
-  client.setQueryData([KEY], rows);
-  if (retests === "read") client.setQueryData(RETESTS_KEY, REQUIREMENTS);
+  client.setQueryData([KEY], rows, { updatedAt: claimsReadAt });
+  if (retests === "read") client.setQueryData(RETESTS_KEY, requirements, { updatedAt: retestsReadAt });
   // Each row's lifecycle, fetched when the row is expanded.
   for (const row of rows) client.setQueryData([`/api/assurance/claims/${row.uuid}/events`], []);
-  return render(
+  render(
     <QueryClientProvider client={client}>
-      <ClaimsPanel deploymentUuid="dep" admin={false} />
+      <ClaimsPanel deploymentUuid="dep" admin={admin} />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 /** The row's text with the screen-reader-only text taken out: what is on screen. */
@@ -464,6 +481,182 @@ describe("the claims panel", () => {
       const { value, basis, waits } = ROWS[i];
       if (waits) expectExpanded(li, "strength —", RETEST_UNREAD);
       else expectExpanded(li, value, basis);
+    });
+  });
+
+  it("keeps a claim its own open requirement names due beside one on a version of its type the list does not hold", () => {
+    // The requirement on an unlisted data-boundary version leaves every other
+    // data-boundary claim unread; the one its own open requirement names is due.
+    mount([claim("i", "supported", "Supported", 0.52), claim("m", "supported", "Supported", 0.52)], "read", {
+      requirements: [requirement("gone", "data_boundary"), requirement("i", "data_boundary")],
+    });
+    const [i, m] = rowsOnScreen();
+    expectCollapsed(i, "strength —", RETEST_DUE);
+    expectCollapsed(m, "strength —", RETEST_UNREAD);
+  });
+
+  it("expands a claim whose status is named like an object key for an admin, and offers it no moves", () => {
+    // `CLAIM_TRANSITIONS.constructor` is Object: read as the list of moves, it
+    // crashed the panel when an admin expanded the row.
+    const odd = ["constructor", "hasOwnProperty", "toString", "__proto__"];
+    mount(
+      [
+        claim("s", "supported", "Supported", 0.52),
+        ...odd.map((status, n) => claim(`o${n}`, status, status, 0.52)),
+      ],
+      "read",
+      { requirements: [], admin: true },
+    );
+    const items = rowsOnScreen();
+    expand(items);
+    // A status the backend has: its legal moves.
+    const moves = within(items[0]).getByRole("combobox", { name: "Move claim to" });
+    expect(within(moves).getAllByRole("option").map((o) => o.getAttribute("value"))).toEqual([
+      "",
+      "verified",
+      "partially_verified",
+      "contradicted",
+      "unknown",
+      "revoked",
+    ]);
+    // One it does not have: no moves, and the reason it has no strength.
+    for (const li of items.slice(1)) {
+      expect(within(li).queryByRole("combobox", { name: "Move claim to" })).toBeNull();
+      expectExpanded(li, "strength —", UNRECOGNISED);
+    }
+  });
+});
+
+describe("the claims panel, when the claims and the retest requirements are read again", () => {
+  const MINUTE = 60_000;
+
+  /** The query client tells the panel what changed on a later tick: let it, and the panel render it. */
+  async function settle() {
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 20)));
+  }
+
+  /**
+   * A person moves a claim a change invalidated back to supported before the
+   * requirements read after that change lands. The panel reads both again, as
+   * `invalidateAssuranceComputed` does after every change, and the claims land
+   * first. Returns the row and what sends the requirements that read answers.
+   */
+  async function movedBackBeforeTheRetestReadLands() {
+    // What the control plane answers: the claim as it stands, and requirements
+    // that arrive only when the test sends them.
+    let claims = [claim("c1", "supported", "Supported", 0.52)];
+    let answerRetests: (requirements: unknown[]) => void = () => {
+      throw new Error("no read of the retest requirements is waiting");
+    };
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+          staleTime: Infinity,
+          gcTime: Infinity,
+          queryFn: async ({ queryKey }) => {
+            if (queryKey[0] === KEY) return claims;
+            if (queryKey[0] === RETESTS_KEY[0]) return new Promise((resolve) => (answerRetests = resolve));
+            throw new Error(`unexpected fetch for ${String(queryKey[0])}`);
+          },
+        },
+      },
+    });
+    // The page as read a minute ago: supported, and no retest open.
+    client.setQueryData([KEY], claims, { updatedAt: Date.now() - MINUTE });
+    client.setQueryData(RETESTS_KEY, [], { updatedAt: Date.now() - MINUTE });
+    client.setQueryData(["/api/assurance/claims/c1/events"], []);
+    render(
+      <QueryClientProvider client={client}>
+        <ClaimsPanel deploymentUuid="dep" admin={false} />
+      </QueryClientProvider>,
+    );
+    const row = () => rowsOnScreen()[0];
+    expectCollapsed(row(), "strength 0.52", CLAIM_STRENGTH_BASIS);
+
+    // An admin runs the invalidation check: a retest opens on c1, and c1 goes
+    // stale. Both are read again; the requirements are slow.
+    claims = [claim("c1", "stale", "Stale", 0.52)];
+    await act(async () => void client.invalidateQueries());
+    await waitFor(() => expect(within(row()).getByText("Stale")).toBeTruthy());
+    expectCollapsed(row(), "strength —", REASON.stale);
+
+    // The admin moves c1 back to supported, and both are read again. The claims
+    // land beside requirements read before the retest opened, and still being read.
+    claims = [claim("c1", "supported", "Supported", 0.52)];
+    await act(async () => void client.invalidateQueries());
+    await waitFor(() => expect(within(row()).getByText("Supported")).toBeTruthy());
+    expect(client.isFetching({ queryKey: RETESTS_KEY })).toBe(1);
+    return { row, answerRetests: (requirements: unknown[]) => answerRetests(requirements) };
+  }
+
+  it("shows no strength beside requirements read before the claims while they are read again", async () => {
+    const { row, answerRetests } = await movedBackBeforeTheRetestReadLands();
+    expectCollapsed(row(), "strength —", CLAIM_STRENGTH_READING);
+    expand([row()]);
+    expectExpanded(row(), "strength —", CLAIM_STRENGTH_READING);
+
+    // The requirements land, and one names c1: a retest is due.
+    await act(async () => answerRetests([requirement("c1", "data_boundary")]));
+    await waitFor(() => expectExpanded(row(), "strength —", RETEST_DUE));
+  });
+
+  it("shows the strength once the requirements read again land and none names the claim", async () => {
+    const { row, answerRetests } = await movedBackBeforeTheRetestReadLands();
+    expectCollapsed(row(), "strength —", CLAIM_STRENGTH_READING);
+    await act(async () => answerRetests([]));
+    await waitFor(() => expectCollapsed(row(), "strength 0.52", CLAIM_STRENGTH_BASIS));
+  });
+
+  it("gives every claim its own reason while requirements older than the claims are read again", async () => {
+    const client = mount(ROWS.map((r) => r.row), "read", {
+      claimsReadAt: Date.now(),
+      retestsReadAt: Date.now() - MINUTE,
+      reread: "slow",
+    });
+    await act(async () => void client.invalidateQueries({ queryKey: [RETESTS_KEY[0]] }));
+    await settle();
+    expect(client.isFetching({ queryKey: RETESTS_KEY })).toBe(1);
+    rowsOnScreen().forEach((li, i) => {
+      const { value, basis, waits } = ROWS[i];
+      if (waits) expectCollapsed(li, "strength —", CLAIM_STRENGTH_READING);
+      else expectCollapsed(li, value, basis);
+    });
+  });
+
+  it("keeps each strength while the requirements alone are read again, the read in hand no older than the claims", async () => {
+    // As when the retest obligations panel reads them again on its own: the
+    // requirements in hand were read with the claims, in the same millisecond.
+    const readAt = Date.now() - MINUTE;
+    const client = mount(ROWS.map((r) => r.row), "read", { claimsReadAt: readAt, retestsReadAt: readAt, reread: "slow" });
+    await act(async () => void client.invalidateQueries({ queryKey: [RETESTS_KEY[0]] }));
+    await settle();
+    expect(client.isFetching({ queryKey: RETESTS_KEY })).toBe(1);
+    rowsOnScreen().forEach((li, i) => expectCollapsed(li, ROWS[i].value, ROWS[i].basis));
+  });
+
+  it("reads requirements that landed before the claims, with no read of them in flight, as the newest asked for", () => {
+    // Both were read again after one change, and the requirements came back first.
+    const readAt = Date.now() - MINUTE;
+    const client = mount(ROWS.map((r) => r.row), "read", { claimsReadAt: readAt + 1_000, retestsReadAt: readAt });
+    expect(client.isFetching()).toBe(0);
+    rowsOnScreen().forEach((li, i) => expectCollapsed(li, ROWS[i].value, ROWS[i].basis));
+  });
+
+  it("shows no strength once reading the requirements again fails, rather than the read before", async () => {
+    const client = mount(ROWS.map((r) => r.row), "read", { reread: "fail" });
+    await act(async () => void client.invalidateQueries());
+    const items = rowsOnScreen();
+    await waitFor(() =>
+      expect(within(items[0]).getByTestId("text-claim-strength").getAttribute("title")).toBe(RETEST_UNREAD),
+    );
+    expect(client.getQueryState(RETESTS_KEY)?.status).toBe("error");
+    // The read before is still held, and names row i: none of it is used.
+    expect(client.getQueryData(RETESTS_KEY)).toEqual(REQUIREMENTS);
+    items.forEach((li, i) => {
+      const { value, basis, waits } = ROWS[i];
+      if (waits) expectCollapsed(li, "strength —", RETEST_UNREAD);
+      else expectCollapsed(li, value, basis);
     });
   });
 });

@@ -2470,8 +2470,8 @@ function nextPath(payload: unknown): string | null {
  *
  * `whole` is for a list a reader takes as the whole set, where an empty list
  * means "none" and not "none we could read": a body that is neither a list nor
- * a page of one, or more pages than MAX_PAGES, is then unavailability too,
- * rather than the rows that happened to arrive.
+ * a page of one, a bare list after the first page, or more pages than MAX_PAGES,
+ * is then unavailability too, rather than the rows that happened to arrive.
  */
 async function pagedRows(
   firstPath: string,
@@ -2487,8 +2487,17 @@ async function pagedRows(
       );
     }
     const payload = whole ? await response.json().catch(() => null) : await response.json();
-    // A bare array is not paginated: it is the complete answer.
-    if (Array.isArray(payload)) return payload as Record<string, unknown>[];
+    // A bare array is not paginated: as the first answer it is the complete one.
+    // Behind a page's `next` link it is neither that list's next page nor, beside
+    // the rows already read, provably the whole of it: a whole read cannot use it.
+    if (Array.isArray(payload)) {
+      if (whole && page > 0) {
+        throw new ControlPlaneUnavailable(
+          `the Athena control plane answered a later page of ${firstPath} with a bare list, not a page; the list cannot be read whole`,
+        );
+      }
+      return payload as Record<string, unknown>[];
+    }
     if (whole && !Array.isArray(objOf(payload).results)) {
       throw new ControlPlaneUnavailable("the Athena control plane answered a list read with something that is not a list");
     }
@@ -4780,9 +4789,9 @@ export async function listRetestRequirements(
  * The backend's action (`DeploymentViewSet.retest_requirements`) answers one
  * unpaginated list. The claims panel reads "no retest due" from a claim's absence
  * here, so the list is read whole: a paginated answer is followed to its end, and
- * one that is not a list, or does not end, is unavailability rather than the rows
- * that arrived. It used to take a first page's `results` and read anything else
- * as no obligations at all.
+ * one that is not a list, turns from pages into a bare list, or does not end, is
+ * unavailability rather than the rows that arrived. It used to take a first page's
+ * `results` and read anything else as no obligations at all.
  */
 export async function deploymentRetestRequirements(
   uuid: string,

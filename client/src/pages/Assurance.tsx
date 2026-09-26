@@ -6040,12 +6040,15 @@ function claimStrengthWhileReading(claim: Pick<Claim, "status" | "confidence" | 
  * deployment's retest-requirements action returns only those by default, as one
  * list, and names the claim version each is about as `claimUuid`).
  *
- * A requirement names the claim VERSION that drifted, and the backend binds it to
- * the claim's identity across versions (`invalidation._has_open_requirement`,
+ * A requirement names the claim VERSION that was current when it opened: the one
+ * that drifted (`invalidation`), or whose declared condition came true
+ * (`latent.evaluate_conditions`). The backend binds it to the claim's identity
+ * across versions (`invalidation._has_open_requirement`,
  * `revalidation.plan_revalidation`). The requirement does not carry that identity,
  * so one naming a version this list does not hold leaves every claim of its type
  * unread (null), never "no retest due". So does a read that failed or did not
- * come back as a list.
+ * come back as a list. A claim an open requirement names is due (true) whatever
+ * else is unread: that requirement alone says a retest is due.
  */
 function retestDueByClaim(requirements: unknown, claims: Claim[]): (claim: Claim) => boolean | null {
   if (!Array.isArray(requirements)) return () => null;
@@ -6130,7 +6133,7 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [noteFor, setNoteFor] = useState<Record<string, string>>({});
 
-  const { data, isLoading, isError, error } = useQuery<Claim[]>({
+  const { data, isLoading, isError, error, dataUpdatedAt: claimsReadAt } = useQuery<Claim[]>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-claims`],
   });
   // The deployment's open retest requirements, read once for every claim: a
@@ -6141,6 +6144,13 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/retest-requirements`, {}],
   });
   const retestDue = retestDueByClaim(retests.isError ? undefined : retests.data, data ?? []);
+  // Whether a retest is due is still being read while the requirements have never
+  // been read, and while they are being read again and the read in hand is older
+  // than the claims. A change here re-reads both (`invalidateAssuranceComputed`),
+  // and the claims can land first: a claim a person moved back to supported would
+  // otherwise stand beside requirements read before its retest opened. A read that
+  // landed before the claims, with none in flight, is the newest one asked for.
+  const retestsReading = retests.isPending || (retests.isFetching && retests.dataUpdatedAt < claimsReadAt);
 
   const recompute = useMutation({
     mutationFn: async () =>
@@ -6228,9 +6238,10 @@ export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string;
         <ul className="space-y-2">
           {data.map((c) => {
             const isOpen = expanded.has(c.uuid);
-            const nextStates = CLAIM_TRANSITIONS[c.status] ?? [];
+            // Own keys only: a status named like an object key ("constructor") has no moves.
+            const nextStates = Object.hasOwn(CLAIM_TRANSITIONS, c.status) ? CLAIM_TRANSITIONS[c.status] : [];
             const strengthInput = { ...c, retestDue: retestDue(c) };
-            const { value: strength, basis: strengthBasis } = retests.isPending
+            const { value: strength, basis: strengthBasis } = retestsReading
               ? claimStrengthWhileReading(c)
               : { value: claimStrength(strengthInput), basis: claimStrengthBasis(strengthInput) };
             return (
