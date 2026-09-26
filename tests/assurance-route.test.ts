@@ -3128,6 +3128,34 @@ describe("assurance BFF against a paginated control plane", () => {
           return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/providers/?page=2`, previous: null, results: [row("prov-a", "first")] });
         }
 
+        // A deployment's open retest obligations. The backend answers one bare
+        // list today; the claims panel reads "no retest due" from their absence,
+        // so a paged answer must be read to its end, and one that is not a list
+        // or never ends must not pass as the rows that arrived.
+        const retests = path.match(/^\/api\/assurance\/deployments\/([^/]+)\/retest-requirements\/$/);
+        if (retests && method === "GET") {
+          const page = Number(new URLSearchParams(query).get("page") ?? "1");
+          const row = (uuid: string, claim: string) => ({
+            uuid, deployment_uuid: retests[1], claim_uuid: claim,
+            claim_type: "data_boundary", claim_type_label: "Data boundary",
+            resolving_claim_uuid: null, reason: "the bound system state drifted",
+            triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+            opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+            created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+          });
+          const at = (n: number) => `http://${req.headers.host}${path}?page=${n}`;
+          if (retests[1] === "dep-paged") {
+            if (page === 2) return json(200, { count: 2, next: null, previous: at(1), results: [row("rr-b", "claim-b")] });
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          if (retests[1] === "dep-endless") {
+            return json(200, { count: 1_000_000, next: at(page + 1), previous: null, results: [row(`rr-${page}`, `claim-${page}`)] });
+          }
+          if (retests[1] === "dep-not-a-list") {
+            return json(200, { detail: "not a list" });
+          }
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -3167,6 +3195,22 @@ describe("assurance BFF against a paginated control plane", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
     expect(res.body.map((p: { uuid: string }) => p.uuid)).toEqual(["prov-a", "prov-b"]);
+  });
+
+  it("reads a deployment's retest obligations to the last page", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-paged/retest-requirements");
+    expect(res.status).toBe(200);
+    expect(res.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a", "claim-b"]);
+  });
+
+  it("refuses a deployment's retest obligations it cannot read whole, rather than answer the rows that arrived", async () => {
+    const endless = await user.get("/api/assurance/deployments/dep-endless/retest-requirements");
+    expect(endless.status).toBe(503);
+    expect(String(endless.body.error)).toMatch(/incomplete/);
+
+    const notAList = await user.get("/api/assurance/deployments/dep-not-a-list/retest-requirements");
+    expect(notAList.status).toBe(503);
+    expect(String(notAList.body.error)).toMatch(/not a list/);
   });
 });
 

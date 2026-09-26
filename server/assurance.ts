@@ -2467,8 +2467,16 @@ function nextPath(payload: unknown): string | null {
  * follow the `next` link until it is exhausted so nothing past the first page is
  * silently dropped; query filters ride along because DRF echoes them into `next`.
  * A non-ok answer on any page is unavailability, per the existing contract.
+ *
+ * `whole` is for a list a reader takes as the whole set, where an empty list
+ * means "none" and not "none we could read": a body that is neither a list nor
+ * a page of one, or more pages than MAX_PAGES, is then unavailability too,
+ * rather than the rows that happened to arrive.
  */
-async function pagedRows(firstPath: string): Promise<Record<string, unknown>[]> {
+async function pagedRows(
+  firstPath: string,
+  { whole = false }: { whole?: boolean } = {},
+): Promise<Record<string, unknown>[]> {
   const collected: Record<string, unknown>[] = [];
   let path: string | null = firstPath;
   for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
@@ -2478,11 +2486,19 @@ async function pagedRows(firstPath: string): Promise<Record<string, unknown>[]> 
         `the Athena control plane answered ${response.status}: ${await body(response)}`,
       );
     }
-    const payload = await response.json();
+    const payload = whole ? await response.json().catch(() => null) : await response.json();
     // A bare array is not paginated: it is the complete answer.
     if (Array.isArray(payload)) return payload as Record<string, unknown>[];
+    if (whole && !Array.isArray(objOf(payload).results)) {
+      throw new ControlPlaneUnavailable("the Athena control plane answered a list read with something that is not a list");
+    }
     collected.push(...rows(payload));
     path = nextPath(payload);
+  }
+  if (whole && path !== null) {
+    throw new ControlPlaneUnavailable(
+      `the Athena control plane had more than ${MAX_PAGES} pages at ${firstPath}; the list would be incomplete`,
+    );
   }
   return collected;
 }
@@ -4760,22 +4776,21 @@ export async function listRetestRequirements(
  * A deployment's retest obligations (SPINE Phase 2). A read (open); a non-ok
  * answer is genuine unavailability. Defaults to open; `all=true` includes the
  * resolved history.
+ *
+ * The backend's action (`DeploymentViewSet.retest_requirements`) answers one
+ * unpaginated list. The claims panel reads "no retest due" from a claim's absence
+ * here, so the list is read whole: a paginated answer is followed to its end, and
+ * one that is not a list, or does not end, is unavailability rather than the rows
+ * that arrived. It used to take a first page's `results` and read anything else
+ * as no obligations at all.
  */
 export async function deploymentRetestRequirements(
   uuid: string,
   all = false,
 ): Promise<RetestRequirement[]> {
   const query = all ? "?all=true" : "";
-  const response = await call(
-    `/api/assurance/deployments/${encodeURIComponent(uuid)}/retest-requirements/${query}`,
-  );
-  if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
-  }
-  const payload = await response.json().catch(() => null);
-  return rows(payload).map(retestRequirement);
+  const path = `/api/assurance/deployments/${encodeURIComponent(uuid)}/retest-requirements/${query}`;
+  return (await pagedRows(path, { whole: true })).map(retestRequirement);
 }
 
 // ---- Operational-risk register (Phase 3.9) ----
