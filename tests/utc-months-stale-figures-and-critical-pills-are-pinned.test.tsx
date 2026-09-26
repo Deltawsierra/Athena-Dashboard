@@ -44,7 +44,7 @@ describe("UTC month buckets hold outside UTC (M1, M7)", () => {
         firstSeenAt: new Date("2026-03-01T03:00:00Z"), lastSeenAt: new Date("2026-03-01T03:00:00Z"),
       }] as never,
     });
-    expect(s.byMonth).toEqual([{ month: "2026-03", critical: 0, high: 1, medium: 0, low: 0 }]);
+    expect(s.byMonth).toEqual([{ month: "2026-03", critical: 0, high: 1, medium: 0, low: 0, unrated: 0 }]);
   });
 
   it("client: the 2026-03 bucket is labelled Mar 26", () => {

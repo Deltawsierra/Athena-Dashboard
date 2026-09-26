@@ -31,14 +31,33 @@ function recordOf(findings: unknown): Record<string, unknown> | null {
 }
 
 /**
- * A run id as the engine sent it, or as a record holds it: a non-empty string
- * as it is, a whole number (a safe integer) as its digits, and anything else --
- * "", a boolean, NaN, a fraction, an object -- null, which names no run.
+ * A run id as the engine sent it, or as a record holds it: a string a stop can
+ * address as it is, a whole number (a safe integer) as its digits, and anything
+ * else -- a boolean, NaN, a fraction, an object -- null, which names no run.
+ *
+ * A string names a run only when a stop can reach exactly that run by it, as
+ * one segment of `/api/scans/{run_id}/abort`. So these name none, and a scan
+ * the engine started with one is a scan no Stop can reach (a breach of the
+ * engine's contract, which since athena-engine #71 requires a path-safe uuid):
+ * - one that is blank after trimming ("", " ", "\t");
+ * - "." and "..", which the URL resolves away: a stop for ".." was sent to
+ *   `POST /api/abort`, and one for "." to `POST /api/scans/abort`;
+ * - one with a "/" or a "\" in it, which the engine's router splits or
+ *   refuses: "a/b" was sent to `/api/scans/a%2Fb/abort` and answered 404.
+ * Every other string is kept verbatim, space included, and a stop sends it
+ * percent-encoded (server/engine.ts).
  */
 export function runIdFrom(value: unknown): string | null {
-  if (typeof value === "string") return value !== "" ? value : null;
+  if (typeof value === "string") return isAddressableRunId(value) ? value : null;
   if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
   return null;
+}
+
+/** Whether a stop can address exactly this run by this id, as one path segment (see runIdFrom). */
+function isAddressableRunId(value: string): boolean {
+  if (value.trim() === "") return false;
+  if (value === "." || value === "..") return false;
+  return !value.includes("/") && !value.includes("\\");
 }
 
 /** The engine run a record names, or null when it names none. */

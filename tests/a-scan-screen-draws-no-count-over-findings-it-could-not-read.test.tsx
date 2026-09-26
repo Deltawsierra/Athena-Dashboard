@@ -232,6 +232,19 @@ describe("Athena: a finished scan whose findings could not be read", () => {
     expect(screen.getByTestId("text-total").textContent).toBe("1");
   });
 
+  it("draws the band derived from counts recorded beside findings it cannot show, never Not read (round 5)", async () => {
+    // Two highs, one with a message the screens cannot show: the list is unread, and both highs are counted.
+    finishesInline([HIGH, { ...HIGH, message: { text: "Reflected input on /cart" } }]);
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("completed");
+    await waitFor(() => expect(screen.getByTestId("text-findings-unread")).toBeTruthy());
+    expect(screen.getByTestId("text-count-high").textContent).toBe("2");
+    expect(screen.getByTestId("text-risk-band").textContent).toBe("Elevated");
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe("Derived from the worst severity found — not a score.");
+    expect(text()).not.toMatch(/Not read|Clear|Informational/);
+  });
+
   it("still says Clear over a readable finish that found nothing", async () => {
     finishesInline([]);
     realRoutes();
@@ -402,6 +415,11 @@ describe("a running scan whose engine cannot be reached mid-run", () => {
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Assessing…");
     expect(screen.getByTestId("text-total").textContent).toBe("0");
     expect(text()).not.toMatch(/Not read|not recorded/);
+    // Not "No gradable findings yet." beside "The findings could not be read" (round 5).
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
+      "The findings could not be read, so this reads only the counts recorded so far: none of them is gradable.",
+    );
+    expect(text()).not.toMatch(/No gradable findings yet/);
   });
 
   it("Penetration testing draws the counts recorded so far, and never says none was recorded", async () => {

@@ -38,7 +38,7 @@ import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Corners } from "@/components/mythos/Ornament";
-import { SeverityPill, StatusPill, type Severity, type StatusTone } from "@/components/mythos/atoms";
+import { SEV_LABEL, SeverityPill, StatusPill, severityFrom, type Severity, type StatusTone } from "@/components/mythos/atoms";
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
@@ -53,21 +53,26 @@ interface ApiFinding {
 interface FindingsView { findings: ApiFinding[]; counts: Record<string, number> }
 interface ApiUser { id: string; username: string }
 
-const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
-const SEV_COLS = ["Critical", "High", "Medium", "Low"] as const;
-const SEV_HUE = ["--sev-critical", "--sev-high", "--sev-medium", "--sev-low"];
+// "unrated" (no severity recorded) ranks below low and above info: it may be critical.
+const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "unrated", "info"];
+// The heatmap's columns: the four bands, and the findings no severity rates,
+// which were counted in none of them.
+const SEV_COLS = ["Critical", "High", "Medium", "Low", "Not rated"] as const;
+const SEV_HUE = ["--sev-critical", "--sev-high", "--sev-medium", "--sev-low", "--muted-foreground"];
 const CAT_COLORS = ["hsl(var(--gold))", "hsl(var(--sev-high))", "hsl(var(--sev-medium))", "hsl(210 80% 60%)", "hsl(var(--accent-violet))", "hsl(0 0% 55%)"];
 
+/** A finding's severity, read as every reader reads it (any case, trimmed); "unrated" when it has none, never info. */
 function normSev(s: string | null): Severity {
-  const v = (s || "").toLowerCase();
-  return (SEV_ORDER as string[]).includes(v) ? (v as Severity) : "info";
+  return severityFrom(s);
 }
 function humanize(t: string): string {
   return t.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
-function impactOf(sev: Severity): "High" | "Medium" | "Low" {
+/** The impact a severity implies; none is invented for a finding no severity rates. */
+function impactOf(sev: Severity): "High" | "Medium" | "Low" | "Unknown" {
   if (sev === "critical" || sev === "high") return "High";
   if (sev === "medium") return "Medium";
+  if (sev === "unrated") return "Unknown";
   return "Low";
 }
 const STATUS_TONE: Record<string, { label: string; tone: StatusTone }> = {
@@ -215,7 +220,7 @@ export default function Risks() {
   // category x severity heatmap
   const heat = cats.map(([label]) => {
     const rows = open.filter((f) => humanize(f.type) === label);
-    const cells = SEV_ORDER.slice(0, 4).map((sv) => rows.filter((f) => normSev(f.severity) === sv).length);
+    const cells = SEV_ORDER.slice(0, 5).map((sv) => rows.filter((f) => normSev(f.severity) === sv).length);
     return { name: label, cells, total: rows.length };
   });
 
@@ -271,7 +276,7 @@ export default function Risks() {
         <FilterSelect label="Engagement" value={clientId} onChange={setSelClient}
           options={clients.map((c) => ({ value: c.id, label: c.name }))} />
         <FilterSelect label="Severity" value={sevF} onChange={setSevF}
-          options={[{ value: "all", label: "All severities" }, ...SEV_ORDER.map((s) => ({ value: s, label: s[0].toUpperCase() + s.slice(1) }))]} />
+          options={[{ value: "all", label: "All severities" }, ...SEV_ORDER.map((s) => ({ value: s, label: SEV_LABEL[s] }))]} />
         <FilterSelect label="Status" value={statusF} onChange={setStatusF}
           options={[{ value: "all", label: "All statuses" }, { value: "open", label: "Open" }, { value: "acknowledged", label: "Acknowledged" }, { value: "accepted", label: "Accepted" }, { value: "fixed", label: "Fixed" }]} />
         <FilterSelect label="Category" value={catF} onChange={setCatF}
@@ -399,7 +404,7 @@ export default function Risks() {
                 {!ready
                   ? unavailable
                   : sharpest
-                    ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity)} severity on ${sharpest.target || "the target"}.`
+                    ? `"${sharpest.message || humanize(sharpest.type)}" — ${normSev(sharpest.severity) === "unrated" ? "no severity recorded" : `${normSev(sharpest.severity)} severity`} on ${sharpest.target || "the target"}.`
                     : untracked.state !== "ready"
                       ? `"No open or in-review tracked findings." ${notInHand(untracked, "what the latest completed scan reported")}`
                       : untracked.data

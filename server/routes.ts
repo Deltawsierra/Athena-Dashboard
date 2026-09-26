@@ -246,34 +246,61 @@ function unfinishedRunOf(test: { findings: unknown; status: string }): string | 
   return runId !== null && !FINISHED_RUN_STATES.has(test.status) ? runId : null;
 }
 
+/** A record counted against Max Concurrent Tests that no stop can name, as the refusal names it. */
+interface UnnamedRecord { testId: string; target: string | null }
+
 /**
  * Why a scan was not started at Max Concurrent Tests, and what can stop each
  * run counted against it. A run with a run id is stopped by its Stop, where
- * this app recorded it, or by the kill switch. A run with none is stopped by
- * neither -- no stop can name it -- only by a failsafe, which stops the engine
- * itself. "Stop one" was said over runs no Stop could reach.
+ * this app recorded it, or by the kill switch. So is a run the engine lists
+ * with no run id that this app recorded with one (`recordedById`): its Stop
+ * names it by the recorded id. A run with none is stopped by neither -- no stop
+ * can name it -- only by a failsafe, which stops the engine itself. "Stop one"
+ * was said over runs no Stop could reach, and "no Stop can name it" over a run
+ * whose own Stop worked.
+ *
+ * Counted from the recorded rows (the engine's list could not be read), a scan
+ * with no run id stays recorded as running after the engine has stopped it:
+ * this app cannot ask the engine about it. A failsafe stops the engine, not
+ * the count. So the refusal names each such record (`unnamedRecords`), and says
+ * that deleting it frees its place.
  */
 function concurrencyRefusal(
-  { running, unnamed, limit, unlisted }: { running: number; unnamed: number; limit: number; unlisted: string | null },
+  { running, unnamed, limit, unlisted, recordedById = 0, unnamedRecords = [] }: {
+    running: number; unnamed: number; limit: number; unlisted: string | null;
+    recordedById?: number; unnamedRecords?: UnnamedRecord[];
+  },
 ): string {
   const named = running - unnamed;
   const counted = `${running} engine scan${running === 1 ? " is" : "s are"} ` +
     (unlisted === null
       ? "running"
       : `recorded as running (the engine's list of live runs could not be read: ${unlisted})`) +
-    `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started.`;
+    `, and Max Concurrent Tests on the AI Control page is ${limit}, so this scan was not started.` +
+    (recordedById > 0
+      ? ` ${recordedById} of them ${recordedById === 1 ? "is" : "are"} listed by the engine with no run id but ` +
+        `recorded here with one, and ${recordedById === 1 ? "its" : "their"} Stop names ` +
+        `${recordedById === 1 ? "it" : "them"} by that id.`
+      : "");
   const byStop = "with its Stop where this app recorded it, or with the kill switch on the AI Control page";
   const byFailsafe = "pause, stand down or terminate the engine from the Failsafe console";
+  const n = unnamedRecords.length;
+  const stale = n === 0 ? "" :
+    ` This app cannot ask the engine about a scan with no run id, so its record stays running after the engine ` +
+    `has stopped it, and a failsafe stops the engine but does not clear the record. If ` +
+    `${n === 1 ? "it has" : "they have"} stopped, delete ${n === 1 ? "its record" : "their records"} on the Tests ` +
+    `screen (with force, since no stop can be sent) to free ${n === 1 ? "its place" : "their places"}: ` +
+    `${unnamedRecords.map((one) => `${one.target ?? "a scan with no target"} (test ${one.testId})`).join(", ")}.`;
   if (unnamed === 0) return `${counted} Stop one -- ${byStop} -- or raise the limit, to start another.`;
-  const them = (n: number) => (n === 1 ? "it" : "them");
-  const noId = (n: number) => `no run id, so no Stop and no kill switch can name ${them(n)}: to stop ` +
-    `${n === 1 ? "it" : "one"}, ${byFailsafe}`;
+  const them = (k: number) => (k === 1 ? "it" : "them");
+  const noId = (k: number) => `no run id, so no Stop and no kill switch can name ${them(k)}: to stop ` +
+    `${k === 1 ? "it" : "one"}, ${byFailsafe}`;
   if (named === 0) {
-    return `${counted} ${running === 1 ? "It has" : "They have"} ${noId(running)}. ` +
+    return `${counted} ${running === 1 ? "It has" : "They have"} ${noId(running)}.${stale} ` +
       "Or raise the limit, to start another.";
   }
   return `${counted} ${named} of them ${named === 1 ? "has" : "have"} a run id: stop ${named === 1 ? "it" : "one"} ${byStop}. ` +
-    `${unnamed} ${unnamed === 1 ? "has" : "have"} ${noId(unnamed)}. Or raise the limit, to start another.`;
+    `${unnamed} ${unnamed === 1 ? "has" : "have"} ${noId(unnamed)}.${stale} Or raise the limit, to start another.`;
 }
 
 /**
@@ -431,6 +458,49 @@ function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): 
       `Stop ${failed.length === 1 ? "it" : "them"} first -- the scan's Stop on the Tests screen, the kill switch, ` +
       `or a failsafe pause -- then delete ${what}.` +
       (accepted > 0 ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} stopped: the engine accepted the stop.` : ""),
+    stops,
+  });
+  return true;
+}
+
+/** An engine scan that may still be running and that no stop can name: the engine gave it no run id a stop can address. */
+function unfinishedWithoutRunId(test: { findings: unknown; status: string }): boolean {
+  return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && runIdOf(test) === null;
+}
+
+/**
+ * Refuse, unless forced (`?force=1`), a delete that takes with it a scan that
+ * may still be running and that no stop can name.
+ *
+ * Such a scan was deleted at once (200): no stop was sent -- none can name it --
+ * and no warning given, and a run that may still be scanning disappeared from
+ * this app. It is deleted now only when asked in so many words, and the answer
+ * says no stop was sent. This refuses a delete, never a stop: every stop the
+ * delete could send was sent before this is asked.
+ */
+function refuseUnforcedDeleteWithoutStop(
+  req: Request, res: Response, what: string, tests: Array<{ id: string; findings: unknown; status: string }>, stops: ScanStop[],
+): boolean {
+  if (req.query.force === "1" || req.query.force === "true") return false;
+  const unnamed = tests.filter(unfinishedWithoutRunId);
+  if (unnamed.length === 0) return false;
+  const targets = unnamed.map((one) => {
+    const target = (one.findings as { target?: unknown }).target;
+    return typeof target === "string" ? target : `test ${one.id}`;
+  });
+  const n = unnamed.length;
+  const accepted = stops.filter((one) => one.stopped).length;
+  res.status(409).json({
+    message:
+      `Nothing was deleted. ${n === 1 ? "A scan" : `${n} scans`} (${targets.join(", ")}) may still be running, and the ` +
+      `engine gave ${n === 1 ? "it" : "them"} no run id a stop can name, so no stop can be sent. Stop ` +
+      `${n === 1 ? "it" : "them"} from the Failsafe console first (pause, stand down or terminate the engine), or ` +
+      `delete ${what} with force: ${n === 1 ? "its record goes" : "their records go"}, and no stop is sent.` +
+      (accepted > 0
+        ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} sent a stop, and the engine accepted ${accepted === 1 ? "it" : "each"}.`
+        : ""),
+    reason: "no_stop_possible",
+    noStop: unnamed.map((one, index) => ({ testId: one.id, target: targets[index] })),
     stops,
   });
   return true;
@@ -1103,6 +1173,8 @@ export function registerRoutes(app: Express): void {
     // while one of them could not be (stopBeforeDeleting).
     const stops = await stopBeforeDeleting(req, tests);
     if (refuseUnstoppedDelete(res, "the client", stops)) return;
+    if (refuseUnforcedDeleteWithoutStop(req, res, "the client", tests, stops)) return;
+    const withoutStop = tests.filter(unfinishedWithoutRunId).map((one) => one.id);
 
     let success: boolean;
     try {
@@ -1121,7 +1193,11 @@ export function registerRoutes(app: Express): void {
     try {
       await storage.createActivityLog({
         action: "deleted", entityType: "client", entityId: req.params.id,
-        details: { cascaded, ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}) }, ...actor(req),
+        details: {
+          cascaded,
+          ...(stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : {}),
+          ...(withoutStop.length > 0 ? { deletedWithoutStop: withoutStop } : {}),
+        }, ...actor(req),
       });
     } catch (cause) {
       if (stops.length === 0) throw cause;
@@ -1221,6 +1297,8 @@ export function registerRoutes(app: Express): void {
     // accepted the stop (stopBeforeDeleting): its row is its Stop.
     const stops = await stopBeforeDeleting(req, [test]);
     if (refuseUnstoppedDelete(res, "the test", stops)) return;
+    if (refuseUnforcedDeleteWithoutStop(req, res, "the test", [test], stops)) return;
+    const withoutStop = unfinishedWithoutRunId(test);
 
     let success: boolean;
     try {
@@ -1237,12 +1315,18 @@ export function registerRoutes(app: Express): void {
     try {
       await storage.createActivityLog({
         action: "deleted", entityType: "test", entityId: req.params.id,
-        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) } : null, ...actor(req),
+        details: stops.length > 0 ? { stopped: stops.map((one) => one.runId) }
+          : withoutStop ? { deletedWithoutStop: true } : null,
+        ...actor(req),
       });
     } catch (cause) {
-      if (stops.length === 0) throw cause;
+      if (stops.length === 0 && !withoutStop) throw cause;
     }
-    res.json(stops.length > 0 ? { success: true, stops } : { success: true });
+    res.json({
+      success: true,
+      ...(stops.length > 0 ? { stops } : {}),
+      ...(withoutStop ? { detail: "deleted with force: the engine gave this scan no run id a stop can name, so no stop was sent" } : {}),
+    });
   }));
 
   // ==== SCANS: the engine, and what it found ====
@@ -1335,8 +1419,10 @@ export function registerRoutes(app: Express): void {
     let running: number;
     let unnamed: number;
     let unlisted: string | null = null;
+    let live: engine.ActiveRun[] = [];
+    let unnamedRecords: UnnamedRecord[] = [];
     try {
-      const live = await engine.activeRuns();
+      live = await engine.activeRuns();
       running = live.length;
       unnamed = live.filter((run) => run.runId === null).length;
     } catch (cause) {
@@ -1345,14 +1431,46 @@ export function registerRoutes(app: Express): void {
       const recorded = (await storage.getAllTests())
         .filter((test) => !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings));
       running = recorded.length;
-      unnamed = recorded.filter((test) => unfinishedRunOf(test) === null).length;
+      unnamedRecords = recorded.filter((test) => unfinishedRunOf(test) === null).map((test) => {
+        const target = (test.findings as { target?: unknown }).target;
+        return { testId: test.id, target: typeof target === "string" ? target : null };
+      });
+      unnamed = unnamedRecords.length;
     }
     if (running >= limit) {
+      // A run the engine lists with no run id, at the target of a scan recorded
+      // here as running with a run id the engine did not list: that scan's own
+      // Stop names it by the recorded id, so it is stoppable, and said so. Only
+      // read when refusing, and a read that fails matches nothing.
+      let recordedById = 0;
+      if (unlisted === null && unnamed > 0) {
+        const listedIds = new Set(live.map((run) => run.runId).filter((id): id is string => id !== null));
+        let rows: Awaited<ReturnType<typeof storage.getAllTests>> = [];
+        try {
+          rows = await storage.getAllTests();
+        } catch {
+          rows = [];
+        }
+        const unlistedTargets = rows
+          .filter((test) => { const id = unfinishedRunOf(test); return id !== null && !listedIds.has(id); })
+          .map((test) => (test.findings as { target?: unknown }).target)
+          .filter((target): target is string => typeof target === "string");
+        for (const run of live) {
+          if (run.runId !== null || run.target === null) continue;
+          const at = unlistedTargets.indexOf(run.target);
+          if (at === -1) continue;
+          unlistedTargets.splice(at, 1);
+          recordedById += 1;
+        }
+        unnamed -= recordedById;
+      }
       return void res.status(409).json({
-        error: concurrencyRefusal({ running, unnamed, limit, unlisted }),
+        error: concurrencyRefusal({ running, unnamed, limit, unlisted, recordedById, unnamedRecords }),
         reason: "concurrency_limit",
         running,
         unnamed,
+        ...(recordedById > 0 ? { recordedById } : {}),
+        ...(unnamedRecords.length > 0 ? { unnamedRecords } : {}),
         counted: unlisted === null ? "engine" : "recorded",
         limit,
       });
@@ -1464,6 +1582,10 @@ export function registerRoutes(app: Express): void {
 
     res.status(201).json({
       test, runId: started.runId, state: started.state, filed,
+      // A run the engine started without a run id a stop can name breaks the
+      // engine's contract: no Stop can reach it, and the screens say what can
+      // (the Failsafe console) in place of a Stop that would answer 409.
+      ...(started.runId === null && !completedInline ? { stop: "failsafe" as const } : {}),
       ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
     });
   }));
@@ -1487,7 +1609,7 @@ export function registerRoutes(app: Express): void {
       // to name it by. It is not "no engine run". It is pointed at the kill
       // switch, which stops every run the engine lists by a run id, and at the
       // failsafes, which stop the engine whatever it lists.
-      return void res.status(409).json({ error: NO_RUN_ID_TO_STOP });
+      return void res.status(409).json({ error: NO_RUN_ID_TO_STOP, stop: "failsafe" });
     }
     if (!runId) {
       return void res.status(409).json({
@@ -1566,8 +1688,12 @@ export function registerRoutes(app: Express): void {
     if (!runId) {
       // An engine scan the engine accepted without a run id, not recorded as
       // completed: the engine cannot be asked about it, and it is never told it
-      // has no engine run.
-      return void res.json({ test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK });
+      // has no engine run. No Stop can reach it either: every read says so, so
+      // the screens show what stops it in place of a Stop.
+      return void res.json({
+        test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK,
+        ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
+      });
     }
 
     let current;

@@ -52,7 +52,8 @@ describe("summarizeFindings", () => {
       ],
     });
     expect(summary.clients).toBe(3);
-    expect(summary.open).toEqual({ total: 4, critical: 1, high: 1, medium: 0, low: 1, info: 1 });
+    // "banana" is no rating: not rated (it may be critical), never info, which says "not a risk" (round 5).
+    expect(summary.open).toEqual({ total: 4, critical: 1, high: 1, medium: 0, low: 1, unrated: 1, info: 0 });
     expect(summary.byClient.find((one) => one.clientId === "c1")).toMatchObject({ open: 2, critical: 1, high: 1 });
   });
 
@@ -91,10 +92,10 @@ describe("summarizeFindings", () => {
       ],
     });
     expect(summary.byMonth).toEqual([
-      { month: "2026-01", critical: 1, high: 2, medium: 0, low: 0 },
+      { month: "2026-01", critical: 1, high: 2, medium: 0, low: 0, unrated: 0 },
       // A month with none is a zero, not a gap.
-      { month: "2026-02", critical: 0, high: 0, medium: 0, low: 0 },
-      { month: "2026-03", critical: 0, high: 0, medium: 1, low: 1 },
+      { month: "2026-02", critical: 0, high: 0, medium: 0, low: 0, unrated: 0 },
+      { month: "2026-03", critical: 0, high: 0, medium: 1, low: 1, unrated: 0 },
     ]);
   });
 
@@ -108,7 +109,7 @@ describe("summarizeFindings", () => {
     });
     expect(summary.byMonth).toHaveLength(12);
     expect(summary.byMonth[0].month).toBe("2025-07");
-    expect(summary.byMonth[11]).toEqual({ month: "2026-06", critical: 1, high: 0, medium: 0, low: 0 });
+    expect(summary.byMonth[11]).toEqual({ month: "2026-06", critical: 1, high: 0, medium: 0, low: 0, unrated: 0 });
     expect(summary.byMonth.reduce((sum, row) => sum + row.high, 0)).toBe(0);
   });
 
@@ -165,7 +166,7 @@ describe("summarizeFindings", () => {
   it("summarizes an empty estate as empty", () => {
     expect(summarizeFindings({ clients: [], sites: [], findings: [] })).toEqual({
       clients: 0,
-      open: { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
+      open: { total: 0, critical: 0, high: 0, medium: 0, low: 0, unrated: 0, info: 0 },
       byEnvironment: [], byMonth: [], topOpen: [], byClient: [],
     });
   });
@@ -204,7 +205,7 @@ describe("GET /api/findings/summary", () => {
 
     const res = await agent.get("/api/findings/summary");
     expect(res.status).toBe(200);
-    expect(res.body.open).toEqual({ total: 3, critical: 1, high: 1, medium: 0, low: 1, info: 0 });
+    expect(res.body.open).toEqual({ total: 3, critical: 1, high: 1, medium: 0, low: 1, unrated: 0, info: 0 });
     expect(res.body.byEnvironment).toEqual([
       { environment: null, open: 2 },
       { environment: "production", open: 1 },

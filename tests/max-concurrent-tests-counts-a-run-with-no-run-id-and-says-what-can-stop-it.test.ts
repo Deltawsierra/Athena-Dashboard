@@ -42,6 +42,11 @@ let clientId: string;
 
 const FAILSAFE = "pause, stand down or terminate the engine from the Failsafe console";
 const BY_STOP = "with its Stop where this app recorded it, or with the kill switch on the AI Control page";
+/** What the refusal says of the no-run-id records it counted from the recorded rows (round 5). */
+const STALE = (records: string) =>
+  "This app cannot ask the engine about a scan with no run id, so its record stays running after the engine has " +
+  "stopped it, and a failsafe stops the engine but does not clear the record. If it has stopped, delete its record " +
+  `on the Tests screen (with force, since no stop can be sent) to free its place: ${records}.`;
 
 beforeAll(async () => {
   engine = http.createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -77,7 +82,7 @@ afterEach(async () => {
   active = [];
   listReadable = true;
   for (const test of await storage.getAllTests()) {
-    if (test.status === "running" || test.status === "in-progress") await storage.updateTest(test.id, { status: "aborted" });
+    if (!["completed", "aborted", "failed", "refused"].includes(test.status)) await storage.updateTest(test.id, { status: "aborted" });
   }
   await agent.patch("/api/ai-control").send({ maxConcurrentTests: 5 });
 });
@@ -109,8 +114,9 @@ describe("a running scan the engine accepted without a run id", () => {
       "1 engine scan is recorded as running (the engine's list of live runs could not be read: the engine answered " +
       "503 when asked for its active runs: {\"detail\":\"list down\"}), and Max Concurrent Tests on the AI Control page " +
       `is 1, so this scan was not started. It has no run id, so no Stop and no kill switch can name it: to stop it, ${FAILSAFE}. ` +
-      "Or raise the limit, to start another.",
+      `${STALE(`https://limit.example/ (test ${first.body.test.id})`)} Or raise the limit, to start another.`,
     );
+    expect(byRows.body.unnamedRecords).toEqual([{ testId: first.body.test.id, target: "https://limit.example/" }]);
   });
 
   it("is not counted once it is recorded as finished, and a person's test in progress is never counted", async () => {
@@ -139,7 +145,8 @@ describe("a running scan the engine accepted without a run id", () => {
       new RegExp(
         "so this scan was not started\\. 1 of them has a run id: stop it with its Stop where this app recorded it, or " +
         "with the kill switch on the AI Control page\\. 1 has no run id, so no Stop and no kill switch can name it: to " +
-        "stop it, pause, stand down or terminate the engine from the Failsafe console\\. Or raise the limit, to start " +
+        "stop it, pause, stand down or terminate the engine from the Failsafe console\\. This app cannot ask the engine " +
+        "about a scan with no run id, .*: https://limit\\.example/ \\(test [0-9a-f-]+\\)\\. Or raise the limit, to start " +
         "another\\.$",
       ),
     );
@@ -183,5 +190,98 @@ describe("the refusal says what can stop each run it counted", () => {
       "1 engine scan is running, and Max Concurrent Tests on the AI Control page is 1, so this scan was not " +
       `started. Stop one -- ${BY_STOP} -- or raise the limit, to start another.`,
     );
+  });
+});
+
+describe("a record with no run id, counted while the engine's list cannot be read (round 5)", () => {
+  it("stays recorded as running after the engine has finished it; the refusal names it, and deleting it with force frees its place", async () => {
+    startBody = () => ({ state: "running" });
+    const first = await start();
+    expect(first.status).toBe(201);
+    // The engine finishes it; nothing here can ask about a run with no id, however often it is read.
+    for (let i = 0; i < 3; i += 1) await agent.get(`/api/scans/${first.body.test.id}`);
+    expect((await storage.getTest(first.body.test.id))!.status).toBe("running");
+    await limitTo(1);
+    listReadable = false;
+    startBody = (n) => ({ run_id: `run-${n}`, state: "running" });
+    const refused = await start();
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toContain(STALE(`https://limit.example/ (test ${first.body.test.id})`));
+    // The failsafe is named as what stops the run, and the delete as what clears the record: they are different.
+    expect(refused.body.error).toContain("a failsafe stops the engine but does not clear the record");
+    expect((await agent.delete(`/api/tests/${first.body.test.id}`)).status).toBe(409);
+    expect((await agent.delete(`/api/tests/${first.body.test.id}?force=1`)).status).toBe(200);
+    expect((await start()).status).toBe(201);
+  });
+
+  it("is not named when the engine's list is read: the engine's word is what counts there", async () => {
+    startBody = () => ({ state: "running" });
+    expect((await start()).status).toBe(201);
+    await limitTo(1);
+    active = [{ state: "running" }];
+    const refused = await start();
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).not.toContain("delete its record");
+    expect(refused.body.unnamedRecords).toBeUndefined();
+  });
+});
+
+describe("a recorded row counted from the rows in each live state the engine reports (round 5)", () => {
+  for (const state of ["queued", "aborting", "running"]) {
+    it(`a row recorded as ${state} counts while the engine's list cannot be read`, async () => {
+      startBody = (n) => ({ run_id: `run-${n}`, state: "running" });
+      const first = await start();
+      expect(first.status).toBe(201);
+      // As the status route records the engine's own word for the run.
+      await storage.updateTest(first.body.test.id, { status: state });
+      await limitTo(1);
+      listReadable = false;
+      const refused = await start();
+      expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+      expect(refused.body).toMatchObject({ running: 1, unnamed: 0, counted: "recorded" });
+    });
+  }
+});
+
+describe("a run recorded here with a run id that the engine lists with none (round 5)", () => {
+  it("is counted as one its Stop can reach, by the recorded id, and never told no Stop can name it", async () => {
+    const first = await start();
+    expect(first.status).toBe(201);
+    // The engine lists it at its target, with no run id.
+    active = [{ target: "https://limit.example/", state: "running" }];
+    await limitTo(1);
+    const refused = await start();
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ running: 1, unnamed: 0, recordedById: 1, counted: "engine" });
+    expect(refused.body.error).toBe(
+      "1 engine scan is running, and Max Concurrent Tests on the AI Control page is 1, so this scan was not started. " +
+      "1 of them is listed by the engine with no run id but recorded here with one, and its Stop names it by that id. " +
+      `Stop one -- ${BY_STOP} -- or raise the limit, to start another.`,
+    );
+    const stopped = await agent.post(`/api/scans/${first.body.test.id}/abort`);
+    expect(stopped.status).toBe(200);
+  });
+
+  it("is matched only at its own target: a run the engine lists with none elsewhere is still one no Stop can name", async () => {
+    const first = await start();
+    expect(first.status).toBe(201);
+    // The recorded run is not on the engine's list by its id, and the one run listed with none is at another target.
+    active = [{ target: "https://elsewhere.example/", state: "running" }];
+    await limitTo(1);
+    const refused = await start();
+    expect(refused.status).toBe(409);
+    expect(refused.body).toMatchObject({ running: 1, unnamed: 1 });
+    expect(refused.body.recordedById).toBeUndefined();
+    expect(refused.body.error).toMatch(/It has no run id, so no Stop and no kill switch can name it/);
+  });
+
+  it("an unnamed run at another target is still one no Stop can name", async () => {
+    const first = await start();
+    expect(first.status).toBe(201);
+    active = [{ run_id: first.body.runId, target: "https://limit.example/", state: "running" }, { target: "https://elsewhere.example/", state: "running" }];
+    await limitTo(2);
+    const refused = await start();
+    expect(refused.body).toMatchObject({ running: 2, unnamed: 1 });
+    expect(refused.body.recordedById).toBeUndefined();
   });
 });

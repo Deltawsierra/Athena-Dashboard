@@ -17,6 +17,7 @@ import {
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
+import { ratingOf } from "@shared/latest-scans";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 
@@ -397,8 +398,10 @@ export class MemStorage implements IStorage {
     );
     const counts = { critical: 0, high: 0 };
     for (const id of Array.from(ids)) {
-      const severity = (this.findings.get(id)?.severity ?? "").toLowerCase();
-      if (severity === "critical" || severity === "high") counts[severity] += 1;
+      // Read as every reader reads it (ratingOf: any case, trimmed), so a row
+      // filed as " high" before filing normalised it is a filed high.
+      const rating = ratingOf(this.findings.get(id)?.severity);
+      if (rating === "critical" || rating === "high") counts[rating] += 1;
     }
     return counts;
   }

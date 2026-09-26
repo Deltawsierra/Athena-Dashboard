@@ -29,6 +29,7 @@ import {
 import FindingConfidence from "@/components/FindingConfidence";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
+import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
@@ -80,6 +81,8 @@ interface ScanView {
   test: Test;
   state: string;
   detail?: string;
+  /** "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel). */
+  stop?: "failsafe";
   engine: { findings?: EngineFinding[]; detail?: string } | null;
 }
 
@@ -169,7 +172,7 @@ export default function AthenaScan() {
         siteId: siteId || undefined,
         target: target.trim(),
       });
-      return (await response.json()) as { test: Test; runId: string | null; state?: string };
+      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe" };
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
@@ -220,6 +223,12 @@ export default function AthenaScan() {
   const startedAs = start.data && start.data.test.id === testId ? start.data.state : undefined;
   const knownStopped = scan !== undefined ? FINISHED.has(scan.state) : startedAs !== undefined && FINISHED.has(startedAs);
   const mayBeRunning = testId !== null && !knownStopped;
+  // A scan the server says no Stop can reach (the engine gave it no run id a
+  // stop can name): NoStopPanel stands in place of the Stop, and says what
+  // stops it. Only when the server said so, in the start's answer or a read;
+  // where the page does not know, the normal Stop stays.
+  const failsafeOnly = testId !== null
+    && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
   const finished = scan !== undefined && FINISHED.has(scan.state);
 
   const counts: SeverityCounts = {
@@ -431,7 +440,7 @@ export default function AthenaScan() {
               <Play className="mr-2 h-4 w-4" />
               {start.isPending ? "Asking the engine…" : "Start scan"}
             </Button>
-            {mayBeRunning && (
+            {mayBeRunning && !failsafeOnly && (
               <Button
                 type="button"
                 variant="destructive"
@@ -449,6 +458,7 @@ export default function AthenaScan() {
               </span>
             )}
           </div>
+          {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
         </form>
       </GlassCard>
 
@@ -525,7 +535,11 @@ export default function AthenaScan() {
                   : band === "Clear"
                     ? finished
                       ? "The scan returned no gradable findings."
-                      : "No gradable findings yet."
+                      : returned === null
+                        // Not "No gradable findings yet." beside "The findings could not be read".
+                        ? "The findings could not be read, so this reads only the counts recorded so far: none " +
+                          "of them is gradable."
+                        : "No gradable findings yet."
                     : "Derived from the worst severity found — not a score."}
               </p>
             </GlassCard>

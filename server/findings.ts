@@ -109,13 +109,15 @@ export function fingerprint(scope: string, sighting: Sighting): string {
 /**
  * Worst first. When one issue arrives at several severities within a scan --
  * a weak payload reads "medium", a confirmed one "critical", at the same
- * endpoint -- it is filed once, at the worst. An unrecognised severity ranks
- * below all of these.
+ * endpoint -- it is filed once, at the worst. A severity that is missing or no
+ * rating ranks below low and ABOVE info: it may be critical, so it is never
+ * folded into an info sighting of the same issue. It ranked below everything,
+ * and an issue seen rated info and unrated at one place was filed as info.
  */
 const SEVERITY_RANK = ["critical", "high", "medium", "low", "info"];
 function severityRank(severity: string | null): number {
-  const at = SEVERITY_RANK.indexOf((severity ?? "").toLowerCase());
-  return at === -1 ? SEVERITY_RANK.length : at;
+  const at = SEVERITY_RANK.indexOf(ratingOf(severity) ?? "");
+  return at === -1 ? SEVERITY_RANK.indexOf("info") - 0.5 : at;
 }
 
 /** A scan's results folded into the issues they are, as ingest files them. */

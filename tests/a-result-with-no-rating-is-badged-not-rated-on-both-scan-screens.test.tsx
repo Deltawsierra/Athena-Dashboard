@@ -147,6 +147,8 @@ describe("Athena: a result with no rating", () => {
     const [badge] = await badges();
     expect(badge.textContent).toBe("Not rated");
     expect(badge.getAttribute("style")).toMatch(/--muted-foreground/);
+    // The row's border too: a severity colour that does not exist ("--sev-unrated") drew none (round 5).
+    expect(badge.closest("li")!.getAttribute("style")).toMatch(/--muted-foreground/);
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Not rated");
     expect(screen.getByTestId("list-findings").textContent).not.toMatch(/Info/);
   });
@@ -185,6 +187,8 @@ describe("Penetration testing: a result with no rating", () => {
     await startAScan("completed");
     const [badge] = await badges();
     expect(badge.textContent).toBe("not rated");
+    expect(badge.getAttribute("style")).toMatch(/--muted-foreground/);
+    expect(badge.closest("li")!.getAttribute("style")).toMatch(/--muted-foreground/);
     expect(screen.getByTestId("text-count-total").textContent).toBe("1");
   });
 });

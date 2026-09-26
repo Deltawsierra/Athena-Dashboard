@@ -67,6 +67,7 @@ import {
   DecisionPill,
   EvidenceClassChip,
   SeverityPill,
+  severityFrom,
   type Severity,
 } from "@/components/mythos/atoms";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -1506,11 +1507,11 @@ function ProvidersRegistry({
   );
 }
 
-function asSeverity(s: string): Severity {
-  // Lowercased first: a backend "Critical"/"HIGH" must not collapse to the Info
-  // pill because the case did not match.
-  const lower = (s ?? "").toLowerCase();
-  return (["critical", "high", "medium", "low", "info"].includes(lower) ? lower : "info") as Severity;
+export function asSeverity(s: string): Severity {
+  // By the rule every reader uses (any case, trimmed): a backend "Critical" or
+  // "HIGH" must not collapse to the Info pill because the case did not match,
+  // and a severity that is missing or no rating reads "Not rated", never Info.
+  return severityFrom(s);
 }
 
 /**
