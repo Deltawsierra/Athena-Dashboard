@@ -11,7 +11,7 @@ import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
-import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
 import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
@@ -240,6 +240,27 @@ function causeOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/**
+ * The id the kill switch stops a test's unfinished run by (shared/engine-record.ts
+ * stopIdFrom): its run id, or a non-empty id blank after trimming, which no
+ * screen offers a Stop for but a stop still reaches exactly. null otherwise.
+ */
+function unfinishedStopIdOf(test: { findings: unknown; status: string }): string | null {
+  const stopId = stopIdOf(test);
+  return stopId !== null && !FINISHED_RUN_STATES.has(test.status) ? stopId : null;
+}
+
+/**
+ * The id a stop can address a test's engine run by exactly: its run id, or, for
+ * an engine scan, a non-empty id blank after trimming (shared/engine-record.ts
+ * stopIdFrom). Every stop -- the kill switch, a delete, the abort route -- is
+ * sent by this, so none is sent fewer times than a stop can reach; only what a
+ * screen offers (a Stop, or the failsafe panel) goes by the run id alone.
+ */
+function stopIdOf(test: { findings: unknown }): string | null {
+  return runIdOf(test) ?? (isEngineRecord(test.findings) ? engineStopIdOf(test.findings) : null);
+}
+
 /** The run of a test whose engine run may still be running, or null. */
 function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {
   const runId = runIdOf(test);
@@ -289,9 +310,9 @@ function concurrencyRefusal(
     ` This app cannot ask the engine about a scan with no run id, so its record stays running after the engine ` +
     `has stopped it, and a failsafe stops the engine but does not clear the record. If ` +
     `${n === 1 ? "it has" : "they have"} stopped, delete ${n === 1 ? "its record" : "their records"} on the Tests ` +
-    `screen (with force, since no stop can be sent) to free ${n === 1 ? "its place" : "their places"}: ` +
+    `screen to free ${n === 1 ? "its place" : "their places"}: ` +
     `${unnamedRecords.map((one) => `${one.target ?? "a scan with no target"} (test ${one.testId})`).join(", ")}.`;
-  if (unnamed === 0) return `${counted} Stop one -- ${byStop} -- or raise the limit, to start another.`;
+  if (unnamed === 0) return `${counted} Stop one -- ${byStop} -- or raise the limit, to start another.${stale}`;
   const them = (k: number) => (k === 1 ? "it" : "them");
   const noId = (k: number) => `no run id, so no Stop and no kill switch can name ${them(k)}: to stop ` +
     `${k === 1 ? "it" : "one"}, ${byFailsafe}`;
@@ -396,7 +417,7 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
   const rows = await rowsRead;
   const running = rows.ok
     ? rows.value
-      .map((test) => ({ test, runId: unfinishedRunOf(test) }))
+      .map((test) => ({ test, runId: unfinishedStopIdOf(test) }))
       .filter((one): one is { test: (typeof one)["test"]; runId: string } => one.runId !== null)
     : [];
   const scansStopped = Promise.all(running.map(({ test, runId }) => stopScan(req, test, runId, "kill_switch")));
@@ -409,10 +430,15 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
     const covered = new Set(running.map((one) => one.runId));
     const recordedBy = new Map<string, string>();
     for (const test of rows.ok ? rows.value : []) {
-      const runId = runIdOf(test);
+      const runId = stopIdOf(test);
       if (runId !== null) recordedBy.set(runId, test.id);
     }
-    const named = listed.value.filter((run): run is engine.ActiveRun & { runId: string } => run.runId !== null);
+    // Every run a stop can address exactly is sent one (stopIdFrom): a
+    // blank-looking id too, which the screens read as no run id but a stop
+    // still reaches. Only a run no stop can address is left unnamed.
+    const named = listed.value
+      .filter((run): run is engine.ActiveRun & { stopId: string } => run.stopId !== null)
+      .map((run) => ({ ...run, runId: run.stopId }));
     const unnamed = listed.value.length - named.length;
     engineRuns = {
       listed: true,
@@ -441,7 +467,8 @@ async function stopEverythingRunning(req: Request): Promise<{ stops: RecordedSto
  */
 function stopBeforeDeleting(req: Request, tests: Array<{ id: string; findings: unknown; status: string }>): Promise<ScanStop[]> {
   return Promise.all(tests.flatMap((test) => {
-    const runId = unfinishedRunOf(test);
+    // By any id a stop can address exactly, blank-looking ones included.
+    const runId = unfinishedStopIdOf(test);
     return runId === null ? [] : [stopScan(req, test, runId, "delete")];
   }));
 }
@@ -465,7 +492,7 @@ function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): 
 
 /** An engine scan that may still be running and that no stop can name: the engine gave it no run id a stop can address. */
 function unfinishedWithoutRunId(test: { findings: unknown; status: string }): boolean {
-  return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && runIdOf(test) === null;
+  return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && stopIdOf(test) === null;
 }
 
 /**
@@ -1424,7 +1451,10 @@ export function registerRoutes(app: Express): void {
     try {
       live = await engine.activeRuns();
       running = live.length;
-      unnamed = live.filter((run) => run.runId === null).length;
+      // Unnamed: a run no stop can address, so neither a Stop nor the kill
+      // switch reaches it (stopIdFrom). A blank-looking id is reached by the
+      // kill switch, and counted as one it names.
+      unnamed = live.filter((run) => run.stopId === null).length;
     } catch (cause) {
       if (!(cause instanceof engine.EngineUnavailable)) throw cause;
       unlisted = cause.message;
@@ -1435,7 +1465,7 @@ export function registerRoutes(app: Express): void {
         const target = (test.findings as { target?: unknown }).target;
         return { testId: test.id, target: typeof target === "string" ? target : null };
       });
-      unnamed = unnamedRecords.length;
+      unnamed = recorded.filter((test) => unfinishedStopIdOf(test) === null).length;
     }
     if (running >= limit) {
       // A run the engine lists with no run id, at the target of a scan recorded
@@ -1444,7 +1474,7 @@ export function registerRoutes(app: Express): void {
       // read when refusing, and a read that fails matches nothing.
       let recordedById = 0;
       if (unlisted === null && unnamed > 0) {
-        const listedIds = new Set(live.map((run) => run.runId).filter((id): id is string => id !== null));
+        const listedIds = new Set(live.map((run) => run.stopId).filter((id): id is string => id !== null));
         let rows: Awaited<ReturnType<typeof storage.getAllTests>> = [];
         try {
           rows = await storage.getAllTests();
@@ -1456,7 +1486,7 @@ export function registerRoutes(app: Express): void {
           .map((test) => (test.findings as { target?: unknown }).target)
           .filter((target): target is string => typeof target === "string");
         for (const run of live) {
-          if (run.runId !== null || run.target === null) continue;
+          if (run.stopId !== null || run.target === null) continue;
           const at = unlistedTargets.indexOf(run.target);
           if (at === -1) continue;
           unlistedTargets.splice(at, 1);
@@ -1516,7 +1546,10 @@ export function registerRoutes(app: Express): void {
         status: completedInline ? "completed" : "running",
         completedAt: completedInline ? new Date() : null,
         summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
-        findings: { runId: started.runId, target: data.target, results: started.findings },
+        // The id as a stop can address it (stopIdFrom): the run id, or a
+        // non-empty id blank after trimming. The screens read the latter as no
+        // run id (runIdFrom); the kill switch still sends it its stop.
+        findings: { runId: started.stopId ?? started.runId, target: data.target, results: started.findings },
         // Results the engine sent that could not be read (null) count as
         // nothing here; the status route answers them as unread, never as none.
         ...(completedInline
@@ -1530,15 +1563,17 @@ export function registerRoutes(app: Express): void {
       // start failed" left the run going with nothing here able to stop it.
       // So the run just started is stopped, and the answer says what came of
       // that.
-      if (!started.runId || completedInline) throw cause;
-      const stop = await sendStop(req, { runId: started.runId, target: data.target, testId: null }, "start_not_recorded");
+      // By any id a stop can address exactly, blank-looking ones included.
+      const stopId = started.stopId ?? started.runId;
+      if (!stopId || completedInline) throw cause;
+      const stop = await sendStop(req, { runId: stopId, target: data.target, testId: null }, "start_not_recorded");
       return void res.status(500).json({
-        error: `the engine started run ${started.runId} but it could not be recorded here (${causeOf(cause)}); ` +
+        error: `the engine started run ${stopId} but it could not be recorded here (${causeOf(cause)}); ` +
           (stop.stopped
             ? "the run was sent a stop, and the engine accepted it"
             : `the run was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
               "stop it with the kill switch or a failsafe pause"),
-        runId: started.runId,
+        runId: stopId,
         stopped: stop.stopped,
       });
     }
@@ -1603,7 +1638,9 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
-    const runId = runIdOf(test);
+    // By any id a stop can address exactly: a blank-looking id the screens
+    // offer no Stop for is still sent this stop, if asked (stopIdOf).
+    const runId = stopIdOf(test);
     if (!runId && isEngineRecord(test.findings)) {
       // An engine scan the engine accepted without a run id: a stop has nothing
       // to name it by. It is not "no engine run". It is pointed at the kill

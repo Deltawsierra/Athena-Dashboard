@@ -458,6 +458,18 @@ export default function AthenaScan() {
               </span>
             )}
           </div>
+          {mayBeRunning && failsafeOnly && (
+            <div className="mt-3 flex flex-wrap items-center gap-3" data-testid="text-start-held">
+              <p className="text-[12px] text-muted-foreground">
+                Start is off while this scan may still be running. The engine never named it, so this page cannot
+                learn when it stops, and it still counts toward Max Concurrent Tests. Stop it as said below; to start
+                another scan here, set this one aside: it stays listed under Scans running now, with what stops it.
+              </p>
+              <Button type="button" variant="outline" size="sm" onClick={() => setTestId(null)} data-testid="button-set-aside">
+                Set this scan aside
+              </Button>
+            </div>
+          )}
           {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
         </form>
       </GlassCard>

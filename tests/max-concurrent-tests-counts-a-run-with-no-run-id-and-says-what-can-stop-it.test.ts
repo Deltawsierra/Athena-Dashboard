@@ -46,7 +46,7 @@ const BY_STOP = "with its Stop where this app recorded it, or with the kill swit
 const STALE = (records: string) =>
   "This app cannot ask the engine about a scan with no run id, so its record stays running after the engine has " +
   "stopped it, and a failsafe stops the engine but does not clear the record. If it has stopped, delete its record " +
-  `on the Tests screen (with force, since no stop can be sent) to free its place: ${records}.`;
+  `on the Tests screen to free its place: ${records}.`;
 
 beforeAll(async () => {
   engine = http.createServer((req: IncomingMessage, res: ServerResponse) => {

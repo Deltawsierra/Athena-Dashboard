@@ -40,7 +40,7 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import NoStopPanel from "@/components/NoStopPanel";
-import { failsafeOnly, unfinishedRunOf } from "@/lib/engineRuns";
+import { failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
@@ -664,7 +664,12 @@ export default function Tests() {
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>Delete Test</AlertDialogTitle>
                                   <AlertDialogDescription data-testid={`text-delete-warning-${test.id}`}>
-                                    {failsafeOnly(test)
+                                    {failsafeOnly(test) && !noStopCanBeSent(test)
+                                      ? "This scan may still be running. The engine gave it an id no Stop is offered " +
+                                        "for (only space), but a stop can still reach it by that id: deleting it sends " +
+                                        "that stop first, and deletes the test only once the engine accepts it; if it " +
+                                        "does not, nothing is deleted. This action cannot be undone."
+                                      : noStopCanBeSent(test)
                                       ? "This scan may still be running, and the engine gave it no run id a stop can " +
                                         "name, so no stop can be sent: deleting it only removes its record here, and " +
                                         "the run, if it is running, goes on. Stop it from the Failsafe console first " +
@@ -681,10 +686,10 @@ export default function Tests() {
                                 <AlertDialogFooter>
                                   <AlertDialogCancel>Cancel</AlertDialogCancel>
                                   <AlertDialogAction
-                                    onClick={() => deleteMutation.mutate({ id: test.id, force: failsafeOnly(test) })}
+                                    onClick={() => deleteMutation.mutate({ id: test.id, force: noStopCanBeSent(test) })}
                                     data-testid={`button-confirm-delete-${test.id}`}
                                   >
-                                    {failsafeOnly(test) ? "Delete without a stop" : "Delete"}
+                                    {noStopCanBeSent(test) ? "Delete without a stop" : "Delete"}
                                   </AlertDialogAction>
                                 </AlertDialogFooter>
                               </AlertDialogContent>

@@ -16,7 +16,7 @@
  */
 
 import * as settings from "./settings";
-import { runIdFrom } from "@shared/engine-record";
+import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
@@ -61,6 +61,12 @@ export interface EngineScan {
   detail: string;
   /** The engine's own refusal, when it refused. Shown verbatim. */
   refused?: string;
+  /**
+   * The id a stop can address this run by exactly (shared/engine-record.ts
+   * stopIdFrom): `runId`, or a non-empty id that is blank after trimming, which
+   * the screens treat as none but a stop still reaches. Set by startScan only.
+   */
+  stopId?: string | null;
 }
 
 export class EngineUnavailable extends Error {}
@@ -338,6 +344,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     // its digits. Cast as a string, `run_id: 42` was recorded as the number and
     // then read as no run id at all, so nothing could name the run to stop it.
     runId: runIdFrom(payload.run_id),
+    stopId: stopIdFrom(payload.run_id),
     state: (payload.state as string) ?? "running",
     findings: inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
@@ -667,6 +674,12 @@ export interface ActiveRun {
    * could not be stopped from here.
    */
   runId: string | null;
+  /**
+   * The id the kill switch sends its stop by (shared/engine-record.ts
+   * stopIdFrom): `runId`, or a non-empty id blank after trimming, which a stop
+   * still reaches exactly. null only when no stop can address the run.
+   */
+  stopId: string | null;
   target: string | null;
   state: string;
 }
@@ -700,11 +713,12 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   // is a live run with no id a stop can name.
   return listed.map((one): ActiveRun => {
     if (one === null || typeof one !== "object" || Array.isArray(one)) {
-      return { runId: runIdFrom(one), target: null, state: "unknown" };
+      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown" };
     }
     const run = one as Record<string, unknown>;
     return {
       runId: runIdFrom(run.run_id),
+      stopId: stopIdFrom(run.run_id),
       target: typeof run.target === "string" ? run.target : null,
       state: typeof run.state === "string" ? run.state : "unknown",
     };

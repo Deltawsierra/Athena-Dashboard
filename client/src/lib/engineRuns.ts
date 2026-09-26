@@ -5,7 +5,7 @@
  * server would stop.
  */
 
-import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
 
 /** Engine run states after which nothing more happens. */
 export const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
@@ -27,4 +27,14 @@ export function unfinishedRunOf(test: { findings: unknown; status: string }): st
  */
 export function failsafeOnly(test: { findings: unknown; status: string }): boolean {
   return !FINISHED_RUN_STATES.has(test.status) && isEngineRecord(test.findings) && engineRunIdOf(test.findings) === null;
+}
+
+/**
+ * Whether no stop at all can be sent to such a scan: its id is none a stop can
+ * address exactly (shared/engine-record.ts stopIdFrom). A blank-looking id is
+ * no run id to the screens, but the server still sends a stop by it -- on a
+ * delete, and from the kill switch -- so deleting that scan needs no force.
+ */
+export function noStopCanBeSent(test: { findings: unknown; status: string }): boolean {
+  return failsafeOnly(test) && engineStopIdOf(test.findings) === null;
 }

@@ -11,10 +11,11 @@
  *
  * And what was never pinned:
  * - a run id padded with space is a run id, as the engine sent it: its own
- *   Stop and the kill switch send it a stop. One that is only space was one
- *   too until round 5; by the owner's decision it is now no run id -- a breach
- *   of the engine's contract (athena-engine #71: a path-safe uuid) -- counted
- *   and said as a live run no stop can name, and no stop URL is sent for it;
+ *   Stop and the kill switch send it a stop. One that is only space is no run
+ *   id to the screens since round 5 -- a breach of the engine's contract
+ *   (athena-engine #71: a path-safe uuid), shown with the failsafe panel -- but
+ *   the kill switch still sends it its stop, which reaches the engine's route
+ *   with the exact id: it never sends fewer stops than before;
  * - a live run with no run id is counted in every live state the engine lists
  *   (queued, running, aborting), not only "running";
  * - the count of those runs is written to the audit log, not only answered;
@@ -142,19 +143,17 @@ describe("a run id padded with space, and one that is only space", () => {
     expect(aborts).toEqual(expect.arrayContaining(["POST /api/scans/%2042%20/abort", "POST /api/scans/%097/abort"]));
   });
 
-  it("only space, it is no run id: its Stop says what stops it, the kill switch counts it as unnamed, and no stop URL is sent", async () => {
+  it("only space, it is no run id to the screens, and the kill switch still sends it its stop, recorded or only listed", async () => {
     startBody = () => ({ run_id: " ", state: "running" });
     const { test, runId } = await startScan();
     expect(runId).toBeNull();
-    const before = calls.length;
-    const stopped = await agent.post(`/api/scans/${test.id}/abort`);
-    expect(stopped.status).toBe(409);
-    expect(stopped.body.stop).toBe("failsafe");
     active = [{ run_id: " ", state: "running" }, { run_id: "\t", state: "queued" }];
     const { body, aborts } = await engage();
-    expect(body.engineRuns).toEqual({ listed: true, runs: [], unnamed: 2 });
-    expect(aborts).toEqual([]);
-    expect(calls.slice(before).filter((one) => one.endsWith("/abort"))).toEqual([]);
+    expect(body.stops.scans).toContainEqual(expect.objectContaining({ testId: test.id, runId: " ", stopped: true }));
+    expect(body.engineRuns).toEqual({
+      listed: true, runs: [{ runId: "\t", target: null, testId: null, stopped: true, detail: "" }],
+    });
+    expect(aborts.sort()).toEqual(["POST /api/scans/%09/abort", "POST /api/scans/%20/abort"]);
   });
 });
 

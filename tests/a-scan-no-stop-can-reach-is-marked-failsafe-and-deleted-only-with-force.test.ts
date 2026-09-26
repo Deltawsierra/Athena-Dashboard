@@ -13,6 +13,13 @@
  *   "/" or a "\", which the engine's router splits or refuses ("a/b" went to
  *   `/api/scans/a%2Fb/abort`, answered 404). No stop URL is ever sent for one;
  *   every other id is sent verbatim, percent-encoded.
+ * - The screens' rule is not the stops' rule. A non-empty id blank after
+ *   trimming (" ", "\t") is no run id to the screens -- they show the failsafe
+ *   panel -- but a stop by it reaches the engine's route with the exact id, so
+ *   every stop is still sent by it: the kill switch, a delete, the abort route.
+ *   The kill switch never sends fewer stops than it did before round 5. Only
+ *   "", "." and "..", and an id with a "/" or a "\", get no stop: one by them
+ *   would reach a different route, or none.
  * - Deleting such a scan while it may still be running was answered 200 at
  *   once, with no stop -- none can name it -- and no warning. It is refused
  *   (409) unless forced, and a forced delete says no stop was sent.
@@ -27,7 +34,7 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { runIdFrom } from "@shared/engine-record";
+import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import type { IStorage } from "../server/storage";
 import { makeApp, signIn } from "./helpers";
 
@@ -98,7 +105,15 @@ describe("a run id no stop can address", () => {
     }
   });
 
-  for (const runId of [" ", ".", "..", "a/b", "a\\b"]) {
+  it("a stop is still sent by a non-empty id blank after trimming; never by '', '.', '..', or one with a '/' or a '\\'", () => {
+    for (const blank of [" ", "\t", " \n "]) expect(stopIdFrom(blank), JSON.stringify(blank)).toBe(blank);
+    for (const none of ["", ".", "..", "a/b", "/", "../x", "a\\b", "\\"]) {
+      expect(stopIdFrom(none), JSON.stringify(none)).toBeNull();
+    }
+    expect(stopIdFrom(42)).toBe("42");
+  });
+
+  for (const runId of [".", "..", "a/b", "a\\b"]) {
     it(`${JSON.stringify(runId)} from a start is recorded as none, marked failsafe, and no stop URL is ever sent for it`, async () => {
       const { test, runId: recorded, stop } = await start({ run_id: runId, state: "running" });
       expect(recorded).toBeNull();
@@ -114,14 +129,52 @@ describe("a run id no stop can address", () => {
     });
   }
 
+  it("\" \" from a start is no run id to the screens -- marked failsafe -- but every stop is still sent by it", async () => {
+    const { test, runId: recorded, stop } = await start({ run_id: " ", state: "running" });
+    expect(recorded).toBeNull();
+    expect(stop).toBe("failsafe");
+    expect((await agent.get(`/api/scans/${test.id}`)).body.stop).toBe("failsafe");
+    // The abort route, asked, sends it.
+    const stopped = await agent.post(`/api/scans/${test.id}/abort`);
+    expect(stopped.status, JSON.stringify(stopped.body)).toBe(200);
+    expect(seen).toContain("POST /api/scans/%20/abort");
+    // The kill switch sends it, recorded here or only listed by the engine.
+    seen.length = 0;
+    active = [{ run_id: " ", target: TARGET, state: "running" }, { run_id: "\t", state: "queued" }];
+    const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
+    expect(engaged.status, JSON.stringify(engaged.body)).toBe(200);
+    expect(engaged.body.stops.scans).toContainEqual(expect.objectContaining({ testId: test.id, runId: " ", stopped: true }));
+    expect(engaged.body.engineRuns).toEqual({
+      listed: true, runs: [{ runId: "\t", target: null, testId: null, stopped: true, detail: "" }],
+    });
+    expect(seen.filter((one) => one.endsWith("/abort")).sort()).toEqual(["POST /api/scans/%09/abort", "POST /api/scans/%20/abort"]);
+    await agent.patch("/api/ai-control").send({ killSwitchEnabled: false });
+    // A delete sends it first, and needs no force: a stop was sent, and the engine accepted it.
+    seen.length = 0;
+    const deleted = await agent.delete(`/api/tests/${test.id}`);
+    expect(deleted.status, JSON.stringify(deleted.body)).toBe(200);
+    expect(deleted.body.stops).toEqual([expect.objectContaining({ runId: " ", stopped: true })]);
+    expect(seen).toEqual(["POST /api/scans/%20/abort"]);
+  });
+
+  it("the kill switch sends a stop to \" \" and never one to '..'", async () => {
+    active = [" ", ".."];
+    const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
+    expect(engaged.status).toBe(200);
+    expect(engaged.body.engineRuns).toEqual({
+      listed: true, runs: [{ runId: " ", target: null, testId: null, stopped: true, detail: "" }], unnamed: 1,
+    });
+    expect(seen.filter((one) => one.endsWith("abort"))).toEqual(["POST /api/scans/%20/abort"]);
+  });
+
   it("the kill switch sends every other id its stop, verbatim and percent-encoded, and none to a route it would miss", async () => {
     active = [" 42 ", "-5", "0", "...", "a.b", "..", ".", "a/b", " ", "a\\b"];
     const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
     expect(engaged.status).toBe(200);
-    expect(engaged.body.engineRuns.unnamed).toBe(5);
+    expect(engaged.body.engineRuns.unnamed).toBe(4);
     expect(seen.filter((one) => one.startsWith("POST") && one.endsWith("/abort")).sort()).toEqual([
       "POST /api/scans/%2042%20/abort", "POST /api/scans/-5/abort", "POST /api/scans/.../abort",
-      "POST /api/scans/0/abort", "POST /api/scans/a.b/abort",
+      "POST /api/scans/0/abort", "POST /api/scans/a.b/abort", "POST /api/scans/%20/abort",
     ].sort());
   });
 });

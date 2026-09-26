@@ -17,6 +17,13 @@
  * does not know -- the first read still on its way, or a read that failed --
  * the Stop stays.
  *
+ * The panel links the Failsafe console and the AI Control page only for an
+ * admin: for anyone else neither is routed, and a link opened "not found".
+ * Anyone else is told to ask an admin. And the screen that started such a scan
+ * says, beside its Start button, why Start is off -- the scan the engine never
+ * named still counts -- and lets it be set aside, still listed under "Scans
+ * running now", to start another.
+ *
  * Athena and Penetration Testing run against the real routes, served over
  * HTTP and signed in, with an engine each test tells what to answer.
  */
@@ -25,7 +32,7 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
@@ -161,8 +168,13 @@ for (const [name, Screen] of [["Athena", AthenaScan], ["Penetration testing", Pe
         render(<QueryClientProvider client={queryClient}><Screen /></QueryClientProvider>);
         await startAScan();
         const panel = await screen.findByTestId("panel-no-stop");
-        expectPanelNotStop(panel);
+        await waitFor(() => expectPanelNotStop(panel));
         expect(screen.queryByTestId("button-stop-scan")).toBeNull();
+        // Start is off while the scan may be running, and says why beside it.
+        expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(true);
+        expect(screen.getByTestId("text-start-held").textContent).toMatch(
+          /^Start is off while this scan may still be running\. The engine never named it, so this page cannot learn when it stops, and it still counts toward Max Concurrent Tests\./,
+        );
         // Still so once the scan has been read again.
         await waitFor(() => expect(sent.some((one) => /^GET \/api\/scans\/[0-9a-f-]{36}$/.test(one))).toBe(true));
         expect(screen.getByTestId("panel-no-stop")).toBeTruthy();
@@ -173,7 +185,37 @@ for (const [name, Screen] of [["Athena", AthenaScan], ["Penetration testing", Pe
     }
   });
 
+  describe(`${name}: a scan the engine never named can be set aside to start another`, () => {
+    it("Set this scan aside turns Start on, and the scan stays listed under Scans running now with the panel", async () => {
+      startBody = () => ({ state: "running" });
+      realRoutes();
+      render(<QueryClientProvider client={queryClient}><Screen /></QueryClientProvider>);
+      await startAScan();
+      await screen.findByTestId("panel-no-stop");
+      const started = document.querySelector('[data-testid="text-start-held"]');
+      expect(started).toBeTruthy();
+      fireEvent.click(screen.getByTestId("button-set-aside"));
+      await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
+      expect(screen.queryByTestId("text-start-held")).toBeNull();
+      const listed = await screen.findByTestId("list-running-scans", {}, { timeout: 4_000 }).catch(async () => {
+        // The list is read again on its own interval; a refetch brings the set-aside scan in.
+        await queryClient.invalidateQueries({ queryKey: ["/api/tests"] });
+        return screen.findByTestId("list-running-scans");
+      });
+      await waitFor(() => expect(listed.querySelector('[data-testid^="panel-no-stop-"]')).toBeTruthy());
+    });
+  });
+
   describe(`${name}: a scan with a run id keeps its Stop`, () => {
+    it("and no Start note is shown", async () => {
+      startBody = (runId) => ({ run_id: runId, state: "running" });
+      realRoutes();
+      render(<QueryClientProvider client={queryClient}><Screen /></QueryClientProvider>);
+      await startAScan();
+      await waitFor(() => expect(screen.getByTestId("button-stop-scan")).toBeTruthy());
+      expect(screen.queryByTestId("text-start-held")).toBeNull();
+    });
+
     it("while the first read is still on its way", async () => {
       startBody = (runId) => ({ run_id: runId, state: "running" });
       realRoutes({ read: "pending" });
@@ -209,7 +251,7 @@ describe("Scans running now", () => {
     const row = await screen.findByTestId(`running-scan-${unnamed.body.test.id}`);
     expect(row.textContent).toContain("https://nostop.example/unnamed");
     expect(row.textContent).toContain("no run id from the engine");
-    expectPanelNotStop(screen.getByTestId(`panel-no-stop-${unnamed.body.test.id}`));
+    await waitFor(() => expectPanelNotStop(screen.getByTestId(`panel-no-stop-${unnamed.body.test.id}`)));
     expect(screen.queryByTestId(`button-stop-scan-${unnamed.body.test.id}`)).toBeNull();
     expect(screen.getByTestId(`button-stop-scan-${named.body.test.id}`)).toBeTruthy();
   });
@@ -223,16 +265,20 @@ describe("the Tests screen", () => {
     executedBy: null, isSample: false,
   };
   const UNNAMED = { ...BASE, id: "unnamed", status: "running", findings: { runId: null, target: "https://acme.example/", results: null } };
+  /** A scan the engine started with the id " ": no run id to the screens, but a stop still reaches it by that id. */
+  const BLANK = { ...BASE, id: "blank", status: "running", findings: { runId: " ", target: "https://acme.example/", results: null } };
+  const ADMIN = { id: "u1", username: "admin", role: "admin" };
+  const ANALYST = { id: "u2", username: "analyst", role: "analyst" };
   const NAMED = { ...BASE, id: "named", status: "running", findings: { runId: "run-7", target: "https://acme.example/", results: null } };
 
-  function serve() {
+  function serve(user: Record<string, unknown> | null = ADMIN) {
     const writes: Array<{ method: string; url: string }> = [];
     const data: Record<string, unknown> = {
-      "/api/tests": [UNNAMED, NAMED],
+      "/api/tests": [UNNAMED, NAMED, BLANK],
       "/api/clients": [{ id: "c1", name: "Acme", company: "Acme", status: "active" }],
       "/api/sites": [],
       "/api/sample-data": { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 },
-      "/api/auth/check": { authenticated: true, user: null },
+      "/api/auth/check": { authenticated: true, user },
     };
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       const method = init?.method ?? "GET";
@@ -251,7 +297,8 @@ describe("the Tests screen", () => {
 
   it("shows the panel for a running scan with no run id, and says deleting its record frees its place; a named one keeps its Stop", async () => {
     serve();
-    expectPanelNotStop(await screen.findByTestId("panel-no-stop-unnamed"));
+    const panel = await screen.findByTestId("panel-no-stop-unnamed");
+    await waitFor(() => expectPanelNotStop(panel));
     expect(screen.queryByTestId("button-stop-unnamed")).toBeNull();
     expect(screen.getByTestId("text-no-stop-record-unnamed").textContent).toMatch(/delete this record to free its place\.$/);
     expect(screen.getByTestId("button-stop-named")).toBeTruthy();
@@ -268,6 +315,36 @@ describe("the Tests screen", () => {
     expect(confirm.textContent).toBe("Delete without a stop");
     fireEvent.click(confirm);
     await waitFor(() => expect(writes).toEqual([{ method: "DELETE", url: "/api/tests/unnamed?force=1" }]));
+  });
+
+  it("for anyone not an admin, links to neither admin page, and says to ask an admin", async () => {
+    serve(ANALYST);
+    const panel = await screen.findByTestId("panel-no-stop-unnamed");
+    await waitFor(() => expect(within(panel).getByTestId("text-ask-an-admin")).toBeTruthy());
+    expect(within(panel).getByTestId("text-ask-an-admin").textContent).toMatch(
+      /^To stop it, ask an admin to use the Failsafe console \(pause, stand down or terminate the engine\) or the kill switch on the AI Control page/,
+    );
+    expect(panel.querySelector('a[href="/failsafe"]')).toBeNull();
+    expect(panel.querySelector('a[href="/ai-control"]')).toBeNull();
+    expect(panel.querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("an admin is given both links, and no ask-an-admin sentence", async () => {
+    serve(ADMIN);
+    const panel = await screen.findByTestId("panel-no-stop-unnamed");
+    await waitFor(() => expect(panel.querySelector('a[href="/failsafe"]')).toBeTruthy());
+    expect(within(panel).queryByTestId("text-ask-an-admin")).toBeNull();
+  });
+
+  it("a scan the engine started with the id \" \" shows the panel, and is deleted without force: a stop still reaches it", async () => {
+    const writes = serve();
+    await screen.findByTestId("panel-no-stop-blank");
+    expect(screen.queryByTestId("button-stop-blank")).toBeNull();
+    fireEvent.click(screen.getByTestId("button-delete-blank"));
+    expect((await screen.findByTestId("text-delete-warning-blank")).textContent).toMatch(/a stop can still reach it by that id/);
+    expect(screen.getByTestId("button-confirm-delete-blank").textContent).toBe("Delete");
+    fireEvent.click(screen.getByTestId("button-confirm-delete-blank"));
+    await waitFor(() => expect(writes).toEqual([{ method: "DELETE", url: "/api/tests/blank" }]));
   });
 
   it("a named running scan is deleted without force: its stop is sent first, by the server", async () => {

@@ -42,22 +42,43 @@ function recordOf(findings: unknown): Record<string, unknown> | null {
  * - one that is blank after trimming ("", " ", "\t");
  * - "." and "..", which the URL resolves away: a stop for ".." was sent to
  *   `POST /api/abort`, and one for "." to `POST /api/scans/abort`;
- * - one with a "/" or a "\" in it, which the engine's router splits or
- *   refuses: "a/b" was sent to `/api/scans/a%2Fb/abort` and answered 404.
+ * - one with a "/" or a "\", which the engine's router splits or refuses:
+ *   "a/b" was sent to `/api/scans/a%2Fb/abort` and answered 404.
  * Every other string is kept verbatim, space included, and a stop sends it
  * percent-encoded (server/engine.ts).
+ *
+ * This is what the screens offer a Stop for. The kill switch sends more: see
+ * stopIdFrom.
  */
 export function runIdFrom(value: unknown): string | null {
+  const id = stopIdFrom(value);
+  return id !== null && id.trim() !== "" ? id : null;
+}
+
+/**
+ * The id the kill switch sends a stop by: every id a stop can address exactly,
+ * as one path segment -- runIdFrom's, and a non-empty id that is blank after
+ * trimming too (" ", "\t"). Such an id is no run id to the screens (they show
+ * what stops the scan in place of a Stop), but a stop sent by it reaches the
+ * engine's route with the exact id, and the kill switch never sends fewer stops
+ * than it can. "", "." and "..", and an id with a "/" or a "\", get none: a
+ * stop by them would reach a different route, or none.
+ */
+export function stopIdFrom(value: unknown): string | null {
   if (typeof value === "string") return isAddressableRunId(value) ? value : null;
   if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
   return null;
 }
 
-/** Whether a stop can address exactly this run by this id, as one path segment (see runIdFrom). */
+/** Whether a stop can address exactly this run by this id, as one path segment (see stopIdFrom). */
 function isAddressableRunId(value: string): boolean {
-  if (value.trim() === "") return false;
-  if (value === "." || value === "..") return false;
+  if (value === "" || value === "." || value === "..") return false;
   return !value.includes("/") && !value.includes("\\");
+}
+
+/** The id the kill switch stops a record's run by (stopIdFrom), or null when a stop can address none. */
+export function engineStopIdOf(findings: unknown): string | null {
+  return stopIdFrom(recordOf(findings)?.runId);
 }
 
 /** The engine run a record names, or null when it names none. */
