@@ -79,6 +79,11 @@ function causeOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** Said of a watch whose row could not be written: it is watched, but a restart would lose it. */
+function unrecordedSentence(cause: unknown): string {
+  return `this watch could not be recorded yet (${causeOf(cause)}); a restart now would lose it`;
+}
+
 function later(fn: () => void, ms: number): void {
   const timer = setTimeout(fn, ms);
   // A watch never keeps the process alive on its own.
@@ -123,7 +128,7 @@ export class RetestWatcher {
       await this.storage.createRetestWatch(row);
     } catch (cause) {
       this.unrecorded.add(row.engineRunId);
-      row.lastReadError = `this watch could not be recorded yet (${causeOf(cause)}); a restart now would lose it`;
+      row.lastReadError = unrecordedSentence(cause);
     }
     this.follow(row.engineRunId);
     return row;
@@ -239,17 +244,20 @@ export class RetestWatcher {
     if (!this.current(engineRunId, token)) return;
     const row = this.known.get(engineRunId);
     if (!row) return this.done(engineRunId, token);
+    let notRecorded: unknown = null;
     try {
       if (this.unrecorded.has(engineRunId)) {
         await this.storage.createRetestWatch(row);
         this.unrecorded.delete(engineRunId);
         row.lastReadError = null;
       }
-    } catch {
-      // Tried again on the next read.
+    } catch (cause) {
+      // Tried again on the next read, and said until it succeeds.
+      notRecorded = cause;
     }
     try {
       await this.step(row, token);
+      if (notRecorded !== null && this.unrecorded.has(engineRunId)) row.lastReadError = unrecordedSentence(notRecorded);
     } catch (cause) {
       // A write or a filing that failed is said, and tried again: the run's
       // verdict is not lost to one failed write.
