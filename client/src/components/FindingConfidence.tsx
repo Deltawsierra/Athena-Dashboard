@@ -39,6 +39,18 @@ const NO_CONFIDENCE = "no confidence recorded";
 /** Said where the engine sent a confidence that cannot be printed as a number. */
 const CONFIDENCE_NOT_A_NUMBER = "confidence not shown: the engine sent a value that is not a number";
 
+/**
+ * Whether a basis has anything in it to read: a character that is not a space,
+ * a separator, or a control, format, private-use or unassigned one (`\p{C}`,
+ * `\p{Z}`). A basis of only zero-width spaces, NULs or soft hyphens printed
+ * "The engine's basis for this number: " followed by nothing a person sees or a
+ * screen reader reads.
+ *
+ * Built with the constructor: the client's tsconfig names no target, and tsc
+ * refuses the `u` flag in a literal below ES6. Every browser the app ships to has it.
+ */
+const VISIBLE = new RegExp("[^\\s\\p{C}\\p{Z}]", "u");
+
 /** The engine's basis, as it sent it, said to be the engine's. */
 function engineBasis(basis: string): string {
   return `The engine's basis for this number: ${basis}`;
@@ -67,7 +79,8 @@ function findingConfidence(finding: EngineConfidence): { value: string; basis: s
     return { value: CONFIDENCE_NOT_A_NUMBER, basis: null };
   }
   const value = `confidence ${asSent(confidence)}`;
-  if (typeof basis === "string" && basis.trim() !== "") return { value, basis: engineBasis(basis) };
+  // Shown verbatim, invisible characters and all, when there is something to read in it.
+  if (typeof basis === "string" && VISIBLE.test(basis)) return { value, basis: engineBasis(basis) };
   if (basis === undefined || basis === null || typeof basis === "string") return { value, basis: NO_BASIS };
   return { value, basis: BASIS_NOT_TEXT };
 }

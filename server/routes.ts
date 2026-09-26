@@ -10,6 +10,7 @@ import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
+import { isEngineInternal } from "@shared/engine-internal";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import {
@@ -138,8 +139,10 @@ function countSeverities(findings: unknown[]): {
     if (!finding || typeof finding !== "object") continue;
     const entry = finding as Record<string, unknown>;
     // The engine marks its own diagnostics `internal`. They are worth showing
-    // and they are not vulnerabilities, so they are not counted as any.
-    if (entry.internal === true) continue;
+    // and they are not vulnerabilities, so they are not counted as any. Any
+    // truthy mark is one, as athena-engine's `engine/utils/scoring.py` reads it
+    // (`if item.get("internal"):`), and as both scan screens list it.
+    if (isEngineInternal(entry.internal)) continue;
     total += 1;
     const severity = String(entry.severity ?? "").toLowerCase();
     if (severity in counts) counts[severity as keyof typeof counts] += 1;
@@ -169,9 +172,30 @@ function runIdOf(test: { findings: unknown }): string | null {
   return typeof runId === "string" && runId !== "" ? runId : null;
 }
 
-/** Whether one of a run's recorded results is a finding a screen can read: a record. */
+/** The fields of a finding the scan screens print as text. */
+const RESULT_TEXT_FIELDS = ["type", "message", "details", "severity"] as const;
+
+/**
+ * Whether one of a run's results is a finding a screen can read: a record whose
+ * text fields are text, or absent (null is absent). The screens print them as
+ * they are, and a `message` that is an object threw "Objects are not valid as a
+ * React child" and blanked the whole page.
+ */
 function isResultRow(row: unknown): boolean {
-  return row !== null && typeof row === "object" && !Array.isArray(row);
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return false;
+  const entry = row as Record<string, unknown>;
+  return RESULT_TEXT_FIELDS.every(
+    (field) => entry[field] === undefined || entry[field] === null || typeof entry[field] === "string",
+  );
+}
+
+/**
+ * A run's results, when every one can be shown; null when they cannot be read:
+ * not a list, or with a row that is not a readable finding. One row that cannot
+ * be shown makes the list unread, said to be so, and never a shorter list.
+ */
+function readableResults(results: unknown): unknown[] | null {
+  return Array.isArray(results) && results.every(isResultRow) ? results : null;
 }
 
 /** Engine run states after which nothing more happens. */
@@ -446,6 +470,22 @@ function sameValue(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
+/**
+ * Whether a test is an engine scan: its findings carry a run id, the target the
+ * scan route recorded, or the run's results. Only `POST /api/scans` writes a
+ * `target` or `results` (a person's test that sends either is refused), so a run
+ * the engine finished inline without a run id is an engine scan all the same:
+ * guarded by its run id alone, its counts could be edited to disagree with the
+ * findings the scan screens list from it. A key recorded as null is none.
+ */
+function isEngineRecord(test: { findings: unknown }): boolean {
+  if (runIdOf(test) !== null) return true;
+  const recorded = test.findings;
+  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return false;
+  const { target, results } = recorded as Record<string, unknown>;
+  return typeof target === "string" || (results !== undefined && results !== null);
+}
+
 function engineRecordEdited(
   res: Response,
   before: { findings: unknown } & Record<string, unknown>,
@@ -454,7 +494,7 @@ function engineRecordEdited(
   const sent = data.findings && typeof data.findings === "object" && !Array.isArray(data.findings)
     ? (data.findings as Record<string, unknown>)
     : null;
-  if (runIdOf(before) === null) return suppliedEngineKeys(res, data.findings);
+  if (!isEngineRecord(before)) return suppliedEngineKeys(res, data.findings);
 
   const recorded = before.findings as Record<string, unknown>;
   const changed: string[] = ENGINE_OWNED_TEST_FIELDS.filter(
@@ -1302,6 +1342,8 @@ export function registerRoutes(app: Express): void {
         completedAt: completedInline ? new Date() : null,
         summary: `${data.target} — engine run ${started.runId ?? "unknown"}`,
         findings: { runId: started.runId, target: data.target, results: started.findings },
+        // Results the engine sent that could not be read (null) count as
+        // nothing here; the status route answers them as unread, never as none.
         ...(completedInline
           ? countSeverities(started.findings ?? [])
           : { severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0 }),
@@ -1331,20 +1373,26 @@ export function registerRoutes(app: Express): void {
     // log write that fails is reported, and the page still gets its test.
     let filed: lifecycle.IngestResult | null = null;
     let notFiled: string | null = null;
-    try {
-      // File what came back as findings with a life of their own. A scan that
-      // completes inline has its results now; one still running is filed when
-      // it finishes, on the status route.
-      filed = await lifecycle.ingest(storage, started.findings ?? [], {
-        clientId: data.clientId,
-        siteId: data.siteId ?? null,
-        engagementRef,
-        target: data.target,
-        testId: test.id,
-        runId: started.runId ?? null,
-      });
-    } catch (cause) {
-      notFiled = causeOf(cause);
+    if (started.findings === null) {
+      // Results the engine sent that could not be read are filed as nothing,
+      // and said so; the record holds them as unread.
+      notFiled = "the engine's results for this run could not be read";
+    } else {
+      try {
+        // File what came back as findings with a life of their own. A scan that
+        // completes inline has its results now; one still running is filed when
+        // it finishes, on the status route.
+        filed = await lifecycle.ingest(storage, started.findings, {
+          clientId: data.clientId,
+          siteId: data.siteId ?? null,
+          engagementRef,
+          target: data.target,
+          testId: test.id,
+          runId: started.runId ?? null,
+        });
+      } catch (cause) {
+        notFiled = causeOf(cause);
+      }
     }
 
     try {
@@ -1422,6 +1470,14 @@ export function registerRoutes(app: Express): void {
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
     const runId = typeof recorded.runId === "string" ? recorded.runId : null;
+    // A test no engine run stands behind -- a person's, or a sample row -- has
+    // no findings of a run's to answer, completed or not. Only the scan route
+    // writes a run id or a target, so a record with neither was never a run.
+    if (!runId && typeof recorded.target !== "string") {
+      return void res.json({
+        test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
+      });
+    }
     if (test.status === "completed") {
       // The engine is not asked again about a run recorded as completed, so what
       // it returned is what was recorded then: the last poll's findings, or the
@@ -1430,8 +1486,8 @@ export function registerRoutes(app: Express): void {
       // `engine: null`, and the scan screens read that as "returned no findings"
       // beside the counts those same findings were counted into. Findings that
       // cannot be read are said to be unread, never answered as none.
-      const results = recorded.results;
-      if (!Array.isArray(results) || !results.every(isResultRow)) {
+      const results = readableResults(recorded.results);
+      if (results === null) {
         return void res.json({
           test, state: test.status, engine: null,
           detail: "the findings recorded for this scan could not be read",
@@ -1462,8 +1518,10 @@ export function registerRoutes(app: Express): void {
       throw cause;
     }
 
-    // Counted from what came back, never from what was asked for.
-    const counts = countSeverities(current.findings);
+    // Counted from what came back, never from what was asked for. Results the
+    // engine sent that could not be read (null: not a list) are recorded as
+    // unread and not counted: the counts stay as the last readable ones left them.
+    const counts = current.findings === null ? {} : countSeverities(current.findings);
     const finished = current.state === "completed" || current.state === "aborted"
       || current.state === "failed";
 
@@ -1478,11 +1536,11 @@ export function registerRoutes(app: Express): void {
     // would record half a picture as the current state of the engagement,
     // and the next poll would file the same findings again.
     let filed: lifecycle.IngestResult | null = null;
-    if (finished) {
+    if (finished && current.findings !== null) {
       const client = await storage.getClient(test.clientId);
       const site = test.siteId ? await storage.getSite(test.siteId) : null;
       if (client) {
-        filed = await lifecycle.ingest(storage, current.findings ?? [], {
+        filed = await lifecycle.ingest(storage, current.findings, {
           clientId: client.id,
           siteId: test.siteId ?? null,
           engagementRef: site ? `${client.id}:${site.id}` : client.id,
@@ -1493,6 +1551,15 @@ export function registerRoutes(app: Express): void {
       }
     }
 
+    // Findings the screens cannot show are said to be unread, with the reason,
+    // and never answered as a list: not as none, and not as a row that blanks the
+    // page. The same rule answers them once the run is recorded as completed.
+    if (readableResults(current.findings) === null) {
+      return void res.json({
+        test: updated ?? test, state: current.state, engine: null, filed,
+        detail: "the findings the engine sent for this run could not be read",
+      });
+    }
     res.json({ test: updated ?? test, state: current.state, engine: current, filed });
   }));
 
@@ -3591,7 +3658,7 @@ export function registerRoutes(app: Express): void {
           header,
           severity: typeof finding.severity === "string" ? finding.severity : undefined,
           message: typeof finding.message === "string" ? finding.message : undefined,
-          internal: finding.internal === true,
+          internal: isEngineInternal(finding.internal),
         });
       }
     }

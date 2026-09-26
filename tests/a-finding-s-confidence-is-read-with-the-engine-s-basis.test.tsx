@@ -45,6 +45,11 @@ const HTML_BASIS =
   `<img src="x" onerror="window.__basisRan = 1"><b>ordinal</b> & "not" a 'probability' ` +
   `<script>window.__basisRan = 2</script></p>`;
 
+/** A basis with text in it among characters nobody sees. */
+const VISIBLE_AMONG_INVISIBLE = "\u200bordinal:\u00ad derived\u2060 from signals\u0007";
+/** A basis with spaces around it, which is shown as the engine sent it. */
+const PADDED_BASIS = "  ordinal: padded  ";
+
 const engines = (basis: string) => `The engine's basis for this number: ${basis}`;
 const NO_BASIS = "The engine sent no basis for this number.";
 const BASIS_NOT_TEXT = "The engine sent a basis for this number that is not text, so it is not shown.";
@@ -71,6 +76,14 @@ const FINDINGS = [
   finding("a tiny value", { confidence: 0.004, confidence_basis: BASIS }),
   finding("a percentage-sized value", { confidence: 52 }),
   finding("markup in the basis", { confidence: 0.8, confidence_basis: HTML_BASIS }),
+  // Nothing to read: zero-width and format characters, controls, separators.
+  finding("a zero-width basis", { confidence: 0.45, confidence_basis: "\u200b" }),
+  finding("a basis of controls", { confidence: 0.45, confidence_basis: "\u0000\u0007" }),
+  finding("a basis of format characters", { confidence: 0.45, confidence_basis: "\u00ad\u2060\ufeff\u200d" }),
+  finding("a basis of separators", { confidence: 0.45, confidence_basis: "\u00a0\u2028\u3000 \t\n" }),
+  // Something to read, with invisible characters and padding around it: shown as sent.
+  finding("text among invisible characters", { confidence: 0.45, confidence_basis: VISIBLE_AMONG_INVISIBLE }),
+  finding("a padded basis", { confidence: 0.45, confidence_basis: PADDED_BASIS }),
 ];
 
 const SEED = (): Array<[unknown[], unknown]> => [
@@ -218,6 +231,17 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
         expect(row(message).textContent).not.toContain("ordinal");
         expect(row(message).textContent).not.toContain("[object Object]");
       }
+    });
+
+    it("says the engine sent no basis where its basis has nothing to read, and shows one with text in it as sent", async () => {
+      mount(<Page />);
+      await startAScan();
+      for (const message of ["a zero-width basis", "a basis of controls", "a basis of format characters", "a basis of separators"]) {
+        expectConfidence(message, "confidence 0.45", NO_BASIS);
+        expect(row(message).textContent).not.toContain("The engine's basis for this number:");
+      }
+      expectConfidence("text among invisible characters", "confidence 0.45", engines(VISIBLE_AMONG_INVISIBLE));
+      expectConfidence("a padded basis", "confidence 0.45", engines(PADDED_BASIS));
     });
 
     it("says no confidence was recorded where there is no number, and never prints a zero for it", async () => {

@@ -17,6 +17,8 @@
  * separate creation time.
  */
 
+import { isEngineInternal } from "./engine-internal";
+
 /** The fields of a test these rules read. */
 export interface ScopedTest {
   clientId: string;
@@ -83,7 +85,7 @@ export function countsNotRecorded(test: CountedTest): boolean {
   if (!recorded || typeof recorded !== "object") return false;
   const results = (recorded as { results?: unknown }).results;
   return Array.isArray(results) && results.some(
-    (one) => one !== null && typeof one === "object" && (one as { internal?: unknown }).internal !== true,
+    (one) => one !== null && typeof one === "object" && !isEngineInternal((one as { internal?: unknown }).internal),
   );
 }
 
@@ -185,7 +187,7 @@ function resultsOf(test: Pick<CountedTest, "findings">): Array<Record<string, un
   if (!Array.isArray(results)) return null;
   return results.filter(
     (one): one is Record<string, unknown> =>
-      one !== null && typeof one === "object" && (one as { internal?: unknown }).internal !== true,
+      one !== null && typeof one === "object" && !isEngineInternal((one as { internal?: unknown }).internal),
   );
 }
 

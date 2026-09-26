@@ -28,6 +28,8 @@
  */
 
 import { createHash } from "node:crypto";
+
+import { isEngineInternal } from "@shared/engine-internal";
 import type { Finding } from "@shared/schema";
 
 /** A finding as it comes off a scan result, with where it came from. */
@@ -49,7 +51,8 @@ export interface Sighting {
  * map. Both places are read, evidence first.
  */
 export function sightingOf(raw: Record<string, unknown>, target: string | null): Sighting | null {
-  if (raw.internal === true) return null;
+  // The engine's own diagnostic, by the rule the counts use (shared/engine-internal).
+  if (isEngineInternal(raw.internal)) return null;
   const type = typeof raw.type === "string" ? raw.type : null;
   if (!type) return null;
 

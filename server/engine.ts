@@ -51,13 +51,29 @@ export interface EngineStatus {
 export interface EngineScan {
   runId: string | null;
   state: string;
-  findings: unknown[];
+  /**
+   * The run's results as the engine sent them. An empty list when it sent none
+   * (a run still going has no `result`); null when it sent a `results` that is
+   * not a list, which could not be read and is never read as none.
+   */
+  findings: unknown[] | null;
   detail: string;
   /** The engine's own refusal, when it refused. Shown verbatim. */
   refused?: string;
 }
 
 export class EngineUnavailable extends Error {}
+
+/**
+ * The engine's `results`, read. Absent is none sent. Present and not a list is
+ * an answer that could not be read: null, never an empty list. It was `[]`, so
+ * a garbled answer was recorded, counted and shown as a scan that returned no
+ * findings.
+ */
+function resultsOf(results: unknown): unknown[] | null {
+  if (results === undefined) return [];
+  return Array.isArray(results) ? results : null;
+}
 
 function baseUrl(): string | null {
   // From the settings row if an operator saved one, else from the
@@ -319,9 +335,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   return {
     runId: (payload.run_id as string) ?? null,
     state: (payload.state as string) ?? "running",
-    findings: Array.isArray(inline.results)
-      ? inline.results
-      : Array.isArray(payload.results) ? payload.results : [],
+    findings: inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
   };
 }
@@ -635,7 +649,7 @@ export async function runState(runId: string): Promise<EngineScan> {
   return {
     runId,
     state: (payload.state as string) ?? "unknown",
-    findings: Array.isArray(result.results) ? result.results : [],
+    findings: resultsOf(result.results),
     detail: (payload.reason as string) ?? "",
   };
 }

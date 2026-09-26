@@ -47,6 +47,7 @@ import {
   type SeverityCounts,
   type Severity,
 } from "@/lib/athenaScan";
+import { isEngineInternal } from "@shared/engine-internal";
 import type { Client, Site, Test } from "@shared/schema";
 
 interface EngineStatus {
@@ -68,7 +69,8 @@ interface EngineFinding {
   confidence?: number | null;
   /** The engine's own sentence for what `confidence` is, shown with it verbatim. */
   confidence_basis?: string | null;
-  internal?: boolean;
+  /** The engine's own diagnostic when truthy, as the engine reads it (shared/engine-internal). */
+  internal?: unknown;
 }
 
 interface ScanView {
@@ -201,8 +203,9 @@ export default function AthenaScan() {
   // not be reached, or the findings recorded for a finished run could not be
   // read. Null is never drawn as "no findings".
   const returned = scan?.engine && Array.isArray(scan.engine.findings) ? scan.engine.findings : null;
-  const findings = (returned ?? []).filter((f) => !f.internal);
-  const notes = (returned ?? []).filter((f) => f.internal);
+  // Notes by the rule the counts use, so a note is never counted as a finding.
+  const findings = (returned ?? []).filter((f) => !isEngineInternal(f.internal));
+  const notes = (returned ?? []).filter((f) => isEngineInternal(f.internal));
   const running = scan !== undefined && !FINISHED.has(scan.state);
   // Until a read says the scan has stopped, it may be running, and its Stop is
   // on screen: while the first read is still on its way, and after a read
