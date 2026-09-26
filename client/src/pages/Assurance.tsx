@@ -24,7 +24,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { loaded } from "@/lib/loaded";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { type Query, useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   Boxes,
@@ -2725,15 +2725,20 @@ function BoundaryForm({
  * deployment — a provider fact feeds every deployment that uses it, a
  * remediation move feeds cross-deployment roll-ups — to refresh every
  * deployment's computed panels.
+ *
+ * A read of these panels in flight was asked before the change, so it is
+ * cancelled first and asked again. Invalidating alone restarts only a read that
+ * already has data: React Query keeps a first read in flight, and it could land
+ * after the change's reads with the state from before it.
  */
 function invalidateAssuranceComputed(uuid?: string): void {
   const prefix = `/api/assurance/deployments/${uuid ? `${uuid}/` : ""}`;
-  queryClient.invalidateQueries({
-    predicate: (query) => {
-      const key = query.queryKey[0];
-      return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length;
-    },
-  });
+  const computed = (query: Query) => {
+    const key = query.queryKey[0];
+    return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length;
+  };
+  void queryClient.cancelQueries({ predicate: computed });
+  queryClient.invalidateQueries({ predicate: computed });
   queryClient.invalidateQueries({ queryKey: ["/api/assurance/deployments"] });
 }
 
@@ -5921,6 +5926,151 @@ const CLAIM_STATUS_LABEL: Record<string, string> = {
   revoked: "Revoked",
 };
 
+/**
+ * A claim's strength is the backend's ordinal: 1.00 down to 0.10 by the weakest
+ * class of evidence supporting the claim (athena-backend `claims._confidence`,
+ * documented once in mythos-core `evidence`). It is not a probability, so it is
+ * never printed as a percentage: "conf 52%" read as a 52% chance the claim is true.
+ *
+ * It is shown only for a claim whose status stands on supporting evidence. The
+ * backend grades the machine's reading, and a status a person set keeps that
+ * grade: a claim a person moved to contradicted or revoked still carries the
+ * strength it had while supported, and one moved up from unknown carries none.
+ * Printing that number beside such a status would say the opposite of the status.
+ *
+ * And it is a read of current evidence, so even under a supporting status it is
+ * not shown once that evidence has expired (`isStale`: last observed longer ago
+ * than the backend's evidence TTL), nor while a retest is due. A retest is due
+ * while the claim has an open retest requirement: a change invalidated it, and a
+ * person can move it back to supported before any retest (`CLAIM_TRANSITIONS.stale`).
+ * The backend then holds the decision at NEEDS_MORE_EVIDENCE at best (`retest_pending`
+ * in `claim_decision_signal`), while the claim still carries the strength it had
+ * before the change.
+ */
+const SUPPORTING_STATUSES = new Set(["supported", "verified", "partially_verified"]);
+
+// A retest is due: what STALE means, whether a system change, a declared condition
+// coming true or expiry set it (assurance/invalidation.py), and what an open
+// retest requirement means under any status.
+const RETEST_DUE_BECAUSE = "a retest is due before this claim can be read as current";
+
+// What each status means in athena-backend, true on every path that sets it --
+// never a cause. A person can set contradicted or unknown over evidence that
+// supports the claim, or over evidence that contradicts it, and a derived unknown
+// can be partly known, so neither reason says anything about the evidence or
+// about any other status.
+const NO_STRENGTH_BECAUSE: Record<string, string> = {
+  contradicted: "this claim is marked contradicted",
+  unknown: "this claim is marked unknown",
+  revoked: "this claim was withdrawn",
+  stale: RETEST_DUE_BECAUSE,
+  superseded: "a newer version of this claim replaces it",
+  draft: "this claim has not been assessed",
+};
+
+// A status athena-backend does not have today. What it means is not known here,
+// so the reason says only that.
+const UNRECOGNISED_STATUS_BECAUSE = "this console does not recognise this claim's status";
+
+// `isStale` on the backend (AssuranceClaim.is_stale): the claim's evidence was
+// last observed longer ago than EVIDENCE_TTL_DAYS.
+const EXPIRED_BECAUSE = "the evidence behind this claim has expired";
+
+// The backend's scale: `claims._confidence` is round(max(0.1, 1.0 - 0.12 * rank), 2),
+// so every strength it records is in [0.10, 1.00]. A number outside it is not one.
+const STRENGTH_FLOOR = 0.1;
+const STRENGTH_CEILING = 1;
+const OFF_SCALE_BECAUSE = "the recorded value is not on the evidence-strength scale (0.10 to 1.00)";
+
+const RETEST_UNREAD_BECAUSE = "whether a retest is due for this claim could not be read";
+
+export const CLAIM_STRENGTH_BASIS =
+  "Ordinal: read from the weakest class of evidence supporting the claim. Not a probability that the claim is true.";
+
+/** A strength that waits only on the retest requirements, while they are being read. */
+export const CLAIM_STRENGTH_READING =
+  "No strength yet: whether a retest is due for this claim is still being read.";
+
+/** What a claim's strength is read from. */
+type ClaimStrengthInput = Pick<Claim, "status" | "confidence" | "isStale"> & {
+  /**
+   * Whether a retest is due for the claim, from the deployment's open retest
+   * requirements: true or false once they are read; null when they could not be.
+   */
+  retestDue: boolean | null;
+};
+
+/**
+ * The strength a claim is shown with, or the sentence that says why it has none.
+ * Each check is the first thing that withholds the number, so a reason that does
+ * not depend on the retest requirements never waits on them.
+ */
+function strengthOrReason({ status, confidence, isStale, retestDue }: ClaimStrengthInput): number | string {
+  if (!SUPPORTING_STATUSES.has(status)) {
+    const known = Object.hasOwn(NO_STRENGTH_BECAUSE, status);
+    return `No strength: ${known ? NO_STRENGTH_BECAUSE[status] : UNRECOGNISED_STATUS_BECAUSE}.`;
+  }
+  if (isStale) return `No strength: ${EXPIRED_BECAUSE}.`;
+  // NaN is not a number: nothing that is a strength was recorded.
+  if (typeof confidence !== "number" || Number.isNaN(confidence)) return "No strength recorded for this claim.";
+  if (!(confidence >= STRENGTH_FLOOR && confidence <= STRENGTH_CEILING)) return `No strength: ${OFF_SCALE_BECAUSE}.`;
+  if (retestDue === true) return `No strength: ${RETEST_DUE_BECAUSE}.`;
+  if (retestDue === null) return `No strength: ${RETEST_UNREAD_BECAUSE}.`;
+  return confidence;
+}
+
+export function claimStrength(claim: ClaimStrengthInput): string {
+  const strength = strengthOrReason(claim);
+  return typeof strength === "number" ? `strength ${strength.toFixed(2)}` : "strength —";
+}
+
+export function claimStrengthBasis(claim: ClaimStrengthInput): string {
+  const strength = strengthOrReason(claim);
+  return typeof strength === "number" ? CLAIM_STRENGTH_BASIS : strength;
+}
+
+/**
+ * A claim row's strength and basis while the retest requirements are still being
+ * read: a strength that waits only on them is not shown yet, and every other
+ * claim already has its reason, which does not depend on them.
+ */
+function claimStrengthWhileReading(claim: Pick<Claim, "status" | "confidence" | "isStale">) {
+  const settled = strengthOrReason({ ...claim, retestDue: false });
+  return { value: "strength —", basis: typeof settled === "number" ? CLAIM_STRENGTH_READING : settled };
+}
+
+/**
+ * Whether a retest is due for each claim, from the deployment's open retest
+ * requirements (athena-backend `RetestRequirement` with `resolved_at` null: the
+ * deployment's retest-requirements action returns only those by default, as one
+ * list, and names the claim version each is about as `claimUuid`).
+ *
+ * A requirement names the claim VERSION that was current when it opened: the one
+ * that drifted (`invalidation`), or whose declared condition came true
+ * (`latent.evaluate_conditions`). The backend binds it to the claim's identity
+ * across versions (`invalidation._has_open_requirement`,
+ * `revalidation.plan_revalidation`). The requirement does not carry that identity,
+ * so one naming a version this list does not hold leaves every claim of its type
+ * unread (null), never "no retest due". So does a read that failed or did not
+ * come back as a list. A claim an open requirement names is due (true) whatever
+ * else is unread: that requirement alone says a retest is due.
+ */
+function retestDueByClaim(requirements: unknown, claims: Claim[]): (claim: Claim) => boolean | null {
+  if (!Array.isArray(requirements)) return () => null;
+  const listed = new Set(claims.map((c) => c.uuid));
+  const due = new Set<string>();
+  const unreadTypes = new Set<string>();
+  let allUnread = false;
+  for (const r of requirements as Partial<RetestRequirement>[]) {
+    if (!r || typeof r !== "object") allUnread = true;
+    else if (r.isOpen !== true) continue;
+    else if (r.claimUuid && listed.has(r.claimUuid)) due.add(r.claimUuid);
+    else if (r.claimType) unreadTypes.add(r.claimType);
+    else allUnread = true;
+  }
+  return (c) => (due.has(c.uuid) ? true : allUnread || unreadTypes.has(c.claimType) ? null : false);
+}
+
 /** A claim's status, coloured by how it bears on assurance. A pass reads green
  *  only when actually supported/verified; contradicted is a mark against, and
  *  stale/unknown are honest gaps — never green-by-default. */
@@ -5983,14 +6133,43 @@ function ClaimEventLedger({ claimUuid }: { claimUuid: string }) {
  * ledger; an admin transitions a claim (the backend enforces the state machine
  * and the verified-evidence gate) or recomputes the whole register. Self-fetching.
  */
-function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [noteFor, setNoteFor] = useState<Record<string, string>>({});
 
-  const { data, isLoading, isError, error } = useQuery<Claim[]>({
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    dataUpdatedAt: claimsReadAt,
+    isFetching: claimsFetching,
+  } = useQuery<Claim[]>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-claims`],
   });
+  // The deployment's open retest requirements, read once for every claim: a
+  // strength is not shown while a retest is due, or while that is not known. This
+  // is the query the retest obligations panel makes when it lists open ones only
+  // (its `{ all: undefined }` hashes as `{}`), so the page asks for them once.
+  const retests = useQuery<RetestRequirement[]>({
+    queryKey: [`/api/assurance/deployments/${deploymentUuid}/retest-requirements`, {}],
+  });
+  const retestDue = retestDueByClaim(retests.isError ? undefined : retests.data, data ?? []);
+  // Whether a retest is due is still being read while the requirements have never
+  // been read, and while either they or the claims are being read again and the
+  // read of it in hand is older than the other. A change cancels any read of the
+  // two in flight and reads both again (`invalidateAssuranceComputed`), and either
+  // can land first. The claims first: a claim a person moved back to supported
+  // would otherwise stand beside requirements read before its retest opened. The
+  // requirements first: a claim read while its retest was open would stand beside
+  // requirements read after a recompute resolved it and replaced the claim. A read
+  // that has landed, with none of either in flight, was asked after the last change
+  // made here.
+  const retestsReading =
+    retests.isPending ||
+    (retests.isFetching && retests.dataUpdatedAt < claimsReadAt) ||
+    (claimsFetching && claimsReadAt < retests.dataUpdatedAt);
 
   const recompute = useMutation({
     mutationFn: async () =>
@@ -6078,7 +6257,12 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
         <ul className="space-y-2">
           {data.map((c) => {
             const isOpen = expanded.has(c.uuid);
-            const nextStates = CLAIM_TRANSITIONS[c.status] ?? [];
+            // Own keys only: a status named like an object key ("constructor") has no moves.
+            const nextStates = Object.hasOwn(CLAIM_TRANSITIONS, c.status) ? CLAIM_TRANSITIONS[c.status] : [];
+            const strengthInput = { ...c, retestDue: retestDue(c) };
+            const { value: strength, basis: strengthBasis } = retestsReading
+              ? claimStrengthWhileReading(c)
+              : { value: claimStrength(strengthInput), basis: claimStrengthBasis(strengthInput) };
             return (
               <li key={c.uuid} className="rounded-lg border border-border/40 bg-surface-0/40 p-2.5">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -6100,8 +6284,15 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
                     <span className="text-[10px] text-amber-400/90">vendor-asserted</span>
                   )}
                   {c.isStale && <span className="text-[10px] text-amber-400/90">stale</span>}
-                  <span className="text-[10px] text-muted-foreground">
-                    conf {c.confidence === null ? "—" : `${Math.round(c.confidence * 100)}%`}
+                  <span
+                    className="text-[10px] text-muted-foreground"
+                    title={strengthBasis}
+                    data-testid="text-claim-strength"
+                  >
+                    <span data-testid="text-claim-strength-value">{strength}</span>
+                    <span className="sr-only" data-testid="text-claim-strength-sr">
+                      {` (${strengthBasis})`}
+                    </span>
                   </span>
                   {c.assetName && <span className="text-[10px] text-muted-foreground">· {c.assetName}</span>}
                   {c.receiptDigest && (
@@ -6120,6 +6311,9 @@ function ClaimsPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin:
                 )}
                 {isOpen && (
                   <div className="mt-2">
+                    <p className="mb-1.5 text-[10px] text-muted-foreground" data-testid="text-claim-strength-basis">
+                      {strengthBasis}
+                    </p>
                     {c.invalidationConditions.length > 0 && (
                       <div className="mb-1.5 text-[10px] text-muted-foreground">
                         <span className="uppercase tracking-wide">Invalidated when</span>
@@ -6478,7 +6672,7 @@ function RetestRequirementsPanel({ deploymentUuid }: { deploymentUuid: string })
  * shows what it changed (SPINE Phase 2). Idempotent — a re-run opens no duplicate
  * obligation. It reports counts; it does not, by itself, assert a system is fixed.
  */
-function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [last, setLast] = useState<{ invalidated: number; retestsOpened: number; retestsResolved: number } | null>(null);
   const check = useMutation({

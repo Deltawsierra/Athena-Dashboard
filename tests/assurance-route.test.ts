@@ -3128,6 +3128,111 @@ describe("assurance BFF against a paginated control plane", () => {
           return json(200, { count: 2, next: `http://${req.headers.host}/api/assurance/providers/?page=2`, previous: null, results: [row("prov-a", "first")] });
         }
 
+        // A deployment's open retest obligations. The backend answers one bare
+        // list today; the claims panel reads "no retest due" from their absence,
+        // so a paged answer must be read to its end, and one that is not a list
+        // or never ends must not pass as the rows that arrived.
+        const retests = path.match(/^\/api\/assurance\/deployments\/([^/]+)\/retest-requirements\/$/);
+        if (retests && method === "GET") {
+          const page = Number(new URLSearchParams(query).get("page") ?? "1");
+          const row = (uuid: string, claim: string) => ({
+            uuid, deployment_uuid: retests[1], claim_uuid: claim,
+            claim_type: "data_boundary", claim_type_label: "Data boundary",
+            resolving_claim_uuid: null, reason: "the bound system state drifted",
+            triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+            opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+            created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+          });
+          const at = (n: number) => `http://${req.headers.host}${path}?page=${n}`;
+          if (retests[1] === "dep-paged") {
+            if (page === 2) return json(200, { count: 2, next: null, previous: at(1), results: [row("rr-b", "claim-b")] });
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          if (retests[1] === "dep-endless") {
+            return json(200, { count: 1_000_000, next: at(page + 1), previous: null, results: [row(`rr-${page}`, `claim-${page}`)] });
+          }
+          if (retests[1] === "dep-not-a-list") {
+            return json(200, { detail: "not a list" });
+          }
+          // A page whose `results` is not a list.
+          if (retests[1] === "dep-results-not-a-list") {
+            return json(200, { count: 1, next: null, previous: null, results: "x" });
+          }
+          // A 200 whose body is not JSON at all: on the first page, and behind a page's `next` link.
+          if (retests[1] === "dep-not-json" || (retests[1] === "dep-not-json-later" && page === 2)) {
+            res.writeHead(200, { "Content-Type": "text/html" });
+            return res.end("<html>sign in</html>");
+          }
+          if (retests[1] === "dep-not-json-later") {
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A page, then a bare list behind its `next` link: holding a row, and empty.
+          if (retests[1] === "dep-then-bare" || retests[1] === "dep-then-bare-empty") {
+            if (page === 2) return json(200, retests[1] === "dep-then-bare" ? [row("rr-b", "claim-b")] : []);
+            return json(200, { count: 1, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A bare empty list as the first answer: the backend's own "none open".
+          if (retests[1] === "dep-none") return json(200, []);
+          // A row that is not a record: in a bare list, and in a page's results.
+          if (retests[1] === "dep-null-row") return json(200, [row("rr-a", "claim-a"), null]);
+          if (retests[1] === "dep-null-row-paged") {
+            return json(200, { count: 2, next: null, previous: null, results: [null, row("rr-a", "claim-a")] });
+          }
+          // A row that is a number, and a row that is itself a list of rows.
+          if (retests[1] === "dep-number-row") return json(200, [5]);
+          if (retests[1] === "dep-list-row") return json(200, [[row("rr-a", "claim-a")]]);
+          // Pages no DRF paginator sends: no `next` at all, on the only page or a
+          // later one, and a first page counting rows its pages do not hold.
+          if (retests[1] === "dep-no-next") return json(200, { results: [] });
+          if (retests[1] === "dep-no-next-detail") return json(200, { detail: "degraded", results: [] });
+          if (retests[1] === "dep-no-next-later") {
+            if (page === 2) return json(200, { results: [row("rr-b", "claim-b")] });
+            return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          if (retests[1] === "dep-count-short") return json(200, { count: 3, next: null, previous: null, results: [] });
+          // One row a page, and a row opened at the top between reads: the first
+          // page's row moves onto the second, and the list is read one row too long.
+          if (retests[1] === "dep-count-drift") {
+            if (page === 1) return json(200, { count: 2, next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+            if (page === 2) return json(200, { count: 3, next: at(3), previous: at(1), results: [row("rr-a", "claim-a")] });
+            return json(200, { count: 3, next: null, previous: at(2), results: [row("rr-b", "claim-b")] });
+          }
+          // Pages every DRF paginator does send: an empty counted page, and cursor
+          // pages, which carry `next` but no count.
+          if (retests[1] === "dep-drf-empty") return json(200, { count: 0, next: null, previous: null, results: [] });
+          if (retests[1] === "dep-cursor") {
+            if (page === 2) return json(200, { next: null, previous: at(1), results: [row("rr-b", "claim-b")] });
+            return json(200, { next: at(2), previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A page whose `next` is not a link DRF would send: it must not read as the last page.
+          if (retests[1] === "dep-next-not-a-link" || retests[1] === "dep-next-empty") {
+            const next = retests[1] === "dep-next-not-a-link" ? 5 : "";
+            return json(200, { count: 2, next, previous: null, results: [row("rr-a", "claim-a")] });
+          }
+          // A list of exactly n pages, one row on each, the last with no `next`.
+          const pages = retests[1].match(/^dep-pages-(\d+)$/);
+          if (pages) {
+            const n = Number(pages[1]);
+            return json(200, { count: n, next: page < n ? at(page + 1) : null, previous: null, results: [row(`rr-${page}`, `claim-${page}`)] });
+          }
+        }
+
+        // The retest-obligation register, which is not read whole: a page with no
+        // `next`, counting more rows than it holds.
+        if (path === "/api/assurance/retest-requirements/" && method === "GET") {
+          return json(200, {
+            count: 3,
+            results: [{
+              uuid: "rr-a", deployment_uuid: "dep-register", claim_uuid: "claim-a",
+              claim_type: "data_boundary", claim_type_label: "Data boundary",
+              resolving_claim_uuid: null, reason: "the bound system state drifted",
+              triggering_system_fingerprint: "t".repeat(16), actor: null, is_open: true,
+              opened_at: "2026-09-17T00:00:00Z", resolved_at: null,
+              created_at: "2026-09-17T00:00:00Z", updated_at: "2026-09-17T00:00:00Z",
+            }],
+          });
+        }
+
         return json(404, { detail: `no route ${method} ${path}` });
       });
     });
@@ -3168,6 +3273,115 @@ describe("assurance BFF against a paginated control plane", () => {
     expect(res.body).toHaveLength(2);
     expect(res.body.map((p: { uuid: string }) => p.uuid)).toEqual(["prov-a", "prov-b"]);
   });
+
+  it("reads a deployment's retest obligations to the last page", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-paged/retest-requirements");
+    expect(res.status).toBe(200);
+    expect(res.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a", "claim-b"]);
+  });
+
+  it("refuses a deployment's retest obligations it cannot read whole, rather than answer the rows that arrived", async () => {
+    const endless = await user.get("/api/assurance/deployments/dep-endless/retest-requirements");
+    expect(endless.status).toBe(503);
+    expect(String(endless.body.error)).toMatch(/incomplete/);
+
+    const notAList = await user.get("/api/assurance/deployments/dep-not-a-list/retest-requirements");
+    expect(notAList.status).toBe(503);
+    expect(String(notAList.body.error)).toMatch(/not a list/);
+
+    // A page whose `results` is there but is not a list is not a page of one.
+    const resultsNotAList = await user.get("/api/assurance/deployments/dep-results-not-a-list/retest-requirements");
+    expect(resultsNotAList.status).toBe(503);
+    expect(String(resultsNotAList.body.error)).toMatch(/not a list/);
+
+    // A body that is not JSON is unavailability, not a server error: on any page.
+    for (const dep of ["dep-not-json", "dep-not-json-later"]) {
+      const notJson = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(notJson.status).toBe(503);
+      expect(String(notJson.body.error)).toMatch(/not a list/);
+    }
+  });
+
+  it("refuses a deployment's retest obligations whose pages turn into a bare list, rather than answer that list", async () => {
+    // Behind a page's `next` link, a bare list is not that list's next page, and
+    // beside the rows already read it is not provably the whole list. Answering it
+    // dropped the first page's row; answering it empty said no retest is due.
+    for (const dep of ["dep-then-bare", "dep-then-bare-empty"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/later page .* with a bare list, not a page; the list cannot be read whole/);
+    }
+
+    // As the first answer, a bare list is the whole list, and an empty one means none.
+    const none = await user.get("/api/assurance/deployments/dep-none/retest-requirements");
+    expect(none.status).toBe(200);
+    expect(none.body).toEqual([]);
+  });
+
+  it("refuses a deployment's retest obligations holding a row that is not a record, or a next link that is not a link", async () => {
+    // A null row used to reach the row mapper and answer an unexplained 500; a
+    // number, or a list of rows, would be mapped into a requirement naming no claim.
+    for (const dep of ["dep-null-row", "dep-null-row-paged", "dep-number-row", "dep-list-row"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/a row that is not a record; the list cannot be read whole/);
+    }
+    // A `next` that is neither a URL nor null used to read as the last page, so the
+    // rows read so far answered as the whole list.
+    for (const dep of ["dep-next-not-a-link", "dep-next-empty"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(/whose next link is not a link; the list cannot be read whole/);
+    }
+  });
+
+  it("refuses a deployment's retest obligations whose pages do not say where they end, or hold other than they count", async () => {
+    // Every DRF paginator sends `next`, as a link or null. A page without it, first
+    // or later, ended the read, and the rows read so far answered as the whole list
+    // (for an empty first page, 200 []).
+    for (const dep of ["dep-no-next", "dep-no-next-detail", "dep-no-next-later"]) {
+      const res = await user.get(`/api/assurance/deployments/${dep}/retest-requirements`);
+      expect(res.status).toBe(503);
+      expect(String(res.body.error)).toMatch(
+        /with no next field, so it does not say whether the list ends there; the list cannot be read whole/,
+      );
+    }
+    // A first page that counts three rows, holding none, answered 200 [].
+    const short = await user.get("/api/assurance/deployments/dep-count-short/retest-requirements");
+    expect(short.status).toBe(503);
+    expect(String(short.body.error)).toMatch(/counted 3 rows at .* but its pages held 0; the list cannot be read whole/);
+    // Rows moved between pages as they were read: one is read twice.
+    const drift = await user.get("/api/assurance/deployments/dep-count-drift/retest-requirements");
+    expect(drift.status).toBe(503);
+    expect(String(drift.body.error)).toMatch(/counted 2 rows at .* but its pages held 3; the list cannot be read whole/);
+  });
+
+  it("reads every page a DRF paginator sends whole: counted, empty, or by cursor with no count", async () => {
+    const empty = await user.get("/api/assurance/deployments/dep-drf-empty/retest-requirements");
+    expect(empty.status).toBe(200);
+    expect(empty.body).toEqual([]);
+
+    const cursor = await user.get("/api/assurance/deployments/dep-cursor/retest-requirements");
+    expect(cursor.status).toBe(200);
+    expect(cursor.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a", "claim-b"]);
+
+    // A reader that does not read whole is unchanged: the register answers the rows it was sent.
+    const register = await user.get("/api/assurance/retest-requirements");
+    expect(register.status).toBe(200);
+    expect(register.body.map((r: { claimUuid: string }) => r.claimUuid)).toEqual(["claim-a"]);
+  });
+
+  it("reads a deployment's retest obligations of exactly 200 pages whole, and refuses one page more", async () => {
+    // MAX_PAGES in server/assurance.ts.
+    const most = await user.get("/api/assurance/deployments/dep-pages-200/retest-requirements");
+    expect(most.status).toBe(200);
+    expect(most.body).toHaveLength(200);
+    expect(most.body[199].claimUuid).toBe("claim-200");
+
+    const more = await user.get("/api/assurance/deployments/dep-pages-201/retest-requirements");
+    expect(more.status).toBe(503);
+    expect(String(more.body.error)).toMatch(/more than 200 pages .*incomplete/);
+  }, 60_000);
 });
 
 describe("assurance BFF against a control plane returning a non-object body", () => {
