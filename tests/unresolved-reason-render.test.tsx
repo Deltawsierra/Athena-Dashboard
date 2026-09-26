@@ -149,8 +149,9 @@ describe("a reference that was followed and waits only on a rescan", () => {
 
 /**
  * The old identity rules wrote one row for every unnamed agent at once, and the
- * current rules key each unnamed agent by where it is -- so no rescan re-records
- * that row, and the references it declares are not ones a rescan confirms. The
+ * current rules record each unnamed agent under a row of its own -- so a rescan
+ * does not re-record that row, and the references it declares are not ones a
+ * rescan confirms. The
  * page used to have two buckets, and a reference from that row fell into
  * "could not be placed" (false: it was followed and counted) or, reaching an
  * old row too, would have been told "rescan to confirm it" (false: none does).
@@ -171,8 +172,8 @@ describe("a reference from the old row for every unnamed agent", () => {
     expect(text).toContain(
       "2 declared references come from the row the old identity rules wrote for every unnamed agent at once",
     );
-    expect(text).toContain("the reach through them is counted");
-    expect(text).toContain("no rescan re-records that row");
+    expect(text).toContain("the reach through them is counted as the rows they name stand now");
+    expect(text).toContain("a rescan records each unnamed agent under a row of its own");
     expect(text).toContain("built over a graph that still counts reach through the old unnamed-agent row.");
     expect(text).not.toContain("could not be placed");
     expect(text).not.toContain("incomplete graph");
@@ -180,7 +181,7 @@ describe("a reference from the old row for every unnamed agent", () => {
     expect(text).not.toContain("yet to confirm");
     const items = screen.getAllByRole("listitem").map((li) => li.textContent ?? "");
     for (const item of items) {
-      expect(item).toContain("no rescan re-records that row");
+      expect(item).toContain("a row of its own, not this one");
       expect(item).not.toContain("rescan to confirm");
       expect(item).not.toContain("could not place");
     }
@@ -190,7 +191,7 @@ describe("a reference from the old row for every unnamed agent", () => {
   it("does not claim a reference was followed when its other reason says it names nothing", () => {
     const said = unresolvedReasons({ reason: "not_found", reasons: ["not_found", "legacy_unnamed_agent"] });
     expect(said).toContain("which discovery could not place");
-    expect(said).toContain("no rescan re-records that row");
+    expect(said).toContain("a row of its own, not this one");
     expect(said).not.toContain("followed");
     render(
       <UnresolvedReferences
@@ -221,7 +222,7 @@ describe("a reference from the old row for every unnamed agent", () => {
     expect(text).toContain("1 declared reference was followed to or from a component");
     expect(text).toContain("a rescan is what confirms it");
     expect(text).toContain("1 more comes from the row the old identity rules wrote");
-    expect(text).toContain("the reach through it is counted");
+    expect(text).toContain("the reach through it is counted as the rows it names stand now");
     expect(text).toContain(
       "built over a graph a rescan has yet to confirm, and that still counts reach through the old unnamed-agent row.",
     );

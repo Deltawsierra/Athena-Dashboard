@@ -2297,16 +2297,17 @@ const REASON_PHRASING: Record<string, string> = {
   // Declared by the one row the old identity rules wrote for every unnamed agent
   // at once. Whether it was followed is the other reasons' to say -- a reference
   // from that row can still name nothing -- so this does not claim it. What it
-  // does say is that no rescan re-records that row: the current rules key each
-  // unnamed agent by where it is, so "rescan" would send the operator to a scan
-  // that never clears it.
+  // does say is that a rescan does not re-record that row: the current rules
+  // record each unnamed agent under a row of its own, keyed by where it is, so
+  // "rescan" would send the operator to a scan that never clears it.
   legacy_unnamed_agent:
-    "which comes from the row the old identity rules wrote for every unnamed agent at once — no rescan re-records that row",
+    "which comes from the row the old identity rules wrote for every unnamed agent at once — a rescan records each unnamed agent under a row of its own, not this one",
 };
 
-// From the old unnamed-agent row, an old row at the other end is not one a rescan
-// confirms either: the old unnamed-agent row still names it, so it stays. Said
-// without the rescan the superseded phrasing asks for.
+// From the old unnamed-agent row, an old row at the other end is said as what it
+// is and no more: that row's reference is never re-recorded, so "rescan to
+// confirm it" -- the superseded phrasing -- would promise the reference a rescan
+// that does not touch it.
 const SUPERSEDED_FROM_LEGACY_ROW = "which reaches a component also recorded under the old identity rules";
 
 export function unresolvedReason(reason: string | null): string {
@@ -2423,9 +2424,9 @@ export function UnresolvedReferences({
                 {legacy}{" "}
                 {unplaced + rescan > 0 ? "more" : `declared reference${legacy === 1 ? "" : "s"}`}{" "}
                 {legacy === 1 ? "comes" : "come"} from the row the old identity rules wrote for every
-                unnamed agent at once; the reach through {legacy === 1 ? "it" : "them"} is counted, and
-                no rescan re-records that row — the current rules key each unnamed agent by where it
-                is.{" "}
+                unnamed agent at once; the reach through {legacy === 1 ? "it" : "them"} is counted as
+                the rows {legacy === 1 ? "it names" : "they name"} stand now, and a rescan records
+                each unnamed agent under a row of its own, keyed by where it is, not that one.{" "}
               </>
             )}
             So {what} was built over{" "}
