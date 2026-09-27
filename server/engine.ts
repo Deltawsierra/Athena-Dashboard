@@ -15,8 +15,27 @@
  * there is a fact about the deployment, not an excuse for fiction.
  */
 
+import http from "http";
+import https from "https";
 import * as settings from "./settings";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
+
+/**
+ * Node loads its HTTP client (fetch, undici) the first time it is used, and
+ * synchronously: 90-150 ms on this machine, on the event loop; and its first
+ * request runs code that has never run before. That first use was the first
+ * Stop after start-up -- the loop held while the stop was being sent. Both
+ * are done here instead, when the server starts, before any request is
+ * served.
+ */
+try {
+  new Response("");
+  // And its request path, once, with nothing sent anywhere (a data: URL):
+  // the first stop is not the first request this client ever makes.
+  void fetch("data:,").then((answer) => answer.arrayBuffer()).catch(() => undefined);
+} catch {
+  // A runtime without fetch has nothing to load; the calls say so themselves.
+}
 
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
@@ -110,36 +129,77 @@ export class EngineConnectionRefused extends EngineUnavailable {}
 /** The connect-phase failures: no connection was made, so nothing was sent. */
 const NOTHING_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
 function refusedBeforeSending(cause: unknown): boolean {
-  const inner = cause && typeof cause === "object" ? (cause as { cause?: unknown }).cause : undefined;
-  if (!inner || typeof inner !== "object") return false;
-  const code = (inner as { code?: unknown }).code;
-  const errors = (inner as { errors?: unknown }).errors;
+  if (!cause || typeof cause !== "object") return false;
+  const errors = (cause as { errors?: unknown }).errors;
   if (Array.isArray(errors) && errors.length > 0) {
     return errors.every((one) => one && typeof one === "object" && NOTHING_SENT.has(String((one as { code?: unknown }).code)));
   }
+  const code = (cause as { code?: unknown }).code;
   return typeof code === "string" && NOTHING_SENT.has(code);
 }
 
 /**
- * The request behind each answer `call` returned, by the answer: aborting it
- * after the headers are in ends the body's stream and closes its connection.
- * Cancelling the body instead does nothing while `text()` holds its reader --
- * a locked stream refuses the cancel -- so a stalled answer kept its socket.
+ * An answer from the engine: its status, and the rest read on demand.
+ *
+ * The engine is asked over node:http (https for an https address), not
+ * fetch. fetch's answers cost the loop several times as much each (a WHATWG
+ * Response, its headers and a web stream per answer): the kill switch's 100
+ * stops answered at once held the loop 14 ms here (up to 51 ms on a loaded
+ * machine), against 3 ms. Only what this client reads is kept: `ok`,
+ * `status`, the text of the body, and a way to let the answer go.
  */
-const requestOf = new WeakMap<Response, AbortController>();
+export class EngineAnswer {
+  private reading: Promise<string> | null = null;
+  constructor(readonly status: number, private readonly res: http.IncomingMessage, private readonly req: http.ClientRequest) {
+    // A connection closed mid-answer is an answer that could not be read: said by text(), never thrown here.
+    res.on("error", () => undefined);
+  }
+
+  get ok(): boolean {
+    return this.status >= 200 && this.status < 300;
+  }
+
+  /** The rest of the answer; rejects when the connection closed before it ended. */
+  text(): Promise<string> {
+    if (this.reading === null) {
+      this.reading = new Promise<string>((resolve, reject) => {
+        let raw = "";
+        let ended = false;
+        this.res.setEncoding("utf8");
+        this.res.on("data", (chunk: string) => { raw += chunk; });
+        this.res.on("end", () => { ended = true; resolve(raw); });
+        this.res.on("close", () => { if (!ended) reject(new Error("the connection closed before the answer ended")); });
+      });
+    }
+    return this.reading;
+  }
+
+  /** Let the answer go: its connection is closed, so nothing of it holds a socket or a read. */
+  release(): void {
+    this.req.destroy();
+  }
+
+  /** The body, as a stream a caller may cancel: cancelling it lets the answer go. */
+  get body(): { cancel(): Promise<void> } {
+    return { cancel: async () => this.release() };
+  }
+}
+
+/** Connections to the engine, kept open between calls. */
+const agents = { http: new http.Agent({ keepAlive: true }), https: new https.Agent({ keepAlive: true }) };
 
 /**
  * The rest of an answer whose headers are in, or null when it did not arrive
- * within `ms` -- then the request is aborted: its body's stream is ended and
- * its connection closed, so a stalled answer holds no socket and no read.
+ * within `ms` -- then the answer is let go: its connection is closed, so a
+ * stalled answer holds no socket and no read.
  */
-async function bodyWithin(response: Response, ms: number): Promise<string | null> {
+async function bodyWithin(response: EngineAnswer, ms: number): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
   try {
     const read = response.text().catch(() => null);
     const got = await Promise.race([read, late]);
-    if (got === null) requestOf.get(response)?.abort();
+    if (got === null) response.release();
     return got;
   } finally {
     clearTimeout(timer);
@@ -147,7 +207,7 @@ async function bodyWithin(response: Response, ms: number): Promise<string | null
 }
 
 /** An answer's JSON, read within engineTimeouts.bodyMs; throws when it did not arrive, or did not parse. */
-async function jsonWithin(response: Response, what: string): Promise<unknown> {
+async function jsonWithin(response: EngineAnswer, what: string): Promise<unknown> {
   const raw = await bodyWithin(response, engineTimeouts.bodyMs);
   if (raw === null) {
     throw new EngineUnavailable(
@@ -204,42 +264,62 @@ function headers(): Record<string, string> {
   return out;
 }
 
-async function call(path: string, init?: RequestInit, timeoutMs: number = engineTimeouts.callMs): Promise<Response> {
+/** What a call sends: its method and its body. */
+type CallInit = { method?: string; body?: string };
+
+function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs): Promise<EngineAnswer> {
   const base = baseUrl();
   if (!base) {
-    throw new EngineNotConfigured(
+    return Promise.reject(new EngineNotConfigured(
       `no engine is configured; set ${ENGINE_URL} to the engine's address`,
-    );
+    ));
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let url: URL;
   try {
-    const response = await fetch(`${base}${path}`, {
-      ...init,
-      headers: { ...headers(), ...(init?.headers ?? {}) },
-      signal: controller.signal,
-    });
-    // Kept for its body: a body that stalls is let go by aborting this (bodyWithin).
-    requestOf.set(response, controller);
-    return response;
+    url = new URL(`${base}${path}`);
   } catch (cause) {
-    // A hostname, a port and a refusal are all the operator needs; the stack
-    // is not, and this string reaches a browser.
-    const why = cause instanceof Error ? cause.message : String(cause);
-    if (controller.signal.aborted) {
-      throw new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`);
-    }
-    const code = (cause as { cause?: { code?: unknown } })?.cause?.code;
-    if (refusedBeforeSending(cause)) {
-      throw new EngineConnectionRefused(`could not reach the engine at ${base}: ${why}${typeof code === "string" ? ` (${code})` : ""}`);
-    }
-    throw new EngineUnavailable(`could not reach the engine at ${base}: ${why}`);
-  } finally {
-    clearTimeout(timer);
+    return Promise.reject(new EngineUnavailable(
+      `could not reach the engine at ${base}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    ));
   }
+  const secure = url.protocol === "https:";
+  const payload = init?.body;
+  return new Promise<EngineAnswer>((resolve, reject) => {
+    let timedOut = false;
+    const req = (secure ? https : http).request(url, {
+      method: init?.method ?? "GET",
+      headers: {
+        ...headers(),
+        ...(payload !== undefined ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+      },
+      agent: secure ? agents.https : agents.http,
+    }, (res) => {
+      clearTimeout(timer);
+      resolve(new EngineAnswer(res.statusCode ?? 0, res, req));
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy();
+    }, timeoutMs);
+    req.on("error", (cause: Error & { code?: string }) => {
+      clearTimeout(timer);
+      // A hostname, a port and a refusal are all the operator needs; the
+      // stack is not, and this string reaches a browser.
+      if (timedOut) {
+        reject(new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`));
+      } else if (refusedBeforeSending(cause)) {
+        reject(new EngineConnectionRefused(`could not reach the engine at ${base}: ${cause.message}` +
+          (typeof cause.code === "string" && !cause.message.includes(cause.code) ? ` (${cause.code})` : "")));
+      } else {
+        reject(new EngineUnavailable(`could not reach the engine at ${base}: ${cause.message}`));
+      }
+    });
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
 }
 
-async function body(response: Response): Promise<string> {
+async function body(response: EngineAnswer): Promise<string> {
   return ((await bodyWithin(response, engineTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
@@ -271,7 +351,7 @@ async function credentialCheck(): Promise<{ authorized: boolean | null; detail: 
         `and set it on the Settings screen, or as ${ENGINE_KEY}.`,
     };
   }
-  let response: Response;
+  let response: EngineAnswer;
   try {
     response = await call(CREDENTIAL_PROBE);
   } catch (cause) {
