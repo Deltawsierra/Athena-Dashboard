@@ -14,7 +14,7 @@
     "start": "NODE_ENV=production node dist/server-electron.cjs",
     "electron": "node run-electron.cjs",
     "check": "tsc && tsc --project server/tsconfig.json",
-    "test": "vitest run",
+    "test": "vitest run && vitest run --mode timing",
     "test:watch": "vitest",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "db:push": "drizzle-kit push",
