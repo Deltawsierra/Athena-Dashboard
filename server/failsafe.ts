@@ -96,10 +96,12 @@ let cachedAccess: string | null = null;
  *     a fifth of its lifetime early, at most a minute (tokenRefresh). A token
  *     that names no expiry is obtained again every tokenRefresh.unknownMs.
  *     A refresh that fails is tried again tokenRefresh.retryMs later; the
- *     token in hand is kept meanwhile.
+ *     token in hand is kept meanwhile. A token that already reads as expired
+ *     (this clock ahead of the control plane's) is obtained again only
+ *     tokenRefresh.retryMs later, never in a loop.
  *   - warmUp() obtains one at start-up.
  */
-export const tokenRefresh = { maxEarlyMs: 60_000, unknownMs: 4 * 60_000, retryMs: 30_000 };
+export const tokenRefresh = { maxEarlyMs: 60_000, unknownMs: 4 * 60_000, retryMs: 30_000, minMs: 1_000 };
 let tokenInFlight: Promise<string> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 /** Bumped by _resetForTests: a token obtained for an earlier generation is not cached. */
@@ -155,9 +157,12 @@ function scheduleRefresh(access: string): void {
   if (refreshTimer !== null) clearTimeout(refreshTimer);
   const expires = expiryOf(access);
   const now = Date.now();
-  const inMs = expires === null
+  const early = expires === null
     ? tokenRefresh.unknownMs
-    : Math.max(0, (expires - now) - Math.min(tokenRefresh.maxEarlyMs, (expires - now) / 5));
+    : (expires - now) - Math.min(tokenRefresh.maxEarlyMs, (expires - now) / 5);
+  // A token that reads as expired, or all but, when it arrives (this clock ahead of the control
+  // plane's) is not asked for again at once, over and over: tokenRefresh.retryMs later instead.
+  const inMs = early < tokenRefresh.minMs ? tokenRefresh.retryMs : early;
   refreshTimer = setTimeout(() => refreshNow(), inMs);
   refreshTimer.unref?.();
 }

@@ -756,17 +756,32 @@ describe("the control plane's token is kept warm", () => {
     }
   }, 20_000);
 
+  it("a token that already reads as expired when it arrives is not asked for again at once", async () => {
+    failsafeModule._resetForTests();
+    const expired = `h.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 3_600 })).toString("base64url")}.s`;
+    const p = await plane({ token: () => expired });
+    try {
+      expect((await admin.get("/api/failsafe/commands")).status).toBe(200);
+      await sleep(1_000);
+      expect(p.tokens()).toBe(1);
+    } finally {
+      await p.close();
+      failsafeModule._resetForTests();
+    }
+  }, 20_000);
+
   it("a token is obtained again ahead of its expiry, with no call waiting on it", async () => {
     failsafeModule._resetForTests();
     const jwt = (expSeconds: number) =>
       `h.${Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64url")}.s`;
     let expiresAt = 0;
-    const p = await plane({ token: () => { expiresAt = Date.now() + 2_000; return jwt(Math.floor(expiresAt / 1000)); } });
+    // A lifetime of 2-3 s (`exp` is in whole seconds): obtained again a fifth of it early.
+    const p = await plane({ token: () => { expiresAt = Math.floor((Date.now() + 3_000) / 1000) * 1000; return jwt(expiresAt / 1000); } });
     try {
       expect((await admin.get("/api/failsafe/commands")).status).toBe(200);
       expect(p.tokens()).toBe(1);
       const firstExpiry = expiresAt;
-      await until(async () => p.tokens(), (n) => n >= 2, 3_000);
+      await until(async () => p.tokens(), (n) => n >= 2, 4_000);
       expect(p.tokens()).toBe(2);
       // Obtained again before the first one expired.
       const refreshedAt = p.seen.filter((one) => one.line === "POST /api/token/")[1].at;
