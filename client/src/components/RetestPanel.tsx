@@ -55,6 +55,8 @@ interface RetestResult {
   runId: string | null;
   engineRunId?: string | null;
   checkedAt: string | null;
+  /** The engine accepted a stop for this run, and it completed anyway with this verdict. */
+  completedDespiteStop?: boolean;
 }
 
 /**
@@ -160,6 +162,12 @@ function VerdictView({ twinId, result }: { twinId: number; result: RetestResult 
             is how "inconclusive" starts reading as "fine". */}
         <p className="text-sm text-muted-foreground">{result.detail}</p>
         <p className="text-xs text-muted-foreground">{style.meaning}</p>
+        {result.completedDespiteStop && (
+          <p className="text-xs athena-gold" data-testid={`text-verdict-despite-stop-${twinId}`}>
+            Completed despite a stop request: the engine accepted a stop for this retest, but the run finished anyway
+            with this verdict, which was filed.
+          </p>
+        )}
       </div>
     </div>
   );
@@ -198,12 +206,19 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
   const stop = useMutation({
     mutationFn: async () => {
       const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId as string)}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string };
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
     },
-    onSuccess: (result) => {
-      toast({ title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
+    onSuccess: (result: { stopped: boolean; runId: string; alreadyFinished?: boolean }) => {
+      void watch.refetch();
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `Retest run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
     },
-    onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
+    onError: (error: Error) => toast({
+      title: "Not stopped",
+      description: `${error.message} Press Stop again, or use the kill switch on the AI Control page.`,
+      variant: "destructive",
+    }),
   });
 
   const view: RetestStatusView = latest && latest.answer === "status" ? latest : initial;
@@ -229,17 +244,23 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
         )}
       </div>
       {stoppable && (
-        <Button
-          type="button"
-          variant="destructive"
-          size="sm"
-          onClick={() => stop.mutate()}
-          disabled={stop.isPending}
-          data-testid={`button-stop-retest-${twinId}`}
-        >
-          <Square className="mr-2 h-3.5 w-3.5" />
-          {stop.isPending ? "Stopping…" : "Stop"}
-        </Button>
+        <div className="flex flex-col items-end gap-1">
+          {/* Never disabled: a Stop request that hangs must not take away the
+              only Stop. Pressed again, it sends the stop again. */}
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            onClick={() => stop.mutate()}
+            data-testid={`button-stop-retest-${twinId}`}
+          >
+            <Square className="mr-2 h-3.5 w-3.5" />
+            {stop.isPending ? "Stopping… (press to resend)" : "Stop"}
+          </Button>
+          <span className="text-[11px] text-muted-foreground" data-testid={`text-retest-killswitch-${twinId}`}>
+            or the kill switch on the AI Control page
+          </span>
+        </div>
       )}
     </div>
   );
@@ -254,6 +275,14 @@ export default function RetestPanel({ testId }: { testId: string }) {
   const decisions$ = loaded(useQuery<DecisionsView>({
     queryKey: [`/api/tests/${testId}/decisions`],
   }));
+  // Retests of this test still running -- started from here before a reload,
+  // or from another page: each is shown running, with its Stop, and offers no
+  // second Retest.
+  const open$ = useQuery<{ retests: RetestStatusView[] }>({ queryKey: [`/api/tests/${testId}/retests`], retry: false });
+  const openByTwin = new Map<number, RetestStatusView>();
+  for (const one of open$.data?.retests ?? []) {
+    if (one.answer === "status" && (one.phase === "running" || one.phase === "unwatched")) openByTwin.set(one.twinId, one);
+  }
   const data = decisions$.state === "ready" ? decisions$.data : undefined;
 
   const run = useMutation({
@@ -275,6 +304,8 @@ export default function RetestPanel({ testId }: { testId: string }) {
       }
     },
     onError: (error: Error) => {
+      // Refused because one is already running (maybe started elsewhere): show it.
+      void open$.refetch();
       // The engine's or the server's own words. "Retest failed" tells an
       // operator nothing about whether anything was reached.
       toast({ title: "The retest did not run", description: error.message, variant: "destructive" });
@@ -329,7 +360,7 @@ export default function RetestPanel({ testId }: { testId: string }) {
 
       <ul className="space-y-3" data-testid="list-decisions">
         {decisions.map((twin) => {
-          const result = results[twin.id];
+          const result = results[twin.id] ?? openByTwin.get(twin.id);
           const running = result !== undefined && isStatus(result) && (result.phase === "running" || result.phase === "unwatched");
           return (
             <li
@@ -375,8 +406,8 @@ export default function RetestPanel({ testId }: { testId: string }) {
                 // its live list: Scans running now lists it with a Stop, and
                 // the kill switch stops it.
                 <p className="mt-3 border-t border-border/60 pt-3 text-xs text-muted-foreground" data-testid={`text-retest-waiting-${twin.id}`}>
-                  Waiting up to 30 seconds for the engine to answer. While it does, this retest is on the engine&apos;s
-                  list of live runs: Scans running now lists it with its Stop, and the kill switch stops it.
+                  Waiting for the engine to answer. While it does, this retest is on the engine&apos;s list of live
+                  runs: Scans running now lists it with its Stop, and the kill switch stops it.
                 </p>
               )}
 

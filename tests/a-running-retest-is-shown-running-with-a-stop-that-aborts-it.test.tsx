@@ -57,7 +57,8 @@ let session: string;
 beforeAll(async () => {
   globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
   engine = http.createServer((req: IncomingMessage, res: ServerResponse) => {
-    req.resume();
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
     req.on("end", async () => {
       const url = req.url ?? "";
       calls.push(`${req.method} ${url}`);
@@ -68,7 +69,15 @@ beforeAll(async () => {
       if (!fx) return json(res, 500, { detail: "no fixture" });
       if (req.method === "POST" && url === "/api/scan") return reply(fx.exchanges[0]);
       if (req.method === "GET" && url.startsWith("/api/decisions?")) return reply(fx.exchanges[1]);
-      if (req.method === "POST" && url === "/api/remediation/retest") return reply(retestOf(fx));
+      if (req.method === "POST" && url === "/api/remediation/retest") {
+        // Engine main refuses `wait_seconds` (its own 422, recorded); the dashboard then asks without it.
+        const sent = raw ? JSON.parse(raw) : {};
+        if ((fx as { engine?: { contract?: string } }).engine?.contract === "main" && sent.wait_seconds !== undefined) {
+          return reply(retestOf(JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures", "engine-retest",
+            "main-5779e99", "wait-seconds-refused.json"), "utf8"))));
+        }
+        return reply(retestOf(fx));
+      }
       if (req.method === "POST" && url.endsWith("/abort")) return state.abort ? reply(state.abort) : json(res, 404, {});
       if (req.method === "GET" && /^\/api\/scans\/[^/]+$/.test(url)) {
         if (state.hold) await state.hold;

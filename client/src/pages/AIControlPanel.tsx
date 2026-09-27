@@ -55,6 +55,8 @@ interface StopReport {
   stops: KillSwitchStops;
   /** Absent when the server said nothing about the engine's own list; then nothing is said of it. */
   engineRuns?: EngineSweep;
+  /** Records of the stops that could not be written. The stops themselves were sent first. */
+  writeFailures?: string[];
 }
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -204,17 +206,19 @@ export default function AIControlPanel() {
       // A switch that could not be stored still sent every stop, and the
       // server's 500 says what each came to: that is read, not thrown away.
       const answered = (await response.clone().json().catch(() => null)) as
-        (AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: false; message?: string }) | null;
+        (AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: false; message?: string; writeFailures?: string[] }) | null;
       if (!response.ok && answered?.engaged === false && answered.stops) {
         return { ...answered, notEngaged: answered.message ?? "the setting could not be saved" };
       }
       await throwIfResNotOk(response);
-      return answered as AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string };
+      return answered as AIControlSetting & {
+        stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string; writeFailures?: string[];
+      };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
       const report: StopReport | null = result.stops
-        ? { stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged }
+        ? { stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged, writeFailures: result.writeFailures }
         : null;
       setStopReport(report);
       toast({
@@ -224,6 +228,10 @@ export default function AIControlPanel() {
               report.notEngaged ?? "",
               stopSentence(report.stops, leadOf(report)),
               report.engineRuns ? engineSweepSentence(report.engineRuns) : "",
+              report.writeFailures && report.writeFailures.length > 0
+                ? `Every stop was sent first; ${count(report.writeFailures.length, "record")} of them could not be written ` +
+                  `(${report.writeFailures.join("; ")}).`
+                : "",
             ].filter(Boolean).join(" ")
           : "The server did not say what it stopped.",
         variant: report && report.notEngaged === undefined && everyStopTook(report) ? undefined : "destructive",

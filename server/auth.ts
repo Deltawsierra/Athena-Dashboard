@@ -88,7 +88,37 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
 }
 
 /** Rejects the request with 401 unless a live, active account is behind it. */
+/**
+ * Whether a request is a stop: a scan's Stop, a retest's Stop, or engaging the
+ * kill switch. A stop is authorised from the signed-in session alone -- held in
+ * memory -- and never waits on the database: an account lookup that is slow,
+ * or a database that is locked or failing, must not stand between a Stop and
+ * the engine. (A session is ended at sign-out; an account deactivated since
+ * sign-in can still send a stop, which is the safe direction.)
+ */
+export function isStopRequest(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  if (req.method === "POST" && /^\/api\/(scans|retests)\/[^/]+\/abort$/i.test(path)) return true;
+  if (req.method === "PATCH" && /^\/api\/ai-control$/i.test(path)) {
+    const body = req.body && typeof req.body === "object" ? (req.body as { killSwitchEnabled?: unknown }) : {};
+    return body.killSwitchEnabled === true;
+  }
+  return false;
+}
+
+/** The signed-in session's user id and role, from memory; null when there is no session. */
+export function sessionUser(req: Request): { id: string; role: string | null } | null {
+  const id = req.session?.userId;
+  return id ? { id, role: typeof req.session?.role === "string" ? req.session.role : null } : null;
+}
+
 export const requireAuth: RequestHandler = (req, res, next) => {
+  // A stop with a session is authorised from it. One presented with an API key
+  // instead is authorised as any request is: the key has to be looked up.
+  if (isStopRequest(req) && sessionUser(req)) {
+    next();
+    return;
+  }
   loadSessionUser(req)
     .then((user) => {
       if (!user) {
@@ -102,6 +132,16 @@ export const requireAuth: RequestHandler = (req, res, next) => {
 
 /** Rejects with 401 when anonymous and 403 when the account is not an admin. */
 export const requireAdmin: RequestHandler = (req, res, next) => {
+  const user = isStopRequest(req) ? sessionUser(req) : null;
+  if (user) {
+    // Engaging the kill switch: the role the session was signed in with.
+    if (user.role !== "admin") {
+      res.status(403).json({ message: "Admin role required" });
+      return;
+    }
+    next();
+    return;
+  }
   loadSessionUser(req)
     .then((user) => {
       if (!user) {

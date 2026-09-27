@@ -26,15 +26,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "717b4aaa-3509-4c8e-a65e-2bdc6dda058c",
+        "run_id": "29e9f437-df75-4d0b-a357-91f0d88f4620",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-26T22:59:57.184933+00:00",
-        "updated_at": "2026-09-26T22:59:57.189984+00:00",
-        "finished_at": "2026-09-26T22:59:57.189984+00:00",
+        "started_at": "2026-09-27T00:58:15.909274+00:00",
+        "updated_at": "2026-09-27T00:58:15.917441+00:00",
+        "finished_at": "2026-09-27T00:58:15.917441+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -74,7 +74,7 @@
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=717b4aaa-3509-4c8e-a65e-2bdc6dda058c&limit=101"
+        "path": "/api/decisions?run_id=29e9f437-df75-4d0b-a357-91f0d88f4620&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +83,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "717b4aaa-3509-4c8e-a65e-2bdc6dda058c",
+            "run_id": "29e9f437-df75-4d0b-a357-91f0d88f4620",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +104,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-26T22:59:57.242697+00:00",
+            "captured_at": "2026-09-27T00:58:15.970024+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -136,7 +136,7 @@
         "target": "https://offline.invalid/",
         "finding_type": "xss",
         "inventory_digest": null,
-        "run_id": "df967a2e-25fd-49c7-ad5c-a8be5f839ede",
+        "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
         "scan_record_id": 500,
         "check": {
           "id": 1,
@@ -149,30 +149,30 @@
           "inventory_digest": null,
           "run_id": 500,
           "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-          "checked_at": "2026-09-26T22:59:57.277668+00:00"
+          "checked_at": "2026-09-27T00:58:16.012918+00:00"
         },
         "answer": "verdict",
         "state": "completed",
-        "status_url": "/api/scans/df967a2e-25fd-49c7-ad5c-a8be5f839ede"
+        "status_url": "/api/scans/51548ea7-f31f-4a06-ab0b-e211e1aa4973"
       }
     },
     {
       "note": "the same run read from its status_url",
       "request": {
         "method": "GET",
-        "path": "/api/scans/df967a2e-25fd-49c7-ad5c-a8be5f839ede"
+        "path": "/api/scans/51548ea7-f31f-4a06-ab0b-e211e1aa4973"
       },
       "status": 200,
       "body": {
-        "run_id": "df967a2e-25fd-49c7-ad5c-a8be5f839ede",
+        "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-26T22:59:57.270149+00:00",
-        "updated_at": "2026-09-26T22:59:57.285494+00:00",
-        "finished_at": "2026-09-26T22:59:57.285494+00:00",
+        "started_at": "2026-09-27T00:58:16.007074+00:00",
+        "updated_at": "2026-09-27T00:58:16.021439+00:00",
+        "finished_at": "2026-09-27T00:58:16.021439+00:00",
         "done": true,
         "result": {
           "twin_id": 1,
@@ -181,7 +181,7 @@
           "target": "https://offline.invalid/",
           "finding_type": "xss",
           "inventory_digest": null,
-          "run_id": "df967a2e-25fd-49c7-ad5c-a8be5f839ede",
+          "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
           "scan_record_id": 500,
           "check": {
             "id": 1,
@@ -194,7 +194,7 @@
             "inventory_digest": null,
             "run_id": 500,
             "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-26T22:59:57.277668+00:00"
+            "checked_at": "2026-09-27T00:58:16.012918+00:00"
           }
         }
       }

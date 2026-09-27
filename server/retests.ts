@@ -2,41 +2,51 @@
  * Retests the engine is still running, watched until they end -- on the
  * record, so a dashboard that restarts picks each one up again.
  *
- * athena-engine #71 answers a retest that outlasts its 30 s inline wait with
- * 202 and the run's id instead of a verdict. The verdict is then collected from
- * the engine's `/api/scans/{run_id}`, and this is what collects it: one watch
- * per retest, reading the run's status at a bounded interval for a bounded
- * total time, filing the verdict once if the run completes with one, and
- * filing nothing if it was stopped, failed or ended without one.
+ * athena-engine #71 answers a retest it has not finished with 202 and the
+ * run's id instead of a verdict (this dashboard asks it to, with
+ * `wait_seconds: 0`, so no engine thread is held for the verdict). The verdict
+ * is then collected from the engine's `/api/scans/{run_id}`, and this is what
+ * collects it: one watch per retest, reading the run's status at a bounded
+ * interval for a bounded total time, filing the verdict once if the run
+ * completes with one, and filing nothing if it was stopped, failed or ended
+ * without one. A watch past its deadline reads once more before it says it is
+ * no longer watched, so a verdict the engine already has is filed.
  *
  * Each watch is a row in the dashboard's storage (`retest_watches`): the engine
  * run id, the test and twin that name the finding (and the finding, once
  * resolved), who pressed Retest and from where, when, its deadline, the last
- * read, and its state. A dashboard starting up resumes every watch still
- * `running`, in the background. A watch past its deadline is ended as
- * `unwatched` -- said as that, never as an outcome -- and its run stays on the
- * engine's live list, where Scans running now and the kill switch reach it.
+ * read, and its state. A dashboard starting up resumes, in the background,
+ * every watch still `running`, and knows every one that ended `unwatched` in
+ * the last day -- its run may still be going, and the kill switch sends it a
+ * stop by id without reading anything.
  *
  * Filed once, however many dashboards watch: ending a watch and filing its
  * verdict are one storage step that only succeeds while the watch is still
  * `running` (IStorage.endRetestWatch), and a check for an engine run that
  * already has one is refused by a unique index.
  *
- * Nothing here stands in front of a stop. A stop is sent by the retest's
- * engine run id straight to the engine (POST /api/retests/:runId/abort, the
- * kill switch, a failsafe); none of them reads a watch first, waits on a
- * status read, a resume, or a storage write, or shares a lock or a queue with
- * one. A watch only reads the engine.
+ * Nothing here stands in front of a stop, and nothing here holds the event
+ * loop. A stop is sent by the retest's engine run id straight to the engine;
+ * the routes authorise it from memory (peek) and write nothing before it. The
+ * watch writes its row only when something changes (its state, the engine's
+ * state, a read error), at most once a minute otherwise, and every write goes
+ * through the storage layer, which waits for a lock another connection holds
+ * off the event loop (storage-sqlite.ts withBusyRetry): a locked database
+ * slows a watch, never a stop.
  */
 
 import * as engine from "./engine";
 import { DuplicateRetestCheck, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
 import type { RetestWatch } from "@shared/schema";
 
-/** How often a watched retest is read, and for how long in all. Tests shorten both. */
+/** How often a watched retest is read, and for how long in all. Tests shorten these. */
 export const retestWatch = {
   intervalMs: 2_000,
   totalMs: 60 * 60_000,
+  /** How long a watch that ended `unwatched` is still sent a stop by the kill switch. */
+  keepUnwatchedMs: 24 * 60 * 60_000,
+  /** How often an unchanged read is written back to the row. */
+  persistReadEveryMs: 60_000,
 };
 
 /**
@@ -49,6 +59,12 @@ export const retestWatch = {
  *   unwatched  -- the watch ran out of time with the run not over.
  */
 export type RetestPhase = "running" | "verdict" | "stopped" | "failed" | "no_verdict" | "unwatched";
+
+/** The phases after which a run does nothing more. `unwatched` is not one: its run may still be going. */
+const ENDED: ReadonlySet<string> = new Set(["verdict", "stopped", "failed", "no_verdict"]);
+
+/** Engine states in which a run is still doing something to the target. */
+const LIVE_ENGINE_STATES: ReadonlySet<string> = new Set(["queued", "running", "aborting"]);
 
 /** What filing a verdict came to. */
 export interface Applied { findingId: string; status: string; detail: string }
@@ -92,22 +108,27 @@ function later(fn: () => void, ms: number): void {
 
 /** One dashboard's watches. Created with the app (server/routes.ts), and resumed from storage. */
 export class RetestWatcher {
-  /** The last known row of every watch this dashboard started, resumed or read. */
+  /** The last known row of every watch this dashboard started, resumed or read and has not seen end. */
   private known = new Map<string, RetestWatch>();
   /** The runs this dashboard is reading now, each by the token of its one read loop. */
   private following = new Map<string, symbol>();
-  /** Watches whose row could not be written yet; each read tries again. */
+  /** Watches whose row is not written yet; each read tries again. */
   private unrecorded = new Set<string>();
+  /** A write of a new watch's row in flight, shared by everything that needs the row to exist. */
+  private recording = new Map<string, Promise<boolean>>();
+  /** When each watch's read was last written back, so an unchanged read is written at most once a minute. */
+  private persistedReadAt = new Map<string, number>();
   private halted = false;
 
   constructor(private readonly storage: IStorage, private readonly hooks: WatchHooks) {}
 
   /**
-   * Watch a retest the engine answered 202 for. The row is written, then the
-   * run is read every interval. A row that could not be written is still
-   * watched here, and written as soon as a write succeeds.
+   * Watch a retest the engine answered 202 for. Synchronous: the watch exists
+   * in memory -- and its Stop is authorised -- the moment this returns, and
+   * the caller answers without waiting on the row, which is written in the
+   * background. A run the engine already reports ended is read at once.
    */
-  async start(input: WatchStart): Promise<RetestWatch> {
+  start(input: WatchStart): RetestWatch {
     const now = new Date();
     const row: RetestWatch = {
       ...input,
@@ -124,61 +145,88 @@ export class RetestWatcher {
       result: null,
     };
     this.known.set(row.engineRunId, row);
-    try {
-      await this.storage.createRetestWatch(row);
-    } catch (cause) {
-      this.unrecorded.add(row.engineRunId);
-      row.lastReadError = unrecordedSentence(cause);
-    }
-    this.follow(row.engineRunId);
+    this.unrecorded.add(row.engineRunId);
+    void this.ensureRecorded(row);
+    this.follow(row.engineRunId, LIVE_ENGINE_STATES.has(input.engineState) ? retestWatch.intervalMs : 0);
     return row;
   }
 
   /**
-   * Pick up every watch still `running` on the record: after a restart, or
-   * one another dashboard on this database started. In the background: it
-   * returns at once, holds up no start-up and no request, and a read that
-   * fails is logged and tried no further.
+   * Pick up every watch still `running` on the record -- after a restart, or
+   * one another dashboard on this database started -- and know every recent
+   * `unwatched` one, for the kill switch. In the background: it returns at
+   * once, holds up no start-up and no request, and a read that fails is
+   * logged and tried no further.
    */
   resume(): void {
     setImmediate(() => {
       void (async () => {
         let rows: RetestWatch[];
         try {
-          rows = await this.storage.getUnfinishedRetestWatches();
+          rows = await this.storage.getOpenRetestWatches(new Date(Date.now() - retestWatch.keepUnwatchedMs));
         } catch (cause) {
-          console.error(`[retest] the unfinished retest watches could not be read to resume them: ${causeOf(cause)}`);
+          console.error(`[retest] the open retest watches could not be read to resume them: ${causeOf(cause)}`);
           return;
         }
         for (const row of rows) {
           if (this.halted) return;
-          this.known.set(row.engineRunId, row);
-          this.follow(row.engineRunId, 0);
+          if (!this.known.has(row.engineRunId)) this.known.set(row.engineRunId, row);
+          if (row.state === "running") this.follow(row.engineRunId, 0);
         }
       })();
     });
   }
 
-  /** A watch by its engine run id: as recorded, or as known here when the record cannot be read. */
+  /** A watch this dashboard knows, from memory: what a Stop is authorised by, without a read. */
+  peek(engineRunId: string): RetestWatch | undefined {
+    const row = this.known.get(engineRunId);
+    return row ? { ...row } : undefined;
+  }
+
+  /** The watches this dashboard knows for one test, from memory. */
+  knownForTest(testId: string): RetestWatch[] {
+    return Array.from(this.known.values()).filter((one) => one.testId === testId).map((one) => ({ ...one }));
+  }
+
+  /** A watch by its engine run id: as recorded, or as known here when the record cannot be read or is not written yet. */
   async view(engineRunId: string): Promise<RetestWatch | undefined> {
+    const mine = this.known.get(engineRunId);
+    if (mine && this.unrecorded.has(engineRunId)) return { ...mine };
     try {
       const row = await this.storage.getRetestWatch(engineRunId);
       if (row) {
-        if (!this.unrecorded.has(engineRunId)) this.known.set(engineRunId, row);
-        return row;
+        // Memory holds what has not reached the record yet: a stop accepted a moment ago.
+        return mine?.stopAcceptedAt && !row.stopAcceptedAt ? { ...row, stopAcceptedAt: mine.stopAcceptedAt } : row;
       }
     } catch {
       // Answered from what this dashboard knows.
     }
-    return this.known.get(engineRunId);
+    return mine ? { ...mine } : undefined;
   }
 
-  /** The watches this dashboard knows may still be running: the kill switch sends each a stop without reading anything. */
+  /**
+   * The watches this dashboard knows may still be running: `running`, and
+   * `unwatched` in the last day. The kill switch sends each a stop without
+   * reading anything. Older `unwatched` ones are forgotten here.
+   */
   running(): RetestWatch[] {
-    return Array.from(this.known.values()).filter((one) => one.state === "running" || one.state === "unwatched");
+    const since = Date.now() - retestWatch.keepUnwatchedMs;
+    const out: RetestWatch[] = [];
+    for (const [id, one] of Array.from(this.known.entries())) {
+      if (one.state === "unwatched" && (one.endedAt?.getTime() ?? 0) < since) {
+        this.known.delete(id);
+        continue;
+      }
+      if (one.state === "running" || one.state === "unwatched") out.push({ ...one });
+    }
+    return out;
   }
 
-  /** Note, after the fact, that the engine accepted a stop for this run. Never before, and never in its way. */
+  /**
+   * Note that the engine accepted a stop for this run: in memory at once, on
+   * the record in the background. Only ever called after the stop was sent,
+   * and never awaited by it.
+   */
   stopAccepted(engineRunId: string): void {
     const at = new Date();
     const row = this.known.get(engineRunId);
@@ -186,17 +234,51 @@ export class RetestWatcher {
     void this.storage.updateRunningRetestWatch(engineRunId, { stopAcceptedAt: at }).catch(() => undefined);
   }
 
+  /** Stop reading, as a dashboard that shut down does. Its watches stay on the record for the next to resume. */
+  halt(): void {
+    this.halted = true;
+    this.following.clear();
+  }
+
   /** For tests that reuse one engine run id across cases: forget every watch this dashboard knows. */
   reset(): void {
     this.known.clear();
     this.following.clear();
     this.unrecorded.clear();
+    this.recording.clear();
+    this.persistedReadAt.clear();
   }
 
-  /** Stop reading, as a dashboard that shut down does. Its watches stay on the record for the next to resume. */
-  halt(): void {
-    this.halted = true;
-    this.following.clear();
+  /** Resolve and keep the finding a new watch is about, off the request's path. Best-effort: filing resolves it again if this did not. */
+  async noteFinding(engineRunId: string): Promise<void> {
+    const row = this.known.get(engineRunId);
+    if (!row || row.findingId) return;
+    const found = await this.hooks.resolveFinding(row);
+    if ("missing" in found) return;
+    row.findingId = found.findingId;
+    if (await this.ensureRecorded(row)) {
+      await this.storage.updateRunningRetestWatch(engineRunId, { findingId: found.findingId });
+    }
+  }
+
+  /** Write a new watch's row if it is not written yet. One write in flight per watch; false while it cannot be written. */
+  private ensureRecorded(row: RetestWatch): Promise<boolean> {
+    const id = row.engineRunId;
+    if (!this.unrecorded.has(id)) return Promise.resolve(true);
+    const inFlight = this.recording.get(id);
+    if (inFlight) return inFlight;
+    const attempt = this.storage.createRetestWatch({ ...row })
+      .then(() => {
+        this.unrecorded.delete(id);
+        if (row.lastReadError?.startsWith("this watch could not be recorded yet")) row.lastReadError = null;
+        return true;
+      }, (cause) => {
+        row.lastReadError = unrecordedSentence(cause);
+        return false;
+      })
+      .finally(() => this.recording.delete(id));
+    this.recording.set(id, attempt);
+    return attempt;
   }
 
   private follow(engineRunId: string, delay = retestWatch.intervalMs): void {
@@ -222,20 +304,19 @@ export class RetestWatcher {
 
   /** End the watch on the record, filing with it when there is a filing. False when it had already ended. */
   private async end(row: RetestWatch, token: symbol, end: RetestWatchEnd, filing?: RetestFiling): Promise<boolean> {
-    if (this.unrecorded.has(row.engineRunId)) {
-      await this.storage.createRetestWatch(row);
-      this.unrecorded.delete(row.engineRunId);
-    }
+    if (!(await this.ensureRecorded(row))) throw new Error(row.lastReadError ?? "this watch could not be recorded yet");
     const ended = await this.storage.endRetestWatch(row.engineRunId, end, filing);
     this.done(row.engineRunId, token);
+    this.persistedReadAt.delete(row.engineRunId);
     if (ended) {
       const now = { ...row, ...end };
-      this.known.set(row.engineRunId, now);
+      // An ended watch is read from the record from now on; an unwatched one
+      // is kept, for the kill switch.
+      if (ENDED.has(now.state)) this.known.delete(row.engineRunId);
+      else this.known.set(row.engineRunId, now);
       await this.hooks.recordEnd(now).catch(() => undefined);
     } else {
-      // Ended by another dashboard on this record: read what it came to.
-      const recorded = await this.storage.getRetestWatch(row.engineRunId).catch(() => undefined);
-      if (recorded) this.known.set(row.engineRunId, recorded);
+      await this.endedElsewhere(row, token);
     }
     return ended;
   }
@@ -244,20 +325,8 @@ export class RetestWatcher {
     if (!this.current(engineRunId, token)) return;
     const row = this.known.get(engineRunId);
     if (!row) return this.done(engineRunId, token);
-    let notRecorded: unknown = null;
-    try {
-      if (this.unrecorded.has(engineRunId)) {
-        await this.storage.createRetestWatch(row);
-        this.unrecorded.delete(engineRunId);
-        row.lastReadError = null;
-      }
-    } catch (cause) {
-      // Tried again on the next read, and said until it succeeds.
-      notRecorded = cause;
-    }
     try {
       await this.step(row, token);
-      if (notRecorded !== null && this.unrecorded.has(engineRunId)) row.lastReadError = unrecordedSentence(notRecorded);
     } catch (cause) {
       // A write or a filing that failed is said, and tried again: the run's
       // verdict is not lost to one failed write.
@@ -266,92 +335,126 @@ export class RetestWatcher {
     }
   }
 
+  /** File a collected verdict and end the watch with it. */
+  private async fileVerdict(row: RetestWatch, token: symbol, result: engine.RetestResult, at: Date): Promise<void> {
+    // A run the engine accepted a stop for, that completed anyway with a
+    // verdict: the run did finish and the engine did decide, so it is filed --
+    // and said to have completed despite the stop.
+    const despiteStop = row.stopAcceptedAt !== null;
+    const base: RetestWatchEnd = {
+      state: "verdict", engineState: "completed", reason: null, error: null, endedAt: new Date(),
+      lastReadAt: at, lastReadError: null, result: null,
+    };
+    let findingId = row.findingId;
+    let missing: string | null = null;
+    if (!findingId) {
+      const found = await this.hooks.resolveFinding(row);
+      if ("missing" in found) missing = found.missing;
+      else findingId = found.findingId;
+    }
+    if (findingId) {
+      const planned = await this.hooks.filingFor(row, findingId, result);
+      if ("missing" in planned) missing = planned.missing;
+      else {
+        try {
+          await this.end(row, token, {
+            ...base, findingId,
+            result: { ...result, applied: planned.applied, notFiled: null, completedDespiteStop: despiteStop },
+          }, planned.filing);
+          return;
+        } catch (cause) {
+          // This engine run already has its check: it is filed, once.
+          if (!(cause instanceof DuplicateRetestCheck)) throw cause;
+          missing = "a check for this engine run is already on record, so it was not filed again";
+        }
+      }
+    }
+    await this.end(row, token, {
+      ...base, findingId, result: { ...result, applied: null, notFiled: missing, completedDespiteStop: despiteStop },
+    });
+  }
+
+  /** End the watch from a status the engine answered, if that status is an end. True when it was. */
+  private async endFromStatus(row: RetestWatch, token: symbol, status: engine.RetestStatus, at: Date): Promise<boolean> {
+    const { state, reason, error } = status;
+    const phase: RetestPhase | null =
+      state === "aborted" ? "stopped"
+        : state === "failed" ? "failed"
+          : engine.RETEST_DONE_STATES.has(state) ? "no_verdict"
+            : null;
+    if (phase === null) return false;
+    await this.end(row, token, {
+      state: phase, engineState: state, reason, error, endedAt: new Date(), lastReadAt: at, lastReadError: null, result: null,
+    });
+    return true;
+  }
+
+  /** Write a read back to the row: at once when something changed, otherwise at most once a minute. */
+  private async persistRead(row: RetestWatch, token: symbol, changed: boolean): Promise<void> {
+    const last = this.persistedReadAt.get(row.engineRunId) ?? 0;
+    if (!changed && Date.now() - last < retestWatch.persistReadEveryMs) return;
+    if (!(await this.ensureRecorded(row))) return;
+    let still: boolean;
+    try {
+      still = await this.storage.updateRunningRetestWatch(row.engineRunId, {
+        engineState: row.engineState, reason: row.reason, error: row.error,
+        lastReadAt: row.lastReadAt, lastReadError: row.lastReadError,
+      });
+    } catch {
+      // Not written this time: the next read tries again. The watch goes on.
+      return;
+    }
+    this.persistedReadAt.set(row.engineRunId, Date.now());
+    if (!still) await this.endedElsewhere(row, token);
+  }
+
   private async step(row: RetestWatch, token: symbol): Promise<void> {
     const at = new Date();
-    if (at.getTime() >= row.deadlineAt.getTime()) {
+    const pastDeadline = at.getTime() >= row.deadlineAt.getTime();
+
+    let read: engine.RetestAnswer | null = null;
+    let readError: string | null = null;
+    try {
+      read = await engine.retestRun(row.engineRunId);
+    } catch (cause) {
+      readError = causeOf(cause);
+    }
+
+    if (read?.answer === "verdict") return this.fileVerdict(row, token, read.result, at);
+    if (read && (await this.endFromStatus(row, token, read.status, at))) return;
+
+    if (pastDeadline) {
+      // The last read found the run not over (or could not read it): the
+      // watch stops here, and says so -- never as an outcome.
       await this.end(row, token, {
-        state: "unwatched", engineState: row.engineState, reason: row.reason, error: row.error, endedAt: at, result: null,
+        state: "unwatched", engineState: read ? read.status.state : row.engineState, reason: row.reason, error: row.error,
+        endedAt: at, lastReadAt: at, lastReadError: readError, result: null,
       });
       return;
     }
 
-    let read: engine.RetestAnswer;
-    try {
-      read = await engine.retestRun(row.engineRunId);
-    } catch (cause) {
+    if (read === null) {
       // A read that failed is said, and the watch carries on: it is not the
       // run's end, and it is never a verdict.
-      row.lastReadAt = at;
-      row.lastReadError = causeOf(cause);
-      const still = await this.storage.updateRunningRetestWatch(row.engineRunId, { lastReadAt: at, lastReadError: row.lastReadError })
-        .catch(() => true);
-      if (still || this.unrecorded.has(row.engineRunId)) this.again(row.engineRunId, token);
-      else await this.endedElsewhere(row, token);
-      return;
-    }
-
-    if (read.answer === "verdict") {
-      const result = read.result;
-      const base: RetestWatchEnd = {
-        state: "verdict", engineState: "completed", reason: null, error: null, endedAt: new Date(),
-        lastReadAt: at, lastReadError: null, result: null,
-      };
-      let findingId = row.findingId;
-      let missing: string | null = null;
-      if (!findingId) {
-        const found = await this.hooks.resolveFinding(row);
-        if ("missing" in found) missing = found.missing;
-        else findingId = found.findingId;
-      }
-      if (findingId) {
-        const planned = await this.hooks.filingFor(row, findingId, result);
-        if ("missing" in planned) missing = planned.missing;
-        else {
-          try {
-            await this.end(row, token, {
-              ...base, findingId, result: { ...result, applied: planned.applied, notFiled: null },
-            }, planned.filing);
-            return;
-          } catch (cause) {
-            // This engine run already has its check: it is filed, once.
-            if (!(cause instanceof DuplicateRetestCheck)) throw cause;
-            missing = "a check for this engine run is already on record, so it was not filed again";
-          }
-        }
-      }
-      await this.end(row, token, { ...base, findingId, result: { ...result, applied: null, notFiled: missing } });
+      const changed = row.lastReadError !== readError;
+      Object.assign(row, { lastReadAt: at, lastReadError: readError });
+      await this.persistRead(row, token, changed);
+      this.again(row.engineRunId, token);
       return;
     }
 
     const { state, reason, error } = read.status;
-    const end = (phase: RetestPhase) =>
-      this.end(row, token, { state: phase, engineState: state, reason, error, endedAt: new Date(), lastReadAt: at, lastReadError: null, result: null });
-    if (state === "aborted") return void (await end("stopped"));
-    if (state === "failed") return void (await end("failed"));
-    if (engine.RETEST_DONE_STATES.has(state)) return void (await end("no_verdict"));
-
+    const changed = row.engineState !== state || row.reason !== reason || row.error !== error || row.lastReadError !== null;
     Object.assign(row, { engineState: state, reason, error, lastReadAt: at, lastReadError: null });
-    const still = await this.storage.updateRunningRetestWatch(row.engineRunId, {
-      engineState: state, reason, error, lastReadAt: at, lastReadError: null,
-    });
-    if (still || this.unrecorded.has(row.engineRunId)) this.again(row.engineRunId, token);
-    else await this.endedElsewhere(row, token);
+    await this.persistRead(row, token, changed);
+    this.again(row.engineRunId, token);
   }
 
-  /** The record says this watch has ended -- another dashboard ended it. Stop reading, and know what it came to. */
+  /** The record says this watch has ended -- another dashboard ended it. Stop reading, and forget it here. */
   private async endedElsewhere(row: RetestWatch, token: symbol): Promise<void> {
     this.done(row.engineRunId, token);
     const recorded = await this.storage.getRetestWatch(row.engineRunId).catch(() => undefined);
-    if (recorded) this.known.set(row.engineRunId, recorded);
-  }
-
-  /** Resolve and keep the finding a new watch is about, off the request's path. Best-effort: filing resolves it again if this did not. */
-  async noteFinding(engineRunId: string): Promise<void> {
-    const row = this.known.get(engineRunId);
-    if (!row || row.findingId) return;
-    const found = await this.hooks.resolveFinding(row);
-    if ("missing" in found) return;
-    row.findingId = found.findingId;
-    await this.storage.updateRunningRetestWatch(engineRunId, { findingId: found.findingId });
+    if (recorded && ENDED.has(recorded.state)) this.known.delete(row.engineRunId);
+    else if (recorded) this.known.set(row.engineRunId, recorded);
   }
 }

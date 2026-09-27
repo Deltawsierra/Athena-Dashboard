@@ -40,6 +40,15 @@ export function resolveDbPath(): string {
  */
 type Connection = { sqlite: DatabaseType; db: ReturnType<typeof drizzle> };
 
+/** The longest one statement may hold the event loop waiting for another connection's lock. */
+export const BUSY_TIMEOUT_MS = 10;
+
+/**
+ * What opening the database found and could not do, said rather than thrown:
+ * a database that cannot open takes every Stop down with it.
+ */
+export const openReport: { duplicateEngineRunIds: string[] } = { duplicateEngineRunIds: [] };
+
 let connection: Connection | null = null;
 
 function connect(): Connection {
@@ -52,9 +61,18 @@ function connect(): Connection {
 
   const handle = new Database(dbPath);
   handle.pragma("journal_mode = WAL");
+  // Opening may wait for the schema; nothing else is running yet.
   handle.pragma("busy_timeout = 5000");
 
   createSchema(handle);
+  // From here on, a statement waits at most BUSY_TIMEOUT_MS for a lock another
+  // connection holds. better-sqlite3 is synchronous: its busy wait blocks the
+  // whole event loop, and with 5000 every write attempted while a backup, the
+  // sqlite3 shell or another dashboard held the write lock stalled every
+  // request for 5 s -- a Stop included. The storage layer waits the rest of
+  // the way asynchronously instead (storage-sqlite.ts withBusyRetry), so the
+  // loop is never held for longer than this.
+  handle.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
   return connection;
 }
@@ -342,13 +360,38 @@ function createSchema(handle: DatabaseType): void {
     );
   `);
   addMissingColumns(handle);
-  // After the column exists on every database, old ones included: one retest
-  // run is filed as one check, whichever dashboard collected it.
+  createCheckRunIndex(handle);
+  relaxHealthMetricColumns(handle);
+}
+
+/**
+ * One check per engine run: a unique index, created once the column exists on
+ * every database, old ones included, so a retest run is filed as one check
+ * whichever dashboard collected it.
+ *
+ * A database that already holds two checks for one engine run cannot take the
+ * index, and creating it anyway would fail the open -- and a dashboard that
+ * cannot open stops nothing. So duplicates are looked for first, reported
+ * (openReport, and the log), and the index is left off until they are dealt
+ * with; the claim on the watch still files each run once.
+ */
+function createCheckRunIndex(handle: DatabaseType): void {
+  const duplicates = handle.prepare(
+    "SELECT engine_run_id AS id FROM finding_checks WHERE engine_run_id IS NOT NULL " +
+    "GROUP BY engine_run_id HAVING COUNT(*) > 1",
+  ).all() as Array<{ id: string }>;
+  openReport.duplicateEngineRunIds = duplicates.map((one) => one.id);
+  if (duplicates.length > 0) {
+    console.error(
+      `[db] finding_checks holds more than one check for engine run(s) ${openReport.duplicateEngineRunIds.join(", ")}; ` +
+      "the index that files one check per engine run was not created. Remove the extra checks to create it.",
+    );
+    return;
+  }
   handle.exec(
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_engine_run ON finding_checks(engine_run_id) " +
     "WHERE engine_run_id IS NOT NULL",
   );
-  relaxHealthMetricColumns(handle);
 }
 
 /**

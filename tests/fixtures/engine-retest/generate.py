@@ -34,10 +34,12 @@ a function that sends nothing and returns a scan result for the offline target
 scenario needs a run in flight, and raises -- after that hold, where there is
 one -- where a scenario needs a scan that failed); and
 `engine.extension_review` is set to a review with nothing unapproved, which is
-what lets the runner reach `closed`. The retest request
-bodies are exactly the body the dashboard sends (`twin_id`,
-`engagement_ref`, `scope`, and never `wait_seconds`), except where a scenario
-says otherwise.
+what lets the runner reach `closed`. The dashboard now asks
+with `wait_seconds: 0` first (and, on a 422 refusing that field, again
+without it): the `at-once-*` scenarios and main's `wait-seconds-refused` are
+that request's answers. The other #71 scenarios record the request without
+`wait_seconds` (the engine then waits up to 30 s inline), whose answers the
+dashboard still reads if an engine sends them.
 
 Run ids, timestamps, key hashes and digests differ on every run; the tests
 read them from the files rather than assuming them.
@@ -327,6 +329,33 @@ def pr71_queue_full(E, twin):
     hold.set()
 
 
+# The dashboard asks #71 with `wait_seconds: 0` (engine.ts retest): the
+# engine answers 202 at once and holds no thread for the verdict, and the
+# dashboard's watch collects it. These are that request's answers.
+
+def pr71_at_once(outcome, scan_id):
+    def fn(E, twin):
+        release, started = threading.Event(), threading.Event()
+        raises = "scanner exploded" if outcome == "failed" else None
+        E.server.engine.run_scan = stand_in(E, "closed", scan_id, release=release, started=started, raises=raises)
+        answer = E.record(E.call("POST", "/api/remediation/retest", retest_body(twin["id"], wait_seconds=0)),
+                          "the retest, asked with wait_seconds: 0 as the dashboard asks: 202 at once")
+        run_id = answer["body"]["run_id"]
+        started.wait(10)
+        E.record(E.call("GET", "/api/scans/active"), "the engine's live list while the retest runs")
+        E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url while it runs")
+        if outcome == "stopped":
+            E.record(E.call("POST", f"/api/scans/{run_id}/abort", {}), "Stop, by the run_id the 202 answered")
+            wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.ABORTED)
+        else:
+            release.set()
+            wait_until(lambda: E.runs.get(run_id)["state"] in (E.runs.COMPLETED, E.runs.FAILED))
+        E.record(E.call("GET", f"/api/scans/{run_id}"), f"its status_url once it ended ({outcome})")
+        if outcome == "stopped":
+            E.record(E.call("POST", f"/api/scans/{run_id}/abort", {}), "Stop again, on a run that has ended")
+    return fn
+
+
 # ------------------------------------------------------------------ main -----
 
 def main_verdict(kind, scan_id):
@@ -397,6 +426,9 @@ def main():
         scenario("stopped-while-waiting", contract, sha, pr71_inline_aborted, out)
         scenario("failed", contract, sha, pr71_failed, out)
         scenario("queue-full", contract, sha, pr71_queue_full, out, workers=1, queued=0)
+        scenario("at-once-then-verdict", contract, sha, pr71_at_once("verdict", 510), out)
+        scenario("at-once-then-stopped", contract, sha, pr71_at_once("stopped", 511), out)
+        scenario("at-once-then-failed", contract, sha, pr71_at_once("failed", 512), out)
     else:
         contract = "main"
         scenario("verdict-closed", contract, sha, main_verdict("closed", 610), out)

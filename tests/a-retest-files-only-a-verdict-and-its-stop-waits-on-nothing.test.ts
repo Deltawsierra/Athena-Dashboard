@@ -104,7 +104,14 @@ beforeAll(async () => {
       const reply = (one: Exchange) => json(res, one.status, one.body, one.headers ?? {});
       if (req.method === "POST" && url === "/api/scan") return reply(fx.exchanges[0]);
       if (req.method === "GET" && url.startsWith("/api/decisions?")) return reply(fx.exchanges[1]);
-      if (req.method === "POST" && url === "/api/remediation/retest") return reply(retestOf(fx));
+      if (req.method === "POST" && url === "/api/remediation/retest") {
+        // Engine main refuses `wait_seconds` (its own 422, recorded); the
+        // dashboard then asks again without it.
+        if (fx.engine.contract === "main" && body.wait_seconds !== undefined) {
+          return reply(retestOf(load(MAIN, "wait-seconds-refused")));
+        }
+        return reply(retestOf(fx));
+      }
       if (req.method === "POST" && /^\/api\/scans\/[^/]+\/abort$/.test(url)) {
         return engineState.abort ? reply(engineState.abort) : json(res, 404, { detail: "No such scan run" });
       }
@@ -226,9 +233,10 @@ describe("athena-engine #71: a verdict is filed, a status never is", () => {
     expect(after!.fixedVerdict).toBe("closed");
     const checks = await checksOf(finding.id);
     expect(checks.map((one) => [one.verdict, one.runId])).toEqual([["closed", String(answered.scan_record_id)]]);
-    // Only the engine's own request body: no wait_seconds, which main refuses.
-    const sent = calls.find((one) => one.line === "POST /api/remediation/retest")!;
-    expect(Object.keys(sent.body).sort()).toEqual(["engagement_ref", "scope", "twin_id"]);
+    // Asked with wait_seconds: 0, so #71 holds no thread for the verdict; this
+    // fixture is #71's answer to a request without it, answered inline.
+    const sent = calls.filter((one) => one.line === "POST /api/remediation/retest");
+    expect(sent.map((one) => one.body.wait_seconds)).toEqual([0]);
   });
 
   it("201 still_open: its check names the record, and nothing is marked fixed", async () => {
@@ -529,8 +537,11 @@ describe("engine main: read and filed exactly as before", () => {
     expect((await storage.getFinding(finding.id))!.fixedByRunId).toBe(String(answered.run_id));
     const checks = await checksOf(finding.id);
     expect(checks.map((one) => [one.verdict, one.runId])).toEqual([["closed", String(answered.run_id)]]);
-    const sent = calls.find((one) => one.line === "POST /api/remediation/retest")!;
-    expect(Object.keys(sent.body).sort()).toEqual(["engagement_ref", "scope", "twin_id"]);
+    // Asked with wait_seconds: 0 first; main refused the field (422, nothing
+    // started) and was asked again with exactly the body it always had.
+    const sent = calls.filter((one) => one.line === "POST /api/remediation/retest");
+    expect(sent.map((one) => one.body.wait_seconds)).toEqual([0, undefined]);
+    expect(Object.keys(sent[1].body).sort()).toEqual(["engagement_ref", "scope", "twin_id"]);
   });
 
   it("201 still_open, and the synchronous answer of a stopped or failed retest, are verdicts as main says", async () => {

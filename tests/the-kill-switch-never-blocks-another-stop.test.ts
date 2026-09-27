@@ -339,6 +339,10 @@ describe("no failed read stands between an operator and a stop", () => {
 
   it("when the running scans cannot be listed, the switch is engaged and the page is told so -- not that none ran", async () => {
     const { storage } = await import("../server/storage-unified");
+    // The kill switch finds the recorded scans in the tests this process holds
+    // in memory (storage.peekAllTests); one that has not read them all yet
+    // reads the database, and that read is what fails here.
+    const peek = vi.spyOn(storage, "peekAllTests").mockReturnValueOnce(null);
     vi.spyOn(storage, "getAllTests").mockRejectedValueOnce(new Error("database is locked"));
     const kill = await admin.patch("/api/ai-control").send(KILL);
     expect(kill.status).toBe(200);

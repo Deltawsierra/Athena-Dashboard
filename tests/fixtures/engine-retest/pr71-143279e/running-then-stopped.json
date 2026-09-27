@@ -26,15 +26,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "3c364da1-541c-4573-ad8f-1df031fb9d8f",
+        "run_id": "71366614-9e61-4bda-990e-79133161ec08",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-26T23:00:28.501415+00:00",
-        "updated_at": "2026-09-26T23:00:28.506495+00:00",
-        "finished_at": "2026-09-26T23:00:28.506495+00:00",
+        "started_at": "2026-09-27T00:58:46.839379+00:00",
+        "updated_at": "2026-09-27T00:58:46.844927+00:00",
+        "finished_at": "2026-09-27T00:58:46.844927+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -74,7 +74,7 @@
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=3c364da1-541c-4573-ad8f-1df031fb9d8f&limit=101"
+        "path": "/api/decisions?run_id=71366614-9e61-4bda-990e-79133161ec08&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +83,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "3c364da1-541c-4573-ad8f-1df031fb9d8f",
+            "run_id": "71366614-9e61-4bda-990e-79133161ec08",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +104,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-26T23:00:28.558763+00:00",
+            "captured_at": "2026-09-27T00:58:46.907067+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -131,11 +131,11 @@
       "status": 202,
       "body": {
         "answer": "status",
-        "run_id": "38dd1952-6052-4085-9bce-eda69b8d8f08",
+        "run_id": "f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
         "state": "running",
         "reason": null,
         "error": null,
-        "status_url": "/api/scans/38dd1952-6052-4085-9bce-eda69b8d8f08",
+        "status_url": "/api/scans/f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
         "detail": "the retest is running; collect it from status_url"
       }
     },
@@ -143,12 +143,12 @@
       "note": "Stop, by the run_id the 202 answered",
       "request": {
         "method": "POST",
-        "path": "/api/scans/38dd1952-6052-4085-9bce-eda69b8d8f08/abort",
+        "path": "/api/scans/f1eea767-16c9-4c92-8eb4-f80f70ef74fc/abort",
         "body": {}
       },
       "status": 200,
       "body": {
-        "run_id": "38dd1952-6052-4085-9bce-eda69b8d8f08",
+        "run_id": "f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
         "state": "aborting",
         "reason": "stopped by an operator"
       }
@@ -157,19 +157,19 @@
       "note": "its status_url once stopped: state aborted, and the runner's inconclusive verdict as the result",
       "request": {
         "method": "GET",
-        "path": "/api/scans/38dd1952-6052-4085-9bce-eda69b8d8f08"
+        "path": "/api/scans/f1eea767-16c9-4c92-8eb4-f80f70ef74fc"
       },
       "status": 200,
       "body": {
-        "run_id": "38dd1952-6052-4085-9bce-eda69b8d8f08",
+        "run_id": "f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "aborted",
         "reason": "stopped by an operator",
-        "started_at": "2026-09-26T23:00:28.590838+00:00",
-        "updated_at": "2026-09-26T23:00:58.638913+00:00",
-        "finished_at": "2026-09-26T23:00:58.638913+00:00",
+        "started_at": "2026-09-27T00:58:46.949313+00:00",
+        "updated_at": "2026-09-27T00:59:16.981985+00:00",
+        "finished_at": "2026-09-27T00:59:16.981985+00:00",
         "done": true,
         "result": {
           "twin_id": 1,
@@ -178,7 +178,7 @@
           "target": "https://offline.invalid/",
           "finding_type": "xss",
           "inventory_digest": null,
-          "run_id": "38dd1952-6052-4085-9bce-eda69b8d8f08",
+          "run_id": "f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
           "scan_record_id": 503,
           "check": {
             "id": 1,
@@ -191,7 +191,7 @@
             "inventory_digest": null,
             "run_id": 503,
             "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-26T23:00:58.636274+00:00"
+            "checked_at": "2026-09-27T00:59:16.973904+00:00"
           }
         }
       }
@@ -200,12 +200,12 @@
       "note": "Stop again, on a run that has ended",
       "request": {
         "method": "POST",
-        "path": "/api/scans/38dd1952-6052-4085-9bce-eda69b8d8f08/abort",
+        "path": "/api/scans/f1eea767-16c9-4c92-8eb4-f80f70ef74fc/abort",
         "body": {}
       },
       "status": 200,
       "body": {
-        "run_id": "38dd1952-6052-4085-9bce-eda69b8d8f08",
+        "run_id": "f1eea767-16c9-4c92-8eb4-f80f70ef74fc",
         "state": "aborted",
         "detail": "not running"
       }

@@ -8,7 +8,7 @@
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
     "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
   },
-  "scenario": "failed",
+  "scenario": "at-once-then-verdict",
   "exchanges": [
     {
       "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
@@ -26,15 +26,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "08a55edb-7379-4959-8ee1-4a337a2f33c4",
+        "run_id": "bde055a6-8d94-4a1c-85e5-bc8a3b43709f",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:59:47.740711+00:00",
-        "updated_at": "2026-09-27T00:59:47.745048+00:00",
-        "finished_at": "2026-09-27T00:59:47.745048+00:00",
+        "started_at": "2026-09-27T00:59:48.208818+00:00",
+        "updated_at": "2026-09-27T00:59:48.214364+00:00",
+        "finished_at": "2026-09-27T00:59:48.214364+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -74,7 +74,7 @@
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=08a55edb-7379-4959-8ee1-4a337a2f33c4&limit=101"
+        "path": "/api/decisions?run_id=bde055a6-8d94-4a1c-85e5-bc8a3b43709f&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +83,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "08a55edb-7379-4959-8ee1-4a337a2f33c4",
+            "run_id": "bde055a6-8d94-4a1c-85e5-bc8a3b43709f",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +104,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-27T00:59:47.749326+00:00",
+            "captured_at": "2026-09-27T00:59:48.266165+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -116,7 +116,7 @@
       }
     },
     {
-      "note": "the retest, whose scan raised (200 status, failed)",
+      "note": "the retest, asked with wait_seconds: 0 as the dashboard asks: 202 at once",
       "request": {
         "method": "POST",
         "path": "/api/remediation/retest",
@@ -125,60 +125,104 @@
           "engagement_ref": "client-1:site-1",
           "scope": [
             "offline.invalid"
-          ]
+          ],
+          "wait_seconds": 0
         }
       },
-      "status": 200,
+      "status": 202,
       "body": {
         "answer": "status",
-        "run_id": "077373c9-8873-49dd-9853-10f9125e027a",
-        "state": "failed",
+        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+        "state": "queued",
         "reason": null,
-        "error": "RuntimeError: scanner exploded",
-        "status_url": "/api/scans/077373c9-8873-49dd-9853-10f9125e027a"
+        "error": null,
+        "status_url": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843",
+        "detail": "the retest is running; collect it from status_url"
       }
     },
     {
-      "note": "its status_url: failed, with the inconclusive verdict kept as the result",
+      "note": "the engine's live list while the retest runs",
       "request": {
         "method": "GET",
-        "path": "/api/scans/077373c9-8873-49dd-9853-10f9125e027a"
+        "path": "/api/scans/active"
       },
       "status": 200,
       "body": {
-        "run_id": "077373c9-8873-49dd-9853-10f9125e027a",
+        "active": [
+          {
+            "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+            "target": "https://offline.invalid/",
+            "kind": "retest",
+            "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+            "state": "running",
+            "reason": null,
+            "started_at": "2026-09-27T00:59:48.294898+00:00",
+            "updated_at": "2026-09-27T00:59:48.298071+00:00",
+            "finished_at": null
+          }
+        ]
+      }
+    },
+    {
+      "note": "its status_url while it runs",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-        "state": "failed",
+        "state": "running",
         "reason": null,
-        "started_at": "2026-09-27T00:59:47.776428+00:00",
-        "updated_at": "2026-09-27T00:59:47.782412+00:00",
-        "finished_at": "2026-09-27T00:59:47.782412+00:00",
+        "started_at": "2026-09-27T00:59:48.294898+00:00",
+        "updated_at": "2026-09-27T00:59:48.298071+00:00",
+        "finished_at": null,
+        "done": false
+      }
+    },
+    {
+      "note": "its status_url once it ended (verdict)",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+        "target": "https://offline.invalid/",
+        "kind": "retest",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-27T00:59:48.294898+00:00",
+        "updated_at": "2026-09-27T00:59:48.326202+00:00",
+        "finished_at": "2026-09-27T00:59:48.326202+00:00",
         "done": true,
         "result": {
           "twin_id": 1,
-          "verdict": "inconclusive",
-          "detail": "the retest scan raised RuntimeError: scanner exploded",
+          "verdict": "closed",
+          "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
           "target": "https://offline.invalid/",
           "finding_type": "xss",
           "inventory_digest": null,
-          "run_id": "077373c9-8873-49dd-9853-10f9125e027a",
-          "scan_record_id": null,
+          "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+          "scan_record_id": 510,
           "check": {
             "id": 1,
             "tenant": "default",
             "twin_id": 1,
             "target": "https://offline.invalid/",
             "finding_type": "xss",
-            "verdict": "inconclusive",
-            "detail": "the retest scan raised RuntimeError: scanner exploded",
+            "verdict": "closed",
+            "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
             "inventory_digest": null,
-            "run_id": null,
+            "run_id": 510,
             "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-27T00:59:47.780179+00:00"
-          },
-          "error": "RuntimeError: scanner exploded"
+            "checked_at": "2026-09-27T00:59:48.323221+00:00"
+          }
         }
       }
     }

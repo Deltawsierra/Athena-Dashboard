@@ -58,11 +58,13 @@ export default function RunningScans({ exclude, className }: { exclude: string |
   const stopRetest = useMutation({
     mutationFn: async (runId: string) => {
       const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId)}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string };
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/engine/runs"] });
-      toast({ title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `Retest run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
     },
     onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
   });
@@ -70,12 +72,14 @@ export default function RunningScans({ exclude, className }: { exclude: string |
   const stop = useMutation({
     mutationFn: async (testId: string) => {
       const response = await apiRequest("POST", `/api/scans/${testId}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string };
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
     },
     onSuccess: (result, testId) => {
       queryClient.invalidateQueries({ queryKey: [`/api/scans/${testId}`] });
       void invalidateTestsAndFindings();
-      toast({ title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `Run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
     },
     onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
   });
@@ -92,16 +96,17 @@ export default function RunningScans({ exclude, className }: { exclude: string |
             </p>
           </div>
           {run.stopId !== null ? (
+            // Never disabled: a Stop request that hangs must not take away the
+            // only Stop. Pressed again, it sends the stop again.
             <Button
               type="button"
               variant="destructive"
               size="sm"
               onClick={() => stopRetest.mutate(run.stopId as string)}
-              disabled={stopRetest.isPending && stopRetest.variables === run.stopId}
               data-testid={`button-stop-retest-run-${run.stopId}`}
             >
               <Square className="mr-2 h-4 w-4" />
-              {stopRetest.isPending && stopRetest.variables === run.stopId ? "Stopping…" : "Stop"}
+              {stopRetest.isPending && stopRetest.variables === run.stopId ? "Stopping… (press to resend)" : "Stop"}
             </Button>
           ) : (
             <p className="text-[12px] text-muted-foreground">
@@ -119,7 +124,21 @@ export default function RunningScans({ exclude, className }: { exclude: string |
     </p>
   );
 
-  if (tests$.state === "loading") return null;
+  // A retest's Stop is drawn as soon as the engine's list is in: it does not
+  // wait for this app's own list of tests.
+  if (tests$.state === "loading") {
+    if (!retestList && !engineUnread) return null;
+    return (
+      <GlassCard className={className} data-testid="list-running-scans">
+        <p className="athena-label">Scans running now</p>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Retests the engine lists as live. The scans recorded here are still being read.
+        </p>
+        {retestList}
+        {engineUnread}
+      </GlassCard>
+    );
+  }
   if (tests$.state === "error") {
     return (
       <GlassCard ruling className={className}>

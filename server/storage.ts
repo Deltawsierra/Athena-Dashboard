@@ -54,6 +54,15 @@ export interface IStorage {
 
   // Tests
   getTest(id: string): Promise<Test | undefined>;
+  /**
+   * A test as this process last read or wrote it, from memory, without asking
+   * the database: what a Stop finds its run by, so no read -- locked, slow or
+   * failing -- stands between a Stop and the engine. Undefined when this
+   * process has not seen it.
+   */
+  peekTest(id: string): Test | undefined;
+  /** Every test, from memory, once this process has read them all; null until it has. */
+  peekAllTests(): Test[] | null;
   getAllTests(): Promise<Test[]>;
   getTestsByClient(clientId: string): Promise<Test[]>;
   getTestsBySite(siteId: string): Promise<Test[]>;
@@ -90,8 +99,12 @@ export interface IStorage {
   /** Record a new watch. A second watch of the same engine run is refused (its primary key). */
   createRetestWatch(watch: RetestWatch): Promise<RetestWatch>;
   getRetestWatch(engineRunId: string): Promise<RetestWatch | undefined>;
-  /** Every watch still `running`: what a dashboard starting up resumes. */
-  getUnfinishedRetestWatches(): Promise<RetestWatch[]>;
+  /**
+   * Every watch still `running` -- what a dashboard starting up resumes --
+   * and every one that ended `unwatched` (its run may still be going) at or
+   * after `unwatchedSince`, which the kill switch sends a stop by id.
+   */
+  getOpenRetestWatches(unwatchedSince: Date): Promise<RetestWatch[]>;
   /** Change a watch that is still `running`; answers whether it was. */
   updateRunningRetestWatch(engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>): Promise<boolean>;
   /**
@@ -363,6 +376,11 @@ export class MemStorage implements IStorage {
 
   // Tests
   async getTest(id: string) { return this.tests.get(id); }
+  peekTest(id: string) {
+    const test = this.tests.get(id);
+    return test ? { ...test } : undefined;
+  }
+  peekAllTests() { return Array.from(this.tests.values()).map((one) => ({ ...one })); }
   async getAllTests() { return Array.from(this.tests.values()); }
   async getTestsByClient(clientId: string) {
     return Array.from(this.tests.values()).filter((t) => t.clientId === clientId);
@@ -465,8 +483,11 @@ export class MemStorage implements IStorage {
     const row = this.retestWatches.get(engineRunId);
     return row ? { ...row } : undefined;
   }
-  async getUnfinishedRetestWatches() {
-    return Array.from(this.retestWatches.values()).filter((one) => one.state === "running").map((one) => ({ ...one }));
+  async getOpenRetestWatches(unwatchedSince: Date) {
+    return Array.from(this.retestWatches.values())
+      .filter((one) => one.state === "running"
+        || (one.state === "unwatched" && one.endedAt !== null && one.endedAt.getTime() >= unwatchedSince.getTime()))
+      .map((one) => ({ ...one }));
   }
   async updateRunningRetestWatch(engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>) {
     const row = this.retestWatches.get(engineRunId);

@@ -734,11 +734,36 @@ export async function activeRuns(): Promise<ActiveRun[]> {
 }
 
 /** Ask a running scan to stop. */
-export async function abort(runId: string): Promise<boolean> {
+/**
+ * What a stop came to. `accepted`: the engine took it and is stopping the run.
+ * `alreadyFinished`: the engine answered that the run is not running -- it had
+ * ended before the stop arrived, and nothing was stopped by it. Neither: the
+ * engine did not take it (the run may still be going).
+ */
+export interface AbortOutcome {
+  accepted: boolean;
+  alreadyFinished: boolean;
+  /** The run's state as the engine answered it, when it did. */
+  state: string | null;
+}
+
+/** Ask a running scan to stop. */
+export async function abortRun(runId: string): Promise<AbortOutcome> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}/abort`, {
     method: "POST",
   });
-  return response.ok;
+  if (!response.ok) return { accepted: false, alreadyFinished: false, state: null };
+  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const state = payload && typeof payload.state === "string" ? payload.state : null;
+  // Both engines answer a run that has ended `{state, detail: "not running"}`.
+  if (payload && payload.detail === "not running") return { accepted: false, alreadyFinished: true, state };
+  return { accepted: true, alreadyFinished: false, state };
+}
+
+/** Ask a running scan to stop: true when the engine took the stop, or the run had already ended. */
+export async function abort(runId: string): Promise<boolean> {
+  const outcome = await abortRun(runId);
+  return outcome.accepted || outcome.alreadyFinished;
 }
 
 // ==== RETEST ====
@@ -893,17 +918,27 @@ export interface RetestRequest {
 }
 
 /**
- * How long the retest request may take.
- *
- * athena-engine #71 holds the request for up to 30 s (its
- * MAX_INLINE_WAIT_SECONDS) for the verdict, then answers 202 with the run id.
- * The 20 s every other call gets would cut that wait off: the dashboard would
- * report an unreachable engine while the retest ran on, with no run id to
- * stop it by. So this call gets the engine's wait and room to answer.
- * `wait_seconds` is never sent: engine main refuses the field (422), and
- * omitted it means the engine's own ceiling.
+ * An engine answer to a retest that is neither contract's: nothing is filed
+ * from it, and no id in it is read as a scan record.
  */
-export const RETEST_CALL_TIMEOUT_MS = 45_000;
+export class UnrecognisedRetestAnswer extends EngineUnavailable {}
+
+/**
+ * Whether a 422 is the engine refusing `wait_seconds` as a field it does not
+ * know -- engine main does (the fixture main-5779e99/wait-seconds-refused.json)
+ * -- which it does before anything is started.
+ */
+function refusesWaitSeconds(status: number, raw: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const detail = (JSON.parse(raw) as { detail?: unknown }).detail;
+    return Array.isArray(detail) && detail.some((one) =>
+      one && typeof one === "object" && Array.isArray((one as { loc?: unknown }).loc)
+      && ((one as { loc: unknown[] }).loc).includes("wait_seconds"));
+  } catch {
+    return false;
+  }
+}
 
 const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
@@ -959,17 +994,32 @@ function statusOf(payload: Record<string, unknown>, httpStatus: number): RetestS
  *    retest is over, and its `run_id` is the scan record id. Read exactly as
  *    it always was.
  *
- * Any other answer throws: an `answer` this cannot read is not a verdict.
+ * `wait_seconds: 0` is sent first, so #71 answers 202 at once rather than
+ * holding an engine thread for up to 30 s; main refuses the field (422,
+ * before it starts anything) and is asked again without it.
+ *
+ * Any other answer throws UnrecognisedRetestAnswer: a 202 that is not a
+ * status, an answer without `answer` that main would never send (a 202, or
+ * one carrying `scan_record_id`), and an `answer` this cannot read. None is a
+ * verdict, and nothing is filed from one.
  */
 export async function retest(request: RetestRequest): Promise<RetestAnswer> {
-  const response = await call("/api/remediation/retest", {
+  const fields = { twin_id: request.twinId, engagement_ref: request.engagementRef, scope: request.scope };
+  // `wait_seconds: 0` first: athena-engine #71 then answers 202 with the run's
+  // id at once, holds no engine thread waiting for the verdict, and the watch
+  // collects it. Engine main refuses the field with a 422 before it starts
+  // anything, and is asked again without it -- the request it always had.
+  let response = await call("/api/remediation/retest", {
     method: "POST",
-    body: JSON.stringify({
-      twin_id: request.twinId,
-      engagement_ref: request.engagementRef,
-      scope: request.scope,
-    }),
-  }, RETEST_CALL_TIMEOUT_MS);
+    body: JSON.stringify({ ...fields, wait_seconds: 0 }),
+  });
+  if (response.status === 422) {
+    const raw = await body(response);
+    if (!refusesWaitSeconds(422, raw)) {
+      throw new EngineUnavailable(`the engine answered 422: ${raw}`);
+    }
+    response = await call("/api/remediation/retest", { method: "POST", body: JSON.stringify(fields) });
+  }
 
   if (response.status === 429) {
     // #71 refuses a full queue with a status that names the run it recorded
@@ -990,9 +1040,24 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   const payload = (await response.json()) as Record<string, unknown>;
 
   if (!("answer" in payload)) {
+    // Neither contract answers like this: main never answers 202, and never
+    // sends `scan_record_id`. Read as main's verdict it would file a check
+    // against an id that may be a registry uuid, so it is not read at all.
+    if (response.status === 202 || "scan_record_id" in payload) {
+      throw new UnrecognisedRetestAnswer(
+        `Unrecognised engine answer: HTTP ${response.status} with no \`answer\`` +
+        ("scan_record_id" in payload ? " and a `scan_record_id`" : "") + ". Nothing was filed.",
+      );
+    }
     // Engine main: the verdict, with the record id under `run_id` and no id a
     // stop could name (the retest is over by the time it answers).
     return { answer: "verdict", result: verdictOf(payload, payload.run_id, null) };
+  }
+  // A 202 is a run still going, whatever else it says: never a verdict.
+  if (response.status === 202 && payload.answer !== "status") {
+    throw new UnrecognisedRetestAnswer(
+      `Unrecognised engine answer: HTTP 202 with answer ${JSON.stringify(payload.answer)}. Nothing was filed.`,
+    );
   }
   if (payload.answer === "verdict") {
     return {
@@ -1003,8 +1068,8 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   if (payload.answer === "status") {
     return { answer: "status", status: statusOf(payload, response.status) };
   }
-  throw new EngineUnavailable(
-    `the engine answered the retest with answer ${JSON.stringify(payload.answer)}, which is neither a verdict nor a status`,
+  throw new UnrecognisedRetestAnswer(
+    `Unrecognised engine answer: answer ${JSON.stringify(payload.answer)} is neither a verdict nor a status. Nothing was filed.`,
   );
 }
 

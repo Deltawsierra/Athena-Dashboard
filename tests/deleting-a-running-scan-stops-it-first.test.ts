@@ -267,10 +267,15 @@ describe("the kill switch stops every run the engine lists as live, not only the
   it("rows that cannot be read hold back no stop to a run the engine lists", async () => {
     const scan = await runningScan(await engagement("RowsFail"));
     const { storage } = await import("../server/storage-unified");
+    // The kill switch finds the recorded scans in the tests this process holds
+    // in memory (storage.peekAllTests); one that has not read them all yet
+    // reads the database, and that read is what fails here.
+    const peek = vi.spyOn(storage, "peekAllTests").mockReturnValueOnce(null);
     const spy = vi.spyOn(storage, "getAllTests").mockRejectedValueOnce(new Error("database is locked"));
     engine.calls.length = 0;
     const kill = await admin.patch("/api/ai-control").send(KILL);
     spy.mockRestore();
+    peek.mockRestore();
     expect(kill.status).toBe(200);
     expect(kill.body.stops).toEqual({ listed: false, detail: "database is locked" });
     expect(kill.body.engineRuns).toMatchObject({ listed: true, runs: [{ runId: scan.runId, testId: null, stopped: true }] });

@@ -1,6 +1,6 @@
 import { db, sqlite } from "./db-sqlite";
 import * as schema from "@shared/schema";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
@@ -137,6 +137,7 @@ export class SqliteStorage implements IStorage {
     // There are no foreign keys, so the children are removed here. Without
     // this, deleting a client orphaned its tests, sites and documents, which
     // then referenced an id that no longer existed.
+    this.forgetTests();
     const removed = db.transaction(() => {
       db.delete(schema.tests).where(eq(schema.tests.clientId, id)).run();
       db.delete(schema.sites).where(eq(schema.sites.clientId, id)).run();
@@ -179,17 +180,46 @@ export class SqliteStorage implements IStorage {
   }
 
   // Tests
+  //
+  // Every test this process has read or written is kept in memory as well
+  // (peekTest / peekAllTests), so a Stop can find the run it names without
+  // asking the database first: a database that is locked, slow or failing
+  // must never stand between a Stop and the engine.
+  private testCache = new Map<string, Test>();
+  private testsListed = false;
+  private remember<T extends Test | undefined>(test: T): T {
+    if (test) this.testCache.set(test.id, { ...test });
+    return test;
+  }
+  peekTest(id: string): Test | undefined {
+    const test = this.testCache.get(id);
+    return test ? { ...test } : undefined;
+  }
+  peekAllTests(): Test[] | null {
+    return this.testsListed ? Array.from(this.testCache.values()).map((one) => ({ ...one })) : null;
+  }
+  private forgetTests(): void {
+    this.testCache.clear();
+    this.testsListed = false;
+  }
   async getTest(id: string): Promise<Test | undefined> {
-    return db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
+    return this.remember(db.select().from(schema.tests).where(eq(schema.tests.id, id)).get());
   }
   async getAllTests(): Promise<Test[]> {
-    return db.select().from(schema.tests).all();
+    const rows = db.select().from(schema.tests).all();
+    this.testCache = new Map(rows.map((row) => [row.id, { ...row }]));
+    this.testsListed = true;
+    return rows;
   }
   async getTestsByClient(clientId: string): Promise<Test[]> {
-    return db.select().from(schema.tests).where(eq(schema.tests.clientId, clientId)).all();
+    const rows = db.select().from(schema.tests).where(eq(schema.tests.clientId, clientId)).all();
+    rows.forEach((row) => this.remember(row));
+    return rows;
   }
   async getTestsBySite(siteId: string): Promise<Test[]> {
-    return db.select().from(schema.tests).where(eq(schema.tests.siteId, siteId)).all();
+    const rows = db.select().from(schema.tests).where(eq(schema.tests.siteId, siteId)).all();
+    rows.forEach((row) => this.remember(row));
+    return rows;
   }
   // Findings
   async getFinding(id: string): Promise<Finding | undefined> {
@@ -292,8 +322,11 @@ export class SqliteStorage implements IStorage {
   async getRetestWatch(engineRunId: string): Promise<RetestWatch | undefined> {
     return db.select().from(schema.retestWatches).where(eq(schema.retestWatches.engineRunId, engineRunId)).get();
   }
-  async getUnfinishedRetestWatches(): Promise<RetestWatch[]> {
-    return db.select().from(schema.retestWatches).where(eq(schema.retestWatches.state, "running")).all();
+  async getOpenRetestWatches(unwatchedSince: Date): Promise<RetestWatch[]> {
+    return db.select().from(schema.retestWatches).where(or(
+      eq(schema.retestWatches.state, "running"),
+      and(eq(schema.retestWatches.state, "unwatched"), gte(schema.retestWatches.endedAt, unwatchedSince)),
+    )).all();
   }
   async updateRunningRetestWatch(
     engineRunId: string, patch: Partial<Omit<RetestWatch, "engineRunId" | "state">>,
@@ -369,7 +402,9 @@ export class SqliteStorage implements IStorage {
     return this.getTest(id);
   }
   async deleteTest(id: string): Promise<boolean> {
-    return db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
+    const removed = db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
+    this.testCache.delete(id);
+    return removed;
   }
 
   // Documents
@@ -425,6 +460,7 @@ export class SqliteStorage implements IStorage {
     // One transaction: a half-removed seed leaves a dashboard whose notice
     // says one thing and whose figures say another, which is worse than
     // either state on its own.
+    this.forgetTests();
     db.transaction(() => {
       db.delete(schema.tests).where(eq(schema.tests.isSample, true)).run();
       db.delete(schema.documents).where(eq(schema.documents.isSample, true)).run();
@@ -669,4 +705,47 @@ export class SqliteStorage implements IStorage {
   }
 }
 
-export const storage = new SqliteStorage();
+/** Methods that answer from memory, synchronously, and are never retried. */
+const IN_MEMORY = new Set<PropertyKey>(["peekTest", "peekAllTests"]);
+
+/** How long, in all, a statement is retried while another connection holds the lock it needs. */
+const BUSY_RETRY_FOR_MS = 5_000;
+
+function isBusy(cause: unknown): boolean {
+  const code = (cause as { code?: unknown } | null)?.code;
+  return typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"));
+}
+
+/**
+ * Wait for a lock without holding the event loop.
+ *
+ * Each statement gives up after BUSY_TIMEOUT_MS (db-sqlite.ts); a call that
+ * gave up on a busy database is tried again after a timer, for up to
+ * BUSY_RETRY_FOR_MS in all -- the 5 s a write used to wait, spent off the
+ * loop, so every other request, and every Stop, is served in between. A
+ * method fails with SQLITE_BUSY before anything it does is committed (one
+ * statement, or one transaction rolled back whole), so trying it again from
+ * the start is safe.
+ */
+export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RETRY_FOR_MS): T {
+  return new Proxy(target, {
+    get(object, property, receiver) {
+      const value = Reflect.get(object, property, receiver);
+      if (typeof value !== "function" || property === "constructor") return value;
+      if (IN_MEMORY.has(property)) return value.bind(object);
+      return async (...args: unknown[]) => {
+        const deadline = Date.now() + retryForMs;
+        for (;;) {
+          try {
+            return await value.apply(object, args);
+          } catch (cause) {
+            if (!isBusy(cause) || Date.now() >= deadline) throw cause;
+            await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+          }
+        }
+      };
+    },
+  });
+}
+
+export const storage: IStorage = withBusyRetry(new SqliteStorage());
