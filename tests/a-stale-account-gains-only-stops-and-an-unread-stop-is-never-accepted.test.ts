@@ -366,17 +366,28 @@ describe("a stale account gains nothing but stops", () => {
     }
   });
 
-  it("a signature whose command's action cannot be read is not taken for a stop: the account is read, and a current admin's is relayed", async () => {
+  it("a signature whose command's action cannot be read is relayed as a possible stop for a session held as an admin's (the control plane checks the signatures), and logged so; a non-admin's is refused", async () => {
     const plane = await controlPlane({ unreadable: true });
     try {
       const ex = await secondAdmin();
       await storage.deleteUser(ex.id);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      // The residual the round-four decision accepts: a session this process
+      // still holds as an admin's relays a signature whose action could not be
+      // learnt -- it may be a stop's -- without reading the account.
       const stale = await ex.agent.post("/api/failsafe/commands/cmd-pause-4/signatures").send({ keyId: "k1", sig: "abcd" });
-      expect(stale.status).toBe(401);
-      expect(plane.signed("cmd-pause-4")).toBe(false);
+      expect(stale.status).toBe(200);
+      expect(plane.signed("cmd-pause-4")).toBe(true);
+      expect(warn.mock.calls.some((one) => /cmd-pause-4: action not confirmed; relayed as a possible stop/.test(String(one[0])))).toBe(true);
       const current = await admin.post("/api/failsafe/commands/cmd-pause-5/signatures").send({ keyId: "k1", sig: "abcd" });
       expect(current.status).toBe(200);
       expect(plane.signed("cmd-pause-5")).toBe(true);
+      const logged = (await storage.getAllActivityLogs()).find((one) => one.entityType === "failsafe_command" && one.entityId === "cmd-pause-5");
+      expect(logged?.details).toMatchObject({ actionConfirmed: false, note: "action not confirmed; relayed as a possible stop" });
+      // A session not held as an admin's is read, and refused.
+      const user = await analyst.post("/api/failsafe/commands/cmd-pause-6/signatures").send({ keyId: "k1", sig: "abcd" });
+      expect(user.status).toBe(403);
+      expect(plane.signed("cmd-pause-6")).toBe(false);
     } finally {
       await plane.close();
     }
@@ -511,7 +522,7 @@ describe("the other fields sent with the kill switch, when the account or the sw
     await admin.patch("/api/ai-control").send({ ...REACTIVATE, systemStatus: original.systemStatus });
   });
 
-  it("the switch itself cannot be stored: every stop is sent, the answer says NOT engaged, and the other fields are refused by name", async () => {
+  it("the switch itself cannot be stored: every stop is sent, the switch is held engaged in memory and says its flag is not stored, and the other fields are refused by name", async () => {
     const runId = `r4-unstored-${Date.now()}`;
     await runningTest(runId);
     eng.abort = abortsOf(load(PR71, "at-once-then-stopped"))[0];
@@ -520,9 +531,10 @@ describe("the other fields sent with the kill switch, when the account or the sw
     const engaged = await admin.patch("/api/ai-control").send({ killSwitchEnabled: true, maxConcurrentTests: 7 });
     vi.restoreAllMocks();
     expect(engaged.status).toBe(500);
-    expect(engaged.body.engaged).toBe(false);
+    expect(engaged.body.engaged).toBe(true);
+    expect(engaged.body.stored).toBe(false);
     expect(engaged.body.refused).toEqual(["maxConcurrentTests"]);
-    expect(engaged.body.message).toMatch(/could not be engaged: database or disk is full/);
+    expect(engaged.body.message).toMatch(/flag could not be stored: database or disk is full\. It is engaged in this dashboard's memory/);
     expect(engaged.body.message).toMatch(/other fields sent with it \(maxConcurrentTests\) were not saved/);
     expect(engaged.body.stops.scans.some((one: { runId: string; stopped: boolean }) => one.runId === runId && one.stopped)).toBe(true);
     expect(aborts()).toContain(`POST /api/scans/${runId}/abort`);
@@ -531,6 +543,10 @@ describe("the other fields sent with the kill switch, when the account or the sw
       .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())[0];
     expect((switchLog.details as { notStored?: string; refused?: string[] }).notStored).toMatch(/disk is full/);
     expect((switchLog.details as { refused?: string[] }).refused).toEqual(["maxConcurrentTests"]);
+    // Not stored; held engaged here until switched off here.
+    expect((await storage.getAIControlSettings())!.killSwitchEnabled).toBe(false);
+    expect((await admin.get("/api/ai-control")).body.killSwitchEnabled).toBe(true);
+    expect((await admin.patch("/api/ai-control").send(REACTIVATE)).status).toBe(200);
     expect((await admin.get("/api/ai-control")).body.killSwitchEnabled).toBe(false);
   });
 });

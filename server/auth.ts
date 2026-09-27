@@ -20,6 +20,8 @@ declare global {
       currentUser?: User;
       /** Set when requireAdmin authorised a stop from the session in memory, without reading the account. */
       authorisedFromSession?: boolean;
+      /** Set when a signature relay was authorised though its command's action could not be learnt in time: it may be a stop's. */
+      relayedAsPossibleStop?: boolean;
     }
   }
 }
@@ -87,11 +89,42 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
   if (user) noteAccount(user);
   if (!user || !user.isActive) return undefined;
 
-  // Best-effort usage stamp; a failure here must not fail the request.
-  await storage.touchApiKey(record.id).catch(() => {});
+  touchOnce(req, record.id);
   req.currentUser = user;
   return user;
 }
+
+/** The requests whose key's usage stamp has been sent: one stamp per request, however many guards authenticate it. */
+const touched = new WeakSet<Request>();
+
+/**
+ * The key's usage stamp, a write, for a request: sent once, and never waited
+ * on. It used to be awaited, by every guard -- twice for an admin's stop -- so
+ * a database held locked by another connection held an API key's Stop, and
+ * its kill switch, for the whole of the write's wait (5 s, then 10 s). It now
+ * takes its place in the write line (storage-sqlite.ts withBusyRetry) while
+ * the request goes on; a stamp that fails is logged and counted
+ * (apiKeyTouches.failed), and fails nothing.
+ */
+function touchOnce(req: Request, keyId: string): void {
+  if (touched.has(req)) return;
+  touched.add(req);
+  apiKeyTouches.sent += 1;
+  let pending: Promise<void>;
+  try {
+    pending = Promise.resolve(storage.touchApiKey(keyId));
+  } catch (cause) {
+    pending = Promise.reject(cause);
+  }
+  pending.catch((cause: unknown) => {
+    apiKeyTouches.failed += 1;
+    console.error(`[auth] the usage stamp of API key ${keyId} could not be written (the request went on): ` +
+      `${cause instanceof Error ? cause.message : String(cause)}`);
+  });
+}
+
+/** How many API-key usage stamps were sent, and how many of them failed. */
+export const apiKeyTouches = { sent: 0, failed: 0 };
 
 /**
  * Every account this process has signed in, or changed, as it is now: its role
@@ -165,15 +198,20 @@ export function reviseLiveSessions(
  * Relaying a signature to a failsafe command is NOT one of these by its path:
  * whether it is a stop depends on the command's action, which only the
  * control plane knows. It is decided by requireAdminUnlessStop, from that
- * action: a pause's, a stand-down's or a terminate's is authorised from
- * memory; any other -- a resume's, a release's, or one whose action cannot be
- * read -- from the account, read now.
+ * action: a pause's, a stand-down's or a terminate's -- or one whose action
+ * could not be learnt within its deadline, which may be a stop's -- is
+ * authorised from memory; a resume's or a release's from the account, read
+ * now.
  *
  * The session's role is the account's as this process knows it now
  * (sessionUser), not as it was at sign-in. What this process knows can be
  * stale -- another dashboard on the same database may have demoted or
  * deleted the account -- and that is why only stops are ever decided from it:
- * a stale account may gain nothing but a stop.
+ * a stale account may gain nothing but a stop. The one exception is a relay
+ * whose command's action could not be learnt in time: it is relayed as a
+ * possible stop, so a resume's signature from such a session goes through
+ * only when the control plane's own read of that command also fails -- and
+ * the control plane still verifies the keyholders' signatures on it.
  */
 export function isStopRequest(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
@@ -218,9 +256,10 @@ function isSignatureRelay(req: Request): boolean {
 /** Rejects the request with 401 unless a live, active account is behind it. */
 export const requireAuth: RequestHandler = (req, res, next) => {
   // A stop with a session is authorised from it. One presented with an API key
-  // instead is authorised as any request is: the key has to be looked up. A
+  // instead is authorised as any request is: the key has to be looked up (two
+  // reads; its usage stamp, a write, is never waited on -- touchOnce). A
   // signature relay with a session is left to its route's guard
-  // (requireAdminUnlessStop), which reads the account unless it is a stop's.
+  // (requireAdminUnlessStop), which reads the account unless it may be a stop's.
   if ((isStopRequest(req) || isSignatureRelay(req)) && sessionUser(req)) {
     next();
     return;
@@ -266,29 +305,47 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
 };
 
 /**
- * An admin's guard for a route whose request is a stop or not depending on
- * what it names -- a signature relay, whose command's action only the control
- * plane knows. `isStop` says whether this one is.
- *
- *   - A stop is authorised from the session in memory, as every stop is: the
- *     account is not read, and no failed or slow read stands in its way.
- *   - Anything else -- `isStop` false, or failing -- needs the account read
- *     now, and an active admin behind it: a session this process still holds
- *     as an admin's, whose account another dashboard demoted or deleted, gains
- *     nothing but stops. A read that fails answers 503, and nothing is done.
+ * What a request whose route is a stop or not depending on what it names --
+ * a signature relay, whose command's action only the control plane knows --
+ * turned out to be: a stop's ("stop"), not a stop's ("not_stop"), or not
+ * known in time ("possible_stop": the action could not be learnt within its
+ * deadline, so it may be a stop's).
  */
-export function requireAdminUnlessStop(isStop: (req: Request) => Promise<boolean>): RequestHandler {
+export type StopKind = "stop" | "possible_stop" | "not_stop";
+
+/**
+ * An admin's guard for a route whose request is a stop or not depending on
+ * what it names. `kindOf` says which this one is, within its own deadline
+ * (routes.ts: from memory for a command this dashboard has proxied, otherwise
+ * one read of at most failsafeTimeouts.commandReadMs).
+ *
+ *   - A stop, or a possible stop, from a session whose account this process
+ *     holds as an active admin's, is authorised from the session in memory:
+ *     the account is not read, and no failed or slow read stands in its way.
+ *     A possible stop is marked (req.relayedAsPossibleStop) for its route to
+ *     log. The control plane checks the keyholders' signatures on every
+ *     command whatever this guard decides: that is the authority, and this is
+ *     not.
+ *   - Anything else -- not a stop, or no admin session in memory -- needs the
+ *     account read now (once per request), and an active admin behind it: a
+ *     session this process still holds as an admin's, whose account another
+ *     dashboard demoted or deleted, gains nothing but stops. A read that fails
+ *     answers 503, and nothing is done.
+ */
+export function requireAdminUnlessStop(kindOf: (req: Request) => Promise<StopKind>): RequestHandler {
   return (req, res, next) => {
     void (async () => {
       const me = sessionUser(req);
-      if (me !== null && me.role === "admin" && (await isStop(req).catch(() => false))) {
+      const kind: StopKind = await kindOf(req).catch(() => "possible_stop" as const);
+      if (me !== null && me.role === "admin" && kind !== "not_stop") {
         req.authorisedFromSession = true;
+        if (kind === "possible_stop") req.relayedAsPossibleStop = true;
         next();
         return;
       }
       let user: User | undefined;
       try {
-        user = await loadSessionUser(req);
+        user = req.currentUser ?? (await loadSessionUser(req));
       } catch (cause) {
         res.status(503).json({
           message: "The account behind this session could not be read " +
@@ -305,6 +362,7 @@ export function requireAdminUnlessStop(isStop: (req: Request) => Promise<boolean
         res.status(403).json({ message: "Admin role required" });
         return;
       }
+      if (kind === "possible_stop") req.relayedAsPossibleStop = true;
       next();
     })().catch(next);
   };

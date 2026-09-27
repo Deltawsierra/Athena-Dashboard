@@ -160,9 +160,11 @@ for (const watches of [3, 20]) {
           expect(got, line).toBeDefined();
           expect(got!.at - pressed, line).toBeLessThan(250);
         }
-        // The flag could not be stored under the held lock; that is said, with every stop.
+        // The flag could not be stored under the held lock; that is said, with every stop --
+        // and the press is held engaged in this dashboard's memory all the same.
         expect(engaged.status).toBe(500);
-        expect(engaged.body.engaged).toBe(false);
+        expect(engaged.body.engaged).toBe(true);
+        expect(engaged.body.stored).toBe(false);
         expect(engaged.body.message).toMatch(/Every stop was sent all the same/);
       } finally {
         watcher.halt();

@@ -237,6 +237,42 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
     expect(document.body.textContent).not.toMatch(/Kill switch engaged/);
   });
 
+  it("an engage a later disengage superseded says the switch was switched off again, never that it is engaged or was never engaged", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      message: "The kill switch was engaged and every stop was sent, and a later change has since switched it off (it is off " +
+        "now); the other fields sent with it (systemStatus, activeSystems) were not saved: a later change to these settings " +
+        "was sent while this one was being saved; the stored settings are that one's.",
+      killSwitchEnabled: false,
+      engaged: false,
+      stops: { listed: true, scans: [scan("a", true)] },
+      engineRuns: { listed: true, runs: [] },
+      refused: ["systemStatus", "activeSystems"],
+      superseded: "a later change to these settings was sent while this one was being saved; the stored settings are that one's",
+    }), { status: 409, headers: { "Content-Type": "application/json" } })));
+    const said = (await engage()).textContent;
+    expect(said).toBe("Kill switch switched off again by a later change, stops sent anyway; 1 running scan was sent a stop, and the engine accepted it.");
+    expect(screen.getByTestId("text-kill-switch-not-engaged").textContent).toMatch(/a later change has since switched it off \(it is off now\)/);
+    expect(document.body.textContent).not.toMatch(/Kill switch engaged|Kill switch NOT engaged/);
+  });
+
+  it("a switch whose flag could not be stored but is held engaged in the server's memory is said to be engaged, with every stop", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      message: "The kill switch's flag could not be stored: SQLITE_FULL: database or disk is full. It is engaged in this " +
+        "dashboard's memory: every write here but a stop is refused until it is switched off here, but another dashboard " +
+        "on this database does not see it, and a restart of this one forgets it -- press it again once the database takes " +
+        "writes. Every stop was sent all the same; what each came to is below.",
+      engaged: true,
+      stored: false,
+      stops: { listed: true, scans: [scan("a", true)] },
+      engineRuns: { listed: true, runs: [] },
+    }), { status: 500, headers: { "Content-Type": "application/json" } })));
+    const said = (await engage()).textContent;
+    expect(said).toBe("Kill switch engaged; 1 running scan was sent a stop, and the engine accepted it.");
+    expect(screen.queryByTestId("text-kill-switch-not-engaged")).toBeNull();
+  });
+
   it("a failure that carries no stops is a plain failure: no report is drawn", async () => {
     mount(SETTINGS);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Forbidden" }), {

@@ -35,8 +35,19 @@ const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
 const FAILSAFE_PASSWORD_ENV = "ATHENA_FAILSAFE_PASSWORD";
 const FAILSAFE_ENGINE_ID_ENV = "ATHENA_FAILSAFE_ENGINE_ID";
 
-/** How long any single call to the control plane may take. */
-const TIMEOUT_MS = 15_000;
+/**
+ * How long the control plane is waited for. `callMs`: for an answer's
+ * headers (and for a token). `bodyMs`: for the rest of an answer once its
+ * headers are in -- a body that stalls is given up on then, and its request
+ * aborted, so it holds no request and no socket. `stopBodyMs`: the same for
+ * the answer to a stop's own call (drafting a pause, stand-down or terminate;
+ * relaying a signature), which has already been sent by then. `commandReadMs`:
+ * the whole of the read a signature relay makes to learn its command's action
+ * (connect, headers and body together) when the action is not already known
+ * here -- a relay never waits on that read longer (readActionWithin). Tests
+ * shorten these.
+ */
+export const failsafeTimeouts = { callMs: 15_000, bodyMs: 15_000, stopBodyMs: 2_000, commandReadMs: 250 };
 
 /** The most of the control plane's error body we will quote back. */
 const MAX_ERROR_BODY = 500;
@@ -68,7 +79,7 @@ export function defaultEngineId(): string {
 
 let cachedAccess: string | null = null;
 
-async function obtainAccessToken(base: string): Promise<string> {
+async function obtainAccessToken(base: string, signal?: AbortSignal): Promise<string> {
   const username = (process.env[FAILSAFE_USER_ENV] ?? "").trim();
   const password = process.env[FAILSAFE_PASSWORD_ENV] ?? "";
   if (!username || !password) {
@@ -78,8 +89,8 @@ async function obtainAccessToken(base: string): Promise<string> {
         `to an operator account the backend knows`,
     );
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const controller = linked(signal);
+  const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
   let response: Response;
   try {
     response = await fetch(`${base}/api/token/`, {
@@ -105,7 +116,8 @@ async function obtainAccessToken(base: string): Promise<string> {
       `the failsafe control plane answered ${response.status} when obtaining a token: ${await body(response)}`,
     );
   }
-  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  requestOf.set(response, controller);
+  const payload = (await jsonWithin(response, failsafeTimeouts.bodyMs, "a token").catch(() => null)) as Record<string, unknown> | null;
   const access = payload && typeof payload.access === "string" ? payload.access : null;
   if (!access) {
     throw new FailsafeUnavailable("the failsafe control plane returned no access token");
@@ -114,12 +126,55 @@ async function obtainAccessToken(base: string): Promise<string> {
   return access;
 }
 
-async function body(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, MAX_ERROR_BODY);
-  } catch {
-    return "";
+/** A controller that is aborted when `outer` is: a call's own, tied to its caller's deadline. */
+function linked(outer?: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (outer) {
+    if (outer.aborted) controller.abort();
+    else outer.addEventListener("abort", () => controller.abort(), { once: true });
   }
+  return controller;
+}
+
+/**
+ * The request behind each answer: aborting it after the headers are in ends
+ * the body's stream and closes its connection, so a stalled answer holds no
+ * socket and no read.
+ */
+const requestOf = new WeakMap<Response, AbortController>();
+
+/** The rest of an answer whose headers are in, or null when it did not arrive within `ms` (its request is then aborted). */
+async function textWithin(response: Response, ms: number): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  try {
+    const read = response.text().catch(() => null);
+    const got = await Promise.race([read, late]);
+    if (got === null) requestOf.get(response)?.abort();
+    return got;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** An answer's JSON, read within `ms`: FailsafeUnavailable when it did not arrive, or did not parse. */
+async function jsonWithin(response: Response, ms: number, what: string): Promise<unknown> {
+  const raw = await textWithin(response, ms);
+  if (raw === null) {
+    throw new FailsafeUnavailable(
+      `the control plane sent the headers of its answer to ${what} (${response.status}) but not the rest within ` +
+      `${ms < 1000 ? `${ms} ms` : `${Math.round(ms / 1000)} s`}, so it could not be read`,
+    );
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    throw new FailsafeUnavailable(`the control plane's answer to ${what} (${response.status}) could not be read`);
+  }
+}
+
+async function body(response: Response): Promise<string> {
+  return ((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
 /**
@@ -130,16 +185,16 @@ async function body(response: Response): Promise<string> {
  * the caller's to interpret -- a 403 from the backend is a real "you may not do
  * this", not something to retry.
  */
-async function call(path: string, init: RequestInit = {}, retryAuth = true): Promise<Response> {
+async function call(path: string, init: RequestInit = {}, retryAuth = true, signal?: AbortSignal): Promise<Response> {
   const base = baseUrl();
   if (!base) {
     throw new FailsafeUnavailable(
       `no failsafe control plane is configured; set ${FAILSAFE_URL_ENV} to the backend's address`,
     );
   }
-  const access = cachedAccess ?? (await obtainAccessToken(base));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const access = cachedAccess ?? (await obtainAccessToken(base, signal));
+  const controller = linked(signal);
+  const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
   let response: Response;
   try {
     response = await fetch(`${base}${path}`, {
@@ -157,13 +212,82 @@ async function call(path: string, init: RequestInit = {}, retryAuth = true): Pro
   } finally {
     clearTimeout(timer);
   }
+  requestOf.set(response, controller);
   if (response.status === 401 && retryAuth) {
     // Token expired mid-session; get a new one and try once more.
+    void response.body?.cancel().catch(() => undefined);
     cachedAccess = null;
-    await obtainAccessToken(base);
-    return call(path, init, false);
+    await obtainAccessToken(base, signal);
+    return call(path, init, false, signal);
   }
   return response;
+}
+
+// ==== The actions of the commands this dashboard has proxied ====
+//
+// A command's action is fixed when it is drafted: it is part of the bytes its
+// signers sign. So every command a draft, a list or a detail answer carries
+// through here is remembered by its uuid with its action, and a signature relay for a command known here is
+// decided from memory, with no read (routes.ts, POST .../signatures).
+
+/** The failsafe actions that stop an engine. */
+const STOP_ACTIONS = new Set(["pause", "stand_down", "terminate"]);
+/** At most this many commands are remembered; the oldest is forgotten first. */
+const KNOWN_ACTIONS_MAX = 10_000;
+const knownActions = new Map<string, string>();
+
+function remember(one: FailsafeCommand): FailsafeCommand {
+  if (one.uuid && one.action) {
+    knownActions.delete(one.uuid);
+    knownActions.set(one.uuid, one.action);
+    if (knownActions.size > KNOWN_ACTIONS_MAX) {
+      const oldest = knownActions.keys().next().value;
+      if (oldest !== undefined) knownActions.delete(oldest);
+    }
+  }
+  return one;
+}
+
+/** The action of a command this dashboard has proxied, by its exact uuid; undefined when none has. */
+export function knownActionOf(uuid: string): string | undefined {
+  return knownActions.get(uuid);
+}
+
+/**
+ * A command's action as a signature relay needs it: from memory when this
+ * dashboard has proxied the command (no read), otherwise read once from the
+ * control plane with a hard deadline on the whole read -- connect, token,
+ * headers and body -- of `ms`. `action` is null when it could not be learnt
+ * in time (`unread` says why); the read is then aborted, and never waited on.
+ */
+export async function readActionWithin(
+  uuid: string, ms: number = failsafeTimeouts.commandReadMs,
+): Promise<{ action: string | null; from: "memory" | "read"; unread?: string }> {
+  const known = knownActions.get(uuid);
+  if (known !== undefined) return { action: known, from: "memory" };
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<{ action: null; from: "read"; unread: string }>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve({ action: null, from: "read", unread: `the control plane did not answer the read of command ${uuid} within ${ms} ms` });
+    }, ms);
+  });
+  const read = getCommand(uuid, controller.signal).then(
+    (drafted) => drafted
+      ? { action: drafted.command.action || null, from: "read" as const, ...(drafted.command.action ? {} : { unread: "the control plane's answer named no action" }) }
+      : { action: null, from: "read" as const, unread: `the control plane has no command ${uuid}` },
+    (cause) => ({ action: null, from: "read" as const, unread: cause instanceof Error ? cause.message : String(cause) }),
+  );
+  try {
+    return await Promise.race([read, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 // ==== Typed views of the control plane ====
@@ -335,9 +459,9 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the failsafe state"));
   const list = (key: string): FailsafeCommand[] =>
-    Array.isArray(payload[key]) ? (payload[key] as Record<string, unknown>[]).map(command) : [];
+    Array.isArray(payload[key]) ? (payload[key] as Record<string, unknown>[]).map(command).map(remember) : [];
   return {
     engineId: typeof payload.engine_id === "string" ? payload.engine_id : null,
     engineState: typeof payload.engine_state === "string" ? payload.engine_state : null,
@@ -359,8 +483,8 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>[];
-  return Array.isArray(payload) ? payload.map(command) : [];
+  const payload = await jsonWithin(response, failsafeTimeouts.bodyMs, "the list of commands");
+  return Array.isArray(payload) ? (payload as Record<string, unknown>[]).map(command).map(remember) : [];
 }
 
 /**
@@ -385,28 +509,33 @@ export async function draftCommand(input: {
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  // A stop's draft has been made by now: its answer is waited for no longer than a stop's.
+  const bodyMs = STOP_ACTIONS.has(input.action) ? failsafeTimeouts.stopBodyMs : failsafeTimeouts.bodyMs;
+  const payload = asRecord(await jsonWithin(response, bodyMs, "the draft"));
   return {
     ok: true,
     drafted: {
-      command: command(payload),
+      command: remember(command(payload)),
       signingBytes: typeof payload.signing_bytes === "string" ? payload.signing_bytes : "",
       draft: draftFrom(payload),
     },
   };
 }
 
-export async function getCommand(uuid: string): Promise<DraftedCommand | null> {
-  const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/`);
-  if (response.status === 404) return null;
+export async function getCommand(uuid: string, signal?: AbortSignal): Promise<DraftedCommand | null> {
+  const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/`, {}, true, signal);
+  if (response.status === 404) {
+    void response.body?.cancel().catch(() => undefined);
+    return null;
+  }
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the command"));
   return {
-    command: command(payload),
+    command: remember(command(payload)),
     signingBytes: typeof payload.signing_bytes === "string" ? payload.signing_bytes : "",
     draft: draftFrom(payload),
   };
@@ -433,7 +562,17 @@ export async function submitSignature(
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, command: command((await response.json()) as Record<string, unknown>) };
+  // The signature has been taken by now (2xx): its answer is waited for no longer than a stop's.
+  let payload: Record<string, unknown>;
+  try {
+    payload = asRecord(await jsonWithin(response, failsafeTimeouts.stopBodyMs, "the signature"));
+  } catch (cause) {
+    throw new FailsafeUnavailable(
+      `${cause instanceof Error ? cause.message : String(cause)}. The control plane answered ${response.status}: it took ` +
+      "the signature; read the command again to see where it stands",
+    );
+  }
+  return { ok: true, command: command(payload) };
 }
 
 export async function cancelCommand(
@@ -450,7 +589,7 @@ export async function cancelCommand(
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, command: command((await response.json()) as Record<string, unknown>) };
+  return { ok: true, command: command(asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the withdrawal"))) };
 }
 
 export async function audit(opts: { command?: string } = {}): Promise<FailsafeAuditEvent[]> {
@@ -461,11 +600,12 @@ export async function audit(opts: { command?: string } = {}): Promise<FailsafeAu
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>[];
-  return Array.isArray(payload) ? payload.map(auditEvent) : [];
+  const payload = await jsonWithin(response, failsafeTimeouts.bodyMs, "the audit trail");
+  return Array.isArray(payload) ? (payload as Record<string, unknown>[]).map(auditEvent) : [];
 }
 
-/** Test seam: forget any cached access token. */
+/** Test seam: forget any cached access token, and every command action known here. */
 export function _resetForTests(): void {
   cachedAccess = null;
+  knownActions.clear();
 }

@@ -101,6 +101,26 @@ export class EngineRefused extends EngineUnavailable {
 export class EngineNotConfigured extends EngineUnavailable {}
 
 /**
+ * The engine's address refused the connection, or could not be found, before
+ * a byte of the request was sent: nothing reached the engine, so nothing was
+ * started. A definite answer, unlike a reset or a timeout after sending.
+ */
+export class EngineConnectionRefused extends EngineUnavailable {}
+
+/** The connect-phase failures: no connection was made, so nothing was sent. */
+const NOTHING_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+function refusedBeforeSending(cause: unknown): boolean {
+  const inner = cause && typeof cause === "object" ? (cause as { cause?: unknown }).cause : undefined;
+  if (!inner || typeof inner !== "object") return false;
+  const code = (inner as { code?: unknown }).code;
+  const errors = (inner as { errors?: unknown }).errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors.every((one) => one && typeof one === "object" && NOTHING_SENT.has(String((one as { code?: unknown }).code)));
+  }
+  return typeof code === "string" && NOTHING_SENT.has(code);
+}
+
+/**
  * The request behind each answer `call` returned, by the answer: aborting it
  * after the headers are in ends the body's stream and closes its connection.
  * Cancelling the body instead does nothing while `text()` holds its reader --
@@ -136,6 +156,17 @@ async function jsonWithin(response: Response, what: string): Promise<unknown> {
     );
   }
   return JSON.parse(raw) as unknown;
+}
+
+/** A JSON answer as an object: a body that is not one is read as an empty object (every field then reads as absent). */
+function objectOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+/** A JSON answer that must be an object to be read at all: any other body is an answer that could not be read, never an empty one. */
+function objectOrUnread(value: unknown, what: string): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  throw new EngineUnavailable(`the engine's answer to ${what} was not an object, so it could not be read`);
 }
 
 /**
@@ -197,6 +228,10 @@ async function call(path: string, init?: RequestInit, timeoutMs: number = engine
     const why = cause instanceof Error ? cause.message : String(cause);
     if (controller.signal.aborted) {
       throw new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`);
+    }
+    const code = (cause as { cause?: { code?: unknown } })?.cause?.code;
+    if (refusedBeforeSending(cause)) {
+      throw new EngineConnectionRefused(`could not reach the engine at ${base}: ${why}${typeof code === "string" ? ` (${code})` : ""}`);
     }
     throw new EngineUnavailable(`could not reach the engine at ${base}: ${why}`);
   } finally {
@@ -298,7 +333,7 @@ export async function status(): Promise<EngineStatus> {
         detail: `the engine answered ${response.status}: ${await body(response)}`,
       };
     }
-    const health = await response.json().catch(() => null);
+    const health = await jsonWithin(response, "the health check").catch(() => null);
     const credential = await credentialCheck();
     return {
       configured: true,
@@ -400,7 +435,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOf(await jsonWithin(response, "the scan"));
   // Measured against a live engine: results come back under `result.results`,
   // never at the top level. This read `payload.results` -- a key the engine
   // does not send -- so a scan that completed inline had its findings silently
@@ -490,7 +525,7 @@ export async function classifyCve(text: string): Promise<CveClassification> {
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the classification"), "the classification");
   const classes = Array.isArray(payload.classes)
     ? payload.classes.filter((one): one is string => typeof one === "string")
     : [];
@@ -690,7 +725,7 @@ export async function buildEvidencePack(request: EvidenceRequest): Promise<Evide
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the evidence pack"), "the evidence pack");
   const manifest = (payload.manifest ?? {}) as Record<string, unknown>;
   const rawSources = Array.isArray(manifest.sources) ? manifest.sources : [];
   const signature = evidenceSignature(payload.signature);
@@ -724,7 +759,7 @@ export async function runState(runId: string): Promise<EngineScan> {
       `the engine answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, `run ${runId}`), `run ${runId}`);
   const result = (payload.result ?? {}) as Record<string, unknown>;
   return {
     runId,
@@ -933,7 +968,7 @@ export async function listDecisions(runId: string, limit = 100): Promise<Decisio
       `the engine answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the list of decisions"), "the list of decisions");
   const raw = Array.isArray(payload.decisions) ? payload.decisions : [];
   return {
     decisions: raw.slice(0, limit).map((one) => decisionTwin(one as Record<string, unknown>)),
@@ -1255,7 +1290,13 @@ export async function loadedScanners(): Promise<string[] | null> {
   }
   if (!response.ok) return null;
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  // Not known is null, never an empty list: a body that stalls or is not an object is not known.
+  let payload: Record<string, unknown>;
+  try {
+    payload = objectOrUnread(await jsonWithin(response, "the list of extensions"), "the list of extensions");
+  } catch {
+    return null;
+  }
   const listed = Array.isArray(payload.extensions) ? payload.extensions : [];
   return listed
     .map((one) => one as Record<string, unknown>)

@@ -4,7 +4,7 @@ import { storage } from "./storage-unified";
 import { openReport } from "./db-sqlite";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
-  requireAuth, requireAdmin, requireAdminUnlessStop, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
+  requireAuth, requireAdmin, requireAdminUnlessStop, type StopKind, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
 } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
@@ -20,7 +20,7 @@ import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
-import type { Finding, RetestWatch, Test } from "@shared/schema";
+import type { AIControlSetting, Finding, RetestWatch, Test } from "@shared/schema";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -525,17 +525,21 @@ function runningScansOf(rows: Test[]): Array<{ test: Test; runId: string }> {
  * stop. A write that failed is counted in `writeFailures` and said.
  */
 async function stopEverythingRunning(
-  req: Request, watcher: retests.RetestWatcher,
+  req: Request, watcher: retests.RetestWatcher, press: KillPress,
 ): Promise<{ stops: RecordedStops; engineRuns: EngineSweep; writeFailures: string[] }> {
   const who = actor(req);
   const records: Array<() => Promise<string | null>> = [];
-  /** Every run id a stop was sent to: one stop per run, whichever list names it first. */
-  const sent = new Set<string>();
+  /**
+   * Every run id a stop was sent to (press.claimed): one stop per run,
+   * whichever list names it first -- or a start this press caught in flight
+   * (stopForPress), whose stop is its own to report.
+   */
   const claim = (runId: string): boolean => {
-    if (sent.has(runId)) return false;
-    sent.add(runId);
+    if (press.claimed.has(runId)) return false;
+    press.claimed.add(runId);
     return true;
   };
+  const sendAbort = (runId: string): Promise<StopOutcome> => stopForPress(press, runId);
 
   const knownRetests = watcher.running();
   const retestStops = Promise.all(knownRetests.filter((one) => claim(one.engineRunId)).map(async (one): Promise<EngineRunStop> => {
@@ -1045,52 +1049,214 @@ function killSwitchClass(method: string, fullPath: string, body: unknown): KillS
   return null;
 }
 
-/** The action of a failsafe command, or null when it cannot be read. */
-async function failsafeActionOf(uuid: string): Promise<string | null> {
-  try {
-    const drafted = await failsafe.getCommand(uuid);
-    return drafted ? drafted.command.action : null;
-  } catch {
-    return null;
+/** A command's action as a signature relay or a withdrawal learns it (failsafe.readActionWithin): at most one bounded read. */
+type ActionRead = Awaited<ReturnType<typeof failsafe.readActionWithin>>;
+
+/** The one read of a request's command's action: its guard and its handler share it, so the command is never read twice. */
+const actionReads = new WeakMap<Request, Promise<ActionRead>>();
+function actionOfRequest(req: Request): Promise<ActionRead> {
+  let read = actionReads.get(req);
+  if (!read) {
+    read = failsafe.readActionWithin(req.params.uuid, failsafe.failsafeTimeouts.commandReadMs);
+    actionReads.set(req, read);
   }
+  return read;
 }
 
 const KILL_SWITCH_REFUSAL =
   "The AI kill switch is engaged. Writes are disabled, except stops: a scan's Stop, and a failsafe " +
   "pause, stand-down or terminate, stay available.";
 
+// ==== The kill switch, as this dashboard pressed it ====
+//
+// The switch's flag is stored in the settings row, and that write can wait
+// for a lock (storage-sqlite.ts withBusyRetry) while the engage's stops go
+// out. Until it landed, every read of the row said the switch was off: a scan
+// started 100 ms after the press passed the switch, reached the engine and
+// ran on, never sent a stop. So the press is held in memory, set
+// synchronously when the engage is authorised -- before anything is awaited
+// or any write queued -- and every check reads memory first: the switch is
+// engaged when memory OR the stored row says so.
+
 /**
- * Whether the engaged kill switch refuses this signature relay or withdrawal.
+ * One press of the kill switch: the stops it sent, by run id -- each run is
+ * sent one stop per press, whichever of its lists (or a start caught in
+ * flight) names it first -- and each stop's outcome.
+ */
+interface KillPress {
+  seq: number;
+  claimed: Set<string>;
+  stops: Map<string, Promise<StopOutcome>>;
+}
+
+/**
+ * The switch as this dashboard pressed it. `engaged` is set when an engage is
+ * authorised, and cleared only by a write of the flag at least as late as it
+ * (its own, once stored -- from then on the stored row decides, so another
+ * dashboard's disengage is honoured -- or a later disengage's). An engage
+ * whose flag could not be stored stays engaged here (`notStored` says why)
+ * until a disengage is stored from this dashboard: its writes are refused,
+ * though another dashboard does not see it, and a restart forgets it.
+ */
+const killSwitchMemory: { engaged: boolean; seq: number; notStored: string | null } = { engaged: false, seq: 0, notStored: null };
+
+/** Whether this dashboard holds the switch engaged in memory (a press whose flag is not stored yet, or could not be). */
+export function killSwitchEngagedInMemory(): boolean {
+  return killSwitchMemory.engaged;
+}
+
+/**
+ * A scan's or a retest's start, from the moment it arrives until it is
+ * answered. A press marks every one in flight (`press`): one not yet sent to
+ * the engine is not sent, and one the engine accepted after the press is
+ * stopped at once, by its run id.
+ */
+interface StartTicket {
+  kind: "scan" | "retest";
+  press: KillPress | null;
+  /** The stop this start's run was sent because of `press`, once sent. */
+  stopped: Promise<StopOutcome> | null;
+}
+const startsInFlight = new Set<StartTicket>();
+const startTickets = new WeakMap<Request, StartTicket>();
+
+/** Every scan or retest start is registered the moment it arrives, before anything is read or awaited. */
+function trackStart(kind: StartTicket["kind"]): RequestHandler {
+  return (req, res, next) => {
+    const ticket: StartTicket = { kind, press: null, stopped: null };
+    startsInFlight.add(ticket);
+    startTickets.set(req, ticket);
+    const done = () => { startsInFlight.delete(ticket); };
+    res.once("finish", done);
+    res.once("close", done);
+    next();
+  };
+}
+
+/**
+ * Press the switch: synchronously, as soon as the engage is authorised. Held
+ * engaged in memory (unless a later write of the flag already overtook this
+ * press), and every start in flight is marked.
+ */
+function pressKillSwitch(seq: number, flagWrittenLaterThan: (seq: number) => boolean): KillPress {
+  const press: KillPress = { seq, claimed: new Set(), stops: new Map() };
+  if (!flagWrittenLaterThan(seq)) {
+    killSwitchMemory.engaged = true;
+    killSwitchMemory.seq = Math.max(killSwitchMemory.seq, seq);
+    killSwitchMemory.notStored = null;
+  }
+  startsInFlight.forEach((ticket) => { ticket.press = press; });
+  return press;
+}
+
+/** A write of the flag (either way) with this sequence number was stored: memory lets go of every press it is at least as late as. */
+function killSwitchFlagStored(seq: number): void {
+  if (killSwitchMemory.engaged && seq >= killSwitchMemory.seq) {
+    killSwitchMemory.engaged = false;
+    killSwitchMemory.notStored = null;
+  }
+}
+
+/** An engage's flag could not be stored: it stays engaged in memory, and this says why. */
+function killSwitchFlagNotStored(seq: number, why: string): void {
+  if (killSwitchMemory.engaged && seq === killSwitchMemory.seq) killSwitchMemory.notStored = why;
+}
+
+/** Send a run its stop for a press: one per run per press, shared with whichever list named it first. */
+function stopForPress(press: KillPress, runId: string): Promise<StopOutcome> {
+  let sent = press.stops.get(runId);
+  if (!sent) {
+    press.claimed.add(runId);
+    sent = sendAbort(runId);
+    press.stops.set(runId, sent);
+  }
+  return sent;
+}
+
+/**
+ * The stop sent to a run the engine accepted for a start the kill switch
+ * caught in flight (its ticket was marked by a press), or null when there is
+ * none to send: no press since it arrived, a run the engine finished or
+ * refused, or no id a stop can name. Sent once per start (the ticket keeps
+ * it), and once per run per press (stopForPress).
+ */
+function stoppedByKillSwitch(
+  ticket: StartTicket | null, started: { state: string; runId: string | null; stopId?: string | null },
+): Promise<StopOutcome> | null {
+  if (ticket === null) return null;
+  if (ticket.stopped !== null) return ticket.stopped;
+  if (ticket.press === null || started.state === "completed" || started.state === "refused") return null;
+  const runId = started.stopId ?? started.runId;
+  if (!runId) return null;
+  ticket.stopped = stopForPress(ticket.press, runId);
+  return ticket.stopped;
+}
+
+/**
+ * A start's ticket marked when ANOTHER dashboard on this database engaged the
+ * switch -- its press cannot mark this dashboard's starts -- read from the
+ * stored row now: before a start is sent, and once the engine has answered
+ * it. A read that fails marks nothing (the entry check already read it, and
+ * the run, once recorded, is on the row every sweep reads).
+ */
+async function markIfEngagedElsewhere(ticket: StartTicket | null): Promise<void> {
+  if (ticket === null || ticket.press !== null) return;
+  const stored = await storage.getAIControlSettings().then((one) => one?.killSwitchEnabled === true, () => false);
+  if (stored && ticket.press === null) ticket.press = { seq: 0, claimed: new Set(), stops: new Map() };
+}
+
+const KILL_SWITCH_START_NOTE = "started while the kill switch was being pressed: stopped as soon as the engine answered the start";
+
+/** What a start the kill switch caught in flight came to, in words. */
+function killSwitchStartSentence(runId: string, stop: StopOutcome): string {
+  return `Engine run ${runId} was stopped by the kill switch pressed while it was starting: ` + (
+    stop.answerUnread ? "the engine answered its stop 2xx, but the rest of the answer was not read (stop sent, answer unread)."
+      : stop.stopped ? "the engine accepted the stop."
+        : stop.alreadyFinished ? "the engine answered that it had already ended."
+          : `the stop did not take (${stop.detail}): it may still be running -- press the kill switch again, or use a failsafe pause.`);
+}
+
+/** Whether the switch is engaged now: in memory, or on the stored row (read only when memory does not already say so). */
+async function killSwitchEngagedNow(): Promise<{ engaged: boolean; systemStatus: string | null }> {
+  if (killSwitchMemory.engaged) return { engaged: true, systemStatus: "shutdown" };
+  const settings = await storage.getAIControlSettings();
+  return { engaged: settings?.killSwitchEnabled === true, systemStatus: settings?.systemStatus ?? null };
+}
+
+/**
+ * Whether the engaged kill switch refuses this signature relay or withdrawal,
+ * from the action its request already learnt (actionOfRequest: never a
+ * second read).
  *
- *   relay  -- a stop's signature is let through; a resume's or a release's
- *             is refused. When the settings or the command cannot be read
- *             the relay is let through: it might be a stop's, and the
- *             control plane and the engine check every signature.
+ *   relay  -- a stop's signature, or one whose action could not be learnt in
+ *             time (it may be a stop's), is never refused, and nothing is
+ *             read for it. A resume's or a release's is refused while the
+ *             switch is engaged -- in memory from the instant it was pressed,
+ *             or on the stored row; when the row cannot be read, it is
+ *             refused too (it is not a stop).
  *   cancel -- withdrawing a resume or a release is let through (it keeps an
  *             engine stopped); withdrawing a stop is refused, and so is one
- *             whose command cannot be read.
+ *             whose command could not be read.
  *
  * Called by the route's handler with req.params.uuid, the uuid Express
- * decoded and the handler relays. The middleware used to re-parse the path
- * and decode it itself, so what it looked up and what was relayed were two
- * readings of one string: an escaped character or a capitalised route
- * segment read differently in each was all it took to relay a resume's
- * signature past the switch. Now there is one reading.
+ * decoded and the handler relays: one reading of the uuid, as its guard's.
  */
-async function killSwitchRefusesCommand(res: Response, kind: "relay" | "cancel", uuid: string): Promise<boolean> {
-  let settings;
-  try {
-    settings = await storage.getAIControlSettings();
-  } catch (cause) {
-    // A relay that may be a stop's is not refused because a read failed.
-    if (kind === "relay") return false;
-    throw cause;
-  }
-  if (!settings?.killSwitchEnabled) return false;
-  const action = await failsafeActionOf(uuid);
+async function killSwitchRefusesCommand(res: Response, kind: "relay" | "cancel", read: ActionRead): Promise<boolean> {
+  const action = read.action;
   if (kind === "relay" && (action === null || !FAILSAFE_RECOVER_ACTIONS.has(action))) return false;
   if (kind === "cancel" && action !== null && FAILSAFE_RECOVER_ACTIONS.has(action)) return false;
-  res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
+  let now: { engaged: boolean; systemStatus: string | null };
+  try {
+    now = await killSwitchEngagedNow();
+  } catch (cause) {
+    res.status(503).json({
+      message: `Whether the AI kill switch is engaged could not be read (${causeOf(cause)}), and this is not a stop. ` +
+        "Nothing was done; try again.",
+    });
+    return true;
+  }
+  if (!now.engaged) return false;
+  res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: now.systemStatus });
   return true;
 }
 
@@ -1116,10 +1282,16 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
     return;
   }
 
+  // Engaged in memory from the instant it was pressed: refused at once, with
+  // no read -- the stored row may not say so yet.
+  if (killSwitchMemory.engaged) {
+    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: "shutdown" });
+    return;
+  }
   (async () => {
     const settings = await storage.getAIControlSettings();
-    if (!settings?.killSwitchEnabled) return void next();
-    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings.systemStatus });
+    if (!settings?.killSwitchEnabled && !killSwitchMemory.engaged) return void next();
+    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings?.systemStatus ?? "shutdown" });
   })().catch(next);
 };
 
@@ -1786,6 +1958,10 @@ export function registerRoutes(app: Express): void {
     aiControlSeq.set(req, aiControlArrivals);
     next();
   });
+  // Every scan and retest start is registered as it arrives, so a kill switch
+  // pressed while it is starting catches it (trackStart, pressKillSwitch).
+  app.post("/api/scans", trackStart("scan"));
+  app.post("/api/tests/:testId/retest", trackStart("retest"));
 
   app.use("/api", requireAuth);
 
@@ -2147,6 +2323,19 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // The kill switch pressed since this start arrived -- while its settings
+    // or the engine's list were being read -- or held engaged in memory:
+    // nothing is sent to the engine.
+    const ticket = startTickets.get(req) ?? null;
+    await markIfEngagedElsewhere(ticket);
+    if (ticket?.press || killSwitchMemory.engaged) {
+      return void res.status(503).json({
+        message: KILL_SWITCH_REFUSAL,
+        error: "the kill switch was engaged while this scan was starting, so it was not started: nothing was sent to the engine",
+        reason: "kill_switch",
+      });
+    }
+
     let started;
     try {
       started = await engine.startScan({
@@ -2171,6 +2360,13 @@ export function registerRoutes(app: Express): void {
         detail: started.refused ?? "",
       });
     }
+
+    // The kill switch pressed while the engine was being asked: the run it
+    // accepted is stopped now, by its run id, before anything is written --
+    // this press's sweep could not have named it (stoppedByKillSwitch).
+    if (started.state !== "completed" && started.state !== "refused") await markIfEngagedElsewhere(ticket);
+    const pressedStop = stoppedByKillSwitch(ticket, started);
+    if (pressedStop !== null) await pressedStop;
 
     // A run the engine finished inline has its results now, and its row is
     // written as finished: counted from what came back and dated. It used to
@@ -2207,6 +2403,18 @@ export function registerRoutes(app: Express): void {
       // By any id a stop can address exactly, blank-looking ones included.
       const stopId = started.stopId ?? started.runId;
       if (!stopId || completedInline) throw cause;
+      const byKillSwitch = stoppedByKillSwitch(ticket, started);
+      if (byKillSwitch !== null) {
+        // Already stopped by the kill switch pressed while it was starting.
+        const stop = await byKillSwitch;
+        void writeStopRecord(actor(req), { runId: stopId, target: data.target, testId: null }, "kill_switch", stop,
+          KILL_SWITCH_START_NOTE).then((failed) => { if (failed) console.error(`[scan] ${failed}`); });
+        return void res.status(409).json({
+          error: `${killSwitchStartSentence(stopId, stop)} It could not be recorded here either (${causeOf(cause)}).`,
+          reason: "kill_switch", runId: stopId, stopped: stop.stopped,
+          ...(stop.alreadyFinished ? { alreadyFinished: true } : {}), ...(stop.answerUnread ? { answerUnread: true } : {}),
+        });
+      }
       const stop = await sendStop(req, { runId: stopId, target: data.target, testId: null }, "start_not_recorded");
       return void res.status(500).json({
         error: `the engine started run ${stopId} but it could not be recorded here (${causeOf(cause)}); ` +
@@ -2222,6 +2430,22 @@ export function registerRoutes(app: Express): void {
         runId: stopId,
         stopped: stop.stopped,
         ...(stop.alreadyFinished ? { alreadyFinished: true } : {}),
+      });
+    }
+
+    // Stopped by the kill switch pressed while it was starting -- before the
+    // engine answered, or since, before its row was in: recorded, and said.
+    const killed = stoppedByKillSwitch(ticket, started);
+    if (killed !== null) {
+      const stop = await killed;
+      const runId = started.stopId ?? started.runId!;
+      const failed = await writeStopRecord(actor(req), { runId, target: data.target, testId: test.id }, "kill_switch", stop,
+        KILL_SWITCH_START_NOTE);
+      if (failed) console.error(`[scan] ${failed}`);
+      return void res.status(409).json({
+        error: killSwitchStartSentence(runId, stop),
+        reason: "kill_switch", test, runId, stopped: stop.stopped,
+        ...(stop.alreadyFinished ? { alreadyFinished: true } : {}), ...(stop.answerUnread ? { answerUnread: true } : {}),
       });
     }
 
@@ -2582,6 +2806,19 @@ export function registerRoutes(app: Express): void {
       retestsReserved.delete(key);
     }
 
+    // The kill switch pressed since this retest arrived, or held engaged in
+    // memory: nothing is sent, and its slot is free at once.
+    const ticket = startTickets.get(req) ?? null;
+    await markIfEngagedElsewhere(ticket);
+    if (ticket?.press || killSwitchMemory.engaged) {
+      retestsInFlight.delete(key);
+      return void res.status(503).json({
+        message: KILL_SWITCH_REFUSAL,
+        error: "the kill switch was engaged while this retest was starting, so it was not started: nothing was sent to the engine",
+        reason: "kill_switch",
+      });
+    }
+
     // When Retest was pressed: the check says so, however the verdict arrives.
     const requestedAt = new Date();
     let answered: engine.RetestAnswer;
@@ -2589,12 +2826,21 @@ export function registerRoutes(app: Express): void {
       answered = await engine.retest({ twinId: data.twinId, engagementRef, scope });
     } catch (cause) {
       retestsInFlight.delete(key);
-      // Only a definite answer frees the slot at once: a refusal (4xx), or no
-      // engine to send to. A timeout, a reset or aborted connection, a 5xx,
-      // an answer that could not be read or was not recognised -- the request
-      // may have reached the engine, and engine main runs a retest to its end
-      // whoever is waiting. Its slot is held (retestSlots) until the engine
-      // lists no live retest on its scope, or the ceiling.
+      // Only a definite answer frees the slot at once: a refusal (4xx), no
+      // engine to send to, or a connection the engine's host refused before
+      // anything was sent (engine.EngineConnectionRefused: nothing reached it,
+      // so nothing was started). A timeout, a reset or aborted connection, a
+      // 5xx, an answer that could not be read or was not recognised -- the
+      // request may have reached the engine, and engine main runs a retest to
+      // its end whoever is waiting. Its slot is held (retestSlots) until the
+      // engine lists no live retest on its scope, or the ceiling.
+      if (cause instanceof engine.EngineConnectionRefused) {
+        console.log(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (refused before anything was sent).`);
+        return void res.status(503).json({
+          error: `the engine refused the connection; the retest was not started (${causeOf(cause)})`,
+          reason: "engine_refused_connection",
+        });
+      }
       const definite = cause instanceof engine.EngineRefused || cause instanceof engine.EngineNotConfigured
         || (cause instanceof engine.UnrecognisedRetestAnswer && cause.answered);
       if (!definite) {
@@ -2622,6 +2868,36 @@ export function registerRoutes(app: Express): void {
     console.log(`[retest] the in-flight slot of retest ${key} is free at once: the engine answered with a ${answered.answer}.`);
 
     const who = { userId: req.session.userId ?? null, actor: actor(req) };
+
+    // The kill switch pressed while the engine was being asked, and the
+    // engine answered with a retest still running: it is watched (its verdict,
+    // if it comes to one, is filed as any is) and stopped now, by its run id.
+    const liveRetest = answered.answer === "status" && answered.status.engineRunId !== null
+      && (answered.status.httpStatus === 202 || LIVE_RETEST_STATES.has(answered.status.state));
+    if (liveRetest) await markIfEngagedElsewhere(ticket);
+    if (liveRetest && answered.answer === "status" && ticket?.press) {
+      const status = answered.status;
+      const runId = status.engineRunId!;
+      watcher.start({
+        engineRunId: runId, testId: test.id, clientId: client.id, twinId: data.twinId, engagementRef,
+        requestedBy: who.userId, requestedFrom: who.actor.ipAddress, engineState: status.state,
+      });
+      ticket.stopped ??= stopForPress(ticket.press, runId);
+      const stop = await ticket.stopped;
+      res.status(409).json({
+        error: killSwitchStartSentence(runId, stop).replace(/^Engine run/, "Retest run"),
+        reason: "kill_switch", answer: "status", phase: "running", engineRunId: runId, testId: test.id, twinId: data.twinId,
+        state: status.state, stopped: stop.stopped, stoppable: true,
+        ...(stop.alreadyFinished ? { alreadyFinished: true } : {}), ...(stop.answerUnread ? { answerUnread: true } : {}),
+      });
+      // After the answer: the watch's note, and the record of the stop.
+      const noted = stop.answerUnread ? watcher.stopSentUnread(runId) : stop.stopped ? watcher.stopAccepted(runId) : Promise.resolve(null);
+      const failed = [await noted.catch((cause) => causeOf(cause)),
+        await writeStopRecord(who.actor, { runId, target: null, testId: test.id }, "kill_switch", stop, KILL_SWITCH_START_NOTE)]
+        .filter((one): one is string => typeof one === "string" && one !== "");
+      for (const one of failed) console.error(`[retest] ${one}`);
+      return;
+    }
 
     // A status is where the run is, never a verdict: nothing is filed, no
     // finding is changed, and nothing is called fixed or inconclusive from it
@@ -2976,8 +3252,11 @@ export function registerRoutes(app: Express): void {
 
   // ==== AI CONTROL ====
   app.get("/api/ai-control", asyncHandler(async (_req, res) => {
-    const settings = await storage.getAIControlSettings();
-    res.json(settings ?? (await storage.updateAIControlSettings({})));
+    const settings = (await storage.getAIControlSettings()) ?? (await storage.updateAIControlSettings({}));
+    // A press this dashboard holds in memory is the switch's state whatever the row says yet (killSwitchMemory).
+    res.json(killSwitchMemory.engaged
+      ? { ...settings, killSwitchEnabled: true, ...(killSwitchMemory.notStored !== null ? { killSwitchNotStored: killSwitchMemory.notStored } : {}) }
+      : settings);
   }));
 
   /**
@@ -2988,26 +3267,46 @@ export function registerRoutes(app: Express): void {
    * takes 300 ms, pressed before an engage authorised from memory at once,
    * still comes before it. The writes are made one after another (a flag
    * write under a held lock waits off the event loop, and two retrying at
-   * once landed in either order), and a write whose request a later-sequenced
-   * one has already overtaken is not made at all: that request is answered
-   * `superseded`, and writes nothing. So the stored flag is always the last
-   * press's, and the last answer always matches it.
+   * once landed in either order), and a write is not made at all when a
+   * later-sequenced request has already stored one of the same fields: that
+   * request is answered `superseded`, and writes nothing. A later write of
+   * other fields alone overtakes nothing. So each field stored is the last
+   * press's that set it; and every answer states the settings stored when it
+   * is given -- with the switch as memory holds it (killSwitchMemory).
    */
   let aiControlWrites: Promise<unknown> = Promise.resolve();
-  /** The sequence number of the latest request whose write was made. */
-  let aiControlWritten = 0;
-  /** The sequence number of the latest request authorised to write: one after this will write after it, or already has. */
-  let aiControlAuthorised = 0;
-  /** Write, unless a later-sequenced request already has: then null, and nothing is written. */
+  /** For each field, the sequence number of the latest request whose write of it was stored. */
+  const aiControlFieldWritten = new Map<string, number>();
+  /** The settings as this dashboard's latest stored write left them. */
+  let aiControlLatest: AIControlSetting | null = null;
+  const laterWriteOf = (fields: string[], seq: number): boolean =>
+    fields.some((field) => (aiControlFieldWritten.get(field) ?? 0) > seq);
+  const flagWrittenLaterThan = (seq: number): boolean => laterWriteOf(["killSwitchEnabled"], seq);
+  /** Write, unless a later-sequenced request already stored one of these fields: then null, and nothing is written. */
   const writeAIControl = (seq: number, fields: Parameters<typeof storage.updateAIControlSettings>[0]) => {
+    const names = Object.keys(fields).filter((field) => field !== "lastModifiedBy");
     const written = aiControlWrites.then(async () => {
-      if (seq < aiControlWritten) return null;
-      const stored = await storage.updateAIControlSettings(fields);
-      aiControlWritten = seq;
+      if (laterWriteOf(names, seq)) return null;
+      let stored: AIControlSetting;
+      try {
+        stored = await storage.updateAIControlSettings(fields);
+      } catch (cause) {
+        if (fields.killSwitchEnabled === true) killSwitchFlagNotStored(seq, causeOf(cause));
+        throw cause;
+      }
+      for (const field of names) aiControlFieldWritten.set(field, Math.max(aiControlFieldWritten.get(field) ?? 0, seq));
+      aiControlLatest = stored;
+      if (names.includes("killSwitchEnabled")) killSwitchFlagStored(seq);
       return stored;
     });
     aiControlWrites = written.catch(() => undefined);
     return written;
+  };
+  /** The settings stored now, as far as this dashboard wrote them, with the switch as memory holds it. */
+  const aiControlNow = (fallback: AIControlSetting | null): AIControlSetting | null => {
+    const stored = aiControlLatest ?? fallback;
+    if (stored === null) return null;
+    return { ...stored, killSwitchEnabled: stored.killSwitchEnabled === true || killSwitchMemory.engaged };
   };
   const SUPERSEDED = "a later change to these settings was sent while this one was being saved; the stored settings are that one's";
 
@@ -3025,12 +3324,15 @@ export function registerRoutes(app: Express): void {
       data = updateAIControlSettingSchema.parse(req.body);
     }
     const noted = ignored.length > 0 ? { ignored } : {};
-    // Authorised and valid: this request will write, unless one that arrived
-    // after it already has.
-    aiControlAuthorised = Math.max(aiControlAuthorised, seq);
+    // Engaging: pressed now, in memory, before anything is awaited or any
+    // write queued (pressKillSwitch). From this instant every write but a stop
+    // is refused, a start in flight is not sent -- or, accepted after this,
+    // is stopped by its run id -- and a resume's or a release's signature is
+    // refused, whatever the stored row says yet.
+    const press = data.killSwitchEnabled === true ? pressKillSwitch(seq, flagWrittenLaterThan) : null;
     // The stops first (stopEverythingRunning): each goes to the engine before
     // anything is written, and they go together. Then the flag, so every other
-    // write is refused from here on. Sent again each time the switch is sent
+    // dashboard refuses writes too. Sent again each time the switch is sent
     // on, so an operator can retry the scans that could not be reached.
     //
     // A flag that could not be stored holds back no stop: on a full disk, or
@@ -3038,7 +3340,7 @@ export function registerRoutes(app: Express): void {
     // answer carries both outcomes. The flag's write waits for a lock off the
     // event loop (storage-sqlite.ts withBusyRetry), alongside the stops still
     // being answered, so it delays none of them.
-    const sweep = data.killSwitchEnabled === true ? stopEverythingRunning(req, watcher) : null;
+    const sweep = press !== null ? stopEverythingRunning(req, watcher, press) : null;
 
     // Engaging, authorised from the session in memory (auth.ts isStopRequest),
     // authorises the switch and nothing else: every other field sent with it
@@ -3052,7 +3354,7 @@ export function registerRoutes(app: Express): void {
 
     let settings: Awaited<ReturnType<typeof storage.updateAIControlSettings>> | null = null;
     let notStored: string | null = null;
-    /** A later-sequenced request wrote first: this one writes nothing, and says so. */
+    /** A later-sequenced request stored one of these fields first: this one writes nothing, and says so. */
     let overtaken = false;
     try {
       settings = await writeAIControl(seq, { ...now, lastModifiedBy: req.session.userId ?? null });
@@ -3137,20 +3439,30 @@ export function registerRoutes(app: Express): void {
       if (stops === null) throw cause;
       writeFailures.push(`the record of engaging the kill switch could not be written: ${causeOf(cause)}`);
     }
-    // A later change to these settings was saved after this one -- or before
-    // it, overtaking it, so this one wrote nothing: this answer is not what is
-    // stored now, and says so (the page reads them again).
-    const superseded = overtaken || aiControlWritten > seq || aiControlAuthorised > seq ? { superseded: SUPERSEDED } : {};
+    // A later change to one of these fields was STORED after this one's own
+    // write settled -- or before it, overtaking it, so this one wrote nothing:
+    // this answer states the settings stored now, not this request's, and
+    // says so (the page reads them again). A later change that was only
+    // authorised, or whose write failed, supersedes nothing.
+    const sent = Object.keys(data);
+    const isSuperseded = overtaken || laterWriteOf(sent, seq)
+      // A later press of the switch, held in memory while its flag is written.
+      || (sent.includes("killSwitchEnabled") && killSwitchMemory.engaged && killSwitchMemory.seq > seq);
+    const superseded = isSuperseded ? { superseded: SUPERSEDED } : {};
+    const current = isSuperseded
+      ? aiControlNow((await storage.getAIControlSettings().catch(() => undefined)) ?? settings)
+      : settings === null ? null : { ...settings, killSwitchEnabled: settings.killSwitchEnabled === true || killSwitchMemory.engaged };
+    /** The switch as it is now: stored, or held in memory. */
+    const engagedNow = current?.killSwitchEnabled === true || killSwitchMemory.engaged;
     if (overtaken) {
       // Nothing of this request was written: a request that arrived after it
-      // wrote first. Its stops, if it sent any, went all the same, and are
-      // said; the settings answered are the ones stored now.
-      settings = (await storage.getAIControlSettings().catch(() => undefined)) ?? null;
+      // stored one of these fields first. Its stops, if it sent any, went all
+      // the same, and are said; the settings answered are the ones stored now.
       return void res.status(409).json({
         message: `Nothing of this change was saved: ${SUPERSEDED}.` +
           (stops !== null ? " Every stop was sent all the same; what each came to is below." : ""),
-        ...settings,
-        ...(stops !== null ? { engaged: settings?.killSwitchEnabled === true, stops, engineRuns } : {}),
+        ...current,
+        ...(stops !== null ? { engaged: engagedNow, stops, engineRuns } : {}),
         ...(writeFailures.length > 0 ? { writeFailures } : {}),
         ...noted,
         written: false,
@@ -3158,13 +3470,21 @@ export function registerRoutes(app: Express): void {
       });
     }
     if (notStored !== null) {
-      // Not engaged -- the flag is not stored, so writes are not refused -- and
-      // the stops went out all the same: both are said.
+      // The flag is not stored; the press is held in memory all the same
+      // (killSwitchMemory) unless a later change let it go: said, with the
+      // stops, which went out regardless.
       return void res.status(500).json({
-        message: `The kill switch could not be engaged: ${notStored}. Every stop was sent all the same; ` +
-          "what each came to is below. Writes are not refused until the switch is engaged." +
-          (refused !== null ? ` The other fields sent with it (${otherFields.join(", ")}) were not saved.` : ""),
-        engaged: false,
+        message: engagedNow
+          ? `The kill switch's flag could not be stored: ${notStored}. It is engaged in this dashboard's memory: every ` +
+            "write here but a stop is refused until it is switched off here, but another dashboard on this database " +
+            "does not see it, and a restart of this one forgets it -- press it again once the database takes writes. " +
+            "Every stop was sent all the same; what each came to is below." +
+            (refused !== null ? ` The other fields sent with it (${otherFields.join(", ")}) were not saved.` : "")
+          : `The kill switch could not be engaged: ${notStored}, and a later change has since switched it off. Every ` +
+            "stop was sent all the same; what each came to is below. Writes are not refused." +
+            (refused !== null ? ` The other fields sent with it (${otherFields.join(", ")}) were not saved.` : ""),
+        engaged: engagedNow,
+        stored: false,
         stops,
         engineRuns,
         ...(writeFailures.length > 0 ? { writeFailures } : {}),
@@ -3174,13 +3494,17 @@ export function registerRoutes(app: Express): void {
       });
     }
     if (refused !== null) {
-      // Engaged, and every stop sent; the rest of the request refused, by name.
+      // Every stop sent; the rest of the request refused, by name -- with the
+      // switch as it stands now, which a later change may have turned off.
       return void res.status(refused.status).json({
-        message: `The kill switch was engaged and every stop was sent, but the other fields sent with it ` +
+        message: (engagedNow
+          ? "The kill switch was engaged and every stop was sent, but the other fields sent with it "
+          : "The kill switch was engaged and every stop was sent, and a later change has since switched it off " +
+            "(it is off now); the other fields sent with it ") +
           `(${otherFields.join(", ")}) were not saved: ${refused.why}. Engaging the kill switch is authorised from ` +
           "the signed-in session; every other setting needs an active admin account.",
-        engaged: true,
-        ...settings,
+        ...current,
+        engaged: engagedNow,
         stops,
         engineRuns,
         ...(writeFailures.length > 0 ? { writeFailures } : {}),
@@ -3190,8 +3514,8 @@ export function registerRoutes(app: Express): void {
       });
     }
     res.json(stops === null
-      ? { ...settings, ...superseded }
-      : { ...settings, stops, engineRuns, ...(writeFailures.length > 0 ? { writeFailures } : {}), ...noted, ...superseded });
+      ? { ...current, ...superseded }
+      : { ...current, stops, engineRuns, ...(writeFailures.length > 0 ? { writeFailures } : {}), ...noted, ...superseded });
   }));
 
   // ==== AI CHAT ====
@@ -3473,19 +3797,35 @@ export function registerRoutes(app: Express): void {
   }));
 
   // A signature is a stop only when its command is one: a pause's, a
-  // stand-down's or a terminate's is authorised from the session in memory; a
-  // resume's or a release's -- or one whose command cannot be read -- needs
-  // the account, read now (auth.ts requireAdminUnlessStop).
-  const relaysAStop = async (req: Request): Promise<boolean> => {
-    const action = await failsafeActionOf(req.params.uuid);
-    return action !== null && FAILSAFE_STOP_ACTIONS.has(action);
+  // stand-down's or a terminate's. Its action comes from memory when this
+  // dashboard has proxied the command (a draft, a list or a detail answer:
+  // failsafe.knownActionOf), with no read; otherwise from one read of the
+  // command, bounded as a whole (failsafe.readActionWithin), whose answer the
+  // kill switch's check reuses. A read that fails or runs out of time never
+  // holds a relay back: the signature of a session held as an admin's is
+  // relayed as a possible stop, and logged so -- the control plane verifies
+  // every keyholder's signature itself, which is the real authority. Only a
+  // command known to be a resume or a release needs the account, read now
+  // (auth.ts requireAdminUnlessStop).
+  const relayKind = async (req: Request): Promise<StopKind> => {
+    const read = await actionOfRequest(req);
+    if (read.action === null) return "possible_stop";
+    return FAILSAFE_STOP_ACTIONS.has(read.action) ? "stop" : "not_stop";
   };
-  app.post("/api/failsafe/commands/:uuid/signatures", requireAdminUnlessStop(relaysAStop), asyncHandler(async (req, res) => {
-    if (await killSwitchRefusesCommand(res, "relay", req.params.uuid)) return;
+  app.post("/api/failsafe/commands/:uuid/signatures", requireAdminUnlessStop(relayKind), asyncHandler(async (req, res) => {
+    const read = await actionOfRequest(req);
+    if (await killSwitchRefusesCommand(res, "relay", read)) return;
     const data = submitSignatureSchema.parse(req.body);
+    const unconfirmed = read.action === null;
     let result;
     try {
-      result = await failsafe.submitSignature(req.params.uuid, data);
+      // Relayed first; said after, so nothing -- not even the log line -- stands before it.
+      const relayed = failsafe.submitSignature(req.params.uuid, data);
+      if (unconfirmed) {
+        console.warn(`[failsafe] signature for command ${req.params.uuid}: action not confirmed; relayed as a possible stop ` +
+          `(${read.unread ?? "its action could not be read"}). The control plane verifies the keyholders' signatures.`);
+      }
+      result = await relayed;
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;
       throw cause;
@@ -3497,12 +3837,13 @@ export function registerRoutes(app: Express): void {
     }
     await recordFailsafeAct(req, "signed", req.params.uuid, {
       keyId: data.keyId, status: result.command.status, signers: result.command.signers,
+      ...(unconfirmed ? { actionConfirmed: false, note: "action not confirmed; relayed as a possible stop", unread: read.unread ?? null } : {}),
     });
     res.json(result.command);
   }));
 
   app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
-    if (await killSwitchRefusesCommand(res, "cancel", req.params.uuid)) return;
+    if (await killSwitchRefusesCommand(res, "cancel", await actionOfRequest(req))) return;
     let result;
     try {
       result = await failsafe.cancelCommand(req.params.uuid);

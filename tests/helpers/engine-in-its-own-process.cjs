@@ -4,6 +4,9 @@
 // (tests/fixtures/engine-retest/pr71-143279e/at-once-then-stopped.json), the
 // run id in each set to the one asked about.
 //
+// A scan start (POST /api/scan) is answered as a run still going, under a
+// fresh run id.
+//
 // Two knobs: POST /__hang {hang} leaves /api/scans/active unanswered (no
 // headers) -- an engine whose worker threads are all busy, as round 1
 // measured (28 s); POST /__abortDelay {ms} answers each stop after ms (a run
@@ -17,6 +20,8 @@ const fixture = JSON.parse(fs.readFileSync(
 const byRequest = (method, test) => fixture.exchanges.filter((one) => one.request.method === method && test(one.request.path));
 const abortAnswer = byRequest("POST", (p) => /\/abort$/.test(p))[0].body;
 const runningRead = byRequest("GET", (p) => /^\/api\/scans\/[^/]+$/.test(p) && p !== "/api/scans/active")[0].body;
+const startAnswer = byRequest("POST", (p) => p === "/api/scan")[0].body;
+let started = 0;
 
 let active = { active: [] };
 let hangActive = false;
@@ -46,6 +51,12 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url === "/health") return res.end(JSON.stringify({ status: "ok" }));
     if (url === "/api/scans/active") return res.end(JSON.stringify(active));
+    if (url === "/api/scan" && req.method === "POST") {
+      started += 1;
+      return res.end(JSON.stringify({
+        ...startAnswer, run_id: `started-${started}-${Date.now()}`, state: "running", done: false, finished_at: null, results: undefined,
+      }));
+    }
     const abort = /^\/api\/scans\/([^/]+)\/abort$/.exec(url);
     if (abort) {
       const send = () => res.end(JSON.stringify({ ...abortAnswer, run_id: decodeURIComponent(abort[1]) }));

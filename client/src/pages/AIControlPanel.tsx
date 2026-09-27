@@ -64,8 +64,10 @@ type EngineSweep =
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
-  /** Set when the switch itself could not be stored: why, in the server's words. The stops went out regardless. */
+  /** Set when the switch is not engaged now -- it could not be stored, or a later change switched it off: why, in the server's words. The stops went out regardless. */
   notEngaged?: string;
+  /** The switch is off now because a later change was saved after this press (the server's `superseded`), not because this press failed. */
+  offSinceSuperseded?: boolean;
   stops: KillSwitchStops;
   /** Absent when the server said nothing about the engine's own list; then nothing is said of it. */
   engineRuns?: EngineSweep;
@@ -186,7 +188,9 @@ function namedSweepSentence(runs: EngineRunStop[]): string | null {
 }
 
 /** The lead of the report: engaged, or not -- with the stops sent regardless. */
-const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill switch NOT engaged, stops sent anyway" : "Kill switch engaged");
+const leadOf = (report: StopReport) => (report.notEngaged === undefined ? "Kill switch engaged"
+  : report.offSinceSuperseded ? "Kill switch switched off again by a later change, stops sent anyway"
+    : "Kill switch NOT engaged, stops sent anyway");
 
 /** Whether every stop the report names was accepted (its answer read), and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
@@ -278,12 +282,17 @@ export default function AIControlPanel() {
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
+      const offSinceSuperseded = result.notEngaged !== undefined && Boolean(result.superseded);
       const report: StopReport | null = result.stops
-        ? { stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged, writeFailures: result.writeFailures }
+        ? {
+          stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged, writeFailures: result.writeFailures,
+          ...(offSinceSuperseded ? { offSinceSuperseded } : {}),
+        }
         : null;
       setStopReport(report);
       toast({
-        title: result.notEngaged !== undefined ? "The kill switch was not engaged" : "Kill switch engaged",
+        title: result.notEngaged === undefined ? "Kill switch engaged"
+          : offSinceSuperseded ? "The kill switch was switched off again by a later change" : "The kill switch was not engaged",
         description: report
           ? [
               report.notEngaged ?? "",
