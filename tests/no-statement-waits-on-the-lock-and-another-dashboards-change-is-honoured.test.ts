@@ -7,6 +7,7 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 import type { AddressInfo } from "net";
+import { PerformanceObserver } from "perf_hooks";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -120,16 +121,56 @@ function holdTheWriteLock(dbPath: string) {
   };
 }
 
+/**
+ * Diagnostics only (no assertion reads them): for each loop gap over 20 ms,
+ * printed once the test is done -- its start and end, the CPU this process
+ * used across it (all threads), the context switches it made, the GC pauses
+ * overlapping it, and what the test and the app were doing (`phase`).
+ */
+let phase = "idle";
+const gcSeen: Array<{ start: number; end: number; kind: number }> = [];
+new PerformanceObserver((list) => {
+  for (const one of list.getEntries()) {
+    gcSeen.push({ start: one.startTime, end: one.startTime + one.duration, kind: (one as unknown as { detail?: { kind?: number } }).detail?.kind ?? -1 });
+    if (gcSeen.length > 2_000) gcSeen.splice(0, 1_000);
+  }
+}).observe({ entryTypes: ["gc"] });
+console.log(`[lag-diag] runner: ${os.availableParallelism()} cores available, loadavg ${os.loadavg().map((n) => n.toFixed(2)).join(" ")}`);
+
 /** The longest the event loop went without running a 5 ms timer, less the 5 ms, while it runs. */
-function loopLag() {
+function loopLag(label = "") {
   let max = 0;
   let last = performance.now();
+  const began = last;
+  let cpu = process.cpuUsage();
+  let ru = process.resourceUsage();
+  let phaseAt = phase;
+  const gaps: string[] = [];
   const timer = setInterval(() => {
     const now = performance.now();
+    const cpuNow = process.cpuUsage();
+    const ruNow = process.resourceUsage();
+    if (now - last - 5 > 20) {
+      const gcs = gcSeen.filter((g) => g.end > last && g.start < now)
+        .map((g) => `kind ${g.kind} ${(g.end - g.start).toFixed(1)} ms`);
+      gaps.push(`[lag-diag] ${label} gap ${(now - last - 5).toFixed(1)} ms, from ${(last - began).toFixed(1)} to ${(now - began).toFixed(1)} ms; ` +
+        `cpu ${((cpuNow.user - cpu.user + cpuNow.system - cpu.system) / 1000).toFixed(1)} ms (user ${((cpuNow.user - cpu.user) / 1000).toFixed(1)}, sys ${((cpuNow.system - cpu.system) / 1000).toFixed(1)}); ` +
+        `ctx switches voluntary ${ruNow.voluntaryContextSwitches - ru.voluntaryContextSwitches}, involuntary ${ruNow.involuntaryContextSwitches - ru.involuntaryContextSwitches}; ` +
+        `gc [${gcs.join(", ") || "none"}]; phase ${phaseAt} -> ${phase}`);
+    }
     max = Math.max(max, now - last - 5);
     last = now;
+    cpu = cpuNow;
+    ru = ruNow;
+    phaseAt = phase;
   }, 5);
-  return { max: () => max, stop: () => clearInterval(timer) };
+  return {
+    max: () => max,
+    stop: () => {
+      clearInterval(timer);
+      for (const one of gaps.splice(0)) console.log(one);
+    },
+  };
 }
 
 describe("a burst of writes started in one turn of the loop, under a held lock", () => {
@@ -137,33 +178,43 @@ describe("a burst of writes started in one turn of the loop, under a held lock",
     it(`${n} writes and a Stop started in the same turn: the loop is held at most 50 ms, the Stop reaches the engine within 100 ms, and every write goes in once`, async () => {
       const { agent, watcher, dbPath, testId, storage } = await boot(`burst-${n}`);
       const release = holdTheWriteLock(dbPath);
-      const lag = loopLag();
+      const lag = loopLag(`${n}w`);
       let released = false;
       const pending: Array<Promise<true | Error>> = [];
+      let done = 0;
+      const where = (what: string) => { phase = `${what} (${done}/${n} writes settled)`; };
       try {
         calls.length = 0;
         const pressed = Date.now();
         const t0 = performance.now();
+        where("starting the burst");
         for (let i = 0; i < n; i += 1) {
           pending.push(storage.createActivityLog({ action: `burst${n}`, entityType: "test", entityId: String(i), details: null })
-            .then(() => true as const, (cause: Error) => cause));
+            .then(() => true as const, (cause: Error) => cause).finally(() => { done += 1; }));
         }
         // The Stop, in the very turn the burst was started in.
         const stop = agent.post(`/api/scans/${testId}/abort`).then((r) => r);
         const burstHeld = performance.now() - t0;
+        where("writes queued, Stop in flight");
         const reached = await arrived(`POST /api/scans/burst-${n}/abort`, 10_000);
         expect(reached).toBeDefined();
         const stopAfter = reached!.at - pressed;
+        where("Stop reached the engine, awaiting its answer");
         expect((await stop).status).toBe(200);
         // A retest's Stop while the writes are still waiting.
         const retestPressed = Date.now();
+        where("retest Stop in flight");
         expect((await agent.post(`/api/retests/rt-burst-${n}/abort`)).status).toBe(200);
         const retestReached = await arrived(`POST /api/scans/rt-burst-${n}/abort`, 10_000);
         const retestAfter = retestReached!.at - retestPressed;
+        where("writes waiting on the lock");
         await sleep(Math.max(0, 1_000 - (Date.now() - pressed)));
         release(); released = true;
+        where("lock released, writes draining");
         const settled = await Promise.all(pending);
+        where("all settled");
         lag.stop();
+        phase = "idle";
         console.log(`[burst] ${n} writes started in one turn: ${Math.round(burstHeld)} ms to start them; ` +
           `Stop reached the engine after ${stopAfter} ms, a retest's Stop after ${retestAfter} ms; ` +
           `longest loop lag ${Math.round(lag.max())} ms`);
@@ -202,15 +253,19 @@ describe("a burst of writes started in one turn of the loop, under a held lock",
       // The flag is stored by now; a backup takes the write lock while the engine answers the stops.
       expect((await storage.getAIControlSettings())!.killSwitchEnabled).toBe(true);
       release = holdTheWriteLock(dbPath);
-      lag = loopLag();
+      phase = "kill switch: lock held, stops awaiting the engine";
+      lag = loopLag("kill100");
       // The stops are answered at ~1.5 s: every record then meets the lock, all in one turn.
       await sleep(Math.max(0, 1_700 - (Date.now() - pressed)));
       const stopPressed = Date.now();
+      phase = "kill switch: records waiting, retest Stop in flight";
       expect((await agent.post("/api/retests/victim-rt/abort")).status).toBe(200);
       const reached = await arrived("POST /api/scans/victim-rt/abort", 5_000);
       const stopAfter = reached!.at - stopPressed;
+      phase = "kill switch: records waiting";
       await sleep(800);
       lag.stop();
+      phase = "idle";
       const held = lag.max();
       release(); release = null;
       const answer = await kill;
