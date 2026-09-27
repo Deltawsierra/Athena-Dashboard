@@ -156,6 +156,7 @@ export class RetestWatcher {
       lastReadAt: null,
       lastReadError: null,
       stopAcceptedAt: null,
+      stopUnreadAt: null,
       endedAt: null,
       result: null,
     };
@@ -237,8 +238,13 @@ export class RetestWatcher {
     try {
       const row = await this.storage.getRetestWatch(engineRunId);
       if (row) {
-        // Memory holds what has not reached the record yet: a stop accepted a moment ago.
-        return mine?.stopAcceptedAt && !row.stopAcceptedAt ? { ...row, stopAcceptedAt: mine.stopAcceptedAt } : row;
+        // Memory holds what has not reached the record yet: a stop accepted, or
+        // sent with its answer unread, a moment ago.
+        return {
+          ...row,
+          ...(mine?.stopAcceptedAt && !row.stopAcceptedAt ? { stopAcceptedAt: mine.stopAcceptedAt } : {}),
+          ...(mine?.stopUnreadAt && !row.stopUnreadAt ? { stopUnreadAt: mine.stopUnreadAt } : {}),
+        };
       }
     } catch {
       // Answered from what this dashboard knows.
@@ -279,6 +285,23 @@ export class RetestWatcher {
     return this.storage.updateRunningRetestWatch(engineRunId, { stopAcceptedAt: at }).then(
       () => null,
       (cause) => `the note that the engine accepted the stop of retest run ${engineRunId} could not be written: ${causeOf(cause)}`,
+    );
+  }
+
+  /**
+   * Note that a stop was sent for this run and the engine answered it 2xx,
+   * but the rest of its answer was not read: "stop sent, answer unread" --
+   * never an accepted stop. In memory at once, on the record in the
+   * background. What writing the note came to: null when it is on the record
+   * (or there is no running watch to note it on), else why not.
+   */
+  stopSentUnread(engineRunId: string): Promise<string | null> {
+    const at = new Date();
+    const row = this.known.get(engineRunId);
+    if (row) row.stopUnreadAt = at;
+    return this.storage.updateRunningRetestWatch(engineRunId, { stopUnreadAt: at }).then(
+      () => null,
+      (cause) => `the note that a stop was sent to retest run ${engineRunId}, its answer unread, could not be written: ${causeOf(cause)}`,
     );
   }
 
@@ -390,7 +413,11 @@ export class RetestWatcher {
     // A run the engine accepted a stop for, that completed anyway with a
     // verdict: the run did finish and the engine did decide, so it is filed --
     // and said to have completed despite the stop.
-    const despiteStop = row.stopAcceptedAt !== null;
+    const despiteStop = row.stopAcceptedAt != null;
+    // A stop was sent, but its answer was not read: whether the engine took it
+    // is not known, so the verdict is never said to have come despite one --
+    // it came after a stop whose answer was not read.
+    const afterUnreadStop = !despiteStop && row.stopUnreadAt != null;
     const base: RetestWatchEnd = {
       state: "verdict", engineState: "completed", reason: null, error: null, endedAt: new Date(),
       lastReadAt: at, lastReadError: null, result: null,
@@ -409,7 +436,7 @@ export class RetestWatcher {
         try {
           await this.end(row, token, {
             ...base, findingId,
-            result: { ...result, applied: planned.applied, notFiled: null, completedDespiteStop: despiteStop },
+            result: { ...result, applied: planned.applied, notFiled: null, completedDespiteStop: despiteStop, completedAfterUnreadStop: afterUnreadStop },
           }, planned.filing);
           return;
         } catch (cause) {
@@ -420,7 +447,7 @@ export class RetestWatcher {
       }
     }
     await this.end(row, token, {
-      ...base, findingId, result: { ...result, applied: null, notFiled: missing, completedDespiteStop: despiteStop },
+      ...base, findingId, result: { ...result, applied: null, notFiled: missing, completedDespiteStop: despiteStop, completedAfterUnreadStop: afterUnreadStop },
     });
   }
 

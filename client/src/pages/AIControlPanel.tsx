@@ -21,10 +21,12 @@ interface ScanStop {
   testId: string;
   runId: string;
   target: string | null;
-  /** True only when the engine accepted the stop. */
+  /** True when the engine answered the stop 2xx: accepted, or -- with `answerUnread` -- its answer was not read. */
   stopped: boolean;
   /** The engine answered "not running": the run had already ended, and nothing was stopped. */
   alreadyFinished?: boolean;
+  /** Stop sent, answer unread: never said to be accepted. */
+  answerUnread?: boolean;
   detail: string;
 }
 
@@ -43,6 +45,7 @@ interface EngineRunStop {
   testId: string | null;
   stopped: boolean;
   alreadyFinished?: boolean;
+  answerUnread?: boolean;
   detail: string;
 }
 
@@ -75,15 +78,31 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
 /** A stop that did not take: neither accepted, nor answered "not running". */
 const didNotTake = (one: { stopped: boolean; alreadyFinished?: boolean }) => !one.stopped && !one.alreadyFinished;
 
-/** What the engine answered of the stops: how many it accepted, and how many runs it said had already ended. */
-function tookSentence(list: Array<{ stopped: boolean; alreadyFinished?: boolean }>): string {
-  const accepted = list.filter((one) => one.stopped).length;
+type Answered = { stopped: boolean; alreadyFinished?: boolean; answerUnread?: boolean };
+
+/**
+ * What the engine answered of the stops: how many it accepted, how many runs
+ * it said had already ended, and how many stops were answered 2xx with the
+ * rest of the answer unread -- said as exactly that, never as accepted.
+ */
+function tookSentence(list: Answered[]): string {
+  const accepted = list.filter((one) => one.stopped && !one.answerUnread).length;
+  const unread = list.filter((one) => one.answerUnread).length;
   const ended = list.filter((one) => one.alreadyFinished).length;
-  const took = `the engine accepted ${accepted === list.length ? (list.length === 1 ? "it" : "all of them") : accepted}`;
-  if (ended === 0) return took;
-  const endedSaid = `${ended === list.length ? (list.length === 1 ? "it" : "all of them") : ended} had already ended ` +
-    "(the engine answered \"not running\", so nothing was stopped)";
-  return accepted === 0 ? endedSaid : `${took}; ${endedSaid}`;
+  const all = (n: number) => (n === list.length ? (list.length === 1 ? "it" : "all of them") : `${n}`);
+  const parts: string[] = [];
+  if (accepted > 0 || (unread === 0 && ended === 0)) parts.push(`the engine accepted ${all(accepted)}`);
+  if (unread > 0) {
+    const subject = unread === list.length
+      ? (list.length === 1 ? "its stop was" : "all of their stops were")
+      : `${unread} ${unread === 1 ? "stop was" : "stops were"}`;
+    parts.push(`${subject} answered 2xx with the rest of the answer unread (stop sent, answer unread), so whether ` +
+      `the engine is stopping ${unread === 1 ? "that run" : "those runs"} is not known`);
+  }
+  if (ended > 0) {
+    parts.push(`${all(ended)} had already ended (the engine answered "not running", so nothing was stopped)`);
+  }
+  return parts.join("; ");
 }
 
 /**
@@ -169,11 +188,12 @@ function namedSweepSentence(runs: EngineRunStop[]): string | null {
 /** The lead of the report: engaged, or not -- with the stops sent regardless. */
 const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill switch NOT engaged, stops sent anyway" : "Kill switch engaged");
 
-/** Whether every stop the report names was accepted, and nothing went unlisted. */
+/** Whether every stop the report names was accepted (its answer read), and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
-  const recorded = report.stops.listed && report.stops.scans.every((one) => !didNotTake(one));
+  const took = (one: Answered) => !didNotTake(one) && !one.answerUnread;
+  const recorded = report.stops.listed && report.stops.scans.every(took);
   const engine = report.engineRuns === undefined
-    || (report.engineRuns.listed && report.engineRuns.runs.every((one) => !didNotTake(one)) && !report.engineRuns.unnamed);
+    || (report.engineRuns.listed && report.engineRuns.runs.every(took) && !report.engineRuns.unnamed);
   return recorded && engine;
 }
 

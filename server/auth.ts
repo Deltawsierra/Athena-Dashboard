@@ -157,13 +157,23 @@ export function reviseLiveSessions(
  *     true`). Only the switch itself is authorised from memory: any other
  *     field sent with it is authorised from the account, after the stops are
  *     sent (routes.ts, PATCH /api/ai-control);
- *   - drafting a failsafe pause, stand-down or terminate, and relaying a
- *     signature to a failsafe command (the control plane checks every
- *     signature, and a stop's signature is what makes the stop happen);
- *   - revoking an API key: it only takes access away.
+ *   - drafting a failsafe pause, stand-down or terminate;
+ *   - revoking an API key: it only takes access away. From memory only for a
+ *     key of the session's own account; revoking another account's key reads
+ *     the account first (routes.ts, DELETE /api/api-keys/:id).
+ *
+ * Relaying a signature to a failsafe command is NOT one of these by its path:
+ * whether it is a stop depends on the command's action, which only the
+ * control plane knows. It is decided by requireAdminUnlessStop, from that
+ * action: a pause's, a stand-down's or a terminate's is authorised from
+ * memory; any other -- a resume's, a release's, or one whose action cannot be
+ * read -- from the account, read now.
  *
  * The session's role is the account's as this process knows it now
- * (sessionUser), not as it was at sign-in.
+ * (sessionUser), not as it was at sign-in. What this process knows can be
+ * stale -- another dashboard on the same database may have demoted or
+ * deleted the account -- and that is why only stops are ever decided from it:
+ * a stale account may gain nothing but a stop.
  */
 export function isStopRequest(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
@@ -176,7 +186,6 @@ export function isStopRequest(req: Request): boolean {
     const action = req.body && typeof req.body === "object" ? (req.body as { action?: unknown }).action : undefined;
     return action === "pause" || action === "stand_down" || action === "terminate";
   }
-  if (req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path)) return true;
   if (req.method === "DELETE" && /^\/api\/api-keys\/[^/]+$/i.test(path)) return true;
   return false;
 }
@@ -197,11 +206,22 @@ export function sessionUser(req: Request): { id: string; role: string | null } |
   return { id, role: typeof req.session?.role === "string" ? req.session.role : null };
 }
 
+/**
+ * A relay of a signature to a failsafe command: a stop only when the command's
+ * action is one (requireAdminUnlessStop decides, with the route's own uuid).
+ */
+function isSignatureRelay(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path);
+}
+
 /** Rejects the request with 401 unless a live, active account is behind it. */
 export const requireAuth: RequestHandler = (req, res, next) => {
   // A stop with a session is authorised from it. One presented with an API key
-  // instead is authorised as any request is: the key has to be looked up.
-  if (isStopRequest(req) && sessionUser(req)) {
+  // instead is authorised as any request is: the key has to be looked up. A
+  // signature relay with a session is left to its route's guard
+  // (requireAdminUnlessStop), which reads the account unless it is a stop's.
+  if ((isStopRequest(req) || isSignatureRelay(req)) && sessionUser(req)) {
     next();
     return;
   }
@@ -244,6 +264,51 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     })
     .catch(next);
 };
+
+/**
+ * An admin's guard for a route whose request is a stop or not depending on
+ * what it names -- a signature relay, whose command's action only the control
+ * plane knows. `isStop` says whether this one is.
+ *
+ *   - A stop is authorised from the session in memory, as every stop is: the
+ *     account is not read, and no failed or slow read stands in its way.
+ *   - Anything else -- `isStop` false, or failing -- needs the account read
+ *     now, and an active admin behind it: a session this process still holds
+ *     as an admin's, whose account another dashboard demoted or deleted, gains
+ *     nothing but stops. A read that fails answers 503, and nothing is done.
+ */
+export function requireAdminUnlessStop(isStop: (req: Request) => Promise<boolean>): RequestHandler {
+  return (req, res, next) => {
+    void (async () => {
+      const me = sessionUser(req);
+      if (me !== null && me.role === "admin" && (await isStop(req).catch(() => false))) {
+        req.authorisedFromSession = true;
+        next();
+        return;
+      }
+      let user: User | undefined;
+      try {
+        user = await loadSessionUser(req);
+      } catch (cause) {
+        res.status(503).json({
+          message: "The account behind this session could not be read " +
+            `(${cause instanceof Error ? cause.message : String(cause)}), and only a stop is authorised without it. ` +
+            "Nothing was done; try again.",
+        });
+        return;
+      }
+      if (!user) {
+        res.status(401).json({ message: "Authentication required" });
+        return;
+      }
+      if (user.role !== "admin") {
+        res.status(403).json({ message: "Admin role required" });
+        return;
+      }
+      next();
+    })().catch(next);
+  };
+}
 
 /**
  * The account behind a request, read from storage now -- for what a request

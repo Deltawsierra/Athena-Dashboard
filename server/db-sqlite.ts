@@ -40,8 +40,14 @@ export function resolveDbPath(): string {
  */
 type Connection = { sqlite: DatabaseType; db: ReturnType<typeof drizzle> };
 
-/** The longest one statement may hold the event loop waiting for another connection's lock. */
-export const BUSY_TIMEOUT_MS = 10;
+/**
+ * The longest one statement may hold the event loop waiting for another
+ * connection's lock: none. A statement the lock refuses fails at once
+ * (SQLITE_BUSY) and is tried again off the loop (storage-sqlite.ts
+ * withBusyRetry). 10 ms per statement was still 10 ms per write started in one
+ * turn of the loop: 200 writes started together held it 2.2 s.
+ */
+export const BUSY_TIMEOUT_MS = 0;
 
 /**
  * What opening the database found and could not do, said rather than thrown:
@@ -65,13 +71,14 @@ function connect(): Connection {
   handle.pragma("busy_timeout = 5000");
 
   createSchema(handle);
-  // From here on, a statement waits at most BUSY_TIMEOUT_MS for a lock another
-  // connection holds. better-sqlite3 is synchronous: its busy wait blocks the
-  // whole event loop, and with 5000 every write attempted while a backup, the
-  // sqlite3 shell or another dashboard held the write lock stalled every
-  // request for 5 s -- a Stop included. The storage layer waits the rest of
-  // the way asynchronously instead (storage-sqlite.ts withBusyRetry), so the
-  // loop is never held for longer than this.
+  // From here on, a statement never waits for a lock another connection
+  // holds (BUSY_TIMEOUT_MS is 0): it is tried once and refused at once.
+  // better-sqlite3 is synchronous: its busy wait blocks the whole event loop,
+  // and with 5000 every write attempted while a backup, the sqlite3 shell or
+  // another dashboard held the write lock stalled every request for 5 s -- a
+  // Stop included. The storage layer does all the waiting, asynchronously
+  // (storage-sqlite.ts withBusyRetry), so no statement on the loop ever waits
+  // on the lock.
   handle.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
   return connection;
@@ -246,6 +253,7 @@ function createSchema(handle: DatabaseType): void {
       last_read_at INTEGER,
       last_read_error TEXT,
       stop_accepted_at INTEGER,
+      stop_unread_at INTEGER,
       ended_at INTEGER,
       result TEXT
     );
@@ -418,6 +426,7 @@ function addMissingColumns(handle: DatabaseType): void {
     ["finding_checks", "engine_run_id", "TEXT"],
     ["finding_checks", "filed_via", "TEXT"],
     ["finding_checks", "requested_at", "INTEGER"],
+    ["retest_watches", "stop_unread_at", "INTEGER"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

@@ -4,7 +4,7 @@ import { storage } from "./storage-unified";
 import { openReport } from "./db-sqlite";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
-  requireAuth, requireAdmin, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
+  requireAuth, requireAdmin, requireAdminUnlessStop, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
 } from "./auth";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
@@ -235,10 +235,12 @@ interface ScanStop {
   testId: string;
   runId: string;
   target: string | null;
-  /** True only when the engine accepted the stop. */
+  /** True only when the engine answered the stop 2xx: it accepted it, or -- with `answerUnread` -- its answer was not read. */
   stopped: boolean;
   /** The engine answered "not running": the run had already ended, and nothing was stopped. `stopped` is false. */
   alreadyFinished?: boolean;
+  /** Stop sent, answer unread: the 2xx was read and the rest of the answer was not. Never counted as accepted. */
+  answerUnread?: boolean;
   /** Why not, in the engine's or the network's words; empty when stopped. */
   detail: string;
 }
@@ -342,8 +344,27 @@ interface StopOutcome {
    * logged as not running, never as stopped or accepted.
    */
   alreadyFinished?: boolean;
+  /**
+   * The engine answered the stop 2xx, but the rest of its answer -- whether it
+   * was stopping the run, or had found it already ended -- was not read
+   * within engineTimeouts.abortBodyMs: "stop sent, answer unread". `stopped`
+   * is true (the 2xx is all that was read), and it is never counted, logged
+   * or noted as accepted.
+   */
+  answerUnread?: boolean;
   /** Why not, in the engine's or the network's words; for an ended run, that it had ended; for a stop whose answer's body never arrived, that. */
   detail: string;
+}
+
+/** A stop the engine took, as far as its answer was read: never one whose answer was not read. */
+const acceptedStop = (outcome: { stopped: boolean; answerUnread?: boolean }): boolean =>
+  outcome.stopped && outcome.answerUnread !== true;
+
+/** How many of the stops sent were answered 2xx with the rest of the answer unread; "" for none. */
+function unreadSentence(stops: Array<{ answerUnread?: boolean }>): string {
+  const unread = stops.filter((one) => one.answerUnread === true).length;
+  return unread === 0 ? "" : ` ${unread} other run${unread === 1 ? " was" : "s were"} sent a stop whose answer was not read ` +
+    "(stop sent, answer unread): whether the engine is stopping " + (unread === 1 ? "it" : "them") + " is not known.";
 }
 
 /** Whether a stop leaves its run not running: the engine took it, or the run had already ended. */
@@ -351,6 +372,8 @@ const notRunningAfter = (outcome: { stopped: boolean; alreadyFinished?: boolean 
   outcome.stopped || outcome.alreadyFinished === true;
 
 const ALREADY_FINISHED = "already finished: the engine answered that the run was no longer running, so there was nothing to stop";
+/** How a verdict that came after a stop whose answer was not read is marked: never "despite a stop request". */
+const AFTER_UNREAD_STOP = "Completed after a stop whose answer was not read";
 const ANSWER_UNREAD =
   "the engine answered the stop 2xx, but the rest of its answer did not arrive in time, so whether it stopped the run " +
   "or found it already ended was not read";
@@ -359,7 +382,8 @@ const ANSWER_UNREAD =
 function outcomeOf(outcome: engine.AbortOutcome): StopOutcome {
   if (outcome.alreadyFinished) return { stopped: false, alreadyFinished: true, detail: ALREADY_FINISHED };
   if (!outcome.accepted) return { stopped: false, detail: "the engine did not accept the stop; the scan may still be running" };
-  return { stopped: true, detail: outcome.answerUnread ? ANSWER_UNREAD : "" };
+  if (outcome.answerUnread) return { stopped: true, answerUnread: true, detail: ANSWER_UNREAD };
+  return { stopped: true, detail: "" };
 }
 
 /** Send one run the abort its own Stop sends. Reads and writes nothing here. */
@@ -388,7 +412,11 @@ async function writeStopRecord(
 ): Promise<string | null> {
   try {
     await storage.createActivityLog({
-      action: outcome.alreadyFinished ? "abort_not_needed" : outcome.stopped ? "aborted" : "abort_failed",
+      // A stop whose answer was not read is recorded as sent, its answer
+      // unread -- never as aborted.
+      action: outcome.alreadyFinished ? "abort_not_needed"
+        : outcome.answerUnread ? "abort_sent_answer_unread"
+          : outcome.stopped ? "aborted" : "abort_failed",
       // Against its test when one records it; against the run when none does.
       entityType: run.testId !== null ? "test" : "engine_run",
       entityId: run.testId ?? run.runId,
@@ -486,11 +514,11 @@ function runningScansOf(rows: Test[]): Array<{ test: Test; runId: string }> {
  *     memory (storage.peekAllTests);
  *   - the engine's list, and the tests on the database, are read alongside:
  *     each run on the engine's list that nothing above covered is sent its
- *     stop as soon as the list is in; and the database's running scans are
- *     sent theirs as soon as it is read, when this process has never held the
- *     tests in memory, or when the engine's list could not be read -- then the
- *     database is the only place another dashboard's scan is recorded, and a
- *     memory list alone would miss it.
+ *     stop as soon as the list is in; and each scan the database records as
+ *     running that nothing above covered -- another dashboard's among them --
+ *     is sent its stop as soon as the database is read, whatever the engine's
+ *     list is doing (an engine whose worker threads are all busy may not
+ *     answer that list for 20 s).
  * No stop waits on a read another list needs. The records of the stops -- a
  * log line each, and the watches' notes -- are written once every stop has
  * been answered, so no write, however slow or failed, delays another run's
@@ -515,7 +543,8 @@ async function stopEverythingRunning(
     const run = { runId: one.engineRunId, target: null, testId: one.testId };
     // The watch's note that its stop was accepted -- only when it was -- and
     // the log line, both after every stop has been answered.
-    if (outcome.stopped) records.push(() => watcher.stopAccepted(one.engineRunId));
+    if (outcome.answerUnread) records.push(() => watcher.stopSentUnread(one.engineRunId));
+    else if (outcome.stopped) records.push(() => watcher.stopAccepted(one.engineRunId));
     records.push(() => writeStopRecord(who, run, "kill_switch", outcome));
     return { ...run, ...outcome };
   }));
@@ -555,18 +584,24 @@ async function stopEverythingRunning(
     }));
   });
 
-  // The database's running scans, when they are needed (above), as soon as they are read.
-  const rowStops: Promise<ScanStop[]> = (async () => {
-    if (peeked !== null && (await engineRead).ok) return [];
-    const rows = await rowsRead;
-    return rows.ok ? Promise.all(runningScansOf(rows.value).filter((one) => claim(one.runId)).map(stopScan)) : [];
-  })();
+  // The database's running scans -- another dashboard's among them -- as soon
+  // as they are read, whatever the engine's list is doing: never after it,
+  // and never only once it failed. Each is claimed against the stops already
+  // sent, so a run the memory list or the engine's list reached first is not
+  // sent a second stop, and the engine's sweep skips what this sent.
+  const rowStops: Promise<ScanStop[]> = rowsRead.then((rows) =>
+    rows.ok ? Promise.all(runningScansOf(rows.value).filter((one) => claim(one.runId)).map(stopScan)) : []);
 
   // Every stop has been sent; wait for their answers.
   const [retestsDone, memoryDone, sweepDone, rowsDone] = await Promise.all([retestStops, memoryStops, sweepStops, rowStops]);
   const listed = await engineRead;
+  // Whether the scans stopped make a complete list: the database's read is
+  // needed for that only when this process never held the tests, or the
+  // engine's list could not be read (then the database is the only place
+  // another dashboard's scan is recorded).
   const needRows = peeked === null || !listed.ok;
-  const rows: Settled<Test[]> = needRows ? await rowsRead : { ok: true, value: peeked ?? [] };
+  const read = await rowsRead;
+  const rows: Settled<Test[]> = needRows ? read : { ok: true, value: read.ok ? read.value : (peeked ?? []) };
   const tests = rows.ok ? rows.value : (peeked ?? []);
   const recordedBy = new Map<string, Test>();
   for (const test of tests) {
@@ -643,7 +678,7 @@ function stopBeforeDeleting(req: Request, tests: Array<{ id: string; findings: u
 function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): boolean {
   const failed = stops.filter((one) => !notRunningAfter(one));
   if (failed.length === 0) return false;
-  const accepted = stops.filter((one) => one.stopped).length;
+  const accepted = stops.filter(acceptedStop).length;
   res.status(409).json({
     message:
       `Nothing was deleted. ${failed.map((one) => `Engine run ${one.runId}${one.target ? ` (${one.target})` : ""} ` +
@@ -651,7 +686,7 @@ function refuseUnstoppedDelete(res: Response, what: string, stops: ScanStop[]): 
       `Stop ${failed.length === 1 ? "it" : "them"} first -- the scan's Stop on the Tests screen, the kill switch, ` +
       `or a failsafe pause -- then delete ${what}.` +
       (accepted > 0 ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} stopped: the engine accepted the stop.` : "") +
-      endedSentence(stops),
+      unreadSentence(stops) + endedSentence(stops),
     stops,
   });
   return true;
@@ -665,9 +700,14 @@ function endedSentence(stops: Array<{ alreadyFinished?: boolean }>): string {
 
 /** What the deletes' stops came to, for the log: the runs stopped, and the runs the engine answered were not running. */
 function stopsForLog(stops: ScanStop[]): Record<string, string[]> {
-  const stopped = stops.filter((one) => one.stopped).map((one) => one.runId);
+  const stopped = stops.filter(acceptedStop).map((one) => one.runId);
+  const unread = stops.filter((one) => one.answerUnread === true).map((one) => one.runId);
   const ended = stops.filter((one) => one.alreadyFinished).map((one) => one.runId);
-  return { ...(stopped.length > 0 ? { stopped } : {}), ...(ended.length > 0 ? { notRunning: ended } : {}) };
+  return {
+    ...(stopped.length > 0 ? { stopped } : {}),
+    ...(unread.length > 0 ? { stopSentAnswerUnread: unread } : {}),
+    ...(ended.length > 0 ? { notRunning: ended } : {}),
+  };
 }
 
 /** An engine scan that may still be running and that no stop can name: the engine gave it no run id a stop can address. */
@@ -696,7 +736,7 @@ function refuseUnforcedDeleteWithoutStop(
     return typeof target === "string" ? target : `test ${one.id}`;
   });
   const n = unnamed.length;
-  const accepted = stops.filter((one) => one.stopped).length;
+  const accepted = stops.filter(acceptedStop).length;
   res.status(409).json({
     message:
       `Nothing was deleted. ${n === 1 ? "A scan" : `${n} scans`} (${targets.join(", ")}) may still be running, and the ` +
@@ -705,7 +745,7 @@ function refuseUnforcedDeleteWithoutStop(
       `delete ${what} with force: ${n === 1 ? "its record goes" : "their records go"}, and no stop is sent.` +
       (accepted > 0
         ? ` ${accepted} other run${accepted === 1 ? " was" : "s were"} sent a stop, and the engine accepted ${accepted === 1 ? "it" : "each"}.`
-        : "") + endedSentence(stops),
+        : "") + unreadSentence(stops) + endedSentence(stops),
     reason: "no_stop_possible",
     noStop: unnamed.map((one, index) => ({ testId: one.id, target: targets[index] })),
     stops,
@@ -1281,12 +1321,16 @@ function retestFiling(
     requestedBy: string | null; requestedAt: Date; filedVia: "retest_request" | "retest_watch";
     /** The engine accepted a stop for this run, and it completed with this verdict anyway. */
     completedDespiteStop?: boolean;
+    /** A stop was sent for this run, its answer unread, and it completed with this verdict after it. */
+    completedAfterUnreadStop?: boolean;
   },
 ): { filing: RetestFiling; applied: retests.Applied } {
   const decided = lifecycle.statusFromVerdict(result.verdict, finding.status);
   // A run stopped too late to stop it: the engine did finish, and did decide,
   // so the verdict is filed -- and says so, on the check and the finding.
-  const despite = how.completedDespiteStop ? " Completed despite a stop request." : "";
+  const despite = how.completedDespiteStop
+    ? " Completed despite a stop request."
+    : how.completedAfterUnreadStop ? ` ${AFTER_UNREAD_STOP}.` : "";
   // Said on the finding as well as on the check: a verdict the watch collected
   // is the requester's retest, filed when the engine finished it -- not a
   // status they set by hand at that moment.
@@ -1374,7 +1418,8 @@ const retestWatchHooks: retests.WatchHooks = {
     if (!finding) return { missing: "the finding this retest was about is no longer on record" };
     return retestFiling(finding, result, {
       requestedBy: watch.requestedBy, requestedAt: watch.startedAt, filedVia: "retest_watch",
-      completedDespiteStop: watch.stopAcceptedAt !== null,
+      completedDespiteStop: watch.stopAcceptedAt != null,
+      completedAfterUnreadStop: watch.stopAcceptedAt == null && watch.stopUnreadAt != null,
     });
   },
   async recordEnd(watch) {
@@ -1396,7 +1441,8 @@ const retestWatchHooks: retests.WatchHooks = {
         ...(result
           ? { verdict: result.verdict, findingType: result.findingType, target: result.target,
             applied: result.applied ?? null, notFiled: result.notFiled ?? null,
-            completedDespiteStop: (result as { completedDespiteStop?: unknown }).completedDespiteStop === true }
+            completedDespiteStop: (result as { completedDespiteStop?: unknown }).completedDespiteStop === true,
+            completedAfterUnreadStop: (result as { completedAfterUnreadStop?: unknown }).completedAfterUnreadStop === true }
           : { reason: watch.reason, error: watch.error }),
       },
       userId: watch.requestedBy,
@@ -1446,10 +1492,12 @@ function retestView(watched: RetestWatch) {
     lastReadAt: watched.lastReadAt,
     lastReadError: watched.lastReadError,
     stopAcceptedAt: watched.stopAcceptedAt,
+    stopUnreadAt: watched.stopUnreadAt ?? null,
     stoppable,
     detail: retestPhaseSentence(phase, {
       ...watched,
       completedDespiteStop: (watched.result as { completedDespiteStop?: unknown } | null)?.completedDespiteStop === true,
+      completedAfterUnreadStop: (watched.result as { completedAfterUnreadStop?: unknown } | null)?.completedAfterUnreadStop === true,
     }),
     ...(watched.result ? { result: watched.result } : {}),
   };
@@ -1459,19 +1507,26 @@ function retestView(watched: RetestWatch) {
 function retestPhaseSentence(
   phase: retests.RetestPhase | "refused",
   about: {
-    reason: string | null; error: string | null; stopAcceptedAt?: Date | string | null; completedDespiteStop?: boolean;
+    reason: string | null; error: string | null; stopAcceptedAt?: Date | string | null; stopUnreadAt?: Date | string | null;
+    completedDespiteStop?: boolean; completedAfterUnreadStop?: boolean;
   },
 ): string {
   switch (phase) {
     case "running":
       return about.stopAcceptedAt
         ? "The engine accepted a stop for this retest and is stopping it. It has not reached a verdict, and nothing has been filed."
-        : "The engine is still running this retest against the target. It has not reached a verdict, and nothing has been filed.";
+        : about.stopUnreadAt
+          ? "A stop was sent for this retest, but the engine's answer to it was not read (stop sent, answer unread), so " +
+            "whether it is stopping is not known. It has not reached a verdict, and nothing has been filed."
+          : "The engine is still running this retest against the target. It has not reached a verdict, and nothing has been filed.";
     case "verdict":
       return about.completedDespiteStop
         ? "The engine accepted a stop for this retest, but the run completed anyway, with a verdict. The verdict was " +
           "filed, marked as completed despite a stop request."
-        : "The retest finished with a verdict.";
+        : about.completedAfterUnreadStop
+          ? "A stop was sent for this retest, but the engine's answer to it was not read, and the run completed with a " +
+            `verdict. The verdict was filed, marked as ${AFTER_UNREAD_STOP.toLowerCase()}.`
+          : "The retest finished with a verdict.";
     case "stopped":
       return "Stopped" + (about.reason ? ` (${about.reason})` : "") +
         " before it reached a verdict. Nothing was filed, and the finding is unchanged.";
@@ -1719,6 +1774,19 @@ export function registerRoutes(app: Express): void {
   );
 
   // Everything below requires a session.
+  // A change to the AI Control settings takes its place in line the moment it
+  // arrives -- before the session guard, or anything else, is awaited -- so
+  // its write is ordered by when it was pressed, not by how long its
+  // authorisation took (the writes, and `superseded`, below at PATCH
+  // /api/ai-control).
+  let aiControlArrivals = 0;
+  const aiControlSeq = new WeakMap<Request, number>();
+  app.patch("/api/ai-control", (req, _res, next) => {
+    aiControlArrivals += 1;
+    aiControlSeq.set(req, aiControlArrivals);
+    next();
+  });
+
   app.use("/api", requireAuth);
 
   // ...and, for writes, that the kill switch is not engaged.
@@ -1781,8 +1849,9 @@ export function registerRoutes(app: Express): void {
       if (stops.length === 0) throw cause;
       // The stops were accepted; that is not to be reported as a failure.
       return void res.status(500).json({
-        message: `Every running scan of this client was sent a stop, and each was stopped (the engine accepted it) or had ` +
-          `already ended (the engine answered "not running"), but the client could not be deleted: ${causeOf(cause)}`,
+        message: `Every running scan of this client was sent a stop, and each was stopped (the engine accepted it), had ` +
+          `already ended (the engine answered "not running"), or was answered 2xx with the rest of its answer unread ` +
+          `(stop sent, answer unread), but the client could not be deleted: ${causeOf(cause)}`,
         stops,
       });
     }
@@ -1904,7 +1973,8 @@ export function registerRoutes(app: Express): void {
     } catch (cause) {
       if (stops.length === 0) throw cause;
       return void res.status(500).json({
-        message: `Engine run ${stops[0].runId} ${stops[0].alreadyFinished ? "had already ended (the engine answered \"not running\")" : "was stopped (the engine accepted the stop)"}, ` +
+        message: `Engine run ${stops[0].runId} ${stops[0].alreadyFinished ? "had already ended (the engine answered \"not running\")"
+          : stops[0].answerUnread ? "was sent a stop whose answer was not read (stop sent, answer unread)" : "was stopped (the engine accepted the stop)"}, ` +
           `but the test could not be deleted: ${causeOf(cause)}`,
         stops,
       });
@@ -2140,7 +2210,10 @@ export function registerRoutes(app: Express): void {
       const stop = await sendStop(req, { runId: stopId, target: data.target, testId: null }, "start_not_recorded");
       return void res.status(500).json({
         error: `the engine started run ${stopId} but it could not be recorded here (${causeOf(cause)}); ` +
-          (stop.stopped
+          (stop.answerUnread
+            ? "the run was sent a stop, and the engine answered it 2xx, but the rest of its answer was not read " +
+              "(stop sent, answer unread): whether it is stopping is not known"
+            : stop.stopped
             ? "the run was sent a stop, and the engine accepted it"
             : stop.alreadyFinished
               ? "the run was sent a stop, and the engine answered that it had already ended"
@@ -2515,27 +2588,38 @@ export function registerRoutes(app: Express): void {
     try {
       answered = await engine.retest({ twinId: data.twinId, engagementRef, scope });
     } catch (cause) {
-      if (cause instanceof engine.UnrecognisedRetestAnswer) {
-        return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer" });
-      }
-      if (cause instanceof engine.EngineTimedOut) {
-        // The engine may be running it still: its slot is held (retestSlots).
-        retestsHeld.set(key, { scope, since: Date.now() });
-        pollHeldRetests();
-        return void res.status(503).json({
-          error: `${cause.message}. It may still be running this retest: this finding cannot be retested again, and ` +
-            "its place among the retests sent at once stays taken, until the engine lists no live retest on its target " +
-            `or ${Math.round(retestSlots.ceilingMs / 60_000)} min pass. The kill switch stops it.`,
-          reason: "retest_unanswered",
-        });
-      }
-      if (cause instanceof engine.EngineUnavailable) {
-        return void res.status(503).json({ error: cause.message });
-      }
-      throw cause;
-    } finally {
       retestsInFlight.delete(key);
+      // Only a definite answer frees the slot at once: a refusal (4xx), or no
+      // engine to send to. A timeout, a reset or aborted connection, a 5xx,
+      // an answer that could not be read or was not recognised -- the request
+      // may have reached the engine, and engine main runs a retest to its end
+      // whoever is waiting. Its slot is held (retestSlots) until the engine
+      // lists no live retest on its scope, or the ceiling.
+      const definite = cause instanceof engine.EngineRefused || cause instanceof engine.EngineNotConfigured
+        || (cause instanceof engine.UnrecognisedRetestAnswer && cause.answered);
+      if (!definite) {
+        retestsHeld.set(key, { scope, since: Date.now() });
+        console.error(`[retest] the in-flight slot of retest ${key} is held: ${causeOf(cause)}. The engine may still be ` +
+          "running it; the slot is freed when the engine lists no live retest on " +
+          `${scope.join(", ")}, or after ${Math.round(retestSlots.ceilingMs / 60_000)} min.`);
+        pollHeldRetests();
+      } else {
+        console.log(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (a definite answer).`);
+      }
+      const heldSaid = "It may still be running this retest: this finding cannot be retested again, and its place among the " +
+        "retests sent at once stays taken, until the engine lists no live retest on its target or " +
+        `${Math.round(retestSlots.ceilingMs / 60_000)} min pass. The kill switch stops it.`;
+      if (cause instanceof engine.UnrecognisedRetestAnswer) {
+        return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer", ...(definite ? {} : { held: heldSaid }) });
+      }
+      return void res.status(503).json(definite ? { error: causeOf(cause) } : {
+        error: `${causeOf(cause)}. ${heldSaid}`,
+        reason: cause instanceof engine.EngineTimedOut ? "retest_unanswered" : "retest_unconfirmed",
+      });
     }
+    // A definite answer: the slot is free at once.
+    retestsInFlight.delete(key);
+    console.log(`[retest] the in-flight slot of retest ${key} is free at once: the engine answered with a ${answered.answer}.`);
 
     const who = { userId: req.session.userId ?? null, actor: actor(req) };
 
@@ -2598,9 +2682,11 @@ export function registerRoutes(app: Express): void {
       && (watched.requestedBy === me.id || storage.peekTest(watched.testId)?.executedBy === me.id);
     // Until the watches on record have been read (RetestWatcher.resume, which
     // tries until it can), who owns a retest this dashboard has not read is
-    // not known here -- and stopping is the safe direction. So the Stop is
-    // sent for anyone signed in who may run retests (every signed-in user
-    // may), and the log says who sent it, and why it was not checked.
+    // not known here -- nor whether the run id is a retest's at all -- and
+    // stopping is the safe direction. So the Stop is sent for anyone signed in
+    // who may run retests (every signed-in user may), to whatever engine run
+    // id it names, and the log says who sent it: "sent before watches loaded,
+    // id not verified as a retest".
     const unverified = watched === undefined && me !== null && !watcher.resumeState().loaded;
     if (me?.role !== "admin" && !owner && !unverified) {
       return void res.status(403).json({
@@ -2625,17 +2711,21 @@ export function registerRoutes(app: Express): void {
     }
     const stopOutcome = outcomeOf(outcome);
     // Noted in memory at once (a watch's own read after this knows it), on
-    // the record in the background -- only when the engine took the stop.
+    // the record in the background: an accepted stop only when the engine
+    // took it and said so; a 2xx whose answer was not read as just that --
+    // "stop sent, answer unread" -- never as accepted.
     if (outcome.accepted) {
-      void watcher.stopAccepted(runId).then((failed) => { if (failed) console.error(`[retest] ${failed}`); });
+      const noted = outcome.answerUnread ? watcher.stopSentUnread(runId) : watcher.stopAccepted(runId);
+      void noted.then((failed) => { if (failed) console.error(`[retest] ${failed}`); });
     }
     res.json(outcome.alreadyFinished
       ? { stopped: false, alreadyFinished: true, runId, state: outcome.state, detail: ALREADY_FINISHED }
       : { stopped: true, runId, ...(outcome.answerUnread ? { answerUnread: true, detail: ANSWER_UNREAD } : {}) });
     // After the stop and its answer: a write that failed unsends nothing.
     const note = unverified && me?.role !== "admin"
-      ? `sent by ${who.userId ?? "an unnamed session"} before this dashboard had read the retests on record, so whether ` +
-        "they own this retest was not checked; stopping is the safe direction"
+      ? `sent before watches loaded, id not verified as a retest: sent by ${who.userId ?? "an unnamed session"} before ` +
+        "this dashboard had read the retests on record, so neither whether this run id is a retest's nor whether they " +
+        "own it was checked -- it is sent to any engine run id; stopping is the safe direction"
       : undefined;
     const failed = await writeStopRecord(who, {
       runId, target: null, testId: watched?.testId ?? null,
@@ -2854,6 +2944,27 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.delete("/api/api-keys/:id", requireAdmin, asyncHandler(async (req, res) => {
+    // Authorised from the session in memory (auth.ts isStopRequest) only for
+    // a key of the session's own account. Another account's key is revoked
+    // only by an admin whose account, read now, is one: a session this
+    // process still holds as an admin's, whose account another dashboard
+    // demoted or deleted, cannot take every other admin's automation away.
+    if (req.authorisedFromSession === true) {
+      const key = (await storage.getAllApiKeys()).find((one) => one.id === req.params.id);
+      if (key && key.createdBy !== req.session.userId) {
+        let account: User | undefined;
+        try {
+          account = await accountNow(req);
+        } catch (cause) {
+          return void res.status(503).json({
+            message: `The account behind this session could not be read (${causeOf(cause)}), and revoking another ` +
+              "account's key needs it. Nothing was revoked; try again.",
+          });
+        }
+        if (!account) return void res.status(401).json({ message: "Authentication required" });
+        if (account.role !== "admin") return void res.status(403).json({ message: "Admin role required" });
+      }
+    }
     const revoked = await storage.revokeApiKey(req.params.id);
     if (!revoked) return notFound(res, "API key");
     await storage.createActivityLog({
@@ -2870,22 +2981,38 @@ export function registerRoutes(app: Express): void {
   }));
 
   /**
-   * Every write of the AI control settings, one after another in the order
-   * the requests came (a flag write under a held lock waits off the event
-   * loop, and two retrying at once landed in either order: an engage answered
-   * "engaged" over a stored "off"). Each takes a generation; an answer whose
-   * write a later one followed says so, and the last answer always matches
-   * the stored flag.
+   * Every write of the AI control settings, in the order the requests
+   * ARRIVED -- not the order their authorisation finished. Each request takes
+   * a sequence number the moment it arrives, before anything is awaited
+   * (aiControlArrival, ahead of requireAdmin): a disengage whose account read
+   * takes 300 ms, pressed before an engage authorised from memory at once,
+   * still comes before it. The writes are made one after another (a flag
+   * write under a held lock waits off the event loop, and two retrying at
+   * once landed in either order), and a write whose request a later-sequenced
+   * one has already overtaken is not made at all: that request is answered
+   * `superseded`, and writes nothing. So the stored flag is always the last
+   * press's, and the last answer always matches it.
    */
   let aiControlWrites: Promise<unknown> = Promise.resolve();
-  let aiControlGeneration = 0;
-  const writeAIControl = (fields: Parameters<typeof storage.updateAIControlSettings>[0]) => {
-    const written = aiControlWrites.then(() => storage.updateAIControlSettings(fields));
+  /** The sequence number of the latest request whose write was made. */
+  let aiControlWritten = 0;
+  /** The sequence number of the latest request authorised to write: one after this will write after it, or already has. */
+  let aiControlAuthorised = 0;
+  /** Write, unless a later-sequenced request already has: then null, and nothing is written. */
+  const writeAIControl = (seq: number, fields: Parameters<typeof storage.updateAIControlSettings>[0]) => {
+    const written = aiControlWrites.then(async () => {
+      if (seq < aiControlWritten) return null;
+      const stored = await storage.updateAIControlSettings(fields);
+      aiControlWritten = seq;
+      return stored;
+    });
     aiControlWrites = written.catch(() => undefined);
     return written;
   };
+  const SUPERSEDED = "a later change to these settings was sent while this one was being saved; the stored settings are that one's";
 
   app.patch("/api/ai-control", requireAdmin, asyncHandler(async (req, res) => {
+    const seq = aiControlSeq.get(req) ?? ++aiControlArrivals;
     const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
       ? (req.body as Record<string, unknown>)
       : {};
@@ -2898,6 +3025,9 @@ export function registerRoutes(app: Express): void {
       data = updateAIControlSettingSchema.parse(req.body);
     }
     const noted = ignored.length > 0 ? { ignored } : {};
+    // Authorised and valid: this request will write, unless one that arrived
+    // after it already has.
+    aiControlAuthorised = Math.max(aiControlAuthorised, seq);
     // The stops first (stopEverythingRunning): each goes to the engine before
     // anything is written, and they go together. Then the flag, so every other
     // write is refused from here on. Sent again each time the switch is sent
@@ -2920,11 +3050,13 @@ export function registerRoutes(app: Express): void {
     const unauthorised = fromMemory ? others : {};
     const now = fromMemory ? { killSwitchEnabled: true } : data;
 
-    const generation = ++aiControlGeneration;
     let settings: Awaited<ReturnType<typeof storage.updateAIControlSettings>> | null = null;
     let notStored: string | null = null;
+    /** A later-sequenced request wrote first: this one writes nothing, and says so. */
+    let overtaken = false;
     try {
-      settings = await writeAIControl({ ...now, lastModifiedBy: req.session.userId ?? null });
+      settings = await writeAIControl(seq, { ...now, lastModifiedBy: req.session.userId ?? null });
+      if (settings === null) overtaken = true;
     } catch (cause) {
       if (data.killSwitchEnabled !== true) throw cause;
       notStored = causeOf(cause);
@@ -2953,9 +3085,12 @@ export function registerRoutes(app: Express): void {
       else if (!account) refused = { status: 401, why: "the account behind this session is no longer active" };
       else if (account.role !== "admin") refused = { status: 403, why: "the account behind this session is no longer an admin" };
       else if (notStored !== null) refused = { status: 500, why: "the kill switch itself could not be stored" };
+      else if (overtaken) refused = { status: 409, why: SUPERSEDED };
       else {
         try {
-          settings = await writeAIControl({ ...unauthorised, lastModifiedBy: req.session.userId ?? null });
+          const stored = await writeAIControl(seq, { ...unauthorised, lastModifiedBy: req.session.userId ?? null });
+          if (stored === null) refused = { status: 409, why: SUPERSEDED };
+          else settings = stored;
         } catch (cause) {
           refused = { status: 500, why: `they could not be stored (${causeOf(cause)})` };
         }
@@ -2965,12 +3100,18 @@ export function registerRoutes(app: Express): void {
 
     // Counted as the engine answered: accepted, or (said only when there
     // are any) answered "not running" -- never a run that had ended as accepted.
-    const count = (list: Array<{ stopped: boolean; alreadyFinished?: boolean }>) => {
+    const count = (list: Array<{ stopped: boolean; alreadyFinished?: boolean; answerUnread?: boolean }>) => {
       const notRunning = list.filter((one) => one.alreadyFinished).length;
-      return { sent: list.length, accepted: list.filter((one) => one.stopped).length, ...(notRunning > 0 ? { notRunning } : {}) };
+      const answerUnread = list.filter((one) => one.answerUnread === true).length;
+      return {
+        sent: list.length, accepted: list.filter(acceptedStop).length,
+        ...(answerUnread > 0 ? { answerUnread } : {}), ...(notRunning > 0 ? { notRunning } : {}),
+      };
     };
-    const logged = stops === null || engineRuns === null ? data : {
+    const notWritten = overtaken ? { notWritten: SUPERSEDED } : {};
+    const logged = stops === null || engineRuns === null ? { ...data, ...notWritten } : {
       ...(fromMemory ? { killSwitchEnabled: true, ...(refused === null ? others : {}) } : data),
+      ...notWritten,
       ...noted,
       ...refusedNote,
       ...(notStored !== null ? { notStored } : {}),
@@ -2996,11 +3137,26 @@ export function registerRoutes(app: Express): void {
       if (stops === null) throw cause;
       writeFailures.push(`the record of engaging the kill switch could not be written: ${causeOf(cause)}`);
     }
-    // A later change to these settings was saved after this one: this answer
-    // is not what is stored now, and says so (the page reads them again).
-    const superseded = generation !== aiControlGeneration
-      ? { superseded: "a later change to these settings was sent while this one was being saved; the stored settings are that one's" }
-      : {};
+    // A later change to these settings was saved after this one -- or before
+    // it, overtaking it, so this one wrote nothing: this answer is not what is
+    // stored now, and says so (the page reads them again).
+    const superseded = overtaken || aiControlWritten > seq || aiControlAuthorised > seq ? { superseded: SUPERSEDED } : {};
+    if (overtaken) {
+      // Nothing of this request was written: a request that arrived after it
+      // wrote first. Its stops, if it sent any, went all the same, and are
+      // said; the settings answered are the ones stored now.
+      settings = (await storage.getAIControlSettings().catch(() => undefined)) ?? null;
+      return void res.status(409).json({
+        message: `Nothing of this change was saved: ${SUPERSEDED}.` +
+          (stops !== null ? " Every stop was sent all the same; what each came to is below." : ""),
+        ...settings,
+        ...(stops !== null ? { engaged: settings?.killSwitchEnabled === true, stops, engineRuns } : {}),
+        ...(writeFailures.length > 0 ? { writeFailures } : {}),
+        ...noted,
+        written: false,
+        ...superseded,
+      });
+    }
     if (notStored !== null) {
       // Not engaged -- the flag is not stored, so writes are not refused -- and
       // the stops went out all the same: both are said.
@@ -3316,7 +3472,15 @@ export function registerRoutes(app: Express): void {
     res.json(drafted);
   }));
 
-  app.post("/api/failsafe/commands/:uuid/signatures", requireAdmin, asyncHandler(async (req, res) => {
+  // A signature is a stop only when its command is one: a pause's, a
+  // stand-down's or a terminate's is authorised from the session in memory; a
+  // resume's or a release's -- or one whose command cannot be read -- needs
+  // the account, read now (auth.ts requireAdminUnlessStop).
+  const relaysAStop = async (req: Request): Promise<boolean> => {
+    const action = await failsafeActionOf(req.params.uuid);
+    return action !== null && FAILSAFE_STOP_ACTIONS.has(action);
+  };
+  app.post("/api/failsafe/commands/:uuid/signatures", requireAdminUnlessStop(relaysAStop), asyncHandler(async (req, res) => {
     if (await killSwitchRefusesCommand(res, "relay", req.params.uuid)) return;
     const data = submitSignatureSchema.parse(req.body);
     let result;

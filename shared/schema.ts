@@ -274,6 +274,12 @@ export const retestWatches = sqliteTable("retest_watches", {
   lastReadAt: timestamp("last_read_at"),
   lastReadError: text("last_read_error"),
   stopAcceptedAt: timestamp("stop_accepted_at"),
+  /**
+   * A stop was sent and the engine answered it 2xx, but the rest of its answer
+   * -- whether it was stopping the run, or had found it already ended -- was
+   * not read: "stop sent, answer unread". Never taken as accepted.
+   */
+  stopUnreadAt: timestamp("stop_unread_at"),
   endedAt: timestamp("ended_at"),
   /** The verdict the watch collected, with what filing it came to. */
   result: json<Record<string, unknown>>("result"),

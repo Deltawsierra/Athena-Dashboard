@@ -3,6 +3,11 @@
 // It answers with the recorded athena-engine 143279e bodies
 // (tests/fixtures/engine-retest/pr71-143279e/at-once-then-stopped.json), the
 // run id in each set to the one asked about.
+//
+// Two knobs: POST /__hang {hang} leaves /api/scans/active unanswered (no
+// headers) -- an engine whose worker threads are all busy, as round 1
+// measured (28 s); POST /__abortDelay {ms} answers each stop after ms (a run
+// whose id starts "victim" is answered at once).
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -14,6 +19,8 @@ const abortAnswer = byRequest("POST", (p) => /\/abort$/.test(p))[0].body;
 const runningRead = byRequest("GET", (p) => /^\/api\/scans\/[^/]+$/.test(p) && p !== "/api/scans/active")[0].body;
 
 let active = { active: [] };
+let hangActive = false;
+let abortDelayMs = 0;
 const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => { raw += chunk; });
@@ -24,12 +31,27 @@ const server = http.createServer((req, res) => {
       res.end("{}");
       return;
     }
+    if (url === "/__hang") {
+      hangActive = JSON.parse(raw).hang === true;
+      res.end("{}");
+      return;
+    }
+    if (url === "/__abortDelay") {
+      abortDelayMs = Number(JSON.parse(raw).ms) || 0;
+      res.end("{}");
+      return;
+    }
     process.stdout.write(JSON.stringify({ line: `${req.method} ${url}`, at: Date.now() }) + "\n");
+    if (url === "/api/scans/active" && hangActive) return; // never answered
     res.writeHead(200, { "Content-Type": "application/json" });
     if (url === "/health") return res.end(JSON.stringify({ status: "ok" }));
     if (url === "/api/scans/active") return res.end(JSON.stringify(active));
     const abort = /^\/api\/scans\/([^/]+)\/abort$/.exec(url);
-    if (abort) return res.end(JSON.stringify({ ...abortAnswer, run_id: decodeURIComponent(abort[1]) }));
+    if (abort) {
+      const send = () => res.end(JSON.stringify({ ...abortAnswer, run_id: decodeURIComponent(abort[1]) }));
+      if (abortDelayMs > 0 && !abort[1].startsWith("victim")) return void setTimeout(send, abortDelayMs);
+      return send();
+    }
     const read = /^\/api\/scans\/([^/]+)$/.exec(url);
     if (read) return res.end(JSON.stringify({ ...runningRead, run_id: decodeURIComponent(read[1]) }));
     res.end("{}");

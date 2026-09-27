@@ -57,6 +57,8 @@ interface RetestResult {
   checkedAt: string | null;
   /** The engine accepted a stop for this run, and it completed anyway with this verdict. */
   completedDespiteStop?: boolean;
+  /** A stop was sent for this run, its answer unread, and it completed with this verdict after it. */
+  completedAfterUnreadStop?: boolean;
 }
 
 /**
@@ -76,6 +78,8 @@ interface RetestStatusView {
   detail: string;
   lastReadError?: string | null;
   stopAcceptedAt?: string | null;
+  /** A stop was sent and answered 2xx, the rest of its answer unread: never an accepted stop. */
+  stopUnreadAt?: string | null;
 }
 
 /** A watched retest as the poll route answers it: a status, or -- once it completed with one -- the verdict. */
@@ -166,6 +170,12 @@ function VerdictView({ twinId, result }: { twinId: number; result: RetestResult 
           <p className="text-xs athena-gold" data-testid={`text-verdict-despite-stop-${twinId}`}>
             Completed despite a stop request: the engine accepted a stop for this retest, but the run finished anyway
             with this verdict, which was filed.
+          </p>
+        )}
+        {!result.completedDespiteStop && result.completedAfterUnreadStop && (
+          <p className="text-xs athena-gold" data-testid={`text-verdict-after-unread-stop-${twinId}`}>
+            Completed after a stop whose answer was not read: a stop was sent for this retest, but the engine&apos;s answer
+            to it was not read, and the run finished with this verdict, which was filed.
           </p>
         )}
       </div>

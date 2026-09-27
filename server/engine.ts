@@ -87,8 +87,31 @@ export class EngineUnavailable extends Error {}
 export class EngineTimedOut extends EngineUnavailable {}
 
 /**
+ * The engine answered, and its answer was a refusal (a 4xx): it did not take
+ * the request, and is doing nothing about it. A definite answer, unlike a
+ * reset, a 5xx, a timeout or an answer that could not be read.
+ */
+export class EngineRefused extends EngineUnavailable {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+/** No engine is configured: nothing was sent anywhere. */
+export class EngineNotConfigured extends EngineUnavailable {}
+
+/**
+ * The request behind each answer `call` returned, by the answer: aborting it
+ * after the headers are in ends the body's stream and closes its connection.
+ * Cancelling the body instead does nothing while `text()` holds its reader --
+ * a locked stream refuses the cancel -- so a stalled answer kept its socket.
+ */
+const requestOf = new WeakMap<Response, AbortController>();
+
+/**
  * The rest of an answer whose headers are in, or null when it did not arrive
- * within `ms` -- then the body is let go, so a stalled answer holds nothing.
+ * within `ms` -- then the request is aborted: its body's stream is ended and
+ * its connection closed, so a stalled answer holds no socket and no read.
  */
 async function bodyWithin(response: Response, ms: number): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -96,7 +119,7 @@ async function bodyWithin(response: Response, ms: number): Promise<string | null
   try {
     const read = response.text().catch(() => null);
     const got = await Promise.race([read, late]);
-    if (got === null) void response.body?.cancel().catch(() => undefined);
+    if (got === null) requestOf.get(response)?.abort();
     return got;
   } finally {
     clearTimeout(timer);
@@ -153,18 +176,21 @@ function headers(): Record<string, string> {
 async function call(path: string, init?: RequestInit, timeoutMs: number = engineTimeouts.callMs): Promise<Response> {
   const base = baseUrl();
   if (!base) {
-    throw new EngineUnavailable(
+    throw new EngineNotConfigured(
       `no engine is configured; set ${ENGINE_URL} to the engine's address`,
     );
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(`${base}${path}`, {
+    const response = await fetch(`${base}${path}`, {
       ...init,
       headers: { ...headers(), ...(init?.headers ?? {}) },
       signal: controller.signal,
     });
+    // Kept for its body: a body that stalls is let go by aborting this (bodyWithin).
+    requestOf.set(response, controller);
+    return response;
   } catch (cause) {
     // A hostname, a port and a refusal are all the operator needs; the stack
     // is not, and this string reaches a browser.
@@ -790,8 +816,10 @@ export interface AbortOutcome {
   state: string | null;
   /**
    * The engine answered 2xx, but the rest of its answer did not arrive within
-   * engineTimeouts.abortBodyMs: taken as accepted, as its status says, though
-   * whether the run was stopping or had already ended was not read.
+   * engineTimeouts.abortBodyMs: "stop sent, answer unread". `accepted` is
+   * true only in that the 2xx was read; whether the run was stopping or had
+   * already ended was not, and every record of it says so -- never that the
+   * stop was accepted (routes.ts outcomeOf).
    */
   answerUnread?: boolean;
 }
@@ -808,8 +836,9 @@ export async function abortRun(runId: string): Promise<AbortOutcome> {
   // Answered from the headers: the body is read only to tell a run that had
   // ended ("not running") from one that is stopping, and for at most
   // engineTimeouts.abortBodyMs. A body that stalls never holds a Stop, or the
-  // kill switch, which waits on every stop's answer: the stop is taken as the
-  // engine's 2xx says, and said to be unconfirmed.
+  // kill switch, which waits on every stop's answer: it is answered as a stop
+  // sent whose answer was not read, and its request is aborted so its socket
+  // is let go (bodyWithin).
   const raw = await bodyWithin(response, engineTimeouts.abortBodyMs);
   if (raw === null) return { accepted: true, alreadyFinished: false, state: null, answerUnread: true };
   let payload: Record<string, unknown> | null = null;
@@ -986,7 +1015,16 @@ export interface RetestRequest {
  * An engine answer to a retest that is neither contract's: nothing is filed
  * from it, and no id in it is read as a scan record.
  */
-export class UnrecognisedRetestAnswer extends EngineUnavailable {}
+export class UnrecognisedRetestAnswer extends EngineUnavailable {
+  /**
+   * `answered`: the engine answered 2xx with a body that carries a run id --
+   * a definite answer, if not one this reads: the retest's slot is freed at
+   * once. Without one (a body that is not an object) it is not.
+   */
+  constructor(message: string, readonly answered = false) {
+    super(message);
+  }
+}
 
 /**
  * Whether a 422 is the engine refusing `wait_seconds` as a field it does not
@@ -1081,7 +1119,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   if (response.status === 422) {
     const raw = await body(response);
     if (!refusesWaitSeconds(422, raw)) {
-      throw new EngineUnavailable(`the engine answered 422: ${raw}`);
+      throw new EngineRefused(`the engine answered 422: ${raw}`, 422);
     }
     response = await call("/api/remediation/retest", { method: "POST", body: JSON.stringify(fields) });
   }
@@ -1095,18 +1133,21 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
     if (payload && typeof payload === "object" && (payload as Record<string, unknown>).answer === "status") {
       return { answer: "status", status: statusOf(payload as Record<string, unknown>, 429) };
     }
-    throw new EngineUnavailable(`the engine answered 429: ${raw}`);
+    throw new EngineRefused(`the engine answered 429: ${raw}`, 429);
   }
   if (!response.ok) {
-    throw new EngineUnavailable(
-      `the engine answered ${response.status}: ${await body(response)}`,
-    );
+    const said = `the engine answered ${response.status}: ${await body(response)}`;
+    // A 4xx is the engine refusing the retest; a 5xx says nothing about
+    // whether it started one.
+    if (response.status >= 400 && response.status < 500) throw new EngineRefused(said, response.status);
+    throw new EngineUnavailable(said);
   }
   const read = await jsonWithin(response, "a retest");
   if (!read || typeof read !== "object" || Array.isArray(read)) {
     throw new UnrecognisedRetestAnswer(`Unrecognised engine answer: HTTP ${response.status} whose body is not an object. Nothing was filed.`);
   }
   const payload = read as Record<string, unknown>;
+  const carriesRunId = payload.run_id !== undefined && payload.run_id !== null && payload.run_id !== "";
 
   if (!("answer" in payload)) {
     // Neither contract answers like this: main never answers 202, and never
@@ -1116,6 +1157,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
       throw new UnrecognisedRetestAnswer(
         `Unrecognised engine answer: HTTP ${response.status} with no \`answer\`` +
         ("scan_record_id" in payload ? " and a `scan_record_id`" : "") + ". Nothing was filed.",
+        carriesRunId,
       );
     }
     // Engine main: the verdict, with the record id under `run_id` and no id a
@@ -1126,6 +1168,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   if (response.status === 202 && payload.answer !== "status") {
     throw new UnrecognisedRetestAnswer(
       `Unrecognised engine answer: HTTP 202 with answer ${JSON.stringify(payload.answer)}. Nothing was filed.`,
+      carriesRunId,
     );
   }
   if (payload.answer === "verdict") {
@@ -1139,6 +1182,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   }
   throw new UnrecognisedRetestAnswer(
     `Unrecognised engine answer: answer ${JSON.stringify(payload.answer)} is neither a verdict nor a status. Nothing was filed.`,
+    carriesRunId,
   );
 }
 

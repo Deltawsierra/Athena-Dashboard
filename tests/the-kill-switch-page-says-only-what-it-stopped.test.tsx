@@ -84,6 +84,20 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
     );
   });
 
+  it("a stop whose answer was not read is said as exactly that -- stop sent, answer unread -- never as accepted", async () => {
+    mount(SETTINGS);
+    engageAnswers({ listed: true, scans: [
+      scan("a", true),
+      { ...scan("b", true, "the engine answered the stop 2xx, but the rest of its answer did not arrive in time"), answerUnread: true },
+    ] });
+    const said = (await engage()).textContent ?? "";
+    expect(said).toBe(
+      "Kill switch engaged; 2 running scans were sent a stop, and the engine accepted 1; 1 stop was answered 2xx with " +
+      "the rest of the answer unread (stop sent, answer unread), so whether the engine is stopping that run is not known.",
+    );
+    expect(said).not.toMatch(/accepted all|accepted it/);
+  });
+
   it("one scan, one stop", async () => {
     mount(SETTINGS);
     engageAnswers({ listed: true, scans: [scan("a", true)] });

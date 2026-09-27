@@ -760,32 +760,67 @@ function readsOnly(property: PropertyKey): boolean {
 }
 
 /**
- * One line, first come first served, for the calls a busy database refused:
- * at most ONE of them tries again at a time, and only after a timer, so a
- * flood of writes under a held lock costs the event loop one statement's
- * wait (BUSY_TIMEOUT_MS) per retry round -- never one per write in flight.
- * With 200 writes waiting, a Stop is served between two rounds, as it is
- * with none.
+ * One line, first come first served, for the calls a busy database refused --
+ * and for every write made while one may be refused: no statement on the
+ * event loop ever waits on the lock (db-sqlite.ts BUSY_TIMEOUT_MS is 0: a try
+ * is refused at once), and at most ONE call tries at a time while the
+ * database is, or may be, busy. So a flood of writes under a held lock --
+ * however many, and however they were started, all in one turn of the loop
+ * included -- costs the loop one refused try per retry round, never one per
+ * write waiting.
  *
- *   - A call that fails busy joins the back of the line (a call already in it
- *     keeps its place at the front), so writes land in the order they were
- *     made: a later write of the same row is never overtaken by an earlier one.
- *   - While the line is not empty, a new call that writes joins it at once
- *     instead of trying (and waiting BUSY_TIMEOUT_MS) on a lock known held; a
- *     call that only reads goes straight through (readsOnly).
- *   - The head of the line tries again every 10-30 ms. When it succeeds the
- *     lock is free, and the rest follow one per turn of the loop.
- *   - A call still waiting when its BUSY_RETRY_FOR_MS are up fails with the
- *     busy error it met.
+ *   - Every call takes a place (`seat`) when it is made, and the line is kept
+ *     in the order of those places: a call refused after it was made goes back
+ *     where it was made, never behind a later one. So writes land in the order
+ *     they were made: a later write of the same row is never overtaken by an
+ *     earlier one.
+ *   - While the line is not empty, or any call's try is still out (made, and
+ *     not yet known to have succeeded or been refused -- `trying`), a new call
+ *     that writes joins the line at once instead of trying. So a burst of
+ *     writes made in one turn of the loop makes ONE try, not one each. A call
+ *     that only reads goes straight through (readsOnly): under WAL a read
+ *     never takes the write lock, and one the database still refuses joins the
+ *     line like any other.
+ *   - The head of the line tries again every 10-30 ms while the database is
+ *     busy. When it succeeds the lock is free, and the rest follow one per
+ *     turn of the loop.
+ *   - A call still waiting when its BUSY_RETRY_FOR_MS are up fails: with the
+ *     busy error it met, or, if it never tried, with one saying the lock was
+ *     held longer than it waits.
  */
 export class BusyLine {
-  private waiting: Array<{ go: () => void; fail: (cause: unknown) => void; deadline: number; cause: unknown }> = [];
+  private waiting: Array<{ seat: number; go: () => void; fail: (cause: unknown) => void; deadline: number; cause: unknown }> = [];
   private scheduled = false;
   private busyNow = false;
+  private seats = 0;
+  /** Tries that are out: made, and not yet known to have succeeded or been refused. */
+  private trying = 0;
 
-  /** Whether calls are waiting for the lock: a new write then waits its turn. */
+  /** Whether a new write waits its turn: calls are waiting for the lock, a try is still out, or the last one was refused. */
   get queued(): boolean {
-    return this.busyNow || this.waiting.length > 0;
+    return this.busyNow || this.waiting.length > 0 || this.trying > 0;
+  }
+
+  /** How many calls are waiting in the line. */
+  get length(): number {
+    return this.waiting.length;
+  }
+
+  /** A place in the line's order, taken when a call is made. */
+  seat(): number {
+    this.seats += 1;
+    return this.seats;
+  }
+
+  /** A try is going out; `settled` is called once it is known how it went. */
+  begin(): () => void {
+    this.trying += 1;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.trying -= 1;
+    };
   }
 
   /** A call outside the line met a busy database: from now on new writes wait their turn. */
@@ -793,17 +828,18 @@ export class BusyLine {
     this.busyNow = true;
   }
 
-  /** Wait for this call's turn to try again. `front`: it has been tried and refused before, and keeps its place. */
-  turn(deadline: number, cause: unknown, front = false): Promise<void> {
+  /** Wait for this call's turn to try (again), at the place it took when it was made. */
+  turn(seat: number, deadline: number, cause: unknown): Promise<void> {
     return new Promise<void>((go, fail) => {
-      const entry = { go, fail, deadline, cause };
-      if (front) this.waiting.unshift(entry);
-      else this.waiting.push(entry);
+      const entry = { seat, go, fail, deadline, cause };
+      let at = this.waiting.length;
+      while (at > 0 && this.waiting[at - 1].seat > seat) at -= 1;
+      this.waiting.splice(at, 0, entry);
       this.schedule(this.busyNow ? "timer" : "now");
     });
   }
 
-  /** What one try came to: a busy refusal keeps the line waiting on a timer; anything else lets the next one go. */
+  /** What one try from the line came to: a busy refusal keeps the line waiting on a timer; anything else lets the next one go. */
   tried(busy: boolean): void {
     this.busyNow = busy;
     this.scheduled = false;
@@ -815,10 +851,12 @@ export class BusyLine {
     this.scheduled = true;
     const next = () => {
       const now = Date.now();
-      // Calls whose time is up fail with the refusal they met.
-      while (this.waiting.length > 0 && this.waiting[0].deadline <= now) {
-        const late = this.waiting.shift()!;
-        late.fail(late.cause ?? this.expired());
+      // Calls whose time is up -- wherever they are in the line -- fail with
+      // the refusal they met, or, never having tried, with one saying so.
+      const late = this.waiting.filter((one) => one.deadline <= now);
+      if (late.length > 0) {
+        this.waiting = this.waiting.filter((one) => one.deadline > now);
+        for (const one of late) one.fail(one.cause ?? this.expired());
       }
       const head = this.waiting.shift();
       if (!head) {
@@ -842,11 +880,12 @@ export class BusyLine {
 /**
  * Wait for a lock without holding the event loop.
  *
- * Each statement gives up after BUSY_TIMEOUT_MS (db-sqlite.ts); a call that
- * gave up on a busy database waits its turn in one line (BusyLine) and is
- * tried again, for up to BUSY_RETRY_FOR_MS in all -- off the loop, one call
- * at a time, so every other request, and every Stop, is served in between
- * however many writes are waiting.
+ * Each statement is tried once and refused at once when another connection
+ * holds the lock it needs (BUSY_TIMEOUT_MS is 0); a call refused as busy, and
+ * every write made while one may be, waits its turn in one line (BusyLine)
+ * and is tried again, for up to BUSY_RETRY_FOR_MS in all -- off the loop, one
+ * call at a time, so every other request, and every Stop, is served in
+ * between however many writes are waiting.
  *
  * A call is tried again from the start only when it failed busy before
  * anything it does was committed: every call writes one statement, or one
@@ -862,17 +901,27 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
       if (IN_MEMORY.has(property)) return value.bind(object);
       return async (...args: unknown[]) => {
         const deadline = Date.now() + retryForMs;
+        const seat = line.seat();
         let inLine = false;
+        // Decided synchronously, when the call is made: a write made while
+        // another's try is still out -- in the same turn of the loop, say --
+        // waits its turn rather than trying beside it.
         if (line.queued && !readsOnly(property)) {
-          await line.turn(deadline, null);
+          await line.turn(seat, deadline, null);
           inLine = true;
         }
+        const writes = !readsOnly(property);
         for (;;) {
+          // A write's try is out until it is known how it went; a read's
+          // never holds a write back.
+          const settled = writes || inLine ? line.begin() : () => undefined;
           try {
             const result = await value.apply(object, args);
+            settled();
             if (inLine) line.tried(false);
             return result;
           } catch (cause) {
+            settled();
             if (!isBusy(cause)) {
               if (inLine) line.tried(false);
               throw cause;
@@ -880,7 +929,7 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
             if (inLine) line.tried(true);
             else line.sawBusy();
             if (Date.now() >= deadline) throw cause;
-            await line.turn(deadline, cause, inLine);
+            await line.turn(seat, deadline, cause);
             inLine = true;
           }
         }

@@ -393,28 +393,42 @@ describe("a stop's answer whose body never finishes holds nothing", () => {
     expect(got.done).toBe(true);
     if (got.done) {
       expect(got.v.status).toBe(200);
-      expect(got.v.body.stops.scans.find((one: { testId: string }) => one.testId === testId)).toMatchObject({ stopped: true });
+      expect(got.v.body.stops.scans.find((one: { testId: string }) => one.testId === testId)).toMatchObject({ stopped: true, answerUnread: true });
     }
+    // Recorded as a stop sent whose answer was not read -- never as aborted (accepted).
     const logged = await storage.getActivityLogsByEntity("test", testId);
-    expect(logged.some((one) => one.action === "aborted")).toBe(true);
+    expect(logged.some((one) => one.action === "abort_sent_answer_unread")).toBe(true);
+    expect(logged.some((one) => one.action === "aborted")).toBe(false);
     await admin.patch("/api/ai-control").send(REACTIVATE);
   });
 });
 
 describe("the retests sent at once", () => {
-  it("a retest answer whose body stalls frees its slot at the timeout; the next retest is sent", async () => {
+  it("a retest answer whose body stalls is no definite answer: its slot is held until the engine lists no live retest on its scope", async () => {
     process.env.ATHENA_MAX_INFLIGHT_RETESTS = "2";
     timeouts().bodyMs = 300;
+    slots().pollMs = 100;
     const fx = load(PR71, "at-once-then-verdict");
     try {
       const tests = [await scanned(fx), await scanned(fx), await scanned(fx)];
+      // The engine lists a live retest on the scope while it answers.
+      eng.active = { status: 200, body: { active: [{ run_id: "stalled-live", target: "https://offline.invalid/", kind: "retest", state: "running" }] } };
       eng.stallRetestBody = true;
       const stalled = await Promise.all(tests.slice(0, 2).map((one) => admin.post(`/api/tests/${one.testId}/retest`).send({ twinId: 1 })));
       expect(stalled.map((r) => r.status)).toEqual([503, 503]);
+      expect(stalled[0].body.reason).toBe("retest_unconfirmed");
       eng.stallRetestBody = false;
       engineServer.closeAllConnections?.();
       calls.length = 0;
       eng.statusReads = [statusReadsOf(fx)[0]];
+      // Both slots are held: the next is refused, and never sent.
+      await sleep(250);
+      const refused = await admin.post(`/api/tests/${tests[2].testId}/retest`).send({ twinId: 1 });
+      expect(refused.status).toBe(429);
+      expect(calls.filter((c) => c.line === "POST /api/remediation/retest")).toEqual([]);
+      // The engine lists no live retest any more: the slots come free at the next read.
+      eng.active = { status: 200, body: { active: [] } };
+      await sleep(400);
       const third = await admin.post(`/api/tests/${tests[2].testId}/retest`).send({ twinId: 1 });
       expect(third.status).not.toBe(429);
       expect(calls.filter((c) => c.line === "POST /api/remediation/retest").length).toBe(1);
