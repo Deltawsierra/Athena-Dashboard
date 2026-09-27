@@ -1,0 +1,168 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "143279e5e9d680fecf48ddd7a926cd565dfb56a8",
+    "contract": "pr71"
+  },
+  "mythos_core": {
+    "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+  },
+  "scenario": "queue-full",
+  "exchanges": [
+    {
+      "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ],
+          "wait_seconds": 10
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "c35d6774-be84-42a3-b874-a61ac90c90e9",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-27T00:59:47.971374+00:00",
+        "updated_at": "2026-09-27T00:59:47.976798+00:00",
+        "finished_at": "2026-09-27T00:59:47.976798+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 400,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        }
+      }
+    },
+    {
+      "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
+      "request": {
+        "method": "GET",
+        "path": "/api/decisions?run_id=c35d6774-be84-42a3-b874-a61ac90c90e9&limit=101"
+      },
+      "status": 200,
+      "body": {
+        "tenant": "default",
+        "decisions": [
+          {
+            "id": 1,
+            "tenant": "default",
+            "run_id": "c35d6774-be84-42a3-b874-a61ac90c90e9",
+            "target": "https://offline.invalid/",
+            "finding_type": "xss",
+            "inputs": {
+              "details": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            },
+            "decision": {
+              "blocked": null,
+              "confidence": 0.9,
+              "cvss_score": null,
+              "evidence_strength": null,
+              "exploit_like": null,
+              "internal": null,
+              "score": null,
+              "severity": "high",
+              "tier": "confirmed",
+              "type": "xss"
+            },
+            "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
+            "inventory_digest": null,
+            "captured_at": "2026-09-27T00:59:48.030239+00:00",
+            "scan_auth": {
+              "authenticated": false,
+              "configured": false,
+              "identities": [],
+              "verified": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "note": "the retest, refused by a full worker queue (429 status)",
+      "request": {
+        "method": "POST",
+        "path": "/api/remediation/retest",
+        "body": {
+          "twin_id": 1,
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 429,
+      "body": {
+        "answer": "status",
+        "run_id": "14fb22ba-8f79-438a-a4f5-9f5ccc251717",
+        "state": "failed",
+        "reason": null,
+        "error": "1 scans already accepted (1 running, 0 may wait)",
+        "status_url": "/api/scans/14fb22ba-8f79-438a-a4f5-9f5ccc251717"
+      },
+      "headers": {
+        "retry-after": "30"
+      }
+    },
+    {
+      "note": "its status_url: failed, nothing started",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/14fb22ba-8f79-438a-a4f5-9f5ccc251717"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "14fb22ba-8f79-438a-a4f5-9f5ccc251717",
+        "target": "https://offline.invalid/",
+        "kind": "retest",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "failed",
+        "reason": null,
+        "started_at": "2026-09-27T00:59:48.078626+00:00",
+        "updated_at": "2026-09-27T00:59:48.080229+00:00",
+        "finished_at": "2026-09-27T00:59:48.080229+00:00",
+        "done": true,
+        "result": {
+          "error": "1 scans already accepted (1 running, 0 may wait)"
+        }
+      }
+    }
+  ]
+}

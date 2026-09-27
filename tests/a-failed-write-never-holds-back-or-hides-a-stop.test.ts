@@ -140,22 +140,38 @@ const aborts = () => engine.calls.filter((one) => one.endsWith("/abort"));
 const KILL = { killSwitchEnabled: true, systemStatus: "shutdown", activeSystems: [] };
 
 describe("a failed write never holds back or hides a stop", () => {
-  it("engaging the kill switch on a full disk still sends every stop, and says the switch is not engaged", async () => {
+  it("engaging the kill switch on a full disk still sends every stop; the press is held in memory, writes here are refused, and the answer says its flag was not stored", async () => {
     const scan = await runningScan();
     await diskFull();
     engine.calls.length = 0;
     const kill = await admin.patch("/api/ai-control").send(KILL);
     expect(aborts(), "the kill switch sent no stop because its flag write failed").toEqual([`POST /api/scans/${scan.runId}/abort`]);
     expect(kill.status).toBe(500);
-    expect(kill.body.engaged).toBe(false);
-    expect(kill.body.message).toMatch(/^The kill switch could not be engaged: SQLITE_FULL: database or disk is full\. Every stop was sent all the same/);
+    // Engaged in this dashboard's memory from the press; the flag is not stored.
+    expect(kill.body.engaged).toBe(true);
+    expect(kill.body.stored).toBe(false);
+    expect(kill.body.message).toMatch(/^The kill switch's flag could not be stored: SQLITE_FULL: database or disk is full\. It is engaged in this dashboard's memory/);
+    expect(kill.body.message).toMatch(/another dashboard on this database does not see it, and a restart of this one forgets it/);
+    expect(kill.body.message).toMatch(/Every stop was sent all the same/);
     expect(kill.body.stops).toEqual({
       listed: true,
       scans: [{ testId: scan.testId, runId: scan.runId, target: "https://acme.example/", stopped: true, detail: "" }],
     });
     expect(kill.body.engineRuns).toEqual({ listed: true, runs: [] });
     vi.restoreAllMocks();
-    // Not engaged: the flag was never stored.
+    // The flag was never stored; the switch is held engaged here, and says why.
+    const { storage } = await import("../server/storage-unified");
+    expect((await storage.getAIControlSettings())!.killSwitchEnabled).toBe(false);
+    const read = (await admin.get("/api/ai-control")).body;
+    expect(read.killSwitchEnabled).toBe(true);
+    expect(read.killSwitchNotStored).toMatch(/SQLITE_FULL/);
+    // Every write here but a stop is refused while it is held.
+    const refused = await admin.post("/api/clients").send({ name: "Held", company: "H", email: "held@h.test" });
+    expect(refused.status).toBe(503);
+    // Switched off here -- stored -- it lets go.
+    const off = await admin.patch("/api/ai-control").send({ killSwitchEnabled: false, systemStatus: "active" });
+    expect(off.status).toBe(200);
+    expect(off.body.killSwitchEnabled).toBe(false);
     expect((await admin.get("/api/ai-control")).body.killSwitchEnabled).toBe(false);
     await recordState(scan.testId);
   });

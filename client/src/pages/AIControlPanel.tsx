@@ -21,12 +21,21 @@ interface ScanStop {
   testId: string;
   runId: string;
   target: string | null;
+  /** True when the engine answered the stop 2xx: accepted, or -- with `answerUnread` -- its answer was not read. */
   stopped: boolean;
+  /** The engine answered "not running": the run had already ended, and nothing was stopped. */
+  alreadyFinished?: boolean;
+  /** Stop sent, answer unread: never said to be accepted. */
+  answerUnread?: boolean;
   detail: string;
 }
 
-/** What the server did about running scans when the switch was sent on. */
-type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
+/**
+ * What the server did about running scans when the switch was sent on. An
+ * unlisted answer may still carry `scans`: the ones the server held as
+ * running, each sent a stop though the whole list could not be read.
+ */
+type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string; scans?: ScanStop[] };
 
 /** A run the engine listed as live that no running scan here recorded (server/routes.ts EngineRunStop). */
 interface EngineRunStop {
@@ -35,6 +44,8 @@ interface EngineRunStop {
   /** The test that records it, when one does; null when nothing here records it. */
   testId: string | null;
   stopped: boolean;
+  alreadyFinished?: boolean;
+  answerUnread?: boolean;
   detail: string;
 }
 
@@ -43,18 +54,60 @@ interface EngineRunStop {
  * `unnamed`, when present, counts the live runs it listed with no run id: no
  * stop could name them, so none was sent.
  */
-type EngineSweep = { listed: true; runs: EngineRunStop[]; unnamed?: number } | { listed: false; detail: string };
+type EngineSweep =
+  | { listed: true; runs: EngineRunStop[]; unnamed?: number }
+  /**
+   * `retests`: the retests the server was watching as running, each sent a stop by its run id though the list was unread.
+   * `retestsUnlisted`: the retests on record had not been read either, so no list of them could be made.
+   */
+  | { listed: false; detail: string; retests?: EngineRunStop[]; retestsUnlisted?: string };
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
-  /** Set when the switch itself could not be stored: why, in the server's words. The stops went out regardless. */
+  /** Set when the switch is not engaged now -- it could not be stored, or a later change switched it off: why, in the server's words. The stops went out regardless. */
   notEngaged?: string;
+  /** The switch is off now because a later change was saved after this press (the server's `superseded`), not because this press failed. */
+  offSinceSuperseded?: boolean;
   stops: KillSwitchStops;
   /** Absent when the server said nothing about the engine's own list; then nothing is said of it. */
   engineRuns?: EngineSweep;
+  /** Records of the stops that could not be written. The stops themselves were sent first. */
+  writeFailures?: string[];
+  /** Set when the switch is engaged only in the server's memory: its flag could not be stored (the server's words). */
+  memoryOnly?: string;
 }
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** A stop that did not take: neither accepted, nor answered "not running". */
+const didNotTake = (one: { stopped: boolean; alreadyFinished?: boolean }) => !one.stopped && !one.alreadyFinished;
+
+type Answered = { stopped: boolean; alreadyFinished?: boolean; answerUnread?: boolean };
+
+/**
+ * What the engine answered of the stops: how many it accepted, how many runs
+ * it said had already ended, and how many stops were answered 2xx with the
+ * rest of the answer unread -- said as exactly that, never as accepted.
+ */
+function tookSentence(list: Answered[]): string {
+  const accepted = list.filter((one) => one.stopped && !one.answerUnread).length;
+  const unread = list.filter((one) => one.answerUnread).length;
+  const ended = list.filter((one) => one.alreadyFinished).length;
+  const all = (n: number) => (n === list.length ? (list.length === 1 ? "it" : "all of them") : `${n}`);
+  const parts: string[] = [];
+  if (accepted > 0 || (unread === 0 && ended === 0)) parts.push(`the engine accepted ${all(accepted)}`);
+  if (unread > 0) {
+    const subject = unread === list.length
+      ? (list.length === 1 ? "its stop was" : "all of their stops were")
+      : `${unread} ${unread === 1 ? "stop was" : "stops were"}`;
+    parts.push(`${subject} answered 2xx with the rest of the answer unread (stop sent, answer unread), so whether ` +
+      `the engine is stopping ${unread === 1 ? "that run" : "those runs"} is not known`);
+  }
+  if (ended > 0) {
+    parts.push(`${all(ended)} had already ended (the engine answered "not running", so nothing was stopped)`);
+  }
+  return parts.join("; ");
+}
 
 /**
  * What the kill switch did, from the server's own account of it: how many
@@ -64,17 +117,22 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
  */
 function stopSentence(report: KillSwitchStops, lead = "Kill switch engaged"): string {
   if (!report.listed) {
-    return `${lead}, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
-      "Stop them from the scan screens, or pause the engine from the Failsafe console.";
+    const held = report.scans ?? [];
+    if (held.length === 0) {
+      return `${lead}, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
+        "Stop them from the scan screens, or pause the engine from the Failsafe console.";
+    }
+    return `${lead}, but the running scans could not all be listed (${report.detail}). ` +
+      `${count(held.length, "scan")} known here as running ${held.length === 1 ? "was" : "were"} sent a stop, and ` +
+      `${tookSentence(held)}. Another may still be running: pause the engine from the Failsafe console to be sure.`;
   }
   const { scans } = report;
   if (scans.length === 0) {
     return `${lead}. No engine scan was recorded as running, so none was sent a stop.`;
   }
-  const accepted = scans.filter((one) => one.stopped).length;
-  const failed = scans.filter((one) => !one.stopped);
+  const failed = scans.filter(didNotTake);
   const sent = `${lead}; ${count(scans.length, "running scan")} ${scans.length === 1 ? "was" : "were"} sent a stop`;
-  const took = `the engine accepted ${accepted === scans.length ? (scans.length === 1 ? "it" : "all of them") : accepted}`;
+  const took = tookSentence(scans);
   if (failed.length === 0) return `${sent}, and ${took}.`;
   const why = failed.map((one) => `${one.target ?? one.testId}: ${one.detail}`).join("; ");
   return `${sent}; ${took}; ${failed.length} could not be stopped (${why}). ` +
@@ -88,8 +146,11 @@ function stopSentence(report: KillSwitchStops, lead = "Kill switch engaged"): st
  */
 function engineSweepSentence(sweep: EngineSweep): string {
   if (!sweep.listed) {
-    return `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
+    const unread = `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
       "records may still be running: pause the engine from the Failsafe console to be sure.";
+    const retestsSaid = sweep.retests && sweep.retests.length > 0 ? ` ${retestSweepSentence(sweep.retests)}` : "";
+    const unlisted = sweep.retestsUnlisted ? ` The retests could not be listed: ${sweep.retestsUnlisted}.` : "";
+    return `${unread}${retestsSaid}${unlisted}`;
   }
   const { runs } = sweep;
   const unnamed = sweep.unnamed ?? 0;
@@ -103,16 +164,25 @@ function engineSweepSentence(sweep: EngineSweep): string {
   return unnamedSentence ? `${namedSentence} ${unnamedSentence}` : namedSentence;
 }
 
+/** What came of the stops sent, by their run ids, to the retests being watched while the engine's list was unread. */
+function retestSweepSentence(sent: EngineRunStop[]): string {
+  const failed = sent.filter(didNotTake);
+  const took = tookSentence(sent);
+  const lead = `${count(sent.length, "retest")} this dashboard was watching ${sent.length === 1 ? "was" : "were"} sent a stop by ` +
+    `${sent.length === 1 ? "its" : "their"} run id all the same, and ${took}`;
+  if (failed.length === 0) return `${lead}.`;
+  return `${lead}; ${failed.length} could not be stopped (${failed.map((one) => `${one.runId}: ${one.detail}`).join("; ")}).`;
+}
+
 /** What came of the stops sent to the named runs the engine listed that no running scan here recorded; null for none. */
 function namedSweepSentence(runs: EngineRunStop[]): string | null {
   if (runs.length === 0) return null;
   const unrecorded = runs.filter((one) => one.testId === null).length;
-  const failed = runs.filter((one) => !one.stopped);
-  const accepted = runs.length - failed.length;
+  const failed = runs.filter(didNotTake);
   const listed = `The engine also listed ${count(runs.length, "live run")} that no running scan here recorded` +
     (unrecorded > 0 ? ` (${unrecorded} with no record here at all)` : "") +
     `; ${runs.length === 1 ? "it was" : "each was"} sent a stop`;
-  const took = `the engine accepted ${accepted === runs.length ? (runs.length === 1 ? "it" : "all of them") : accepted}`;
+  const took = tookSentence(runs);
   if (failed.length === 0) return `${listed}, and ${took}.`;
   const why = failed.map((one) => `${one.target ?? one.runId}: ${one.detail}`).join("; ");
   return `${listed}; ${took}; ${failed.length} could not be stopped (${why}). ` +
@@ -120,13 +190,16 @@ function namedSweepSentence(runs: EngineRunStop[]): string | null {
 }
 
 /** The lead of the report: engaged, or not -- with the stops sent regardless. */
-const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill switch NOT engaged, stops sent anyway" : "Kill switch engaged");
+const leadOf = (report: StopReport) => (report.notEngaged === undefined ? "Kill switch engaged"
+  : report.offSinceSuperseded ? "Kill switch switched off again by a later change, stops sent anyway"
+    : "Kill switch NOT engaged, stops sent anyway");
 
-/** Whether every stop the report names was accepted, and nothing went unlisted. */
+/** Whether every stop the report names was accepted (its answer read), and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
-  const recorded = report.stops.listed && report.stops.scans.every((one) => one.stopped);
+  const took = (one: Answered) => !didNotTake(one) && !one.answerUnread;
+  const recorded = report.stops.listed && report.stops.scans.every(took);
   const engine = report.engineRuns === undefined
-    || (report.engineRuns.listed && report.engineRuns.runs.every((one) => one.stopped) && !report.engineRuns.unnamed);
+    || (report.engineRuns.listed && report.engineRuns.runs.every(took) && !report.engineRuns.unnamed);
   return recorded && engine;
 }
 
@@ -190,29 +263,60 @@ export default function AIControlPanel() {
       // A switch that could not be stored still sent every stop, and the
       // server's 500 says what each came to: that is read, not thrown away.
       const answered = (await response.clone().json().catch(() => null)) as
-        (AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: false; message?: string }) | null;
+        (AIControlSetting & {
+          stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: boolean; message?: string; writeFailures?: string[];
+          superseded?: string; stored?: boolean;
+        }) | null;
       if (!response.ok && answered?.engaged === false && answered.stops) {
         return { ...answered, notEngaged: answered.message ?? "the setting could not be saved" };
       }
+      // Engaged, every stop sent, and the other fields sent with it refused
+      // (the account behind the session could not authorise them): the switch
+      // is on, and that is what this says -- with why the rest was not saved.
+      if (!response.ok && answered?.engaged === true && answered.stops) {
+        return {
+          ...answered, notSaved: answered.message ?? "the other settings sent with it were not saved",
+          // Engaged, but only in the server's memory: its flag could not be stored.
+          ...(answered.stored === false ? { memoryOnly: answered.message ?? "its flag could not be stored" } : {}),
+        };
+      }
       await throwIfResNotOk(response);
-      return answered as AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string };
+      return answered as AIControlSetting & {
+        stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string; notSaved?: string; writeFailures?: string[];
+        superseded?: string; memoryOnly?: string;
+      };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
+      const offSinceSuperseded = result.notEngaged !== undefined && Boolean(result.superseded);
+      const memoryOnly = "memoryOnly" in result && result.memoryOnly ? result.memoryOnly : undefined;
       const report: StopReport | null = result.stops
-        ? { stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged }
+        ? {
+          stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged, writeFailures: result.writeFailures,
+          ...(offSinceSuperseded ? { offSinceSuperseded } : {}),
+          ...(memoryOnly ? { memoryOnly } : {}),
+        }
         : null;
       setStopReport(report);
       toast({
-        title: result.notEngaged !== undefined ? "The kill switch was not engaged" : "Kill switch engaged",
+        title: result.notEngaged === undefined
+          ? (memoryOnly ? "Kill switch engaged in this dashboard's memory only" : "Kill switch engaged")
+          : offSinceSuperseded ? "The kill switch was switched off again by a later change" : "The kill switch was not engaged",
         description: report
           ? [
               report.notEngaged ?? "",
+              "notSaved" in result && result.notSaved ? result.notSaved : "",
+              result.superseded ? `A later change was saved after this one: ${result.superseded}.` : "",
               stopSentence(report.stops, leadOf(report)),
               report.engineRuns ? engineSweepSentence(report.engineRuns) : "",
+              report.writeFailures && report.writeFailures.length > 0
+                ? `Every stop was sent first; ${count(report.writeFailures.length, "record")} of them could not be written ` +
+                  `(${report.writeFailures.join("; ")}).`
+                : "",
             ].filter(Boolean).join(" ")
           : "The server did not say what it stopped.",
-        variant: report && report.notEngaged === undefined && everyStopTook(report) ? undefined : "destructive",
+        variant: report && report.notEngaged === undefined && !("notSaved" in result && result.notSaved) && everyStopTook(report)
+          ? undefined : "destructive",
       });
     },
     onError: (error: Error) => {
@@ -274,6 +378,11 @@ export default function AIControlPanel() {
   // switch is drawn at once, in no state, and sends the shutdown either way.
 
   const isEmergency = settings?.killSwitchEnabled || settings?.systemStatus === "shutdown";
+  // The server holds the switch engaged in its memory only: its flag could not
+  // be stored (GET /api/ai-control's killSwitchNotStored says why). Engaged
+  // here -- every write but a stop is refused -- but not on the record.
+  const notStoredWhy = (settings as (AIControlSetting & { killSwitchNotStored?: unknown }) | undefined)?.killSwitchNotStored;
+  const heldInMemoryOnly = typeof notStoredWhy === "string" ? notStoredWhy : null;
   // The status as recorded. It used to read "Offline" for anything but
   // "active", so the installer's "operational" showed as offline.
   const statusLabel = !known
@@ -354,6 +463,19 @@ export default function AIControlPanel() {
               {stopReport?.notEngaged !== undefined && (
                 <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-not-engaged">
                   {stopReport.notEngaged}
+                </p>
+              )}
+              {heldInMemoryOnly !== null && (
+                <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-not-stored">
+                  The kill switch is engaged in this dashboard&apos;s memory only: its flag could not be stored
+                  ({heldInMemoryOnly}). Every write here but a stop is refused, but another dashboard on this database
+                  does not see it, and a restart of this dashboard forgets it. Press it again once the database takes
+                  writes.
+                </p>
+              )}
+              {stopReport?.memoryOnly !== undefined && (
+                <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-memory-only">
+                  {stopReport.memoryOnly}
                 </p>
               )}
               {stopReport && (

@@ -15,6 +15,13 @@
  * A scan the engine started with no run id a stop can name was left out of
  * this list altogether, while Max Concurrent Tests counted it. It is listed,
  * with NoStopPanel in place of a Stop: what stops it is the Failsafe console.
+ *
+ * A retest is a scan of the customer's target too, and no test row records
+ * it: it is a registered run on the engine's own list of live runs, so it is
+ * read from there (GET /api/engine/runs, kind "retest") and listed with a Stop
+ * by its engine run id (POST /api/retests/:runId/abort). That includes a
+ * retest the engine is still holding its answer for, which no page has a run
+ * id for yet.
  */
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Square } from "lucide-react";
@@ -29,26 +36,109 @@ import { failsafeOnly, unfinishedRunOf } from "@/lib/engineRuns";
 import { loaded } from "@/lib/loaded";
 import type { Client, Test } from "@shared/schema";
 
+/** One run on the engine's live list (server/engine.ts ActiveRun). */
+interface EngineRun {
+  runId: string | null;
+  stopId: string | null;
+  target: string | null;
+  state: string;
+  kind: string | null;
+}
+
 export default function RunningScans({ exclude, className }: { exclude: string | null; className?: string }) {
   const { toast } = useToast();
   // Re-read now and then, so a scan started elsewhere shows up here.
   const tests$ = loaded(useQuery<Test[]>({ queryKey: ["/api/tests"], refetchInterval: 15_000 }));
   const clients$ = loaded(useQuery<Client[]>({ queryKey: ["/api/clients"] }));
+  // More often: a retest can be running for as little as the engine's 30 s wait.
+  const engineRuns$ = loaded(useQuery<{ runs: EngineRun[]; configured: boolean }>({
+    queryKey: ["/api/engine/runs"], refetchInterval: 5_000,
+  }));
 
-  const stop = useMutation({
-    mutationFn: async (testId: string) => {
-      const response = await apiRequest("POST", `/api/scans/${testId}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string };
+  const stopRetest = useMutation({
+    mutationFn: async (runId: string) => {
+      const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId)}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
     },
-    onSuccess: (result, testId) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/scans/${testId}`] });
-      void invalidateTestsAndFindings();
-      toast({ title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/engine/runs"] });
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `Retest run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
     },
     onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
   });
 
-  if (tests$.state === "loading") return null;
+  const stop = useMutation({
+    mutationFn: async (testId: string) => {
+      const response = await apiRequest("POST", `/api/scans/${testId}/abort`, undefined);
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
+    },
+    onSuccess: (result, testId) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/scans/${testId}`] });
+      void invalidateTestsAndFindings();
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `Run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+    },
+    onError: (error: Error) => toast({ title: "Not stopped", description: error.message, variant: "destructive" }),
+  });
+
+  const retests = engineRuns$.state === "ready" ? engineRuns$.data.runs.filter((run) => run.kind === "retest") : [];
+  const retestList = retests.length > 0 && (
+    <ul className="mt-3 space-y-2" data-testid="list-running-retests">
+      {retests.map((run, index) => (
+        <li key={run.stopId ?? `unnamed-${index}`} className="flex items-center justify-between gap-3 rounded-lg border p-3" data-testid={`running-retest-${run.stopId ?? index}`}>
+          <div className="min-w-0 text-[13px]">
+            <p className="break-all font-medium text-foreground">{run.target ?? "a retest with no target listed"}</p>
+            <p className="text-muted-foreground">
+              retest · {run.stopId !== null ? `engine run ${run.stopId}` : "no run id from the engine"} · {run.state}
+            </p>
+          </div>
+          {run.stopId !== null ? (
+            // Never disabled: a Stop request that hangs must not take away the
+            // only Stop. Pressed again, it sends the stop again.
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => stopRetest.mutate(run.stopId as string)}
+              data-testid={`button-stop-retest-run-${run.stopId}`}
+            >
+              <Square className="mr-2 h-4 w-4" />
+              {stopRetest.isPending && stopRetest.variables === run.stopId ? "Stopping… (press to resend)" : "Stop"}
+            </Button>
+          ) : (
+            <p className="text-[12px] text-muted-foreground">
+              No run id, so no Stop can name it: pause the engine from the Failsafe console.
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+  const engineUnread = engineRuns$.state === "error" && (
+    <p className="mt-2 text-[12px] text-muted-foreground" data-testid="text-running-retests-unread">
+      Could not read the engine&apos;s list of live runs ({engineRuns$.message}), so a retest running now may not be
+      listed here: the kill switch on the AI Control page stops it.
+    </p>
+  );
+
+  // A retest's Stop is drawn as soon as the engine's list is in: it does not
+  // wait for this app's own list of tests.
+  if (tests$.state === "loading") {
+    if (!retestList && !engineUnread) return null;
+    return (
+      <GlassCard className={className} data-testid="list-running-scans">
+        <p className="athena-label">Scans running now</p>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Retests the engine lists as live. The scans recorded here are still being read.
+        </p>
+        {retestList}
+        {engineUnread}
+      </GlassCard>
+    );
+  }
   if (tests$.state === "error") {
     return (
       <GlassCard ruling className={className}>
@@ -56,6 +146,8 @@ export default function RunningScans({ exclude, className }: { exclude: string |
           Could not read which scans are running: {tests$.message}. A scan started elsewhere can still be stopped with
           the kill switch on the AI Control page, or by pausing the engine from the Failsafe console.
         </p>
+        {retestList}
+        {engineUnread}
       </GlassCard>
     );
   }
@@ -63,7 +155,7 @@ export default function RunningScans({ exclude, className }: { exclude: string |
   const running = tests$.data.filter(
     (test) => test.id !== exclude && (unfinishedRunOf(test) !== null || failsafeOnly(test)),
   );
-  if (running.length === 0) return null;
+  if (running.length === 0 && retests.length === 0) return null;
   const clientName = (id: string) =>
     (clients$.state === "ready" ? clients$.data.find((one) => one.id === id)?.name : undefined) ?? "an engagement";
 
@@ -71,7 +163,8 @@ export default function RunningScans({ exclude, className }: { exclude: string |
     <GlassCard className={className} data-testid="list-running-scans">
       <p className="athena-label">Scans running now</p>
       <p className="mt-1 text-[12px] text-muted-foreground">
-        Recorded as running, and not started from this page. Each is stopped here, or says what stops it.
+        Scans recorded as running and not started from this page, and every retest the engine lists as live. Each is
+        stopped here, or says what stops it.
       </p>
       <ul className="mt-3 space-y-2">
         {running.map((test) => {
@@ -116,6 +209,8 @@ export default function RunningScans({ exclude, className }: { exclude: string |
           );
         })}
       </ul>
+      {retestList}
+      {engineUnread}
     </GlassCard>
   );
 }

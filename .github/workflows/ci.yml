@@ -41,13 +41,20 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq xvfb
-          HOME="$(mktemp -d)" xvfb-run -a ./dist-electron/linux-unpacked/athena-ai-desktop --no-sandbox &
+          HOME="$(mktemp -d)" xvfb-run -a ./dist-electron/linux-unpacked/athena-ai-desktop --no-sandbox > packaged-app.log 2>&1 &
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:5000/health > /dev/null; then
               echo "the packaged app is serving"
+              # Whether the database's checkpointer thread runs inside the
+              # packaged app (it loads better-sqlite3 from the asar in a
+              # worker thread): the app says so, either way, on start-up.
+              sleep 3
+              echo "--- the packaged app's database lines:"
+              grep -F "[db]" packaged-app.log || echo "(no [db] line: the checkpointer said nothing within 3 s)"
               exit 0
             fi
             sleep 1
           done
           echo "the packaged app did not serve within 60 seconds"
+          cat packaged-app.log
           exit 1

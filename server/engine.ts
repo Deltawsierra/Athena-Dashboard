@@ -15,14 +15,41 @@
  * there is a fact about the deployment, not an excuse for fiction.
  */
 
+import http from "http";
+import https from "https";
 import * as settings from "./settings";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
+
+/**
+ * Node loads its HTTP client (fetch, undici) the first time it is used, and
+ * synchronously: 90-150 ms on this machine, on the event loop; and its first
+ * request runs code that has never run before. That first use was the first
+ * Stop after start-up -- the loop held while the stop was being sent. Both
+ * are done here instead, when the server starts, before any request is
+ * served.
+ */
+try {
+  new Response("");
+  // And its request path, once, with nothing sent anywhere (a data: URL):
+  // the first stop is not the first request this client ever makes.
+  void fetch("data:,").then((answer) => answer.arrayBuffer()).catch(() => undefined);
+} catch {
+  // A runtime without fetch has nothing to load; the calls say so themselves.
+}
 
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
 
-/** How long any single call to the engine may take. */
-const TIMEOUT_MS = 20_000;
+/**
+ * How long the engine is waited for. `callMs`: for its answer's headers, on
+ * any call. `bodyMs`: for the rest of an answer once its headers are in -- a
+ * body that stalls (an engine, or a proxy in front of it, that sent headers
+ * and nothing more) is given up on then, and never holds a request, a slot
+ * or a Stop. `abortBodyMs`: the same for a stop's answer, which is answered
+ * from its headers and only read further to tell "not running" from
+ * "stopping" (abortRun). Tests shorten these.
+ */
+export const engineTimeouts = { callMs: 20_000, bodyMs: 20_000, abortBodyMs: 2_000 };
 
 /** The most of the engine's error body we will quote back. */
 const MAX_ERROR_BODY = 500;
@@ -72,6 +99,183 @@ export interface EngineScan {
 export class EngineUnavailable extends Error {}
 
 /**
+ * The engine did not answer within engineTimeouts.callMs. Unlike a refused
+ * connection, the request may have reached it, and it may still be doing what
+ * was asked (a retest on engine main runs to its end whoever is waiting).
+ */
+export class EngineTimedOut extends EngineUnavailable {}
+
+/**
+ * The engine answered, and its answer was a refusal (a 4xx): it did not take
+ * the request, and is doing nothing about it. A definite answer, unlike a
+ * reset, a 5xx, a timeout or an answer that could not be read.
+ */
+export class EngineRefused extends EngineUnavailable {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+/** No engine is configured: nothing was sent anywhere. */
+export class EngineNotConfigured extends EngineUnavailable {}
+
+/**
+ * The engine's address refused the connection, or could not be found, before
+ * a byte of the request was sent: nothing reached the engine, so nothing was
+ * started. A definite answer, unlike a reset or a timeout after sending.
+ */
+export class EngineConnectionRefused extends EngineUnavailable {}
+
+/** The connect-phase failures: no connection was made, so nothing was sent. */
+const NOTHING_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+function refusedBeforeSending(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const errors = (cause as { errors?: unknown }).errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return errors.every((one) => one && typeof one === "object" && NOTHING_SENT.has(String((one as { code?: unknown }).code)));
+  }
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === "string" && NOTHING_SENT.has(code);
+}
+
+/**
+ * An answer from the engine: its status, and the rest read on demand.
+ *
+ * The engine is asked over node:http (https for an https address), not
+ * fetch. fetch's answers cost the loop several times as much each (a WHATWG
+ * Response, its headers and a web stream per answer): the kill switch's 100
+ * stops answered at once held the loop 14 ms here (up to 51 ms on a loaded
+ * machine), against 3 ms. Only what this client reads is kept: `ok`,
+ * `status`, the text of the body, and a way to let the answer go.
+ */
+export class EngineAnswer {
+  private reading: Promise<string> | null = null;
+  constructor(readonly status: number, private readonly res: http.IncomingMessage, private readonly req: http.ClientRequest) {
+    // A connection closed mid-answer is an answer that could not be read: said by text(), never thrown here.
+    res.on("error", () => undefined);
+  }
+
+  get ok(): boolean {
+    return this.status >= 200 && this.status < 300;
+  }
+
+  /** Where a redirect (301, 302, 303, 307, 308) sends the request; null for any other answer, or one with no location. */
+  get redirect(): string | null {
+    if (![301, 302, 303, 307, 308].includes(this.status)) return null;
+    const location = this.res.headers.location;
+    return typeof location === "string" && location !== "" ? location : null;
+  }
+
+  /** The rest of the answer; rejects when the connection closed before it ended. */
+  text(): Promise<string> {
+    if (this.reading === null) {
+      this.reading = new Promise<string>((resolve, reject) => {
+        let raw = "";
+        let ended = false;
+        this.res.setEncoding("utf8");
+        this.res.on("data", (chunk: string) => { raw += chunk; });
+        this.res.on("end", () => { ended = true; resolve(raw); });
+        this.res.on("close", () => { if (!ended) reject(new Error("the connection closed before the answer ended")); });
+      });
+    }
+    return this.reading;
+  }
+
+  /** Let the answer go: its connection is closed, so nothing of it holds a socket or a read. */
+  release(): void {
+    this.req.destroy();
+  }
+
+  /** The body, as a stream a caller may cancel: cancelling it lets the answer go. */
+  get body(): { cancel(): Promise<void> } {
+    return { cancel: async () => this.release() };
+  }
+}
+
+/**
+ * How long a connection to the engine is kept open unused. Below the
+ * engine's own limit: athena-engine runs under uvicorn, which closes a
+ * kept-alive connection after 5 s idle and says nothing of it beforehand (no
+ * Keep-Alive header). A request written onto a connection the engine is
+ * closing is reset before it is read ("socket hang up"): a Stop sent then was
+ * lost. So a connection is closed from this side after 4 s unused -- as
+ * fetch (undici) did -- and never offered for reuse in the engine's last
+ * second. It applies only to a connection with no request on it: a call
+ * waiting on the engine's answer is bounded by engineTimeouts.callMs alone.
+ */
+export const IDLE_SOCKET_MS = 4_000;
+
+/** Connections to the engine, kept open between calls (IDLE_SOCKET_MS). */
+const agents = {
+  http: new http.Agent({ keepAlive: true, timeout: IDLE_SOCKET_MS }),
+  https: new https.Agent({ keepAlive: true, timeout: IDLE_SOCKET_MS }),
+};
+
+/**
+ * A request on a connection kept from an earlier call that failed before any
+ * answer, in the way a connection the far end had already closed fails: reset,
+ * or hung up. It is sent once more, on a new connection -- as Node's
+ * documentation advises, and only when sending it twice does no harm
+ * (resendable): a read, or a stop. A reset before any answer does not say
+ * whether the engine read the request: engine main keeps running a retest
+ * whose connection was reset, so a start sent again could start a second run.
+ * A start is kept off a connection the engine is closing by IDLE_SOCKET_MS
+ * instead, and one reset anyway is an answer that could not be read (its
+ * retest's slot is held). Never for a request on a new connection, and never
+ * after any of an answer arrived.
+ */
+const STALE_CONNECTION = new Set(["ECONNRESET", "EPIPE"]);
+
+/** Whether a request may be sent twice (STALE_CONNECTION): a read, or a stop -- never a start, or anything else that makes something. */
+function resendable(method: string, path: string): boolean {
+  return method === "GET" || method === "HEAD" || (method === "POST" && /^\/api\/scans\/[^/]+\/abort$/.test(path));
+}
+
+/** Redirects are followed as fetch followed them: at most this many, then refused. */
+const MAX_REDIRECTS = 20;
+
+/**
+ * The rest of an answer whose headers are in, or null when it did not arrive
+ * within `ms` -- then the answer is let go: its connection is closed, so a
+ * stalled answer holds no socket and no read.
+ */
+async function bodyWithin(response: EngineAnswer, ms: number): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  try {
+    const read = response.text().catch(() => null);
+    const got = await Promise.race([read, late]);
+    if (got === null) response.release();
+    return got;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** An answer's JSON, read within engineTimeouts.bodyMs; throws when it did not arrive, or did not parse. */
+async function jsonWithin(response: EngineAnswer, what: string): Promise<unknown> {
+  const raw = await bodyWithin(response, engineTimeouts.bodyMs);
+  if (raw === null) {
+    throw new EngineUnavailable(
+      `the engine sent the headers of its answer to ${what} (${response.status}) but not the rest within ` +
+      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`,
+    );
+  }
+  return JSON.parse(raw) as unknown;
+}
+
+/** A JSON answer as an object: a body that is not one is read as an empty object (every field then reads as absent). */
+function objectOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+/** A JSON answer that must be an object to be read at all: any other body is an answer that could not be read, never an empty one. */
+function objectOrUnread(value: unknown, what: string): Record<string, unknown> {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  throw new EngineUnavailable(`the engine's answer to ${what} was not an object, so it could not be read`);
+}
+
+/**
  * The engine's `results`, read. Absent is none sent. Present and not a list is
  * an answer that could not be read: null, never an empty list. It was `[]`, so
  * a garbled answer was recorded, counted and shown as a scan that returned no
@@ -106,37 +310,139 @@ function headers(): Record<string, string> {
   return out;
 }
 
-async function call(path: string, init?: RequestInit): Promise<Response> {
+/** What a call sends: its method and its body. */
+type CallInit = { method?: string; body?: string };
+
+/**
+ * Ask the engine. Within `timeoutMs` for the headers of its answer, over the
+ * whole call: a read or a stop sent again (STALE_CONNECTION) and every
+ * redirect followed share that one deadline.
+ *
+ * Redirects are followed as fetch followed them before this client used
+ * node:http (an engine behind a proxy that moves it, such as an HTTP-to-HTTPS
+ * redirect): 307 and 308 with the same method and body; 301 and 302 as a GET
+ * when the request was a POST, and 303 always as a GET (HEAD stays HEAD),
+ * without a body; to http or https only, and at most MAX_REDIRECTS times.
+ */
+function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs): Promise<EngineAnswer> {
   const base = baseUrl();
   if (!base) {
-    throw new EngineUnavailable(
+    return Promise.reject(new EngineNotConfigured(
       `no engine is configured; set ${ENGINE_URL} to the engine's address`,
-    );
+    ));
   }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  let url: URL;
   try {
-    return await fetch(`${base}${path}`, {
-      ...init,
-      headers: { ...headers(), ...(init?.headers ?? {}) },
-      signal: controller.signal,
-    });
+    url = new URL(`${base}${path}`);
   } catch (cause) {
-    // A hostname, a port and a refusal are all the operator needs; the stack
-    // is not, and this string reaches a browser.
-    const why = cause instanceof Error ? cause.message : String(cause);
-    throw new EngineUnavailable(`could not reach the engine at ${base}: ${why}`);
-  } finally {
-    clearTimeout(timer);
+    return Promise.reject(new EngineUnavailable(
+      `could not reach the engine at ${base}: ${cause instanceof Error ? cause.message : String(cause)}`,
+    ));
+  }
+  const deadline = Date.now() + timeoutMs;
+  const timedOut = () => new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`);
+  return (async () => {
+    let method = init?.method ?? "GET";
+    let payload = init?.body;
+    for (let hops = 0; ; hops += 1) {
+      let answer: EngineAnswer;
+      try {
+        answer = await send(url, method, payload, deadline, true);
+      } catch (cause) {
+        if (cause instanceof StaleConnection && resendable(method, url.pathname)) {
+          // Reset on a kept connection before any answer: sent once more, on a new one.
+          try {
+            answer = await send(url, method, payload, deadline, false);
+          } catch (again) {
+            throw failure(again, base, timedOut);
+          }
+        } else {
+          throw failure(cause, base, timedOut);
+        }
+      }
+      const location = answer.redirect;
+      if (location === null) return answer;
+      answer.release();
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new EngineUnavailable(`the engine at ${base} answered ${answer.status} with a location that could not be read: ${location}`);
+      }
+      if (next.protocol !== "http:" && next.protocol !== "https:") {
+        throw new EngineUnavailable(`the engine at ${base} answered ${answer.status} to ${next.protocol} -- not followed`);
+      }
+      if (hops + 1 > MAX_REDIRECTS) {
+        throw new EngineUnavailable(`the engine at ${base} redirected more than ${MAX_REDIRECTS} times`);
+      }
+      if (answer.status === 303 ? method !== "HEAD" : (answer.status === 301 || answer.status === 302) && method === "POST") {
+        method = "GET";
+        payload = undefined;
+      }
+      url = next;
+    }
+  })();
+}
+
+/** A request on a kept connection was reset before any answer (STALE_CONNECTION): the caller sends it once more. */
+class StaleConnection extends Error {
+  constructor(readonly error: Error) {
+    super(error.message);
   }
 }
 
-async function body(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, MAX_ERROR_BODY);
-  } catch {
-    return "";
+/** Why a call failed, in words a browser may be shown: a hostname, a port and a refusal, never a stack. */
+function failure(cause: unknown, base: string, timedOut: () => EngineTimedOut): Error {
+  if (cause instanceof EngineUnavailable) return cause;
+  if (cause === TIMED_OUT) return timedOut();
+  const error = (cause instanceof StaleConnection ? cause.error : cause) as Error & { code?: string };
+  const message = error instanceof Error ? error.message : String(error);
+  if (refusedBeforeSending(error)) {
+    return new EngineConnectionRefused(`could not reach the engine at ${base}: ${message}` +
+      (typeof error.code === "string" && !message.includes(error.code) ? ` (${error.code})` : ""));
   }
+  return new EngineUnavailable(`could not reach the engine at ${base}: ${message}`);
+}
+
+const TIMED_OUT = Symbol("timed out");
+
+/**
+ * One request, answered with its headers by `deadline`. `mayReuse`: whether
+ * it may go on a kept connection -- a request sent once more never does
+ * (a fresh connection, closed after its answer).
+ */
+function send(url: URL, method: string, payload: string | undefined, deadline: number, mayReuse: boolean): Promise<EngineAnswer> {
+  const secure = url.protocol === "https:";
+  return new Promise<EngineAnswer>((resolve, reject) => {
+    let timedOut = false;
+    const req = (secure ? https : http).request(url, {
+      method,
+      headers: {
+        ...headers(),
+        ...(payload !== undefined ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+      },
+      agent: mayReuse ? (secure ? agents.https : agents.http) : false,
+    }, (res) => {
+      clearTimeout(timer);
+      resolve(new EngineAnswer(res.statusCode ?? 0, res, req));
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy();
+    }, Math.max(0, deadline - Date.now()));
+    req.on("error", (cause: Error & { code?: string }) => {
+      clearTimeout(timer);
+      if (timedOut) reject(TIMED_OUT);
+      else if (mayReuse && req.reusedSocket && typeof cause.code === "string" && STALE_CONNECTION.has(cause.code)) reject(new StaleConnection(cause));
+      else reject(cause);
+    });
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
+async function body(response: EngineAnswer): Promise<string> {
+  return ((await bodyWithin(response, engineTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
 /**
@@ -167,7 +473,7 @@ async function credentialCheck(): Promise<{ authorized: boolean | null; detail: 
         `and set it on the Settings screen, or as ${ENGINE_KEY}.`,
     };
   }
-  let response: Response;
+  let response: EngineAnswer;
   try {
     response = await call(CREDENTIAL_PROBE);
   } catch (cause) {
@@ -229,7 +535,7 @@ export async function status(): Promise<EngineStatus> {
         detail: `the engine answered ${response.status}: ${await body(response)}`,
       };
     }
-    const health = await response.json().catch(() => null);
+    const health = await jsonWithin(response, "the health check").catch(() => null);
     const credential = await credentialCheck();
     return {
       configured: true,
@@ -331,7 +637,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOf(await jsonWithin(response, "the scan"));
   // Measured against a live engine: results come back under `result.results`,
   // never at the top level. This read `payload.results` -- a key the engine
   // does not send -- so a scan that completed inline had its findings silently
@@ -421,7 +727,7 @@ export async function classifyCve(text: string): Promise<CveClassification> {
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the classification"), "the classification");
   const classes = Array.isArray(payload.classes)
     ? payload.classes.filter((one): one is string => typeof one === "string")
     : [];
@@ -621,7 +927,7 @@ export async function buildEvidencePack(request: EvidenceRequest): Promise<Evide
     );
   }
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the evidence pack"), "the evidence pack");
   const manifest = (payload.manifest ?? {}) as Record<string, unknown>;
   const rawSources = Array.isArray(manifest.sources) ? manifest.sources : [];
   const signature = evidenceSignature(payload.signature);
@@ -655,7 +961,7 @@ export async function runState(runId: string): Promise<EngineScan> {
       `the engine answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, `run ${runId}`), `run ${runId}`);
   const result = (payload.result ?? {}) as Record<string, unknown>;
   return {
     runId,
@@ -682,6 +988,13 @@ export interface ActiveRun {
   stopId: string | null;
   target: string | null;
   state: string;
+  /**
+   * What the engine says the run is -- `scan`, `retest`, `attestation` -- or
+   * null when it did not say. A retest is a registered run like any scan: it
+   * is on this list, the kill switch stops it, and "Scans running now" lists
+   * it by this.
+   */
+  kind: string | null;
 }
 
 /**
@@ -699,7 +1012,7 @@ export async function activeRuns(): Promise<ActiveRun[]> {
       `the engine answered ${response.status} when asked for its active runs: ${await body(response)}`,
     );
   }
-  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const payload = (await jsonWithin(response, "the list of active runs").catch(() => null)) as Record<string, unknown> | null;
   const listed = payload && typeof payload === "object" ? payload.active : undefined;
   if (!Array.isArray(listed)) {
     throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
@@ -713,7 +1026,7 @@ export async function activeRuns(): Promise<ActiveRun[]> {
   // is a live run with no id a stop can name.
   return listed.map((one): ActiveRun => {
     if (one === null || typeof one !== "object" || Array.isArray(one)) {
-      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown" };
+      return { runId: runIdFrom(one), stopId: stopIdFrom(one), target: null, state: "unknown", kind: null };
     }
     const run = one as Record<string, unknown>;
     return {
@@ -721,16 +1034,67 @@ export async function activeRuns(): Promise<ActiveRun[]> {
       stopId: stopIdFrom(run.run_id),
       target: typeof run.target === "string" ? run.target : null,
       state: typeof run.state === "string" ? run.state : "unknown",
+      kind: typeof run.kind === "string" ? run.kind : null,
     };
   });
 }
 
 /** Ask a running scan to stop. */
-export async function abort(runId: string): Promise<boolean> {
+/**
+ * What a stop came to. `accepted`: the engine took it and is stopping the run.
+ * `alreadyFinished`: the engine answered that the run is not running -- it had
+ * ended before the stop arrived, and nothing was stopped by it. Neither: the
+ * engine did not take it (the run may still be going).
+ */
+export interface AbortOutcome {
+  accepted: boolean;
+  alreadyFinished: boolean;
+  /** The run's state as the engine answered it, when it did. */
+  state: string | null;
+  /**
+   * The engine answered 2xx, but the rest of its answer did not arrive within
+   * engineTimeouts.abortBodyMs: "stop sent, answer unread". `accepted` is
+   * true only in that the 2xx was read; whether the run was stopping or had
+   * already ended was not, and every record of it says so -- never that the
+   * stop was accepted (routes.ts outcomeOf).
+   */
+  answerUnread?: boolean;
+}
+
+/** Ask a running scan to stop. */
+export async function abortRun(runId: string): Promise<AbortOutcome> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}/abort`, {
     method: "POST",
   });
-  return response.ok;
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => undefined);
+    return { accepted: false, alreadyFinished: false, state: null };
+  }
+  // Answered from the headers: the body is read only to tell a run that had
+  // ended ("not running") from one that is stopping, and for at most
+  // engineTimeouts.abortBodyMs. A body that stalls never holds a Stop, or the
+  // kill switch, which waits on every stop's answer: it is answered as a stop
+  // sent whose answer was not read, and its request is aborted so its socket
+  // is let go (bodyWithin).
+  const raw = await bodyWithin(response, engineTimeouts.abortBodyMs);
+  if (raw === null) return { accepted: true, alreadyFinished: false, state: null, answerUnread: true };
+  let payload: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    payload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    payload = null;
+  }
+  const state = payload && typeof payload.state === "string" ? payload.state : null;
+  // Both engines answer a run that has ended `{state, detail: "not running"}`.
+  if (payload && payload.detail === "not running") return { accepted: false, alreadyFinished: true, state };
+  return { accepted: true, alreadyFinished: false, state };
+}
+
+/** Ask a running scan to stop: true when the engine took the stop, or the run had already ended. */
+export async function abort(runId: string): Promise<boolean> {
+  const outcome = await abortRun(runId);
+  return outcome.accepted || outcome.alreadyFinished;
 }
 
 // ==== RETEST ====
@@ -806,7 +1170,7 @@ export async function listDecisions(runId: string, limit = 100): Promise<Decisio
       `the engine answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const payload = objectOrUnread(await jsonWithin(response, "the list of decisions"), "the list of decisions");
   const raw = Array.isArray(payload.decisions) ? payload.decisions : [];
   return {
     decisions: raw.slice(0, limit).map((one) => decisionTwin(one as Record<string, unknown>)),
@@ -835,9 +1199,47 @@ export interface RetestResult {
   findingType: string | null;
   /** The detector set the retest ran with, for comparing against the twin's. */
   inventoryDigest: string | null;
+  /**
+   * The id of the scan record the retest produced: what a check and a fix are
+   * filed against. The engine's `scan_record_id` on the contract that sends
+   * `answer` (athena-engine #71); its top-level `run_id` on the one that does
+   * not, where that key was the record id. Null when no scan ran.
+   */
   runId: string | null;
+  /**
+   * The abort-registry id the retest ran under: the id a stop names. The
+   * engine's top-level `run_id` on the contract that sends `answer`; null on
+   * the one that does not, which answers only once the retest is over.
+   */
+  engineRunId: string | null;
   checkedAt: string | null;
 }
+
+/**
+ * A retest the engine answered with where its run is, never with a verdict:
+ * still queued or running (202), stopped, failed or finished without a verdict
+ * (200), or refused by a full worker queue (429). Nothing may be filed, marked
+ * fixed or called inconclusive from this: the engine has not said whether the
+ * finding is there.
+ */
+export interface RetestStatus {
+  /** The abort-registry id a stop names (stopIdFrom), or null when none can. */
+  engineRunId: string | null;
+  /** The engine's run state: queued, running, aborting, aborted, failed, completed -- or "unknown". */
+  state: string;
+  reason: string | null;
+  error: string | null;
+  /** The HTTP status the engine answered with (202, 200 or 429; 200 for a status read). */
+  httpStatus: number;
+}
+
+/** Which of the two things a retest answer is. Read from `answer` before `verdict`. */
+export type RetestAnswer =
+  | { answer: "verdict"; result: RetestResult }
+  | { answer: "status"; status: RetestStatus };
+
+/** Run states after which the engine does nothing more to the target. */
+export const RETEST_DONE_STATES = new Set(["completed", "aborted", "failed"]);
 
 export interface RetestRequest {
   twinId: number;
@@ -846,21 +1248,49 @@ export interface RetestRequest {
   scope: string[];
 }
 
-export async function retest(request: RetestRequest): Promise<RetestResult> {
-  const response = await call("/api/remediation/retest", {
-    method: "POST",
-    body: JSON.stringify({
-      twin_id: request.twinId,
-      engagement_ref: request.engagementRef,
-      scope: request.scope,
-    }),
-  });
-  if (!response.ok) {
-    throw new EngineUnavailable(
-      `the engine answered ${response.status}: ${await body(response)}`,
-    );
+/**
+ * An engine answer to a retest that is neither contract's: nothing is filed
+ * from it, and no id in it is read as a scan record.
+ */
+export class UnrecognisedRetestAnswer extends EngineUnavailable {
+  /**
+   * `answered`: the engine answered 2xx with a body that carries a run id --
+   * a definite answer, if not one this reads: the retest's slot is freed at
+   * once. Without one (a body that is not an object) it is not.
+   */
+  constructor(message: string, readonly answered = false) {
+    super(message);
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+}
+
+/**
+ * Whether a 422 is the engine refusing `wait_seconds` as a field it does not
+ * know -- engine main does (the fixture main-5779e99/wait-seconds-refused.json)
+ * -- which it does before anything is started.
+ */
+function refusesWaitSeconds(status: number, raw: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const detail = (JSON.parse(raw) as { detail?: unknown }).detail;
+    return Array.isArray(detail) && detail.some((one) =>
+      one && typeof one === "object" && Array.isArray((one as { loc?: unknown }).loc)
+      && ((one as { loc: unknown[] }).loc).includes("wait_seconds"));
+  } catch {
+    return false;
+  }
+}
+
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
+/**
+ * A verdict, read. `recordId` is the scan record id and `engineRunId` the
+ * registry id, each already read by the caller for its contract.
+ */
+function verdictOf(
+  payload: Record<string, unknown>,
+  recordId: unknown,
+  engineRunId: string | null,
+): RetestResult {
   const check = (payload.check ?? {}) as Record<string, unknown>;
   return {
     twinId: typeof payload.twin_id === "number" ? payload.twin_id : null,
@@ -872,10 +1302,171 @@ export async function retest(request: RetestRequest): Promise<RetestResult> {
     findingType: typeof payload.finding_type === "string" ? payload.finding_type : null,
     inventoryDigest:
       typeof payload.inventory_digest === "string" ? payload.inventory_digest : null,
-    // Measured: the engine sends this as a number at the top level and as a
-    // string inside `check`. Both are the same run.
-    runId: runIdFrom(payload.run_id),
+    // Measured: the engine sends the record id as a number at the top level
+    // and as a string inside `check`. Both are the same run.
+    runId: runIdFrom(recordId),
+    engineRunId,
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
+  };
+}
+
+/** A status answer, read. */
+function statusOf(payload: Record<string, unknown>, httpStatus: number): RetestStatus {
+  return {
+    engineRunId: stopIdFrom(payload.run_id),
+    state: text(payload.state) ?? "unknown",
+    reason: text(payload.reason),
+    error: text(payload.error),
+    httpStatus,
+  };
+}
+
+/**
+ * Ask the engine to retest one decision.
+ *
+ * Two contracts are read, told apart by whether the answer carries `answer`:
+ *
+ *  - athena-engine #71: `answer: "verdict"` (201) is a verdict, its `run_id`
+ *    the registry id and its record id `scan_record_id`; `answer: "status"`
+ *    (202 running, 200 stopped / failed / no verdict, 429 queue full) is where
+ *    the run is and never a verdict.
+ *  - engine main (no `answer`): any 2xx is the verdict, answered once the
+ *    retest is over, and its `run_id` is the scan record id. Read exactly as
+ *    it always was.
+ *
+ * `wait_seconds: 0` is sent first, so #71 answers 202 at once rather than
+ * holding an engine thread for up to 30 s; main refuses the field (422,
+ * before it starts anything) and is asked again without it.
+ *
+ * Any other answer throws UnrecognisedRetestAnswer: a 202 that is not a
+ * status, an answer without `answer` that main would never send (a 202, or
+ * one carrying `scan_record_id`), and an `answer` this cannot read. None is a
+ * verdict, and nothing is filed from one.
+ */
+export async function retest(request: RetestRequest): Promise<RetestAnswer> {
+  const fields = { twin_id: request.twinId, engagement_ref: request.engagementRef, scope: request.scope };
+  // `wait_seconds: 0` first: athena-engine #71 then answers 202 with the run's
+  // id at once, holds no engine thread waiting for the verdict, and the watch
+  // collects it. Engine main refuses the field with a 422 before it starts
+  // anything, and is asked again without it -- the request it always had.
+  let response = await call("/api/remediation/retest", {
+    method: "POST",
+    body: JSON.stringify({ ...fields, wait_seconds: 0 }),
+  });
+  if (response.status === 422) {
+    const raw = await body(response);
+    if (!refusesWaitSeconds(422, raw)) {
+      throw new EngineRefused(`the engine answered 422: ${raw}`, 422);
+    }
+    response = await call("/api/remediation/retest", { method: "POST", body: JSON.stringify(fields) });
+  }
+
+  if (response.status === 429) {
+    // #71 refuses a full queue with a status that names the run it recorded
+    // FAILED. Anything else on a 429 is the engine's words, as any refusal is.
+    const raw = await body(response);
+    let payload: unknown = null;
+    try { payload = JSON.parse(raw); } catch { payload = null; }
+    if (payload && typeof payload === "object" && (payload as Record<string, unknown>).answer === "status") {
+      return { answer: "status", status: statusOf(payload as Record<string, unknown>, 429) };
+    }
+    throw new EngineRefused(`the engine answered 429: ${raw}`, 429);
+  }
+  if (!response.ok) {
+    const said = `the engine answered ${response.status}: ${await body(response)}`;
+    // A 4xx is the engine refusing the retest; a 5xx says nothing about
+    // whether it started one.
+    if (response.status >= 400 && response.status < 500) throw new EngineRefused(said, response.status);
+    throw new EngineUnavailable(said);
+  }
+  const read = await jsonWithin(response, "a retest");
+  if (!read || typeof read !== "object" || Array.isArray(read)) {
+    throw new UnrecognisedRetestAnswer(`Unrecognised engine answer: HTTP ${response.status} whose body is not an object. Nothing was filed.`);
+  }
+  const payload = read as Record<string, unknown>;
+  const carriesRunId = payload.run_id !== undefined && payload.run_id !== null && payload.run_id !== "";
+
+  if (!("answer" in payload)) {
+    // Neither contract answers like this: main never answers 202, and never
+    // sends `scan_record_id`. Read as main's verdict it would file a check
+    // against an id that may be a registry uuid, so it is not read at all.
+    if (response.status === 202 || "scan_record_id" in payload) {
+      throw new UnrecognisedRetestAnswer(
+        `Unrecognised engine answer: HTTP ${response.status} with no \`answer\`` +
+        ("scan_record_id" in payload ? " and a `scan_record_id`" : "") + ". Nothing was filed.",
+        carriesRunId,
+      );
+    }
+    // Engine main: the verdict, with the record id under `run_id` and no id a
+    // stop could name (the retest is over by the time it answers).
+    return { answer: "verdict", result: verdictOf(payload, payload.run_id, null) };
+  }
+  // A 202 is a run still going, whatever else it says: never a verdict.
+  if (response.status === 202 && payload.answer !== "status") {
+    throw new UnrecognisedRetestAnswer(
+      `Unrecognised engine answer: HTTP 202 with answer ${JSON.stringify(payload.answer)}. Nothing was filed.`,
+      carriesRunId,
+    );
+  }
+  if (payload.answer === "verdict") {
+    return {
+      answer: "verdict",
+      result: verdictOf(payload, payload.scan_record_id, stopIdFrom(payload.run_id)),
+    };
+  }
+  if (payload.answer === "status") {
+    return { answer: "status", status: statusOf(payload, response.status) };
+  }
+  throw new UnrecognisedRetestAnswer(
+    `Unrecognised engine answer: answer ${JSON.stringify(payload.answer)} is neither a verdict nor a status. Nothing was filed.`,
+    carriesRunId,
+  );
+}
+
+/**
+ * Where a retest run is now, read from the engine's `/api/scans/{run_id}` --
+ * the `status_url` #71 answers with, built here from the run id rather than
+ * followed, so a status read can only ever reach that route.
+ *
+ * A verdict only when the run COMPLETED and its stored result carries one,
+ * which is the rule the engine answers a waiting caller by. A run that was
+ * stopped or failed keeps the runner's inconclusive verdict as its stored
+ * result; that is not a verdict on the finding, and it is read as the status
+ * it is.
+ */
+export async function retestRun(engineRunId: string): Promise<RetestAnswer> {
+  const response = await call(`/api/scans/${encodeURIComponent(engineRunId)}`);
+  if (!response.ok) {
+    throw new EngineUnavailable(
+      `the engine answered ${response.status} when asked about retest run ${engineRunId}: ${await body(response)}`,
+    );
+  }
+  const payload = (await jsonWithin(response, `retest run ${engineRunId}`).catch(() => null)) as Record<string, unknown> | null;
+  if (!payload || typeof payload !== "object") {
+    throw new EngineUnavailable(`the engine's answer about retest run ${engineRunId} could not be read`);
+  }
+  const state = text(payload.state) ?? "unknown";
+  const result = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result)
+    ? (payload.result as Record<string, unknown>)
+    : null;
+  if (payload.done === true && state === "completed" && result && typeof result.verdict === "string") {
+    return {
+      answer: "verdict",
+      result: verdictOf(result, result.scan_record_id, stopIdFrom(result.run_id) ?? engineRunId),
+    };
+  }
+  const error = state === "failed"
+    ? text(result?.error) ?? text(result?.detail) ?? text(payload.reason)
+    : null;
+  return {
+    answer: "status",
+    status: {
+      engineRunId,
+      state,
+      reason: text(payload.reason),
+      error,
+      httpStatus: response.status,
+    },
   };
 }
 
@@ -901,7 +1492,13 @@ export async function loadedScanners(): Promise<string[] | null> {
   }
   if (!response.ok) return null;
 
-  const payload = (await response.json()) as Record<string, unknown>;
+  // Not known is null, never an empty list: a body that stalls or is not an object is not known.
+  let payload: Record<string, unknown>;
+  try {
+    payload = objectOrUnread(await jsonWithin(response, "the list of extensions"), "the list of extensions");
+  } catch {
+    return null;
+  }
   const listed = Array.isArray(payload.extensions) ? payload.extensions : [];
   return listed
     .map((one) => one as Record<string, unknown>)

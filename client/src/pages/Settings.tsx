@@ -171,7 +171,13 @@ function Unstated({ children }: { children: ReactNode }) {
 /* ---- live sources ------------------------------------------------------- */
 
 interface ConnField { field: string; secret: boolean; source: string; set: boolean; value: string | null; env: string }
-interface Connections { fields: ConnField[] }
+/**
+ * `database`: what opening the database found and could not do
+ * (server/db-sqlite.ts openReport). `duplicateEngineRunIds` names the engine
+ * runs with more than one retest check on record: until they are removed, the
+ * index that files one check per run is not created.
+ */
+interface Connections { fields: ConnField[]; database?: { duplicateEngineRunIds: string[] } }
 interface EngineStatus { configured: boolean; reachable: boolean; authorized: boolean | null; url: string | null; detail: string }
 // An API key as the server returns it: metadata only, never the secret or hash.
 interface ApiKey {
@@ -263,6 +269,15 @@ export default function Settings() {
                   guidance: { tone: "unreported", title: "Engine reachable; operator key not checked", note: engine.detail || "The server could not check the operator key." },
                 };
   const engineGuidance = engineView.guidance;
+  // What opening the database could not do: said here, not only in the server's log.
+  const duplicates = conn?.database?.duplicateEngineRunIds ?? [];
+  const databaseGuidance: Guidance[] = duplicates.length === 0 ? [] : [{
+    tone: "warn",
+    title: "The database holds more than one retest check for an engine run",
+    note: `Engine run${duplicates.length === 1 ? "" : "s"} ${duplicates.join(", ")} ${duplicates.length === 1 ? "has" : "have"} ` +
+      "more than one check on record, so the index that files one check per engine run was not created. Each watch " +
+      "still files its run once. Remove the extra checks, then restart the dashboard to create the index.",
+  }];
 
   const wired = ["General", "Integrations", "Data Handling"];
 
@@ -531,7 +546,7 @@ export default function Settings() {
               : "What this environment reports about itself. A statement nothing reports is marked as not reported."}
           </p>
           <ul className="space-y-3">
-            {(demo ? demo.guidance : [engineGuidance, ...UNREPORTED]).map((g) => (
+            {(demo ? demo.guidance : [engineGuidance, ...databaseGuidance, ...UNREPORTED]).map((g) => (
               <li
                 key={g.title}
                 className={cn(

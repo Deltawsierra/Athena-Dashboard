@@ -58,6 +58,8 @@ const KEY_CALLS = new Set(["setQueryData"]);
 const RECORD_ROUTES = new Map<string, string>([
   [`/api/scans/${SAMPLE}`, "Test not found"],
   [`/api/tests/${SAMPLE}/decisions`, "Test not found"],
+  // A retest this server is not watching (server/retests.ts): the poll route's own answer.
+  [`/api/retests/${SAMPLE}`, "Retest not found"],
   [`/api/compliance/${SAMPLE}`, "Client not found"],
   [`/api/findings?clientId=${SAMPLE}`, "Client not found"],
 ]);

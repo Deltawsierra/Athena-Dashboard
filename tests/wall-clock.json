@@ -1,0 +1,15 @@
+[
+  "tests/no-statement-waits-on-the-lock-and-another-dashboards-change-is-honoured.test.ts",
+  "tests/a-stop-s-signature-waits-on-no-read-and-no-start-escapes-the-kill-switch.test.ts",
+  "tests/an-api-key-stop-waits-on-no-write-and-no-start-passes-a-pressed-kill-switch.test.ts",
+  "tests/a-write-flood-under-a-held-lock-delays-no-stop-and-writes-nothing-twice.test.ts",
+  "tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts",
+  "tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts",
+  "tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts",
+  "tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts",
+  "tests/a-stale-account-gains-only-stops-and-an-unread-stop-is-never-accepted.test.ts",
+  "tests/a-stop-follows-the-account-and-no-failed-read-or-stalled-answer-holds-it.test.ts",
+  "tests/findings-summary-holds-at-estate-scale.test.ts",
+  "tests/a-relayed-signature-is-read-back-at-once.test.tsx",
+  "tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts"
+]

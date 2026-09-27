@@ -181,12 +181,14 @@ export default function Tests() {
   const stopMutation = useMutation({
     mutationFn: async (id: string) => {
       const response = await apiRequest("POST", `/api/scans/${id}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string };
+      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
     },
     onSuccess: (result, id) => {
       queryClient.invalidateQueries({ queryKey: [`/api/scans/${id}`] });
       void invalidateTestsAndFindings();
-      toast({ title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: `The engine answered that run ${result.runId} had already ended; nothing was stopped.` }
+        : { title: "Stop sent", description: `The engine accepted the stop for run ${result.runId}.` });
     },
     onError: (error) => {
       toast({ title: "Not stopped", description: error.message, variant: "destructive" });

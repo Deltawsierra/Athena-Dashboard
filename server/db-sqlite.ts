@@ -5,6 +5,9 @@ import * as schema from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { Worker } from "worker_threads";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
 
 /**
  * Database location, in priority order:
@@ -40,6 +43,21 @@ export function resolveDbPath(): string {
  */
 type Connection = { sqlite: DatabaseType; db: ReturnType<typeof drizzle> };
 
+/**
+ * The longest one statement may hold the event loop waiting for another
+ * connection's lock: none. A statement the lock refuses fails at once
+ * (SQLITE_BUSY) and is tried again off the loop (storage-sqlite.ts
+ * withBusyRetry). 10 ms per statement was still 10 ms per write started in one
+ * turn of the loop: 200 writes started together held it 2.2 s.
+ */
+export const BUSY_TIMEOUT_MS = 0;
+
+/**
+ * What opening the database found and could not do, said rather than thrown:
+ * a database that cannot open takes every Stop down with it.
+ */
+export const openReport: { duplicateEngineRunIds: string[] } = { duplicateEngineRunIds: [] };
+
 let connection: Connection | null = null;
 
 function connect(): Connection {
@@ -52,12 +70,138 @@ function connect(): Connection {
 
   const handle = new Database(dbPath);
   handle.pragma("journal_mode = WAL");
+  // Opening may wait for the schema; nothing else is running yet.
   handle.pragma("busy_timeout = 5000");
 
   createSchema(handle);
+  // From here on, a statement never waits for a lock another connection
+  // holds (BUSY_TIMEOUT_MS is 0): it is tried once and refused at once.
+  // better-sqlite3 is synchronous: its busy wait blocks the whole event loop,
+  // and with 5000 every write attempted while a backup, the sqlite3 shell or
+  // another dashboard held the write lock stalled every request for 5 s -- a
+  // Stop included. The storage layer does all the waiting, asynchronously
+  // (storage-sqlite.ts withBusyRetry), so no statement on the loop ever waits
+  // on the lock.
+  handle.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  // How commits reach the disk (startCheckpointer). With SQLite's default
+  // (FULL), every commit synced the write-ahead log to disk on the event
+  // loop: 3.5 ms a write on average and up to 28 ms here, and a burst of 1000
+  // writes draining after a lock was let go held the loop 51 ms at a time on
+  // a slower disk. So commits are made with NORMAL: a commit does not sync the
+  // log; the checkpointer thread's checkpoint, once a second, syncs it and
+  // then the database, off the loop. If the thread cannot start, or stops,
+  // commits are FULL again, as before -- and the first of them syncs the log
+  // whole, every commit before it included.
+  //
+  // What that costs: a commit survives the process crashing, but one made in
+  // the last second or so before the machine itself loses power, or its OS
+  // crashes, may be rolled back -- in the moment before the thread first
+  // runs, too, and longer only while a read is still open when a checkpoint
+  // runs (a checkpoint does not sync the log past a reader's snapshot). The
+  // database stays consistent either way (SQLite's WAL + NORMAL guarantee).
+  // A kill switch engaged in that window may read as off after such a power
+  // loss; its stops had already gone to the engine before its flag was
+  // written.
+  //
+  // And one sync is still made on the loop: the first commit after a
+  // checkpoint that emptied the log starts the log over, and SQLite syncs the
+  // log's new header then, on the committing connection -- at most once per
+  // checkpoint, once a second; it does not make that commit durable.
+  handle.pragma("synchronous = NORMAL");
+  if (dbPath !== ":memory:") startCheckpointer(handle, dbPath);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
   return connection;
 }
+
+/** How often the checkpointer moves the write-ahead log into the database, off the loop. */
+export const CHECKPOINT_EVERY_MS = 1_000;
+
+/**
+ * What the checkpointer is doing: `off` until its thread reports it is
+ * running (SQLite checkpoints on the loop meanwhile, as by default), `on`
+ * once it runs, and `failed` (with why) if it could not start or stopped --
+ * then every commit is synced when it is made again (FULL), and SQLite's own
+ * checkpoints on the loop are switched back on: no commit waits on the
+ * thread for its sync, and the log never grows without bound.
+ */
+export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
+
+/**
+ * Move the write-ahead log into the database from a thread of its own, on a
+ * connection of its own (a PASSIVE checkpoint: it waits on no lock, and
+ * holds up no reader or writer), so the checkpoint's writes and its fsync
+ * never run on the event loop. SQLite's own checkpoints -- made by whichever
+ * commit crosses 1000 pages of log, on the loop -- are switched off only once
+ * the thread is running, and back on if it fails.
+ */
+export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePathForTests?: string): void {
+  const loopCheckpoints = (why: string) => {
+    checkpointer.state = "failed";
+    checkpointer.detail = why;
+    try {
+      // Every commit synced again when it is made (FULL), and checkpointed by SQLite on the loop: nothing waits on the thread.
+      handle.pragma("synchronous = FULL");
+      handle.pragma("wal_autocheckpoint = 1000");
+    } catch {
+      // The connection is gone; nothing checkpoints on it any more.
+    }
+    console.error(`[db] the checkpointer thread is not running (${why}); every commit is synced to disk on the event loop ` +
+      "(synchronous FULL), and SQLite checkpoints there, as before");
+  };
+  let worker: Worker;
+  try {
+    const here = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
+    const modulePath = modulePathForTests ?? createRequire(here).resolve("better-sqlite3");
+    worker = new Worker(CHECKPOINTER_SOURCE, {
+      eval: true,
+      workerData: { modulePath, dbPath, everyMs: CHECKPOINT_EVERY_MS },
+    });
+  } catch (cause) {
+    loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
+    return;
+  }
+  worker.unref();
+  worker.on("message", (message: unknown) => {
+    if (message === "running" && checkpointer.state === "off") {
+      try {
+        handle.pragma("wal_autocheckpoint = 0");
+        checkpointer.state = "on";
+        console.log(`[db] the checkpointer thread is running: the write-ahead log is synced and checkpointed off the event loop every ${CHECKPOINT_EVERY_MS} ms (commits synchronous NORMAL)`);
+      } catch (cause) {
+        loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
+      }
+    } else if (typeof message === "object" && message !== null && "failed" in message) {
+      loopCheckpoints(String((message as { failed: unknown }).failed));
+    }
+  });
+  worker.on("error", (cause) => loopCheckpoints(cause instanceof Error ? cause.message : String(cause)));
+  worker.on("exit", (code) => {
+    if (checkpointer.state !== "failed") loopCheckpoints(`its thread exited (${code})`);
+  });
+}
+
+/** The checkpointer's thread: a connection of its own, a PASSIVE checkpoint every `everyMs`. */
+const CHECKPOINTER_SOURCE = `
+const { parentPort, workerData } = require("worker_threads");
+let db;
+try {
+  const Database = require(workerData.modulePath);
+  db = new Database(workerData.dbPath, { fileMustExist: true });
+  db.pragma("busy_timeout = 0");
+  db.pragma("synchronous = NORMAL");
+  parentPort.postMessage("running");
+} catch (cause) {
+  parentPort.postMessage({ failed: cause && cause.message ? cause.message : String(cause) });
+  process.exit(1);
+}
+setInterval(() => {
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch {
+    // Busy, or the file is gone: tried again next time.
+  }
+}, workerData.everyMs);
+`;
 
 /** Open the database now, rather than on the first query. */
 export function openDatabase(): void {
@@ -207,6 +351,32 @@ function createSchema(handle: DatabaseType): void {
       checked_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_checks_finding ON finding_checks(finding_id);
+
+    -- A retest the engine answered 202 for, watched until it ends. On disk, so
+    -- a restart resumes it (server/retests.ts).
+    CREATE TABLE IF NOT EXISTS retest_watches (
+      engine_run_id TEXT PRIMARY KEY,
+      test_id TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      twin_id INTEGER NOT NULL,
+      finding_id TEXT,
+      engagement_ref TEXT,
+      requested_by TEXT,
+      requested_from TEXT,
+      started_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      engine_state TEXT,
+      reason TEXT,
+      error TEXT,
+      last_read_at INTEGER,
+      last_read_error TEXT,
+      stop_accepted_at INTEGER,
+      stop_unread_at INTEGER,
+      ended_at INTEGER,
+      result TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_retest_watches_state ON retest_watches(state);
     CREATE INDEX IF NOT EXISTS idx_tests_site_id ON tests(site_id);
 
     CREATE TABLE IF NOT EXISTS documents (
@@ -317,7 +487,38 @@ function createSchema(handle: DatabaseType): void {
     );
   `);
   addMissingColumns(handle);
+  createCheckRunIndex(handle);
   relaxHealthMetricColumns(handle);
+}
+
+/**
+ * One check per engine run: a unique index, created once the column exists on
+ * every database, old ones included, so a retest run is filed as one check
+ * whichever dashboard collected it.
+ *
+ * A database that already holds two checks for one engine run cannot take the
+ * index, and creating it anyway would fail the open -- and a dashboard that
+ * cannot open stops nothing. So duplicates are looked for first, reported
+ * (openReport, and the log), and the index is left off until they are dealt
+ * with; the claim on the watch still files each run once.
+ */
+function createCheckRunIndex(handle: DatabaseType): void {
+  const duplicates = handle.prepare(
+    "SELECT engine_run_id AS id FROM finding_checks WHERE engine_run_id IS NOT NULL " +
+    "GROUP BY engine_run_id HAVING COUNT(*) > 1",
+  ).all() as Array<{ id: string }>;
+  openReport.duplicateEngineRunIds = duplicates.map((one) => one.id);
+  if (duplicates.length > 0) {
+    console.error(
+      `[db] finding_checks holds more than one check for engine run(s) ${openReport.duplicateEngineRunIds.join(", ")}; ` +
+      "the index that files one check per engine run was not created. Remove the extra checks to create it.",
+    );
+    return;
+  }
+  handle.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_engine_run ON finding_checks(engine_run_id) " +
+    "WHERE engine_run_id IS NOT NULL",
+  );
 }
 
 /**
@@ -341,6 +542,10 @@ function addMissingColumns(handle: DatabaseType): void {
     ["documents", "is_sample", "INTEGER NOT NULL DEFAULT 0"],
     ["ai_health_metrics", "guards_checked", "INTEGER"],
     ["ai_health_metrics", "guards_failing", "INTEGER"],
+    ["finding_checks", "engine_run_id", "TEXT"],
+    ["finding_checks", "filed_via", "TEXT"],
+    ["finding_checks", "requested_at", "INTEGER"],
+    ["retest_watches", "stop_unread_at", "INTEGER"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

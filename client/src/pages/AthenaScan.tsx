@@ -188,14 +188,13 @@ export default function AthenaScan() {
   const stop = useMutation({
     mutationFn: async () => {
       const response = await apiRequest("POST", `/api/scans/${testId}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean };
+      return (await response.json()) as { stopped: boolean; alreadyFinished?: boolean };
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: [`/api/scans/${testId}`] });
-      toast({
-        title: "Stop sent",
-        description: "The engine will send no further request for this scan.",
-      });
+      toast(result.alreadyFinished
+        ? { title: "Already finished", description: "The engine answered that this scan had already ended; nothing was stopped." }
+        : { title: "Stop sent", description: "The engine will send no further request for this scan." });
     },
     onError: (error: Error) =>
       toast({ title: "Not stopped", description: error.message, variant: "destructive" }),

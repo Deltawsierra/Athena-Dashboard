@@ -237,18 +237,22 @@ describe("engaging the kill switch stops what is running, and says what it stopp
       }
     });
 
-    it("a signature whose command cannot be read is relayed: it might be a stop's", async () => {
+    it("a signature whose command cannot be read is relayed: it might be a stop's -- and, its relay's answer naming a resume, withdrawn at once", async () => {
       cp.calls.length = 0;
       const sig = await admin.post("/api/failsafe/commands/unreadable-1/signatures").send({ keyId: "bob", sig: "abcd" });
-      expect(sig.status).toBe(200);
       expect(cp.calls).toContain("POST /api/failsafe/commands/unreadable-1/signatures/");
+      // The switch is engaged: the resume it turned out to be does not stand.
+      const signed = cp.calls.indexOf("POST /api/failsafe/commands/unreadable-1/signatures/");
+      expect(cp.calls.indexOf("POST /api/failsafe/commands/unreadable-1/cancel/")).toBeGreaterThan(signed);
+      expect(sig.status).toBe(503);
+      expect(sig.body.withdrawal).toMatchObject({ action: "resume", withdrawn: true, refusedBecause: "the AI kill switch is engaged" });
     });
 
     it("a resume or a release can be withdrawn; a stop, or a command that cannot be read, cannot", async () => {
       expect((await admin.post("/api/failsafe/commands/resume-1/cancel").send({})).status).toBe(200);
       expect((await admin.post("/api/failsafe/commands/release-1/cancel").send({})).status).toBe(200);
       expect((await admin.post("/api/failsafe/commands/standdown-1/cancel").send({})).status).toBe(503);
-      expect((await admin.post("/api/failsafe/commands/unreadable-1/cancel").send({})).status).toBe(503);
+      expect((await admin.post("/api/failsafe/commands/unreadable-2/cancel").send({})).status).toBe(503);
     });
 
     it("an API key can still be revoked, but not minted", async () => {
@@ -339,6 +343,10 @@ describe("no failed read stands between an operator and a stop", () => {
 
   it("when the running scans cannot be listed, the switch is engaged and the page is told so -- not that none ran", async () => {
     const { storage } = await import("../server/storage-unified");
+    // The kill switch finds the recorded scans in the tests this process holds
+    // in memory (storage.peekAllTests); one that has not read them all yet
+    // reads the database, and that read is what fails here.
+    const peek = vi.spyOn(storage, "peekAllTests").mockReturnValueOnce(null);
     vi.spyOn(storage, "getAllTests").mockRejectedValueOnce(new Error("database is locked"));
     const kill = await admin.patch("/api/ai-control").send(KILL);
     expect(kill.status).toBe(200);

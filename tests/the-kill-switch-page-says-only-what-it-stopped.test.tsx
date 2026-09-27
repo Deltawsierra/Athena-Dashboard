@@ -84,6 +84,20 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
     );
   });
 
+  it("a stop whose answer was not read is said as exactly that -- stop sent, answer unread -- never as accepted", async () => {
+    mount(SETTINGS);
+    engageAnswers({ listed: true, scans: [
+      scan("a", true),
+      { ...scan("b", true, "the engine answered the stop 2xx, but the rest of its answer did not arrive in time"), answerUnread: true },
+    ] });
+    const said = (await engage()).textContent ?? "";
+    expect(said).toBe(
+      "Kill switch engaged; 2 running scans were sent a stop, and the engine accepted 1; 1 stop was answered 2xx with " +
+      "the rest of the answer unread (stop sent, answer unread), so whether the engine is stopping that run is not known.",
+    );
+    expect(said).not.toMatch(/accepted all|accepted it/);
+  });
+
   it("one scan, one stop", async () => {
     mount(SETTINGS);
     engageAnswers({ listed: true, scans: [scan("a", true)] });
@@ -221,6 +235,60 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       /^The kill switch could not be engaged: SQLITE_FULL: database or disk is full\. Every stop was sent all the same/,
     );
     expect(document.body.textContent).not.toMatch(/Kill switch engaged/);
+  });
+
+  it("an engage a later disengage superseded says the switch was switched off again, never that it is engaged or was never engaged", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      message: "The kill switch was engaged and every stop was sent, and a later change has since switched it off (it is off " +
+        "now); the other fields sent with it (systemStatus, activeSystems) were not saved: a later change to these settings " +
+        "was sent while this one was being saved; the stored settings are that one's.",
+      killSwitchEnabled: false,
+      engaged: false,
+      stops: { listed: true, scans: [scan("a", true)] },
+      engineRuns: { listed: true, runs: [] },
+      refused: ["systemStatus", "activeSystems"],
+      superseded: "a later change to these settings was sent while this one was being saved; the stored settings are that one's",
+    }), { status: 409, headers: { "Content-Type": "application/json" } })));
+    const said = (await engage()).textContent;
+    expect(said).toBe("Kill switch switched off again by a later change, stops sent anyway; 1 running scan was sent a stop, and the engine accepted it.");
+    expect(screen.getByTestId("text-kill-switch-not-engaged").textContent).toMatch(/a later change has since switched it off \(it is off now\)/);
+    expect(document.body.textContent).not.toMatch(/Kill switch engaged|Kill switch NOT engaged/);
+  });
+
+  it("a switch whose flag could not be stored but is held engaged in the server's memory is said to be engaged, with every stop", async () => {
+    mount(SETTINGS);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      message: "The kill switch's flag could not be stored: SQLITE_FULL: database or disk is full. It is engaged in this " +
+        "dashboard's memory: every write here but a stop is refused until it is switched off here, but another dashboard " +
+        "on this database does not see it, and a restart of this one forgets it -- press it again once the database takes " +
+        "writes. Every stop was sent all the same; what each came to is below.",
+      engaged: true,
+      stored: false,
+      stops: { listed: true, scans: [scan("a", true)] },
+      engineRuns: { listed: true, runs: [] },
+    }), { status: 500, headers: { "Content-Type": "application/json" } })));
+    const said = (await engage()).textContent;
+    expect(said).toBe("Kill switch engaged; 1 running scan was sent a stop, and the engine accepted it.");
+    expect(screen.queryByTestId("text-kill-switch-not-engaged")).toBeNull();
+    // And that it is engaged in the server's memory only, in the server's words.
+    expect(screen.getByTestId("text-kill-switch-memory-only").textContent).toMatch(
+      /could not be stored: SQLITE_FULL.*It is engaged in this dashboard's memory.*another dashboard on this database does not see it/,
+    );
+  });
+
+  it("after a reload, a switch the server holds engaged only in its memory is shown so, with why -- not as plainly engaged", async () => {
+    mount({ ...ENGAGED, killSwitchNotStored: "SQLITE_FULL: database or disk is full" });
+    const shown = await waitFor(() => screen.getByTestId("text-kill-switch-not-stored"));
+    expect(shown.textContent).toMatch(/engaged in this dashboard's memory only: its flag could not be stored\s*\(SQLITE_FULL: database or disk is full\)/);
+    expect(shown.textContent).toMatch(/another dashboard on this database\s+does not see it, and a restart of this dashboard forgets it/);
+    expect(screen.getByTestId("text-kill-switch-engaged")).toBeTruthy();
+  });
+
+  it("a switch engaged and stored says nothing of memory", async () => {
+    mount(ENGAGED);
+    await waitFor(() => screen.getByTestId("text-kill-switch-engaged"));
+    expect(screen.queryByTestId("text-kill-switch-not-stored")).toBeNull();
   });
 
   it("a failure that carries no stops is a plain failure: no report is drawn", async () => {
