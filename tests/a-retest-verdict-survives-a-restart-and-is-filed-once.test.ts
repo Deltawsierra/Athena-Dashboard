@@ -8,6 +8,17 @@ import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(prefix);
+  madeDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /**
  * A retest verdict is never lost because the dashboard restarted, and never
  * filed twice because two dashboards share a database.
@@ -163,7 +174,7 @@ const BACKENDS = [
     name: "SQLite",
     setUp: () => {
       process.env.ATHENA_STORAGE = "sqlite";
-      process.env.ATHENA_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-retest-watch-")), "athena.db");
+      process.env.ATHENA_DB_PATH = path.join(tempDir(path.join(os.tmpdir(), "athena-retest-watch-")), "athena.db");
     },
     restartLoadsAnew: true,
   },

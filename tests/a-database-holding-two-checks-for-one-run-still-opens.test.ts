@@ -4,6 +4,17 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(prefix);
+  madeDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /**
  * A database that already holds two checks for one engine run still opens.
  *
@@ -20,7 +31,7 @@ afterAll(() => {
 
 describe("opening a database with duplicate engine run ids on its checks", () => {
   it("opens, reports the duplicates, and leaves the unique index off", async () => {
-    const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-dup-checks-")), "athena.db");
+    const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-dup-checks-")), "athena.db");
     const seed = new Database(dbPath);
     seed.exec(`CREATE TABLE finding_checks (
       id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, verdict TEXT NOT NULL, detail TEXT, run_id TEXT,
@@ -48,7 +59,7 @@ describe("opening a database with duplicate engine run ids on its checks", () =>
   });
 
   it("without duplicates, the unique index is created", async () => {
-    const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-dup-checks-")), "athena.db");
+    const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-dup-checks-")), "athena.db");
     process.env.ATHENA_STORAGE = "sqlite";
     process.env.ATHENA_DB_PATH = dbPath;
     vi.resetModules();

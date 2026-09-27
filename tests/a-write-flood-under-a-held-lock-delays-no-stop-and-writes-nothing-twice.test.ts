@@ -6,6 +6,17 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(prefix);
+  madeDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /**
  * SAFETY, round three of PR #56, on the real SQLite backend: a database that
  * another connection holds locked -- a backup, the sqlite3 shell, a second
@@ -66,7 +77,7 @@ async function setActive(body: unknown) {
 /** A dashboard on a fresh SQLite file, signed in, with one engine scan recorded as running. */
 async function boot(runId: string) {
   process.env.ATHENA_STORAGE = "sqlite";
-  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-r3-lock-")), "athena.db");
+  const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-r3-lock-")), "athena.db");
   process.env.ATHENA_DB_PATH = dbPath;
   vi.resetModules();
   const { createApp } = await import("../server/app");
@@ -151,7 +162,7 @@ describe("a flood of writes waiting on a held lock", () => {
 describe("a busy database never makes a write twice", () => {
   it("a write whose read-back meets SQLITE_BUSY is read back again, not written again: one row", async () => {
     process.env.ATHENA_STORAGE = "sqlite";
-    process.env.ATHENA_DB_PATH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-r3-dbl-")), "athena.db");
+    process.env.ATHENA_DB_PATH = path.join(tempDir(path.join(os.tmpdir(), "athena-r3-dbl-")), "athena.db");
     vi.resetModules();
     const { storage } = await import("../server/storage-sqlite");
     await storage.getAllActivityLogs();

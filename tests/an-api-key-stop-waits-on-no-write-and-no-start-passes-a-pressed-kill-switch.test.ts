@@ -6,6 +6,17 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(prefix);
+  madeDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /**
  * SAFETY, round five of PR #56 (the round-four review's findings), on the
  * real SQLite backend on a file, with the write lock held by a second
@@ -74,7 +85,7 @@ async function arrived(line: string, ms = 3_000) {
 /** A dashboard on a fresh SQLite file, signed in, with one engine scan recorded as running. */
 async function boot(runId: string) {
   process.env.ATHENA_STORAGE = "sqlite";
-  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-r5-lock-")), "athena.db");
+  const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-r5-lock-")), "athena.db");
   process.env.ATHENA_DB_PATH = dbPath;
   vi.resetModules();
   const { createApp } = await import("../server/app");
@@ -245,7 +256,7 @@ describe("no commit or checkpoint syncs the disk on the event loop", () => {
 
   it("a checkpointer that cannot start leaves SQLite's own checkpoints on, and says why", async () => {
     const dbm = await import("../server/db-sqlite");
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-r5-ckpt-"));
+    const dir = tempDir(path.join(os.tmpdir(), "athena-r5-ckpt-"));
     const file = path.join(dir, "other.db");
     const handle = new Database(file);
     handle.pragma("journal_mode = WAL");

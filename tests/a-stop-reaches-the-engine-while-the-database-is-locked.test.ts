@@ -6,6 +6,17 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(prefix);
+  madeDirs.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 /**
  * SAFETY: a Stop reaches the engine at once while another connection holds the
  * database's write lock -- a backup, the sqlite3 shell, or a second dashboard
@@ -71,7 +82,7 @@ async function setActive(body: unknown) {
 /** A dashboard on a fresh SQLite file: signed in, one engine scan recorded as running, and `watches` retests watched. */
 async function boot(watches: number) {
   process.env.ATHENA_STORAGE = "sqlite";
-  const dbPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "athena-stop-lock-")), "athena.db");
+  const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-stop-lock-")), "athena.db");
   process.env.ATHENA_DB_PATH = dbPath;
   vi.resetModules();
   const { createApp } = await import("../server/app");
