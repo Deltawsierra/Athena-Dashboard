@@ -5,6 +5,9 @@ import * as schema from "@shared/schema";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { Worker } from "worker_threads";
+import { createRequire } from "module";
+import { fileURLToPath } from "url";
 
 /**
  * Database location, in priority order:
@@ -80,9 +83,104 @@ function connect(): Connection {
   // (storage-sqlite.ts withBusyRetry), so no statement on the loop ever waits
   // on the lock.
   handle.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+  // No fsync on the event loop. With the default (FULL), every commit synced
+  // the write-ahead log to disk on the loop: 3.5 ms a write on average and up
+  // to 28 ms here, and a burst of 1000 writes draining after a lock was let
+  // go held the loop 51 ms at a time on a slower disk. NORMAL syncs the log
+  // only at a checkpoint, and the checkpoints are made off the loop
+  // (startCheckpointer). A commit survives the process crashing; one made
+  // just before the machine itself loses power may be rolled back (SQLite's
+  // WAL + NORMAL guarantee), and the database stays consistent either way.
+  handle.pragma("synchronous = NORMAL");
+  if (dbPath !== ":memory:") startCheckpointer(handle, dbPath);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
   return connection;
 }
+
+/** How often the checkpointer moves the write-ahead log into the database, off the loop. */
+export const CHECKPOINT_EVERY_MS = 1_000;
+
+/**
+ * What the checkpointer is doing: `off` until its thread reports it is
+ * running (SQLite checkpoints on the loop meanwhile, as by default), `on`
+ * once it runs, and `failed` (with why) if it could not start or stopped --
+ * then SQLite's own checkpoints on the loop are switched back on, so the log
+ * never grows without bound.
+ */
+export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
+
+/**
+ * Move the write-ahead log into the database from a thread of its own, on a
+ * connection of its own (a PASSIVE checkpoint: it waits on no lock, and
+ * holds up no reader or writer), so the checkpoint's writes and its fsync
+ * never run on the event loop. SQLite's own checkpoints -- made by whichever
+ * commit crosses 1000 pages of log, on the loop -- are switched off only once
+ * the thread is running, and back on if it fails.
+ */
+export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePathForTests?: string): void {
+  const loopCheckpoints = (why: string) => {
+    checkpointer.state = "failed";
+    checkpointer.detail = why;
+    try {
+      handle.pragma("wal_autocheckpoint = 1000");
+    } catch {
+      // The connection is gone; nothing checkpoints on it any more.
+    }
+    console.error(`[db] the checkpointer thread is not running (${why}); SQLite checkpoints on the event loop instead`);
+  };
+  let worker: Worker;
+  try {
+    const here = typeof __filename === "string" ? __filename : fileURLToPath(import.meta.url);
+    const modulePath = modulePathForTests ?? createRequire(here).resolve("better-sqlite3");
+    worker = new Worker(CHECKPOINTER_SOURCE, {
+      eval: true,
+      workerData: { modulePath, dbPath, everyMs: CHECKPOINT_EVERY_MS },
+    });
+  } catch (cause) {
+    loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
+    return;
+  }
+  worker.unref();
+  worker.on("message", (message: unknown) => {
+    if (message === "running" && checkpointer.state === "off") {
+      try {
+        handle.pragma("wal_autocheckpoint = 0");
+        checkpointer.state = "on";
+      } catch (cause) {
+        loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
+      }
+    } else if (typeof message === "object" && message !== null && "failed" in message) {
+      loopCheckpoints(String((message as { failed: unknown }).failed));
+    }
+  });
+  worker.on("error", (cause) => loopCheckpoints(cause instanceof Error ? cause.message : String(cause)));
+  worker.on("exit", (code) => {
+    if (checkpointer.state !== "failed") loopCheckpoints(`its thread exited (${code})`);
+  });
+}
+
+/** The checkpointer's thread: a connection of its own, a PASSIVE checkpoint every `everyMs`. */
+const CHECKPOINTER_SOURCE = `
+const { parentPort, workerData } = require("worker_threads");
+let db;
+try {
+  const Database = require(workerData.modulePath);
+  db = new Database(workerData.dbPath, { fileMustExist: true });
+  db.pragma("busy_timeout = 0");
+  db.pragma("synchronous = NORMAL");
+  parentPort.postMessage("running");
+} catch (cause) {
+  parentPort.postMessage({ failed: cause && cause.message ? cause.message : String(cause) });
+  process.exit(1);
+}
+setInterval(() => {
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch {
+    // Busy, or the file is gone: tried again next time.
+  }
+}, workerData.everyMs);
+`;
 
 /** Open the database now, rather than on the first query. */
 export function openDatabase(): void {

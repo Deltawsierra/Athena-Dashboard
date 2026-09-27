@@ -16,6 +16,11 @@ import Database from "better-sqlite3";
  *     key's scan Stop reaches the engine within 50 ms under a held lock, and
  *     its kill switch's first stop within 50 ms. A stamp that fails is
  *     logged and counted, and fails nothing.
+ *   - No commit and no checkpoint syncs the disk on the event loop: commits
+ *     do not fsync (synchronous NORMAL), and the write-ahead log is moved
+ *     into the database by a thread of its own. The line of writes waiting
+ *     on a held lock takes its head, and adds a call, in constant time, so a
+ *     drain of thousands of writes keeps its order.
  *   - The kill switch holds from the instant it is pressed, while its flag's
  *     write waits for the lock: a scan started after the press is refused at
  *     once and never reaches the engine, and so is every other write; once
@@ -204,5 +209,83 @@ describe("no start passes a pressed kill switch", () => {
       release();
       watcher.halt();
     }
+  }, 60_000);
+});
+
+describe("no commit or checkpoint syncs the disk on the event loop", () => {
+  it("commits do not fsync, SQLite checkpoints nothing on the loop, and the checkpointer thread moves the log into the database", async () => {
+    const { storage, dbPath, watcher } = await boot("ckpt-run");
+    try {
+      const dbm = await import("../server/db-sqlite");
+      const deadline = Date.now() + 3_000;
+      while (dbm.checkpointer.state === "off" && Date.now() < deadline) await sleep(20);
+      expect(dbm.checkpointer.state).toBe("on");
+      expect(dbm.sqlite.pragma("synchronous", { simple: true })).toBe(1); // NORMAL
+      expect(dbm.sqlite.pragma("wal_autocheckpoint", { simple: true })).toBe(0);
+      for (let i = 0; i < 500; i += 1) {
+        await storage.createActivityLog({ action: "ckpt", entityType: "test", entityId: String(i), details: null });
+      }
+      const probe = new Database(dbPath);
+      try {
+        let state = probe.pragma("wal_checkpoint(NOOP)") as Array<{ log: number; checkpointed: number }>;
+        const until = Date.now() + 5_000;
+        while (state[0].checkpointed < state[0].log && Date.now() < until) {
+          await sleep(100);
+          state = probe.pragma("wal_checkpoint(NOOP)") as Array<{ log: number; checkpointed: number }>;
+        }
+        expect(state[0].log).toBeGreaterThan(0);
+        expect(state[0].checkpointed).toBe(state[0].log);
+      } finally {
+        probe.close();
+      }
+    } finally {
+      watcher.halt();
+    }
+  }, 30_000);
+
+  it("a checkpointer that cannot start leaves SQLite's own checkpoints on, and says why", async () => {
+    const dbm = await import("../server/db-sqlite");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-r5-ckpt-"));
+    const file = path.join(dir, "other.db");
+    const handle = new Database(file);
+    handle.pragma("journal_mode = WAL");
+    handle.pragma("wal_autocheckpoint = 0");
+    const said = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      dbm.startCheckpointer(handle, file, path.join(dir, "no-such-module.js"));
+      const deadline = Date.now() + 3_000;
+      while (dbm.checkpointer.state !== "failed" && Date.now() < deadline) await sleep(20);
+      expect(dbm.checkpointer.state).toBe("failed");
+      expect(dbm.checkpointer.detail).toMatch(/no-such-module/);
+      expect(handle.pragma("wal_autocheckpoint", { simple: true })).toBe(1000);
+      expect(said.mock.calls.some((one) => /checkpointer thread is not running/.test(String(one[0])))).toBe(true);
+    } finally {
+      said.mockRestore();
+      handle.close();
+    }
+  }, 30_000);
+
+  it("3000 writes refused busy and waiting in one line go in once each, in the order they were made", async () => {
+    const { withBusyRetry, BusyLine } = await import("../server/storage-sqlite");
+    const busy = () => Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+    let lockedUntil = Date.now() + 200;
+    const order: number[] = [];
+    const target = {
+      async createThing(i: number) {
+        if (Date.now() < lockedUntil) throw busy();
+        // Now and then the lock is taken again for a moment: the head goes back to its place.
+        if (i % 700 === 0 && !order.includes(-i - 1)) { order.push(-i - 1); lockedUntil = Date.now() + 30; throw busy(); }
+        order.push(i);
+        return i;
+      },
+    };
+    const line = new BusyLine();
+    const store = withBusyRetry(target, 20_000, line);
+    const calls = Array.from({ length: 3000 }, (_unused, i) => store.createThing(i));
+    const done = await Promise.all(calls);
+    expect(done).toEqual(Array.from({ length: 3000 }, (_unused, i) => i));
+    const written = order.filter((one) => one >= 0);
+    expect(written).toEqual(Array.from({ length: 3000 }, (_unused, i) => i));
+    expect(line.length).toBe(0);
   }, 60_000);
 });

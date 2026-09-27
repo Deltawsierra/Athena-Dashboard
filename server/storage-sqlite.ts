@@ -759,6 +759,9 @@ function readsOnly(property: PropertyKey): boolean {
   return typeof property === "string" && /^(get|find|count|filed)[A-Z]/.test(property);
 }
 
+/** A call waiting in the BusyLine for its turn. */
+type Waiting = { seat: number; go: () => void; fail: (cause: unknown) => void; deadline: number; cause: unknown };
+
 /**
  * One line, first come first served, for the calls a busy database refused --
  * and for every write made while one may be refused: no statement on the
@@ -787,9 +790,23 @@ function readsOnly(property: PropertyKey): boolean {
  *   - A call still waiting when its BUSY_RETRY_FOR_MS are up fails: with the
  *     busy error it met, or, if it never tried, with one saying the lock was
  *     held longer than it waits.
+ *   - Every step of the line costs the loop the same however many calls wait
+ *     in it: the head is taken, and a new call joins, in constant time, and
+ *     the calls past their time are looked for only once one may be.
  */
 export class BusyLine {
-  private waiting: Array<{ seat: number; go: () => void; fail: (cause: unknown) => void; deadline: number; cause: unknown }> = [];
+  /**
+   * The line, in seat order, from `head` on: a step takes the head in O(1)
+   * (the index moves; the array is compacted only now and then), and a call
+   * joins at the back in O(1) -- every new call's seat is the highest. Only a
+   * call going back to its place (refused after it was made) is placed by a
+   * binary search. No step of the line touches every call waiting in it, so
+   * the loop's work per write stays constant however long the line is.
+   */
+  private waiting: Array<Waiting | undefined> = [];
+  private head = 0;
+  /** No call waiting has a deadline before this (it may be earlier than any does): the line is searched for calls past their time only once it has passed. */
+  private earliestDeadline = Number.POSITIVE_INFINITY;
   private scheduled = false;
   private busyNow = false;
   private seats = 0;
@@ -798,12 +815,12 @@ export class BusyLine {
 
   /** Whether a new write waits its turn: calls are waiting for the lock, a try is still out, or the last one was refused. */
   get queued(): boolean {
-    return this.busyNow || this.waiting.length > 0 || this.trying > 0;
+    return this.busyNow || this.length > 0 || this.trying > 0;
   }
 
   /** How many calls are waiting in the line. */
   get length(): number {
-    return this.waiting.length;
+    return this.waiting.length - this.head;
   }
 
   /** A place in the line's order, taken when a call is made. */
@@ -831,10 +848,8 @@ export class BusyLine {
   /** Wait for this call's turn to try (again), at the place it took when it was made. */
   turn(seat: number, deadline: number, cause: unknown): Promise<void> {
     return new Promise<void>((go, fail) => {
-      const entry = { seat, go, fail, deadline, cause };
-      let at = this.waiting.length;
-      while (at > 0 && this.waiting[at - 1].seat > seat) at -= 1;
-      this.waiting.splice(at, 0, entry);
+      this.place({ seat, go, fail, deadline, cause });
+      this.earliestDeadline = Math.min(this.earliestDeadline, deadline);
       this.schedule(this.busyNow ? "timer" : "now");
     });
   }
@@ -843,24 +858,82 @@ export class BusyLine {
   tried(busy: boolean): void {
     this.busyNow = busy;
     this.scheduled = false;
-    if (this.waiting.length > 0) this.schedule(busy ? "timer" : "now");
+    if (this.length > 0) this.schedule(busy ? "timer" : "now");
+  }
+
+  /** Put a call in its place by seat: at the back (a new call), at the front (the head going back), or found by a binary search. */
+  private place(entry: Waiting): void {
+    const last = this.waiting.length - 1;
+    if (this.length === 0 || this.waiting[last]!.seat < entry.seat) {
+      this.waiting.push(entry);
+      return;
+    }
+    if (entry.seat < this.waiting[this.head]!.seat && this.head > 0) {
+      this.head -= 1;
+      this.waiting[this.head] = entry;
+      return;
+    }
+    let low = this.head;
+    let high = this.waiting.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (this.waiting[mid]!.seat < entry.seat) low = mid + 1;
+      else high = mid;
+    }
+    this.waiting.splice(low, 0, entry);
+  }
+
+  /** Take the head of the line. */
+  private take(): Waiting | undefined {
+    if (this.length === 0) return undefined;
+    const entry = this.waiting[this.head];
+    this.waiting[this.head] = undefined;
+    this.head += 1;
+    if (this.head === this.waiting.length) {
+      this.waiting = [];
+      this.head = 0;
+    } else if (this.head >= 1024 && this.head * 2 >= this.waiting.length) {
+      this.waiting = this.waiting.slice(this.head);
+      this.head = 0;
+    }
+    return entry;
+  }
+
+  /**
+   * Fail every call whose time is up, wherever it is in the line. Searched
+   * only once the earliest deadline has passed -- so a step normally does
+   * nothing here -- and then once for all of them.
+   */
+  private expire(now: number): void {
+    if (now < this.earliestDeadline) return;
+    const kept: Array<Waiting | undefined> = [];
+    const late: Waiting[] = [];
+    let earliest = Number.POSITIVE_INFINITY;
+    for (let at = this.head; at < this.waiting.length; at += 1) {
+      const one = this.waiting[at]!;
+      if (one.deadline <= now) late.push(one);
+      else {
+        kept.push(one);
+        earliest = Math.min(earliest, one.deadline);
+      }
+    }
+    this.waiting = kept;
+    this.head = 0;
+    this.earliestDeadline = earliest;
+    for (const one of late) one.fail(one.cause ?? this.expired());
   }
 
   private schedule(when: "timer" | "now"): void {
     if (this.scheduled) return;
     this.scheduled = true;
     const next = () => {
-      const now = Date.now();
       // Calls whose time is up -- wherever they are in the line -- fail with
       // the refusal they met, or, never having tried, with one saying so.
-      const late = this.waiting.filter((one) => one.deadline <= now);
-      if (late.length > 0) {
-        this.waiting = this.waiting.filter((one) => one.deadline > now);
-        for (const one of late) one.fail(one.cause ?? this.expired());
-      }
-      const head = this.waiting.shift();
+      this.expire(Date.now());
+      const head = this.take();
       if (!head) {
         this.scheduled = false;
+        this.earliestDeadline = Number.POSITIVE_INFINITY;
         return;
       }
       // The head tries; its result (tried) schedules the next.
