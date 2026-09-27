@@ -6,6 +6,7 @@ import path from "path";
 import { createApp, errorHandler } from "./app";
 import { initializeDefaultData } from "./init-data";
 import { startSampling } from "./health";
+import { warmUp as warmFailsafe } from "./failsafe";
 
 function serveStatic(app: express.Application): void {
   // The bundle lives in dist/, the client build in dist/public.
@@ -25,6 +26,9 @@ function serveStatic(app: express.Application): void {
   // Take a reading now and every minute after, so the health screen draws a
   // real trend rather than reading one row somebody wrote at install time.
   startSampling();
+  // The control plane's service token, and the actions of the commands it
+  // lists, obtained now: the first signature relay waits on neither.
+  warmFailsafe();
 
   const server = createServer(app);
   serveStatic(app);

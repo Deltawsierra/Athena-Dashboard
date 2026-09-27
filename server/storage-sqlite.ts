@@ -790,9 +790,13 @@ type Waiting = { seat: number; go: () => void; fail: (cause: unknown) => void; d
  *   - A call still waiting when its BUSY_RETRY_FOR_MS are up fails: with the
  *     busy error it met, or, if it never tried, with one saying the lock was
  *     held longer than it waits.
- *   - Every step of the line costs the loop the same however many calls wait
- *     in it: the head is taken, and a new call joins, in constant time, and
- *     the calls past their time are looked for only once one may be.
+ *   - The head is taken, and a new call joins, in constant time. The calls
+ *     past their time are looked for by a pass over the whole line, made only
+ *     once the earliest deadline noted may have passed -- but that note is
+ *     not moved later when its call leaves the line, so under a steady flood
+ *     the pass can run on most steps (measured in the round-five review: 406
+ *     of 663 steps, over about 3,259 waiting calls each). Each pass costs
+ *     microseconds, and changes no call's order or outcome.
  */
 export class BusyLine {
   /**
@@ -800,8 +804,11 @@ export class BusyLine {
    * (the index moves; the array is compacted only now and then), and a call
    * joins at the back in O(1) -- every new call's seat is the highest. Only a
    * call going back to its place (refused after it was made) is placed by a
-   * binary search. No step of the line touches every call waiting in it, so
-   * the loop's work per write stays constant however long the line is.
+   * binary search. The one step that touches every call waiting is the
+   * search for calls past their time (expire), made only once
+   * `earliestDeadline` has passed -- which, left stale by a call that went,
+   * can be most steps under a steady flood: not constant time, but a pass of
+   * microseconds.
    */
   private waiting: Array<Waiting | undefined> = [];
   private head = 0;

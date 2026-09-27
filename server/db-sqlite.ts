@@ -83,14 +83,30 @@ function connect(): Connection {
   // (storage-sqlite.ts withBusyRetry), so no statement on the loop ever waits
   // on the lock.
   handle.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
-  // No fsync on the event loop. With the default (FULL), every commit synced
-  // the write-ahead log to disk on the loop: 3.5 ms a write on average and up
-  // to 28 ms here, and a burst of 1000 writes draining after a lock was let
-  // go held the loop 51 ms at a time on a slower disk. NORMAL syncs the log
-  // only at a checkpoint, and the checkpoints are made off the loop
-  // (startCheckpointer). A commit survives the process crashing; one made
-  // just before the machine itself loses power may be rolled back (SQLite's
-  // WAL + NORMAL guarantee), and the database stays consistent either way.
+  // How commits reach the disk (startCheckpointer). With SQLite's default
+  // (FULL), every commit synced the write-ahead log to disk on the event
+  // loop: 3.5 ms a write on average and up to 28 ms here, and a burst of 1000
+  // writes draining after a lock was let go held the loop 51 ms at a time on
+  // a slower disk. So commits are made with NORMAL: a commit does not sync the
+  // log; the checkpointer thread's checkpoint, once a second, syncs it and
+  // then the database, off the loop. If the thread cannot start, or stops,
+  // commits are FULL again, as before -- and the first of them syncs the log
+  // whole, every commit before it included.
+  //
+  // What that costs: a commit survives the process crashing, but one made in
+  // the last second or so before the machine itself loses power, or its OS
+  // crashes, may be rolled back -- in the moment before the thread first
+  // runs, too, and longer only while a read is still open when a checkpoint
+  // runs (a checkpoint does not sync the log past a reader's snapshot). The
+  // database stays consistent either way (SQLite's WAL + NORMAL guarantee).
+  // A kill switch engaged in that window may read as off after such a power
+  // loss; its stops had already gone to the engine before its flag was
+  // written.
+  //
+  // And one sync is still made on the loop: the first commit after a
+  // checkpoint that emptied the log starts the log over, and SQLite syncs the
+  // log's new header then, on the committing connection -- at most once per
+  // checkpoint, once a second; it does not make that commit durable.
   handle.pragma("synchronous = NORMAL");
   if (dbPath !== ":memory:") startCheckpointer(handle, dbPath);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
@@ -104,8 +120,9 @@ export const CHECKPOINT_EVERY_MS = 1_000;
  * What the checkpointer is doing: `off` until its thread reports it is
  * running (SQLite checkpoints on the loop meanwhile, as by default), `on`
  * once it runs, and `failed` (with why) if it could not start or stopped --
- * then SQLite's own checkpoints on the loop are switched back on, so the log
- * never grows without bound.
+ * then every commit is synced when it is made again (FULL), and SQLite's own
+ * checkpoints on the loop are switched back on: no commit waits on the
+ * thread for its sync, and the log never grows without bound.
  */
 export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
 
@@ -122,11 +139,14 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
     checkpointer.state = "failed";
     checkpointer.detail = why;
     try {
+      // Every commit synced again when it is made (FULL), and checkpointed by SQLite on the loop: nothing waits on the thread.
+      handle.pragma("synchronous = FULL");
       handle.pragma("wal_autocheckpoint = 1000");
     } catch {
       // The connection is gone; nothing checkpoints on it any more.
     }
-    console.error(`[db] the checkpointer thread is not running (${why}); SQLite checkpoints on the event loop instead`);
+    console.error(`[db] the checkpointer thread is not running (${why}); every commit is synced to disk on the event loop ` +
+      "(synchronous FULL), and SQLite checkpoints there, as before");
   };
   let worker: Worker;
   try {
@@ -146,6 +166,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
       try {
         handle.pragma("wal_autocheckpoint = 0");
         checkpointer.state = "on";
+        console.log(`[db] the checkpointer thread is running: the write-ahead log is synced and checkpointed off the event loop every ${CHECKPOINT_EVERY_MS} ms (commits synchronous NORMAL)`);
       } catch (cause) {
         loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
       }

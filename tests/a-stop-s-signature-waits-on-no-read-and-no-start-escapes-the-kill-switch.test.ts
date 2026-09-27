@@ -272,8 +272,14 @@ const REACTIVATE = { killSwitchEnabled: false, systemStatus: "active" };
 async function plane(opts: {
   getDelayMs?: number; stallGetBody?: boolean; getFails?: boolean; stallSignatureBody?: boolean; stallEverything?: boolean;
   listed?: Array<{ uuid: string; action: string }>;
+  /** How long its token endpoint takes (password hashing on the backend), and the token it issues. */
+  tokenDelayMs?: number; token?: () => string;
+  /** How long a signature takes to be answered. */
+  signatureDelayMs?: number;
 } = {}) {
   const seen: Array<{ line: string; at: number }> = [];
+  /** Each command's status on this control plane: a signature makes it ready, a withdrawal cancels it. */
+  const statuses = new Map<string, string>();
   const actionOf = (uuid: string) => (uuid.includes("resume") ? "resume" : uuid.includes("release") ? "release"
     : uuid.includes("standdown") ? "stand_down" : "pause");
   const cmd = (uuid: string, action: string) => ({ uuid, action, engine_id: "engine-1", status: "pending", signers: [], required_signatures: 1 });
@@ -283,12 +289,23 @@ async function plane(opts: {
     req.on("data", (c) => { raw += c; });
     req.on("end", async () => {
       seen.push({ line: `${req.method} ${req.url}`, at: Date.now() });
-      if (req.url === "/api/token/") return json(res, 200, { access: "tok" });
+      if (req.url === "/api/token/") {
+        if (opts.tokenDelayMs) await sleep(opts.tokenDelayMs);
+        return json(res, 200, { access: opts.token?.() ?? "tok" });
+      }
       if (opts.stallEverything) { res.writeHead(200, { "Content-Type": "application/json" }); res.write("{"); return; }
       const sig = /^\/api\/failsafe\/commands\/([^/]+)\/signatures\/$/.exec(req.url ?? "");
       if (sig) {
         if (opts.stallSignatureBody) { res.writeHead(200, { "Content-Type": "application/json" }); res.write("{"); return; }
+        if (opts.signatureDelayMs) await sleep(opts.signatureDelayMs);
+        if (statuses.get(sig[1]) === "canceled") return json(res, 409, { detail: "the command was canceled" });
+        statuses.set(sig[1], "ready");
         return json(res, 200, { ...cmd(sig[1], actionOf(sig[1])), status: "ready", signers: ["k1"] });
+      }
+      const withdraw = /^\/api\/failsafe\/commands\/([^/]+)\/cancel\/$/.exec(req.url ?? "");
+      if (withdraw && req.method === "POST") {
+        statuses.set(withdraw[1], "canceled");
+        return json(res, 200, { ...cmd(withdraw[1], actionOf(withdraw[1])), status: "canceled" });
       }
       if (req.url === "/api/failsafe/commands/" && req.method === "POST") {
         drafted += 1;
@@ -319,6 +336,9 @@ async function plane(opts: {
     seen,
     signedAt: (uuid: string) => seen.find((one) => one.line === `POST /api/failsafe/commands/${uuid}/signatures/`)?.at ?? null,
     reads: (uuid: string) => seen.filter((one) => one.line === `GET /api/failsafe/commands/${uuid}/`).length,
+    canceledAt: (uuid: string) => seen.find((one) => one.line === `POST /api/failsafe/commands/${uuid}/cancel/`)?.at ?? null,
+    statusOf: (uuid: string) => statuses.get(uuid) ?? "pending",
+    tokens: () => seen.filter((one) => one.line === "POST /api/token/").length,
     close: async () => {
       delete process.env.ATHENA_FAILSAFE_URL; delete process.env.ATHENA_FAILSAFE_USER; delete process.env.ATHENA_FAILSAFE_PASSWORD;
       server.closeAllConnections?.();
@@ -483,18 +503,24 @@ describe("a stop's signature waits on no unbounded read", () => {
     }
   }, 20_000);
 
-  it("the residual: a resume's signature whose command cannot be read, from a session held as an admin's, is relayed as a possible stop and logged so (the control plane verifies the signatures)", async () => {
+  it("the residual: a resume's signature whose command cannot be read, from a session held as an admin's, is relayed as a possible stop and logged so -- and, its relay's answer naming a resume from an account deleted on the record, withdrawn at once", async () => {
     const p = await plane({ getFails: true });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const ex = await secondAdmin();
       expect(await storage.deleteUser(ex.id)).toBe(true);
       const { answer } = await relay(p, "cmd-resume-residual-1", ex.agent);
-      expect(answer.status).toBe(200);
+      // Relayed all the same (it might have been a stop's), then withdrawn: the account could not have relayed a resume.
       expect(p.signedAt("cmd-resume-residual-1")).not.toBeNull();
-      const logged = (await storage.getAllActivityLogs()).find((one) => one.entityType === "failsafe_command" && one.entityId === "cmd-resume-residual-1");
+      expect(p.canceledAt("cmd-resume-residual-1")).toBeGreaterThanOrEqual(p.signedAt("cmd-resume-residual-1")!);
+      expect(p.statusOf("cmd-resume-residual-1")).toBe("canceled");
+      expect(answer.status).toBe(401);
+      expect(answer.body.withdrawal).toMatchObject({ action: "resume", learntFrom: "answer", withdrawn: true });
+      const logs = (await storage.getAllActivityLogs()).filter((one) => one.entityType === "failsafe_command" && one.entityId === "cmd-resume-residual-1");
+      const logged = logs.find((one) => one.action === "signed");
       expect(logged?.details).toMatchObject({ actionConfirmed: false, note: "action not confirmed; relayed as a possible stop" });
       expect(String((logged?.details as { unread?: string }).unread)).toMatch(/answered 500/);
+      expect(logs.find((one) => one.action === "withdrawn")?.details).toMatchObject({ failsafeAction: "resume", relayedAsPossibleStop: true });
     } finally {
       await p.close();
     }
@@ -532,6 +558,222 @@ describe("a stop's signature waits on no unbounded read", () => {
       }
     } finally {
       await p.close();
+    }
+  }, 20_000);
+});
+
+describe("a possible stop that turns out to be a resume or a release goes through no engaged kill switch", () => {
+  /** The activity records of a command, by what they record. */
+  const recordsOf = async (uuid: string) =>
+    (await storage.getAllActivityLogs()).filter((one) => one.entityType === "failsafe_command" && one.entityId === uuid);
+
+  /** The relay went first (never held), the withdrawal after it, and the command ends withdrawn: no resume took effect. */
+  function expectWithdrawn(p: Awaited<ReturnType<typeof plane>>, uuid: string, answer: request.Response, status: number) {
+    expect(p.signedAt(uuid)).not.toBeNull();
+    expect(p.canceledAt(uuid)).not.toBeNull();
+    expect(p.canceledAt(uuid)!).toBeGreaterThanOrEqual(p.signedAt(uuid)!);
+    expect(p.statusOf(uuid)).toBe("canceled");
+    expect(answer.status).toBe(status);
+    expect(answer.body.relayedAsPossibleStop).toBe(true);
+    expect(answer.body.withdrawal).toMatchObject({ action: "resume", withdrawn: true });
+    expect(answer.body.error).toMatch(/relayed before its command's action was known \(a possible stop\)\. The command is a resume/);
+    expect(answer.body.error).toMatch(/it was withdrawn at once/);
+  }
+
+  it("R1a: the switch engaged and stored, the command's read answering in 300 ms: a current admin's RESUME signature is relayed as a possible stop, then withdrawn at once -- answered 503 and recorded against the admin", async () => {
+    const p = await plane({ getDelayMs: 300 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect((await admin.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
+      expect((await storage.getAIControlSettings())!.killSwitchEnabled).toBe(true);
+      const { answer, lag } = await relay(p, "cmd-resume-r6-1a");
+      expect(lag!).toBeLessThanOrEqual(300);
+      expectWithdrawn(p, "cmd-resume-r6-1a", answer, 503);
+      expect(answer.body.withdrawal.refusedBecause).toBe("the AI kill switch is engaged");
+      const withdrawn = (await recordsOf("cmd-resume-r6-1a")).find((one) => one.action === "withdrawn");
+      expect(withdrawn?.userId).toBe(adminId);
+      expect(withdrawn?.details).toMatchObject({ failsafeAction: "resume", relayedAsPossibleStop: true, refusedBecause: "the AI kill switch is engaged" });
+    } finally {
+      await admin.patch("/api/ai-control").send(REACTIVATE);
+      await p.close();
+    }
+  }, 20_000);
+
+  it("R1b: the press held in memory while its flag waits to be written: the RESUME signature relayed as a possible stop is withdrawn at once", async () => {
+    const p = await plane({ getDelayMs: 300 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const letGo = holdTheFlagWrite();
+    try {
+      const kill = admin.patch("/api/ai-control").send({ killSwitchEnabled: true }).then((r) => r);
+      await sleep(100);
+      expect((await storage.getAIControlSettings())!.killSwitchEnabled).toBe(false);
+      const { answer } = await relay(p, "cmd-resume-r6-1b");
+      expectWithdrawn(p, "cmd-resume-r6-1b", answer, 503);
+      letGo();
+      expect((await kill).status).toBe(200);
+    } finally {
+      letGo();
+      await admin.patch("/api/ai-control").send(REACTIVATE);
+      await p.close();
+    }
+  }, 20_000);
+
+  it("R1c: no token in hand and the token endpoint taking 400 ms: one token is obtained -- the read's, cut off at 250 ms, is cached when it arrives and the relay uses it -- and the RESUME signature is withdrawn", async () => {
+    failsafeModule._resetForTests();
+    const p = await plane({ tokenDelayMs: 400 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect((await admin.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
+      const { answer } = await relay(p, "cmd-resume-r6-1c");
+      expectWithdrawn(p, "cmd-resume-r6-1c", answer, 503);
+      expect(p.tokens()).toBe(1);
+    } finally {
+      await admin.patch("/api/ai-control").send(REACTIVATE);
+      await p.close();
+      failsafeModule._resetForTests();
+    }
+  }, 20_000);
+
+  it("R1d: an admin deleted on the record, the switch off, the command's read answering in 300 ms: the RESUME signature relayed as a possible stop is withdrawn (answered 401)", async () => {
+    const p = await plane({ getDelayMs: 300 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const ex = await secondAdmin();
+      expect(await storage.deleteUser(ex.id)).toBe(true);
+      const { answer } = await relay(p, "cmd-resume-r6-1d", ex.agent);
+      expectWithdrawn(p, "cmd-resume-r6-1d", answer, 401);
+    } finally {
+      await p.close();
+    }
+  }, 20_000);
+
+  it("its read finishing after the relay went (the relay's answer slower still): the withdrawal goes as soon as the read names a resume, before the relay is answered", async () => {
+    const p = await plane({ getDelayMs: 300, signatureDelayMs: 700 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await storage.updateAIControlSettings({ killSwitchEnabled: true, systemStatus: "shutdown" });
+      const pressed = Date.now();
+      const answer = await admin.post("/api/failsafe/commands/cmd-resume-r6-late/signatures").send({ keyId: "k1", sig: "abcd" });
+      const answered = Date.now();
+      expect(p.signedAt("cmd-resume-r6-late")! - pressed).toBeLessThanOrEqual(300);
+      expect(p.canceledAt("cmd-resume-r6-late")).not.toBeNull();
+      // Withdrawn on the read's word, while the relay's answer was still on its way.
+      expect(p.canceledAt("cmd-resume-r6-late")! - pressed).toBeLessThan(700);
+      expect(answered - p.canceledAt("cmd-resume-r6-late")!).toBeGreaterThan(100);
+      expect(p.statusOf("cmd-resume-r6-late")).toBe("canceled");
+      expect(answer.body.withdrawal).toMatchObject({ action: "resume", learntFrom: "read", withdrawn: true });
+      expect(answer.status).toBe(409);
+    } finally {
+      await storage.updateAIControlSettings({ killSwitchEnabled: false, systemStatus: "active" });
+      await p.close();
+    }
+  }, 20_000);
+
+  it("a current admin's RESUME with the switch off, relayed as a possible stop, is not withdrawn: nothing would have refused it", async () => {
+    const p = await plane({ getDelayMs: 300 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const { answer } = await relay(p, "cmd-resume-r6-ok");
+      await sleep(200);
+      expect(answer.status).toBe(200);
+      expect(p.canceledAt("cmd-resume-r6-ok")).toBeNull();
+      expect(p.statusOf("cmd-resume-r6-ok")).toBe("ready");
+    } finally {
+      await p.close();
+    }
+  }, 20_000);
+
+  it("a PAUSE's signature with the switch engaged and its read taking 1.5 s: still relayed within 300 ms, answered 200, and never withdrawn once its read names a pause", async () => {
+    const p = await plane({ getDelayMs: 1_500 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await storage.updateAIControlSettings({ killSwitchEnabled: true, systemStatus: "shutdown" });
+      const { answer, lag } = await relay(p, "cmd-pause-r6-1");
+      expect(answer.status).toBe(200);
+      expect(lag!).toBeLessThanOrEqual(300);
+      await until(async () => failsafeModule.knownActionOf("cmd-pause-r6-1"), (known) => known !== undefined, 4_000);
+      expect(failsafeModule.knownActionOf("cmd-pause-r6-1")).toBe("pause");
+      await sleep(100);
+      expect(p.canceledAt("cmd-pause-r6-1")).toBeNull();
+      expect(p.statusOf("cmd-pause-r6-1")).toBe("ready");
+    } finally {
+      await storage.updateAIControlSettings({ killSwitchEnabled: false, systemStatus: "active" });
+      await p.close();
+    }
+  }, 20_000);
+
+  it("the press reads the commands the control plane lists: a RESUME listed there is refused from memory while the switch is engaged -- never relayed, never read", async () => {
+    const p = await plane({ getDelayMs: 1_500, listed: [{ uuid: "cmd-resume-r6-listed", action: "resume" }] });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(failsafeModule.knownActionOf("cmd-resume-r6-listed")).toBeUndefined();
+      expect((await admin.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
+      await until(async () => failsafeModule.knownActionOf("cmd-resume-r6-listed"), (known) => known !== undefined, 2_000);
+      const { answer } = await relay(p, "cmd-resume-r6-listed");
+      expect(answer.status).toBe(503);
+      expect(p.signedAt("cmd-resume-r6-listed")).toBeNull();
+      expect(p.reads("cmd-resume-r6-listed")).toBe(0);
+    } finally {
+      await admin.patch("/api/ai-control").send(REACTIVATE);
+      await p.close();
+    }
+  }, 20_000);
+
+  it("the relay's own answer teaches the command's action: a second signature for the same RESUME, once the switch is engaged, is refused from memory", async () => {
+    const p = await plane({ getDelayMs: 1_500 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect((await relay(p, "cmd-resume-r6-taught")).answer.status).toBe(200);
+      expect(failsafeModule.knownActionOf("cmd-resume-r6-taught")).toBe("resume");
+      await storage.updateAIControlSettings({ killSwitchEnabled: true, systemStatus: "shutdown" });
+      const second = await admin.post("/api/failsafe/commands/cmd-resume-r6-taught/signatures").send({ keyId: "k2", sig: "abcd" });
+      expect(second.status).toBe(503);
+      expect(p.seen.filter((one) => one.line === "POST /api/failsafe/commands/cmd-resume-r6-taught/signatures/").length).toBe(1);
+    } finally {
+      await storage.updateAIControlSettings({ killSwitchEnabled: false, systemStatus: "active" });
+      await p.close();
+    }
+  }, 20_000);
+});
+
+describe("the control plane's token is kept warm", () => {
+  it("a token cut off at a read's 250 ms is cached when it arrives: the next relay's read uses it, learns its command in time, and no second token is asked for", async () => {
+    failsafeModule._resetForTests();
+    const p = await plane({ tokenDelayMs: 400 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const first = await relay(p, "cmd-pause-r6-tok-1");
+      expect(first.answer.status).toBe(200);
+      expect(warn.mock.calls.some((one) => /cmd-pause-r6-tok-1: action not confirmed/.test(String(one[0])))).toBe(true);
+      const second = await relay(p, "cmd-pause-r6-tok-2");
+      expect(second.answer.status).toBe(200);
+      expect(warn.mock.calls.some((one) => /cmd-pause-r6-tok-2: action not confirmed/.test(String(one[0])))).toBe(false);
+      expect(p.reads("cmd-pause-r6-tok-2")).toBe(1);
+      expect(p.tokens()).toBe(1);
+    } finally {
+      await p.close();
+      failsafeModule._resetForTests();
+    }
+  }, 20_000);
+
+  it("a token is obtained again ahead of its expiry, with no call waiting on it", async () => {
+    failsafeModule._resetForTests();
+    const jwt = (expSeconds: number) =>
+      `h.${Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64url")}.s`;
+    let expiresAt = 0;
+    const p = await plane({ token: () => { expiresAt = Date.now() + 2_000; return jwt(Math.floor(expiresAt / 1000)); } });
+    try {
+      expect((await admin.get("/api/failsafe/commands")).status).toBe(200);
+      expect(p.tokens()).toBe(1);
+      const firstExpiry = expiresAt;
+      await until(async () => p.tokens(), (n) => n >= 2, 3_000);
+      expect(p.tokens()).toBe(2);
+      // Obtained again before the first one expired.
+      const refreshedAt = p.seen.filter((one) => one.line === "POST /api/token/")[1].at;
+      expect(refreshedAt).toBeLessThan(firstExpiry);
+    } finally {
+      await p.close();
+      failsafeModule._resetForTests();
     }
   }, 20_000);
 });

@@ -271,6 +271,24 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
     const said = (await engage()).textContent;
     expect(said).toBe("Kill switch engaged; 1 running scan was sent a stop, and the engine accepted it.");
     expect(screen.queryByTestId("text-kill-switch-not-engaged")).toBeNull();
+    // And that it is engaged in the server's memory only, in the server's words.
+    expect(screen.getByTestId("text-kill-switch-memory-only").textContent).toMatch(
+      /could not be stored: SQLITE_FULL.*It is engaged in this dashboard's memory.*another dashboard on this database does not see it/,
+    );
+  });
+
+  it("after a reload, a switch the server holds engaged only in its memory is shown so, with why -- not as plainly engaged", async () => {
+    mount({ ...ENGAGED, killSwitchNotStored: "SQLITE_FULL: database or disk is full" });
+    const shown = await waitFor(() => screen.getByTestId("text-kill-switch-not-stored"));
+    expect(shown.textContent).toMatch(/engaged in this dashboard's memory only: its flag could not be stored\s*\(SQLITE_FULL: database or disk is full\)/);
+    expect(shown.textContent).toMatch(/another dashboard on this database\s+does not see it, and a restart of this dashboard forgets it/);
+    expect(screen.getByTestId("text-kill-switch-engaged")).toBeTruthy();
+  });
+
+  it("a switch engaged and stored says nothing of memory", async () => {
+    mount(ENGAGED);
+    await waitFor(() => screen.getByTestId("text-kill-switch-engaged"));
+    expect(screen.queryByTestId("text-kill-switch-not-stored")).toBeNull();
   });
 
   it("a failure that carries no stops is a plain failure: no report is drawn", async () => {

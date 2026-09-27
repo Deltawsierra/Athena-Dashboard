@@ -27,11 +27,14 @@ afterAll(() => {
  *     key's scan Stop reaches the engine within 50 ms under a held lock, and
  *     its kill switch's first stop within 50 ms. A stamp that fails is
  *     logged and counted, and fails nothing.
- *   - No commit and no checkpoint syncs the disk on the event loop: commits
- *     do not fsync (synchronous NORMAL), and the write-ahead log is moved
- *     into the database by a thread of its own. The line of writes waiting
- *     on a held lock takes its head, and adds a call, in constant time, so a
- *     drain of thousands of writes keeps its order.
+ *   - While the checkpointer thread runs, a commit does not sync the log
+ *     (synchronous NORMAL), and the write-ahead log is synced and moved into
+ *     the database by that thread; the one sync left on the loop is the log's
+ *     header, when the first commit after a checkpoint starts the log over.
+ *     If the thread fails, every commit is synced when it is made again
+ *     (FULL). The line of writes waiting on a held lock takes its
+ *     head, and adds a call, in constant time, and a drain of thousands of
+ *     writes keeps its order.
  *   - The kill switch holds from the instant it is pressed, while its flag's
  *     write waits for the lock: a scan started after the press is refused at
  *     once and never reaches the engine, and so is every other write; once
@@ -223,8 +226,8 @@ describe("no start passes a pressed kill switch", () => {
   }, 60_000);
 });
 
-describe("no commit or checkpoint syncs the disk on the event loop", () => {
-  it("commits do not fsync, SQLite checkpoints nothing on the loop, and the checkpointer thread moves the log into the database", async () => {
+describe("while the checkpointer runs, commits do not sync the log and checkpoints are made off the event loop", () => {
+  it("a commit does not sync the log (NORMAL), SQLite checkpoints nothing on the loop, and the checkpointer thread moves the log into the database", async () => {
     const { storage, dbPath, watcher } = await boot("ckpt-run");
     try {
       const dbm = await import("../server/db-sqlite");
@@ -254,13 +257,14 @@ describe("no commit or checkpoint syncs the disk on the event loop", () => {
     }
   }, 30_000);
 
-  it("a checkpointer that cannot start leaves SQLite's own checkpoints on, and says why", async () => {
+  it("a checkpointer that cannot start leaves SQLite's own checkpoints on, syncs every commit when it is made again (FULL), and says why", async () => {
     const dbm = await import("../server/db-sqlite");
     const dir = tempDir(path.join(os.tmpdir(), "athena-r5-ckpt-"));
     const file = path.join(dir, "other.db");
     const handle = new Database(file);
     handle.pragma("journal_mode = WAL");
     handle.pragma("wal_autocheckpoint = 0");
+    handle.pragma("synchronous = NORMAL");
     const said = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       dbm.startCheckpointer(handle, file, path.join(dir, "no-such-module.js"));
@@ -269,6 +273,7 @@ describe("no commit or checkpoint syncs the disk on the event loop", () => {
       expect(dbm.checkpointer.state).toBe("failed");
       expect(dbm.checkpointer.detail).toMatch(/no-such-module/);
       expect(handle.pragma("wal_autocheckpoint", { simple: true })).toBe(1000);
+      expect(handle.pragma("synchronous", { simple: true })).toBe(2); // FULL
       expect(said.mock.calls.some((one) => /checkpointer thread is not running/.test(String(one[0])))).toBe(true);
     } finally {
       said.mockRestore();

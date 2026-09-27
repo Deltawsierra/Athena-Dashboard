@@ -73,6 +73,8 @@ interface StopReport {
   engineRuns?: EngineSweep;
   /** Records of the stops that could not be written. The stops themselves were sent first. */
   writeFailures?: string[];
+  /** Set when the switch is engaged only in the server's memory: its flag could not be stored (the server's words). */
+  memoryOnly?: string;
 }
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -263,7 +265,7 @@ export default function AIControlPanel() {
       const answered = (await response.clone().json().catch(() => null)) as
         (AIControlSetting & {
           stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: boolean; message?: string; writeFailures?: string[];
-          superseded?: string;
+          superseded?: string; stored?: boolean;
         }) | null;
       if (!response.ok && answered?.engaged === false && answered.stops) {
         return { ...answered, notEngaged: answered.message ?? "the setting could not be saved" };
@@ -272,26 +274,33 @@ export default function AIControlPanel() {
       // (the account behind the session could not authorise them): the switch
       // is on, and that is what this says -- with why the rest was not saved.
       if (!response.ok && answered?.engaged === true && answered.stops) {
-        return { ...answered, notSaved: answered.message ?? "the other settings sent with it were not saved" };
+        return {
+          ...answered, notSaved: answered.message ?? "the other settings sent with it were not saved",
+          // Engaged, but only in the server's memory: its flag could not be stored.
+          ...(answered.stored === false ? { memoryOnly: answered.message ?? "its flag could not be stored" } : {}),
+        };
       }
       await throwIfResNotOk(response);
       return answered as AIControlSetting & {
         stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string; notSaved?: string; writeFailures?: string[];
-        superseded?: string;
+        superseded?: string; memoryOnly?: string;
       };
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["/api/ai-control"] });
       const offSinceSuperseded = result.notEngaged !== undefined && Boolean(result.superseded);
+      const memoryOnly = "memoryOnly" in result && result.memoryOnly ? result.memoryOnly : undefined;
       const report: StopReport | null = result.stops
         ? {
           stops: result.stops, engineRuns: result.engineRuns, notEngaged: result.notEngaged, writeFailures: result.writeFailures,
           ...(offSinceSuperseded ? { offSinceSuperseded } : {}),
+          ...(memoryOnly ? { memoryOnly } : {}),
         }
         : null;
       setStopReport(report);
       toast({
-        title: result.notEngaged === undefined ? "Kill switch engaged"
+        title: result.notEngaged === undefined
+          ? (memoryOnly ? "Kill switch engaged in this dashboard's memory only" : "Kill switch engaged")
           : offSinceSuperseded ? "The kill switch was switched off again by a later change" : "The kill switch was not engaged",
         description: report
           ? [
@@ -369,6 +378,11 @@ export default function AIControlPanel() {
   // switch is drawn at once, in no state, and sends the shutdown either way.
 
   const isEmergency = settings?.killSwitchEnabled || settings?.systemStatus === "shutdown";
+  // The server holds the switch engaged in its memory only: its flag could not
+  // be stored (GET /api/ai-control's killSwitchNotStored says why). Engaged
+  // here -- every write but a stop is refused -- but not on the record.
+  const notStoredWhy = (settings as (AIControlSetting & { killSwitchNotStored?: unknown }) | undefined)?.killSwitchNotStored;
+  const heldInMemoryOnly = typeof notStoredWhy === "string" ? notStoredWhy : null;
   // The status as recorded. It used to read "Offline" for anything but
   // "active", so the installer's "operational" showed as offline.
   const statusLabel = !known
@@ -449,6 +463,19 @@ export default function AIControlPanel() {
               {stopReport?.notEngaged !== undefined && (
                 <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-not-engaged">
                   {stopReport.notEngaged}
+                </p>
+              )}
+              {heldInMemoryOnly !== null && (
+                <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-not-stored">
+                  The kill switch is engaged in this dashboard&apos;s memory only: its flag could not be stored
+                  ({heldInMemoryOnly}). Every write here but a stop is refused, but another dashboard on this database
+                  does not see it, and a restart of this dashboard forgets it. Press it again once the database takes
+                  writes.
+                </p>
+              )}
+              {stopReport?.memoryOnly !== undefined && (
+                <p className="text-sm p-3 rounded-lg border border-destructive" data-testid="text-kill-switch-memory-only">
+                  {stopReport.memoryOnly}
                 </p>
               )}
               {stopReport && (

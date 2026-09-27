@@ -1233,7 +1233,9 @@ async function killSwitchEngagedNow(): Promise<{ engaged: boolean; systemStatus:
  *             read for it. A resume's or a release's is refused while the
  *             switch is engaged -- in memory from the instant it was pressed,
  *             or on the stored row; when the row cannot be read, it is
- *             refused too (it is not a stop).
+ *             refused too (it is not a stop). One relayed as a possible stop
+ *             that turns out to be a resume's or a release's is withdrawn
+ *             once that is learnt (withdrawPossibleStop).
  *   cancel -- withdrawing a resume or a release is let through (it keeps an
  *             engine stopped); withdrawing a stop is refused, and so is one
  *             whose command could not be read.
@@ -3341,6 +3343,19 @@ export function registerRoutes(app: Express): void {
     // event loop (storage-sqlite.ts withBusyRetry), alongside the stops still
     // being answered, so it delays none of them.
     const sweep = press !== null ? stopEverythingRunning(req, watcher, press) : null;
+    // And, once the stops are on their way, the failsafe commands the control
+    // plane lists are read, and their actions remembered (failsafe.remember):
+    // a resume or a release among them is then refused from memory while the
+    // switch is engaged, with no read to wait on. Never awaited; a read that
+    // fails changes nothing.
+    if (press !== null && failsafe.isConfigured()) {
+      setImmediate(() => {
+        failsafe.listCommands().catch((cause) => {
+          console.warn(`[failsafe] the kill switch's read of the failsafe commands failed (${causeOf(cause)}); ` +
+            "a command not known here is read when its signature is relayed");
+        });
+      });
+    }
 
     // Engaging, authorised from the session in memory (auth.ts isStopRequest),
     // authorises the switch and nothing else: every other field sent with it
@@ -3798,47 +3813,175 @@ export function registerRoutes(app: Express): void {
 
   // A signature is a stop only when its command is one: a pause's, a
   // stand-down's or a terminate's. Its action comes from memory when this
-  // dashboard has proxied the command (a draft, a list or a detail answer:
+  // dashboard has proxied the command (a draft, a list or a detail answer, a
+  // relay's or a withdrawal's answer, the kill switch's sweep:
   // failsafe.knownActionOf), with no read; otherwise from one read of the
-  // command, bounded as a whole (failsafe.readActionWithin), whose answer the
-  // kill switch's check reuses. A read that fails or runs out of time never
-  // holds a relay back: the signature of a session held as an admin's is
-  // relayed as a possible stop, and logged so -- the control plane verifies
-  // every keyholder's signature itself, which is the real authority. Only a
-  // command known to be a resume or a release needs the account, read now
-  // (auth.ts requireAdminUnlessStop).
+  // command, waited for at most 250 ms (failsafe.readActionWithin), whose
+  // answer the kill switch's check reuses. A read that fails or runs out of
+  // time never holds a relay back: the signature of a session held as an
+  // admin's is relayed as a possible stop, and logged so -- the control plane
+  // verifies every keyholder's signature itself, which is the real authority.
+  // Only a command known to be a resume or a release needs the account, read
+  // now (auth.ts requireAdminUnlessStop). And a possible stop that turns out
+  // to be a resume or a release -- its read finishing after the relay went,
+  // or the relay's own answer naming its action -- is withdrawn at once when
+  // it would have been refused (possibleStopLearnt).
   const relayKind = async (req: Request): Promise<StopKind> => {
     const read = await actionOfRequest(req);
     if (read.action === null) return "possible_stop";
     return FAILSAFE_STOP_ACTIONS.has(read.action) ? "stop" : "not_stop";
   };
+
+  /** What became of a possible stop that turned out to be a resume or a release. */
+  interface Withdrawal {
+    action: string;
+    /** How its action was learnt: its read, finishing after the relay went; or the relay's own answer. */
+    learntFrom: "read" | "answer";
+    /** Why it would have been refused, had its action been known in time. */
+    refusedBecause: string;
+    /** Whether the control plane took the withdrawal. */
+    withdrawn: boolean;
+    detail: string;
+    status: number;
+  }
+
+  /**
+   * Whether a relay of this action, from this request, would have been
+   * refused had its action been known in time -- and why: the kill switch
+   * engaged (in memory, or on the stored row), or not known to be off; or
+   * the account behind the session not an active admin's now, or not read.
+   * Null when it would have gone through: a current admin's resume with the
+   * switch off, which nothing here withdraws.
+   */
+  async function wouldRefuseRecovery(req: Request): Promise<{ why: string; status: number } | null> {
+    if (killSwitchMemory.engaged) return { why: "the AI kill switch is engaged", status: 503 };
+    try {
+      const now = await killSwitchEngagedNow();
+      if (now.engaged) return { why: "the AI kill switch is engaged", status: 503 };
+    } catch (cause) {
+      return { why: `whether the AI kill switch is engaged could not be read (${causeOf(cause)})`, status: 503 };
+    }
+    let account: Awaited<ReturnType<typeof accountNow>>;
+    try {
+      account = await accountNow(req);
+    } catch (cause) {
+      return { why: `the account behind this session could not be read (${causeOf(cause)})`, status: 503 };
+    }
+    if (!account) return { why: "the account behind this session is not an active account now", status: 401 };
+    if (account.role !== "admin") return { why: "the account behind this session is not an admin's now", status: 403 };
+    return null;
+  }
+
+  /**
+   * A signature relayed as a possible stop whose command turned out to be a
+   * resume or a release. When the relay would have been refused had that been
+   * known (wouldRefuseRecovery), the command is withdrawn at once -- by this
+   * dashboard's service account, the one credential it holds on the control
+   * plane, in the name of the admin whose session relayed it -- and recorded
+   * against that admin. Withdrawing a resume or a release keeps an engine
+   * stopped; it is never refused (killSwitchRefusesCommand). Tried twice.
+   */
+  async function withdrawPossibleStop(
+    req: Request, uuid: string, action: string, learntFrom: Withdrawal["learntFrom"],
+  ): Promise<Withdrawal | null> {
+    // With the switch engaged in memory, the withdrawal goes before anything is read.
+    const refused = killSwitchMemory.engaged
+      ? { why: "the AI kill switch is engaged", status: 503 }
+      : await wouldRefuseRecovery(req);
+    if (refused === null) return null;
+    let withdrawn = false;
+    let detail = "";
+    for (let attempt = 0; attempt < 2 && !withdrawn; attempt += 1) {
+      try {
+        const result = await failsafe.cancelCommand(uuid);
+        withdrawn = result.ok;
+        detail = result.ok ? `the control plane took the withdrawal; the command is ${result.command.status}`
+          : `the control plane refused the withdrawal (${result.status}): ${result.detail}`;
+        if (!result.ok) break;
+      } catch (cause) {
+        detail = `the withdrawal could not be sent: ${causeOf(cause)}`;
+      }
+    }
+    const outcome: Withdrawal = { action, learntFrom, refusedBecause: refused.why, withdrawn, detail, status: refused.status };
+    const said = `[failsafe] signature for command ${uuid} was relayed as a possible stop; its action is ${action} ` +
+      `(learnt from the ${learntFrom === "read" ? "command's read, after the relay went" : "relay's own answer"}), and ` +
+      `${refused.why}: ${withdrawn ? "withdrawn" : "NOT withdrawn"} (${detail})`;
+    if (withdrawn) console.warn(said);
+    else console.error(said + ". Withdraw it from the failsafe console.");
+    await recordFailsafeAct(req, withdrawn ? "withdrawn" : "withdrawal_failed", uuid, {
+      failsafeAction: action, relayedAsPossibleStop: true, learntFrom, refusedBecause: refused.why, detail,
+    });
+    return outcome;
+  }
+
   app.post("/api/failsafe/commands/:uuid/signatures", requireAdminUnlessStop(relayKind), asyncHandler(async (req, res) => {
     const read = await actionOfRequest(req);
     if (await killSwitchRefusesCommand(res, "relay", read)) return;
     const data = submitSignatureSchema.parse(req.body);
+    const uuid = req.params.uuid;
     const unconfirmed = read.action === null;
-    let result;
+    // A possible stop's action, once learnt -- by its read finishing late, or
+    // by the relay's own answer, whichever is first: a resume or a release is
+    // withdrawn then, at once, whether or not this request is still answering.
+    let followUp: Promise<Withdrawal | null> | null = null;
+    let relayRejected = false;
+    const learnt = (action: string | null, from: Withdrawal["learntFrom"]) => {
+      if (followUp !== null || relayRejected || action === null || !FAILSAFE_RECOVER_ACTIONS.has(action)) return;
+      followUp = withdrawPossibleStop(req, uuid, action, from).catch((cause) => {
+        console.error(`[failsafe] command ${uuid}: a possible stop found to be a ${action} could not be dealt with: ${causeOf(cause)}`);
+        return null;
+      });
+    };
+    let result: Awaited<ReturnType<typeof failsafe.submitSignature>> | null = null;
+    let failed: unknown = null;
     try {
       // Relayed first; said after, so nothing -- not even the log line -- stands before it.
-      const relayed = failsafe.submitSignature(req.params.uuid, data);
+      const relayed = failsafe.submitSignature(uuid, data);
       if (unconfirmed) {
-        console.warn(`[failsafe] signature for command ${req.params.uuid}: action not confirmed; relayed as a possible stop ` +
+        console.warn(`[failsafe] signature for command ${uuid}: action not confirmed; relayed as a possible stop ` +
           `(${read.unread ?? "its action could not be read"}). The control plane verifies the keyholders' signatures.`);
+        void read.later?.then((late) => learnt(late.action, "read"));
       }
       result = await relayed;
     } catch (cause) {
-      if (failsafeUnavailable(res, cause)) return;
-      throw cause;
+      failed = cause;
     }
+    if (result !== null && !result.ok) relayRejected = true;
+    if (unconfirmed && result?.ok) learnt(result.command.action || null, "answer");
+    // Settled already, or being settled now: said in this answer.
+    const withdrawal = followUp === null ? null : await (followUp as Promise<Withdrawal | null>);
+    const withdrawnNote = withdrawal === null ? {} : {
+      relayedAsPossibleStop: true,
+      withdrawal: {
+        action: withdrawal.action, learntFrom: withdrawal.learntFrom, refusedBecause: withdrawal.refusedBecause,
+        withdrawn: withdrawal.withdrawn, detail: withdrawal.detail,
+      },
+    };
+    const withdrawnSentence = withdrawal === null ? "" :
+      `This signature was relayed before its command's action was known (a possible stop). The command is a ` +
+      `${withdrawal.action}, and ${withdrawal.refusedBecause}, so ` + (withdrawal.withdrawn
+        ? `it was withdrawn at once: ${withdrawal.detail}.`
+        : `it had to be withdrawn, and the withdrawal did not take: ${withdrawal.detail}. Withdraw it from the failsafe console now.`);
+    if (failed !== null) {
+      if (failed instanceof failsafe.FailsafeUnavailable) {
+        return void res.status(503).json({ error: withdrawnSentence ? `${failed.message}. ${withdrawnSentence}` : failed.message, ...withdrawnNote });
+      }
+      throw failed;
+    }
+    if (result === null) return;
     if (!result.ok) {
       // A rejected signature (bad key, forged, already signed) is the operator's
       // to see verbatim -- it is the whole point of relaying it here.
-      return void res.status(result.status).json({ error: result.detail });
+      return void res.status(result.status).json({ error: withdrawnSentence ? `${result.detail}. ${withdrawnSentence}` : result.detail, ...withdrawnNote });
     }
-    await recordFailsafeAct(req, "signed", req.params.uuid, {
+    await recordFailsafeAct(req, "signed", uuid, {
       keyId: data.keyId, status: result.command.status, signers: result.command.signers,
       ...(unconfirmed ? { actionConfirmed: false, note: "action not confirmed; relayed as a possible stop", unread: read.unread ?? null } : {}),
     });
+    if (withdrawal !== null) {
+      // Relayed, then withdrawn (or not): not a signature that went through, and said so.
+      return void res.status(withdrawal.status).json({ error: withdrawnSentence, message: withdrawnSentence, ...withdrawnNote, command: result.command });
+    }
     res.json(result.command);
   }));
 

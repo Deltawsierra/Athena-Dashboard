@@ -208,10 +208,14 @@ export function reviseLiveSessions(
  * stale -- another dashboard on the same database may have demoted or
  * deleted the account -- and that is why only stops are ever decided from it:
  * a stale account may gain nothing but a stop. The one exception is a relay
- * whose command's action could not be learnt in time: it is relayed as a
- * possible stop, so a resume's signature from such a session goes through
- * only when the control plane's own read of that command also fails -- and
- * the control plane still verifies the keyholders' signatures on it.
+ * whose command's action could not be learnt in time (250 ms): it is relayed
+ * as a possible stop -- never held to find out -- and the control plane still
+ * verifies the keyholders' signatures on it. Once its action is learnt (its
+ * read finishing later, or the relay's own answer naming it), a resume or a
+ * release that this account, or an engaged kill switch, would have refused
+ * is withdrawn at once (routes.ts withdrawPossibleStop). What is left: the
+ * time between the control plane taking the signature and taking the
+ * withdrawal, and a command whose action is never learnt at all.
  */
 export function isStopRequest(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");

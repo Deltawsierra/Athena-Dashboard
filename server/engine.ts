@@ -159,6 +159,13 @@ export class EngineAnswer {
     return this.status >= 200 && this.status < 300;
   }
 
+  /** Where a redirect (301, 302, 303, 307, 308) sends the request; null for any other answer, or one with no location. */
+  get redirect(): string | null {
+    if (![301, 302, 303, 307, 308].includes(this.status)) return null;
+    const location = this.res.headers.location;
+    return typeof location === "string" && location !== "" ? location : null;
+  }
+
   /** The rest of the answer; rejects when the connection closed before it ended. */
   text(): Promise<string> {
     if (this.reading === null) {
@@ -185,8 +192,47 @@ export class EngineAnswer {
   }
 }
 
-/** Connections to the engine, kept open between calls. */
-const agents = { http: new http.Agent({ keepAlive: true }), https: new https.Agent({ keepAlive: true }) };
+/**
+ * How long a connection to the engine is kept open unused. Below the
+ * engine's own limit: athena-engine runs under uvicorn, which closes a
+ * kept-alive connection after 5 s idle and says nothing of it beforehand (no
+ * Keep-Alive header). A request written onto a connection the engine is
+ * closing is reset before it is read ("socket hang up"): a Stop sent then was
+ * lost. So a connection is closed from this side after 4 s unused -- as
+ * fetch (undici) did -- and never offered for reuse in the engine's last
+ * second. It applies only to a connection with no request on it: a call
+ * waiting on the engine's answer is bounded by engineTimeouts.callMs alone.
+ */
+export const IDLE_SOCKET_MS = 4_000;
+
+/** Connections to the engine, kept open between calls (IDLE_SOCKET_MS). */
+const agents = {
+  http: new http.Agent({ keepAlive: true, timeout: IDLE_SOCKET_MS }),
+  https: new https.Agent({ keepAlive: true, timeout: IDLE_SOCKET_MS }),
+};
+
+/**
+ * A request on a connection kept from an earlier call that failed before any
+ * answer, in the way a connection the far end had already closed fails: reset,
+ * or hung up. It is sent once more, on a new connection -- as Node's
+ * documentation advises, and only when sending it twice does no harm
+ * (resendable): a read, or a stop. A reset before any answer does not say
+ * whether the engine read the request: engine main keeps running a retest
+ * whose connection was reset, so a start sent again could start a second run.
+ * A start is kept off a connection the engine is closing by IDLE_SOCKET_MS
+ * instead, and one reset anyway is an answer that could not be read (its
+ * retest's slot is held). Never for a request on a new connection, and never
+ * after any of an answer arrived.
+ */
+const STALE_CONNECTION = new Set(["ECONNRESET", "EPIPE"]);
+
+/** Whether a request may be sent twice (STALE_CONNECTION): a read, or a stop -- never a start, or anything else that makes something. */
+function resendable(method: string, path: string): boolean {
+  return method === "GET" || method === "HEAD" || (method === "POST" && /^\/api\/scans\/[^/]+\/abort$/.test(path));
+}
+
+/** Redirects are followed as fetch followed them: at most this many, then refused. */
+const MAX_REDIRECTS = 20;
 
 /**
  * The rest of an answer whose headers are in, or null when it did not arrive
@@ -267,6 +313,17 @@ function headers(): Record<string, string> {
 /** What a call sends: its method and its body. */
 type CallInit = { method?: string; body?: string };
 
+/**
+ * Ask the engine. Within `timeoutMs` for the headers of its answer, over the
+ * whole call: a read or a stop sent again (STALE_CONNECTION) and every
+ * redirect followed share that one deadline.
+ *
+ * Redirects are followed as fetch followed them before this client used
+ * node:http (an engine behind a proxy that moves it, such as an HTTP-to-HTTPS
+ * redirect): 307 and 308 with the same method and body; 301 and 302 as a GET
+ * when the request was a POST, and 303 always as a GET (HEAD stays HEAD),
+ * without a body; to http or https only, and at most MAX_REDIRECTS times.
+ */
 function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs): Promise<EngineAnswer> {
   const base = baseUrl();
   if (!base) {
@@ -282,17 +339,89 @@ function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.
       `could not reach the engine at ${base}: ${cause instanceof Error ? cause.message : String(cause)}`,
     ));
   }
+  const deadline = Date.now() + timeoutMs;
+  const timedOut = () => new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`);
+  return (async () => {
+    let method = init?.method ?? "GET";
+    let payload = init?.body;
+    for (let hops = 0; ; hops += 1) {
+      let answer: EngineAnswer;
+      try {
+        answer = await send(url, method, payload, deadline, true);
+      } catch (cause) {
+        if (cause instanceof StaleConnection && resendable(method, url.pathname)) {
+          // Reset on a kept connection before any answer: sent once more, on a new one.
+          try {
+            answer = await send(url, method, payload, deadline, false);
+          } catch (again) {
+            throw failure(again, base, timedOut);
+          }
+        } else {
+          throw failure(cause, base, timedOut);
+        }
+      }
+      const location = answer.redirect;
+      if (location === null) return answer;
+      answer.release();
+      let next: URL;
+      try {
+        next = new URL(location, url);
+      } catch {
+        throw new EngineUnavailable(`the engine at ${base} answered ${answer.status} with a location that could not be read: ${location}`);
+      }
+      if (next.protocol !== "http:" && next.protocol !== "https:") {
+        throw new EngineUnavailable(`the engine at ${base} answered ${answer.status} to ${next.protocol} -- not followed`);
+      }
+      if (hops + 1 > MAX_REDIRECTS) {
+        throw new EngineUnavailable(`the engine at ${base} redirected more than ${MAX_REDIRECTS} times`);
+      }
+      if (answer.status === 303 ? method !== "HEAD" : (answer.status === 301 || answer.status === 302) && method === "POST") {
+        method = "GET";
+        payload = undefined;
+      }
+      url = next;
+    }
+  })();
+}
+
+/** A request on a kept connection was reset before any answer (STALE_CONNECTION): the caller sends it once more. */
+class StaleConnection extends Error {
+  constructor(readonly error: Error) {
+    super(error.message);
+  }
+}
+
+/** Why a call failed, in words a browser may be shown: a hostname, a port and a refusal, never a stack. */
+function failure(cause: unknown, base: string, timedOut: () => EngineTimedOut): Error {
+  if (cause instanceof EngineUnavailable) return cause;
+  if (cause === TIMED_OUT) return timedOut();
+  const error = (cause instanceof StaleConnection ? cause.error : cause) as Error & { code?: string };
+  const message = error instanceof Error ? error.message : String(error);
+  if (refusedBeforeSending(error)) {
+    return new EngineConnectionRefused(`could not reach the engine at ${base}: ${message}` +
+      (typeof error.code === "string" && !message.includes(error.code) ? ` (${error.code})` : ""));
+  }
+  return new EngineUnavailable(`could not reach the engine at ${base}: ${message}`);
+}
+
+const TIMED_OUT = Symbol("timed out");
+
+/**
+ * One request, answered with its headers by `deadline`. `mayReuse`: whether
+ * it may go on a kept connection -- a request sent once more never does
+ * (a fresh connection, closed after its answer).
+ */
+function send(url: URL, method: string, payload: string | undefined, deadline: number, mayReuse: boolean): Promise<EngineAnswer> {
   const secure = url.protocol === "https:";
-  const payload = init?.body;
   return new Promise<EngineAnswer>((resolve, reject) => {
     let timedOut = false;
     const req = (secure ? https : http).request(url, {
-      method: init?.method ?? "GET",
+      method,
       headers: {
         ...headers(),
         ...(payload !== undefined ? { "Content-Length": Buffer.byteLength(payload) } : {}),
       },
-      agent: secure ? agents.https : agents.http,
+      agent: mayReuse ? (secure ? agents.https : agents.http) : false,
     }, (res) => {
       clearTimeout(timer);
       resolve(new EngineAnswer(res.statusCode ?? 0, res, req));
@@ -300,19 +429,12 @@ function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.
     const timer = setTimeout(() => {
       timedOut = true;
       req.destroy();
-    }, timeoutMs);
+    }, Math.max(0, deadline - Date.now()));
     req.on("error", (cause: Error & { code?: string }) => {
       clearTimeout(timer);
-      // A hostname, a port and a refusal are all the operator needs; the
-      // stack is not, and this string reaches a browser.
-      if (timedOut) {
-        reject(new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`));
-      } else if (refusedBeforeSending(cause)) {
-        reject(new EngineConnectionRefused(`could not reach the engine at ${base}: ${cause.message}` +
-          (typeof cause.code === "string" && !cause.message.includes(cause.code) ? ` (${cause.code})` : "")));
-      } else {
-        reject(new EngineUnavailable(`could not reach the engine at ${base}: ${cause.message}`));
-      }
+      if (timedOut) reject(TIMED_OUT);
+      else if (mayReuse && req.reusedSocket && typeof cause.code === "string" && STALE_CONNECTION.has(cause.code)) reject(new StaleConnection(cause));
+      else reject(cause);
     });
     if (payload !== undefined) req.write(payload);
     req.end();
