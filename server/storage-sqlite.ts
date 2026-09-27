@@ -54,6 +54,30 @@ function countFindings(test: Test): number {
 }
 
 export class SqliteStorage implements IStorage {
+  /**
+   * A read made after this call's own write committed -- the row read back to
+   * return it. A busy database is waited out here, off the event loop, and
+   * never by running the whole call again: withBusyRetry re-runs a call only
+   * when it failed busy before anything it does was committed, and a call
+   * whose write is in cannot fail busy after it any more (one that still
+   * cannot read back says so with an error that is not a busy one, which is
+   * not retried). Re-running it wrote a second row for one call.
+   */
+  private async readBack<T>(read: () => T | Promise<T>): Promise<T> {
+    const deadline = Date.now() + BUSY_RETRY_FOR_MS;
+    for (;;) {
+      try {
+        return await read();
+      } catch (cause) {
+        if (!isBusy(cause)) throw cause;
+        if (Date.now() >= deadline) {
+          throw new Error(`written, but it could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+      }
+    }
+  }
+
   // Users
   async getUser(id: string): Promise<User | undefined> {
     return db.select().from(schema.users).where(eq(schema.users.id, id)).get();
@@ -74,7 +98,7 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.users).values(row).run();
-    return (await this.getUser(row.id))!;
+    return (await this.readBack(() => this.getUser(row.id)))!;
   }
   async updateUser(id: string, user: Partial<InsertUser>): Promise<User | undefined> {
     const updates = { ...user };
@@ -82,7 +106,7 @@ export class SqliteStorage implements IStorage {
     if (definedKeys(updates).length > 0) {
       db.update(schema.users).set(updates).where(eq(schema.users.id, id)).run();
     }
-    return this.getUser(id);
+    return this.readBack(() => this.getUser(id));
   }
   async deleteUser(id: string): Promise<boolean> {
     return db.delete(schema.users).where(eq(schema.users.id, id)).run().changes > 0;
@@ -125,25 +149,28 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.clients).values(row).run();
-    return (await this.getClient(row.id))!;
+    return (await this.readBack(() => this.getClient(row.id)))!;
   }
   async updateClient(id: string, client: Partial<InsertClient>): Promise<Client | undefined> {
     if (definedKeys(client).length > 0) {
       db.update(schema.clients).set(client).where(eq(schema.clients.id, id)).run();
     }
-    return this.getClient(id);
+    return this.readBack(() => this.getClient(id));
   }
   async deleteClient(id: string): Promise<boolean> {
     // There are no foreign keys, so the children are removed here. Without
     // this, deleting a client orphaned its tests, sites and documents, which
     // then referenced an id that no longer existed.
-    this.forgetTests();
-    const removed = db.transaction(() => {
+    const { removed, testIds } = db.transaction(() => {
+      const gone = db.select({ id: schema.tests.id }).from(schema.tests).where(eq(schema.tests.clientId, id)).all();
       db.delete(schema.tests).where(eq(schema.tests.clientId, id)).run();
       db.delete(schema.sites).where(eq(schema.sites.clientId, id)).run();
       db.delete(schema.documents).where(eq(schema.documents.clientId, id)).run();
-      return db.delete(schema.clients).where(eq(schema.clients.id, id)).run().changes > 0;
+      return { removed: db.delete(schema.clients).where(eq(schema.clients.id, id)).run().changes > 0, testIds: gone.map((one) => one.id) };
     });
+    // Only the tests that went are forgotten; every other test stays in
+    // memory, so a Stop still finds its run without a read.
+    this.forgetSomeTests((test) => test.clientId === id || testIds.includes(test.id));
     return removed;
   }
 
@@ -167,13 +194,13 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.sites).values(row).run();
-    return (await this.getSite(row.id))!;
+    return (await this.readBack(() => this.getSite(row.id)))!;
   }
   async updateSite(id: string, site: Partial<InsertSite>): Promise<Site | undefined> {
     if (definedKeys(site).length > 0) {
       db.update(schema.sites).set(site).where(eq(schema.sites.id, id)).run();
     }
-    return this.getSite(id);
+    return this.readBack(() => this.getSite(id));
   }
   async deleteSite(id: string): Promise<boolean> {
     return db.delete(schema.sites).where(eq(schema.sites.id, id)).run().changes > 0;
@@ -198,9 +225,19 @@ export class SqliteStorage implements IStorage {
   peekAllTests(): Test[] | null {
     return this.testsListed ? Array.from(this.testCache.values()).map((one) => ({ ...one })) : null;
   }
-  private forgetTests(): void {
-    this.testCache.clear();
-    this.testsListed = false;
+  /**
+   * Forget the tests a delete removed -- those alone -- and read the list
+   * again in the background, so what this process holds matches the record
+   * without anything waiting on it: a Stop answers from what is held (never
+   * from a refill), and a refill that fails leaves the list as it was.
+   */
+  private forgetSomeTests(gone: (test: Test) => boolean): void {
+    for (const [id, test] of Array.from(this.testCache.entries())) {
+      if (gone(test)) this.testCache.delete(id);
+    }
+    if (this.testsListed) {
+      setImmediate(() => void storage.getAllTests().catch(() => undefined));
+    }
   }
   async getTest(id: string): Promise<Test | undefined> {
     return this.remember(db.select().from(schema.tests).where(eq(schema.tests.id, id)).get());
@@ -370,7 +407,7 @@ export class SqliteStorage implements IStorage {
     if (Object.keys(fields).length > 0) {
       db.update(schema.findings).set(fields).where(eq(schema.findings.id, id)).run();
     }
-    return this.getFinding(id);
+    return this.readBack(() => this.getFinding(id));
   }
 
   async createTest(test: InsertTest): Promise<Test> {
@@ -393,13 +430,13 @@ export class SqliteStorage implements IStorage {
       startedAt: new Date(),
     };
     db.insert(schema.tests).values(row).run();
-    return (await this.getTest(row.id))!;
+    return (await this.readBack(() => this.getTest(row.id)))!;
   }
   async updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined> {
     if (definedKeys(test).length > 0) {
       db.update(schema.tests).set(test).where(eq(schema.tests.id, id)).run();
     }
-    return this.getTest(id);
+    return this.readBack(() => this.getTest(id));
   }
   async deleteTest(id: string): Promise<boolean> {
     const removed = db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
@@ -430,14 +467,14 @@ export class SqliteStorage implements IStorage {
       updatedAt: now,
     };
     db.insert(schema.documents).values(row).run();
-    return (await this.getDocument(row.id))!;
+    return (await this.readBack(() => this.getDocument(row.id)))!;
   }
   async updateDocument(id: string, document: Partial<InsertDocument>): Promise<Document | undefined> {
     db.update(schema.documents)
       .set({ ...document, updatedAt: new Date() })
       .where(eq(schema.documents.id, id))
       .run();
-    return this.getDocument(id);
+    return this.readBack(() => this.getDocument(id));
   }
   async deleteDocument(id: string): Promise<boolean> {
     return db.delete(schema.documents).where(eq(schema.documents.id, id)).run().changes > 0;
@@ -460,13 +497,14 @@ export class SqliteStorage implements IStorage {
     // One transaction: a half-removed seed leaves a dashboard whose notice
     // says one thing and whose figures say another, which is worse than
     // either state on its own.
-    this.forgetTests();
     db.transaction(() => {
       db.delete(schema.tests).where(eq(schema.tests.isSample, true)).run();
       db.delete(schema.documents).where(eq(schema.documents.isSample, true)).run();
       db.delete(schema.sites).where(eq(schema.sites.isSample, true)).run();
       db.delete(schema.clients).where(eq(schema.clients.isSample, true)).run();
     });
+    // The sample tests alone are forgotten (forgetSomeTests).
+    this.forgetSomeTests((test) => test.isSample === true);
     return removed;
   }
 
@@ -493,7 +531,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.activityLogs).values(row).run();
-    return db.select().from(schema.activityLogs).where(eq(schema.activityLogs.id, row.id)).get()!;
+    return (await this.readBack(() => db.select().from(schema.activityLogs).where(eq(schema.activityLogs.id, row.id)).get()))!;
   }
 
   // AI health
@@ -527,7 +565,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.aiHealthMetrics).values(row).run();
-    return db.select().from(schema.aiHealthMetrics).where(eq(schema.aiHealthMetrics.id, row.id)).get()!;
+    return (await this.readBack(() => db.select().from(schema.aiHealthMetrics).where(eq(schema.aiHealthMetrics.id, row.id)).get()))!;
   }
 
   // AI control: exactly one row, under a fixed id.
@@ -559,13 +597,13 @@ export class SqliteStorage implements IStorage {
         ...settings,
         id: CONNECTION_ID, updatedAt: now, updatedBy,
       } as any).run();
-      return (await this.getConnectionSettings())!;
+      return (await this.readBack(() => this.getConnectionSettings()))!;
     }
     db.update(schema.connectionSettings)
       .set({ ...settings, updatedAt: now, updatedBy } as any)
       .where(eq(schema.connectionSettings.id, existing.id))
       .run();
-    return (await this.getConnectionSettings())!;
+    return (await this.readBack(() => this.getConnectionSettings()))!;
   }
 
   async getAIControlSettings(): Promise<AIControlSetting | undefined> {
@@ -595,13 +633,13 @@ export class SqliteStorage implements IStorage {
         target: schema.aiControlSettings.id,
         set: { ...settings, lastModifiedAt: now },
       }).run();
-      return (await this.getAIControlSettings())!;
+      return (await this.readBack(() => this.getAIControlSettings()))!;
     }
     db.update(schema.aiControlSettings)
       .set({ ...settings, lastModifiedAt: now })
       .where(eq(schema.aiControlSettings.id, existing.id))
       .run();
-    return (await this.getAIControlSettings())!;
+    return (await this.readBack(() => this.getAIControlSettings()))!;
   }
 
   // Chat
@@ -627,7 +665,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.aiChatMessages).values(row).run();
-    return (await this.getChatMessage(row.id))!;
+    return (await this.readBack(() => this.getChatMessage(row.id)))!;
   }
   async deleteChatMessage(id: string): Promise<boolean> {
     return db.delete(schema.aiChatMessages).where(eq(schema.aiChatMessages.id, id)).run().changes > 0;
@@ -651,13 +689,13 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.classifiers).values(row).run();
-    return (await this.getClassifier(row.id))!;
+    return (await this.readBack(() => this.getClassifier(row.id)))!;
   }
   async updateClassifier(id: string, classifier: Partial<InsertClassifier>): Promise<Classifier | undefined> {
     if (definedKeys(classifier).length > 0) {
       db.update(schema.classifiers).set(classifier).where(eq(schema.classifiers.id, id)).run();
     }
-    return this.getClassifier(id);
+    return this.readBack(() => this.getClassifier(id));
   }
   async deleteClassifier(id: string): Promise<boolean> {
     return db.delete(schema.classifiers).where(eq(schema.classifiers.id, id)).run().changes > 0;
@@ -683,7 +721,7 @@ export class SqliteStorage implements IStorage {
       revokedAt: null,
     };
     db.insert(schema.apiKeys).values(row).run();
-    return { key: (await this.getApiKey(row.id))!, secret };
+    return { key: (await this.readBack(() => this.getApiKey(row.id)))!, secret };
   }
   async findActiveApiKeyByHash(keyHash: string): Promise<ApiKey | undefined> {
     return db
@@ -701,7 +739,7 @@ export class SqliteStorage implements IStorage {
     if (existing.revokedAt == null) {
       db.update(schema.apiKeys).set({ revokedAt: new Date() }).where(eq(schema.apiKeys.id, id)).run();
     }
-    return this.getApiKey(id);
+    return this.readBack(() => this.getApiKey(id));
   }
 }
 
@@ -716,18 +754,107 @@ function isBusy(cause: unknown): boolean {
   return typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"));
 }
 
+/** Calls that only read: under WAL a read never waits for the write lock, so one never queues behind the writes that do. */
+function readsOnly(property: PropertyKey): boolean {
+  return typeof property === "string" && /^(get|find|count|filed)[A-Z]/.test(property);
+}
+
+/**
+ * One line, first come first served, for the calls a busy database refused:
+ * at most ONE of them tries again at a time, and only after a timer, so a
+ * flood of writes under a held lock costs the event loop one statement's
+ * wait (BUSY_TIMEOUT_MS) per retry round -- never one per write in flight.
+ * With 200 writes waiting, a Stop is served between two rounds, as it is
+ * with none.
+ *
+ *   - A call that fails busy joins the back of the line (a call already in it
+ *     keeps its place at the front), so writes land in the order they were
+ *     made: a later write of the same row is never overtaken by an earlier one.
+ *   - While the line is not empty, a new call that writes joins it at once
+ *     instead of trying (and waiting BUSY_TIMEOUT_MS) on a lock known held; a
+ *     call that only reads goes straight through (readsOnly).
+ *   - The head of the line tries again every 10-30 ms. When it succeeds the
+ *     lock is free, and the rest follow one per turn of the loop.
+ *   - A call still waiting when its BUSY_RETRY_FOR_MS are up fails with the
+ *     busy error it met.
+ */
+export class BusyLine {
+  private waiting: Array<{ go: () => void; fail: (cause: unknown) => void; deadline: number; cause: unknown }> = [];
+  private scheduled = false;
+  private busyNow = false;
+
+  /** Whether calls are waiting for the lock: a new write then waits its turn. */
+  get queued(): boolean {
+    return this.busyNow || this.waiting.length > 0;
+  }
+
+  /** A call outside the line met a busy database: from now on new writes wait their turn. */
+  sawBusy(): void {
+    this.busyNow = true;
+  }
+
+  /** Wait for this call's turn to try again. `front`: it has been tried and refused before, and keeps its place. */
+  turn(deadline: number, cause: unknown, front = false): Promise<void> {
+    return new Promise<void>((go, fail) => {
+      const entry = { go, fail, deadline, cause };
+      if (front) this.waiting.unshift(entry);
+      else this.waiting.push(entry);
+      this.schedule(this.busyNow ? "timer" : "now");
+    });
+  }
+
+  /** What one try came to: a busy refusal keeps the line waiting on a timer; anything else lets the next one go. */
+  tried(busy: boolean): void {
+    this.busyNow = busy;
+    this.scheduled = false;
+    if (this.waiting.length > 0) this.schedule(busy ? "timer" : "now");
+  }
+
+  private schedule(when: "timer" | "now"): void {
+    if (this.scheduled) return;
+    this.scheduled = true;
+    const next = () => {
+      const now = Date.now();
+      // Calls whose time is up fail with the refusal they met.
+      while (this.waiting.length > 0 && this.waiting[0].deadline <= now) {
+        const late = this.waiting.shift()!;
+        late.fail(late.cause ?? this.expired());
+      }
+      const head = this.waiting.shift();
+      if (!head) {
+        this.scheduled = false;
+        return;
+      }
+      // The head tries; its result (tried) schedules the next.
+      head.go();
+    };
+    if (when === "now") setImmediate(next);
+    else setTimeout(next, 10 + Math.floor(Math.random() * 20));
+  }
+
+  private expired(): unknown {
+    const error = new Error("database is locked (another connection held its lock for longer than this call waits)") as Error & { code: string };
+    error.code = "SQLITE_BUSY";
+    return error;
+  }
+}
+
 /**
  * Wait for a lock without holding the event loop.
  *
  * Each statement gives up after BUSY_TIMEOUT_MS (db-sqlite.ts); a call that
- * gave up on a busy database is tried again after a timer, for up to
- * BUSY_RETRY_FOR_MS in all -- the 5 s a write used to wait, spent off the
- * loop, so every other request, and every Stop, is served in between. A
- * method fails with SQLITE_BUSY before anything it does is committed (one
- * statement, or one transaction rolled back whole), so trying it again from
- * the start is safe.
+ * gave up on a busy database waits its turn in one line (BusyLine) and is
+ * tried again, for up to BUSY_RETRY_FOR_MS in all -- off the loop, one call
+ * at a time, so every other request, and every Stop, is served in between
+ * however many writes are waiting.
+ *
+ * A call is tried again from the start only when it failed busy before
+ * anything it does was committed: every call writes one statement, or one
+ * transaction rolled back whole, and any read it makes after its write is
+ * waited out inside the call (SqliteStorage.readBack), never by running it
+ * again -- so no write is ever made twice.
  */
-export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RETRY_FOR_MS): T {
+export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RETRY_FOR_MS, line = new BusyLine()): T {
   return new Proxy(target, {
     get(object, property, receiver) {
       const value = Reflect.get(object, property, receiver);
@@ -735,12 +862,26 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
       if (IN_MEMORY.has(property)) return value.bind(object);
       return async (...args: unknown[]) => {
         const deadline = Date.now() + retryForMs;
+        let inLine = false;
+        if (line.queued && !readsOnly(property)) {
+          await line.turn(deadline, null);
+          inLine = true;
+        }
         for (;;) {
           try {
-            return await value.apply(object, args);
+            const result = await value.apply(object, args);
+            if (inLine) line.tried(false);
+            return result;
           } catch (cause) {
-            if (!isBusy(cause) || Date.now() >= deadline) throw cause;
-            await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+            if (!isBusy(cause)) {
+              if (inLine) line.tried(false);
+              throw cause;
+            }
+            if (inLine) line.tried(true);
+            else line.sawBusy();
+            if (Date.now() >= deadline) throw cause;
+            await line.turn(deadline, cause, inLine);
+            inLine = true;
           }
         }
       };

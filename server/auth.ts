@@ -18,6 +18,8 @@ declare global {
     interface Request {
       /** The account behind the session, re-read on every guarded request. */
       currentUser?: User;
+      /** Set when requireAdmin authorised a stop from the session in memory, without reading the account. */
+      authorisedFromSession?: boolean;
     }
   }
 }
@@ -36,6 +38,9 @@ async function loadSessionUser(req: Request): Promise<User | undefined> {
   if (!id) return loadApiKeyUser(req);
 
   const user = await storage.getUser(id);
+  // What the record says now is what the directory holds from now on.
+  if (user) noteAccount(user);
+  else noteAccountDeleted(id);
   if (!user || !user.isActive) return undefined;
 
   req.currentUser = user;
@@ -79,6 +84,7 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
   if (!record || !record.createdBy) return undefined;
 
   const user = await storage.getUser(record.createdBy);
+  if (user) noteAccount(user);
   if (!user || !user.isActive) return undefined;
 
   // Best-effort usage stamp; a failure here must not fail the request.
@@ -87,14 +93,77 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
   return user;
 }
 
-/** Rejects the request with 401 unless a live, active account is behind it. */
 /**
- * Whether a request is a stop: a scan's Stop, a retest's Stop, or engaging the
- * kill switch. A stop is authorised from the signed-in session alone -- held in
- * memory -- and never waits on the database: an account lookup that is slow,
- * or a database that is locked or failing, must not stand between a Stop and
- * the engine. (A session is ended at sign-out; an account deactivated since
- * sign-in can still send a stop, which is the safe direction.)
+ * Every account this process has signed in, or changed, as it is now: its role
+ * and whether it may still sign in (null once deleted). A stop is authorised
+ * from the session -- from memory, never from a read -- and the session's
+ * role is taken from here, so it follows the account the moment an admin
+ * changes it: a demoted admin's live session is refused the kill switch at
+ * once, a deactivated or deleted account's live sessions stop authorising
+ * anything, and a user promoted while signed in may engage it straight away.
+ * Kept current by sign-in, by every guard that reads the account, and by the
+ * user routes when they change or delete one (noteAccount / noteAccountDeleted).
+ */
+const accounts = new Map<string, { role: string; isActive: boolean } | null>();
+
+/** Remember an account as it is now: at sign-in, on every read of it, and when an admin changes it. */
+export function noteAccount(user: Pick<User, "id" | "role" | "isActive">): void {
+  accounts.set(user.id, { role: user.role, isActive: user.isActive !== false });
+}
+
+/** Remember that an account is gone: its live sessions authorise nothing from now on. */
+export function noteAccountDeleted(id: string): void {
+  accounts.set(id, null);
+}
+
+/**
+ * Bring the live sessions of one account in line with it, in the session
+ * store (memory): its sessions take its new role, and are ended when it was
+ * deactivated or deleted. Best-effort and in the background -- the account
+ * directory above already decides every stop -- so a store that cannot be
+ * walked holds nothing up.
+ */
+export function reviseLiveSessions(
+  store: import("express-session").Store | undefined,
+  id: string,
+  now: Pick<User, "role" | "isActive"> | null,
+): void {
+  if (!store || typeof store.all !== "function") return;
+  try {
+    store.all((error, sessions) => {
+      if (error || !sessions) return;
+      const entries: Array<[string, import("express-session").SessionData]> = Array.isArray(sessions)
+        ? []
+        : Object.entries(sessions as Record<string, import("express-session").SessionData>);
+      for (const [sid, data] of entries) {
+        if (data?.userId !== id) continue;
+        if (now === null || now.isActive === false) store.destroy(sid, () => undefined);
+        else if (data.role !== now.role) store.set(sid, { ...data, role: now.role } as import("express-session").SessionData, () => undefined);
+      }
+    });
+  } catch {
+    // The directory decides; the store is only kept tidy.
+  }
+}
+
+/**
+ * Whether a request is a stop, authorised from the signed-in session alone --
+ * held in memory -- and never waiting on the database: an account lookup that
+ * is slow, or a database that is locked or failing, must not stand between a
+ * stop and what it stops.
+ *
+ *   - a scan's Stop, and a retest's Stop;
+ *   - engaging the kill switch (a PATCH whose body sets `killSwitchEnabled:
+ *     true`). Only the switch itself is authorised from memory: any other
+ *     field sent with it is authorised from the account, after the stops are
+ *     sent (routes.ts, PATCH /api/ai-control);
+ *   - drafting a failsafe pause, stand-down or terminate, and relaying a
+ *     signature to a failsafe command (the control plane checks every
+ *     signature, and a stop's signature is what makes the stop happen);
+ *   - revoking an API key: it only takes access away.
+ *
+ * The session's role is the account's as this process knows it now
+ * (sessionUser), not as it was at sign-in.
  */
 export function isStopRequest(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
@@ -103,15 +172,32 @@ export function isStopRequest(req: Request): boolean {
     const body = req.body && typeof req.body === "object" ? (req.body as { killSwitchEnabled?: unknown }) : {};
     return body.killSwitchEnabled === true;
   }
+  if (req.method === "POST" && /^\/api\/failsafe\/commands$/i.test(path)) {
+    const action = req.body && typeof req.body === "object" ? (req.body as { action?: unknown }).action : undefined;
+    return action === "pause" || action === "stand_down" || action === "terminate";
+  }
+  if (req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path)) return true;
+  if (req.method === "DELETE" && /^\/api\/api-keys\/[^/]+$/i.test(path)) return true;
   return false;
 }
 
-/** The signed-in session's user id and role, from memory; null when there is no session. */
+/**
+ * The signed-in session's user id and role, from memory; null when there is
+ * no session, or when its account has since been deactivated or deleted. The
+ * role is the account's now (the directory above), falling back to the one
+ * the session signed in with only for an account this process has never
+ * noted -- which a session held in this process's memory store always has.
+ */
 export function sessionUser(req: Request): { id: string; role: string | null } | null {
   const id = req.session?.userId;
-  return id ? { id, role: typeof req.session?.role === "string" ? req.session.role : null } : null;
+  if (!id) return null;
+  const known = accounts.get(id);
+  if (known === null) return null;
+  if (known !== undefined) return known.isActive ? { id, role: known.role } : null;
+  return { id, role: typeof req.session?.role === "string" ? req.session.role : null };
 }
 
+/** Rejects the request with 401 unless a live, active account is behind it. */
 export const requireAuth: RequestHandler = (req, res, next) => {
   // A stop with a session is authorised from it. One presented with an API key
   // instead is authorised as any request is: the key has to be looked up.
@@ -134,11 +220,12 @@ export const requireAuth: RequestHandler = (req, res, next) => {
 export const requireAdmin: RequestHandler = (req, res, next) => {
   const user = isStopRequest(req) ? sessionUser(req) : null;
   if (user) {
-    // Engaging the kill switch: the role the session was signed in with.
+    // A stop: the account's role as this process knows it now, from memory.
     if (user.role !== "admin") {
       res.status(403).json({ message: "Admin role required" });
       return;
     }
+    req.authorisedFromSession = true;
     next();
     return;
   }
@@ -157,6 +244,16 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     })
     .catch(next);
 };
+
+/**
+ * The account behind a request, read from storage now -- for what a request
+ * authorised from memory also asks that only the account may authorise (the
+ * other fields of a kill-switch request). Undefined when there is none, or it
+ * is not active.
+ */
+export function accountNow(req: Request): Promise<User | undefined> {
+  return req.currentUser ? Promise.resolve(req.currentUser) : loadSessionUser(req);
+}
 
 /** Who is acting, for activity-log attribution. Prefers the account a guard
  *  loaded (which covers API-key requests, where there is no session) and falls

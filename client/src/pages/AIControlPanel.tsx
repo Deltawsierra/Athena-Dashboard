@@ -21,12 +21,19 @@ interface ScanStop {
   testId: string;
   runId: string;
   target: string | null;
+  /** True only when the engine accepted the stop. */
   stopped: boolean;
+  /** The engine answered "not running": the run had already ended, and nothing was stopped. */
+  alreadyFinished?: boolean;
   detail: string;
 }
 
-/** What the server did about running scans when the switch was sent on. */
-type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string };
+/**
+ * What the server did about running scans when the switch was sent on. An
+ * unlisted answer may still carry `scans`: the ones the server held as
+ * running, each sent a stop though the whole list could not be read.
+ */
+type KillSwitchStops = { listed: true; scans: ScanStop[] } | { listed: false; detail: string; scans?: ScanStop[] };
 
 /** A run the engine listed as live that no running scan here recorded (server/routes.ts EngineRunStop). */
 interface EngineRunStop {
@@ -35,6 +42,7 @@ interface EngineRunStop {
   /** The test that records it, when one does; null when nothing here records it. */
   testId: string | null;
   stopped: boolean;
+  alreadyFinished?: boolean;
   detail: string;
 }
 
@@ -45,8 +53,11 @@ interface EngineRunStop {
  */
 type EngineSweep =
   | { listed: true; runs: EngineRunStop[]; unnamed?: number }
-  /** `retests`: the retests the server was watching as running, each sent a stop by its run id though the list was unread. */
-  | { listed: false; detail: string; retests?: EngineRunStop[] };
+  /**
+   * `retests`: the retests the server was watching as running, each sent a stop by its run id though the list was unread.
+   * `retestsUnlisted`: the retests on record had not been read either, so no list of them could be made.
+   */
+  | { listed: false; detail: string; retests?: EngineRunStop[]; retestsUnlisted?: string };
 
 /** The server's whole account of one engagement of the switch. */
 interface StopReport {
@@ -61,6 +72,20 @@ interface StopReport {
 
 const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** A stop that did not take: neither accepted, nor answered "not running". */
+const didNotTake = (one: { stopped: boolean; alreadyFinished?: boolean }) => !one.stopped && !one.alreadyFinished;
+
+/** What the engine answered of the stops: how many it accepted, and how many runs it said had already ended. */
+function tookSentence(list: Array<{ stopped: boolean; alreadyFinished?: boolean }>): string {
+  const accepted = list.filter((one) => one.stopped).length;
+  const ended = list.filter((one) => one.alreadyFinished).length;
+  const took = `the engine accepted ${accepted === list.length ? (list.length === 1 ? "it" : "all of them") : accepted}`;
+  if (ended === 0) return took;
+  const endedSaid = `${ended === list.length ? (list.length === 1 ? "it" : "all of them") : ended} had already ended ` +
+    "(the engine answered \"not running\", so nothing was stopped)";
+  return accepted === 0 ? endedSaid : `${took}; ${endedSaid}`;
+}
+
 /**
  * What the kill switch did, from the server's own account of it: how many
  * running scans were sent a stop, how many the engine accepted, and which it
@@ -69,17 +94,22 @@ const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? on
  */
 function stopSentence(report: KillSwitchStops, lead = "Kill switch engaged"): string {
   if (!report.listed) {
-    return `${lead}, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
-      "Stop them from the scan screens, or pause the engine from the Failsafe console.";
+    const held = report.scans ?? [];
+    if (held.length === 0) {
+      return `${lead}, but the running scans could not be listed, so none was sent a stop: ${report.detail}. ` +
+        "Stop them from the scan screens, or pause the engine from the Failsafe console.";
+    }
+    return `${lead}, but the running scans could not all be listed (${report.detail}). ` +
+      `${count(held.length, "scan")} known here as running ${held.length === 1 ? "was" : "were"} sent a stop, and ` +
+      `${tookSentence(held)}. Another may still be running: pause the engine from the Failsafe console to be sure.`;
   }
   const { scans } = report;
   if (scans.length === 0) {
     return `${lead}. No engine scan was recorded as running, so none was sent a stop.`;
   }
-  const accepted = scans.filter((one) => one.stopped).length;
-  const failed = scans.filter((one) => !one.stopped);
+  const failed = scans.filter(didNotTake);
   const sent = `${lead}; ${count(scans.length, "running scan")} ${scans.length === 1 ? "was" : "were"} sent a stop`;
-  const took = `the engine accepted ${accepted === scans.length ? (scans.length === 1 ? "it" : "all of them") : accepted}`;
+  const took = tookSentence(scans);
   if (failed.length === 0) return `${sent}, and ${took}.`;
   const why = failed.map((one) => `${one.target ?? one.testId}: ${one.detail}`).join("; ");
   return `${sent}; ${took}; ${failed.length} could not be stopped (${why}). ` +
@@ -95,7 +125,9 @@ function engineSweepSentence(sweep: EngineSweep): string {
   if (!sweep.listed) {
     const unread = `The engine's own list of live runs could not be read (${sweep.detail}), so a run it has that no scan here ` +
       "records may still be running: pause the engine from the Failsafe console to be sure.";
-    return sweep.retests && sweep.retests.length > 0 ? `${unread} ${retestSweepSentence(sweep.retests)}` : unread;
+    const retestsSaid = sweep.retests && sweep.retests.length > 0 ? ` ${retestSweepSentence(sweep.retests)}` : "";
+    const unlisted = sweep.retestsUnlisted ? ` The retests could not be listed: ${sweep.retestsUnlisted}.` : "";
+    return `${unread}${retestsSaid}${unlisted}`;
   }
   const { runs } = sweep;
   const unnamed = sweep.unnamed ?? 0;
@@ -111,8 +143,8 @@ function engineSweepSentence(sweep: EngineSweep): string {
 
 /** What came of the stops sent, by their run ids, to the retests being watched while the engine's list was unread. */
 function retestSweepSentence(sent: EngineRunStop[]): string {
-  const failed = sent.filter((one) => !one.stopped);
-  const took = `the engine accepted ${failed.length === 0 ? (sent.length === 1 ? "it" : "all of them") : sent.length - failed.length}`;
+  const failed = sent.filter(didNotTake);
+  const took = tookSentence(sent);
   const lead = `${count(sent.length, "retest")} this dashboard was watching ${sent.length === 1 ? "was" : "were"} sent a stop by ` +
     `${sent.length === 1 ? "its" : "their"} run id all the same, and ${took}`;
   if (failed.length === 0) return `${lead}.`;
@@ -123,12 +155,11 @@ function retestSweepSentence(sent: EngineRunStop[]): string {
 function namedSweepSentence(runs: EngineRunStop[]): string | null {
   if (runs.length === 0) return null;
   const unrecorded = runs.filter((one) => one.testId === null).length;
-  const failed = runs.filter((one) => !one.stopped);
-  const accepted = runs.length - failed.length;
+  const failed = runs.filter(didNotTake);
   const listed = `The engine also listed ${count(runs.length, "live run")} that no running scan here recorded` +
     (unrecorded > 0 ? ` (${unrecorded} with no record here at all)` : "") +
     `; ${runs.length === 1 ? "it was" : "each was"} sent a stop`;
-  const took = `the engine accepted ${accepted === runs.length ? (runs.length === 1 ? "it" : "all of them") : accepted}`;
+  const took = tookSentence(runs);
   if (failed.length === 0) return `${listed}, and ${took}.`;
   const why = failed.map((one) => `${one.target ?? one.runId}: ${one.detail}`).join("; ");
   return `${listed}; ${took}; ${failed.length} could not be stopped (${why}). ` +
@@ -140,9 +171,9 @@ const leadOf = (report: StopReport) => (report.notEngaged !== undefined ? "Kill 
 
 /** Whether every stop the report names was accepted, and nothing went unlisted. */
 function everyStopTook(report: StopReport): boolean {
-  const recorded = report.stops.listed && report.stops.scans.every((one) => one.stopped);
+  const recorded = report.stops.listed && report.stops.scans.every((one) => !didNotTake(one));
   const engine = report.engineRuns === undefined
-    || (report.engineRuns.listed && report.engineRuns.runs.every((one) => one.stopped) && !report.engineRuns.unnamed);
+    || (report.engineRuns.listed && report.engineRuns.runs.every((one) => !didNotTake(one)) && !report.engineRuns.unnamed);
   return recorded && engine;
 }
 
@@ -206,13 +237,23 @@ export default function AIControlPanel() {
       // A switch that could not be stored still sent every stop, and the
       // server's 500 says what each came to: that is read, not thrown away.
       const answered = (await response.clone().json().catch(() => null)) as
-        (AIControlSetting & { stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: false; message?: string; writeFailures?: string[] }) | null;
+        (AIControlSetting & {
+          stops?: KillSwitchStops; engineRuns?: EngineSweep; engaged?: boolean; message?: string; writeFailures?: string[];
+          superseded?: string;
+        }) | null;
       if (!response.ok && answered?.engaged === false && answered.stops) {
         return { ...answered, notEngaged: answered.message ?? "the setting could not be saved" };
       }
+      // Engaged, every stop sent, and the other fields sent with it refused
+      // (the account behind the session could not authorise them): the switch
+      // is on, and that is what this says -- with why the rest was not saved.
+      if (!response.ok && answered?.engaged === true && answered.stops) {
+        return { ...answered, notSaved: answered.message ?? "the other settings sent with it were not saved" };
+      }
       await throwIfResNotOk(response);
       return answered as AIControlSetting & {
-        stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string; writeFailures?: string[];
+        stops?: KillSwitchStops; engineRuns?: EngineSweep; notEngaged?: string; notSaved?: string; writeFailures?: string[];
+        superseded?: string;
       };
     },
     onSuccess: (result) => {
@@ -226,6 +267,8 @@ export default function AIControlPanel() {
         description: report
           ? [
               report.notEngaged ?? "",
+              "notSaved" in result && result.notSaved ? result.notSaved : "",
+              result.superseded ? `A later change was saved after this one: ${result.superseded}.` : "",
               stopSentence(report.stops, leadOf(report)),
               report.engineRuns ? engineSweepSentence(report.engineRuns) : "",
               report.writeFailures && report.writeFailures.length > 0
@@ -234,7 +277,8 @@ export default function AIControlPanel() {
                 : "",
             ].filter(Boolean).join(" ")
           : "The server did not say what it stopped.",
-        variant: report && report.notEngaged === undefined && everyStopTook(report) ? undefined : "destructive",
+        variant: report && report.notEngaged === undefined && !("notSaved" in result && result.notSaved) && everyStopTook(report)
+          ? undefined : "destructive",
       });
     },
     onError: (error: Error) => {

@@ -21,8 +21,16 @@ import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 const ENGINE_URL = settings.FIELDS.engineUrl.env;
 const ENGINE_KEY = settings.FIELDS.engineKey.env;
 
-/** How long any single call to the engine may take. */
-const TIMEOUT_MS = 20_000;
+/**
+ * How long the engine is waited for. `callMs`: for its answer's headers, on
+ * any call. `bodyMs`: for the rest of an answer once its headers are in -- a
+ * body that stalls (an engine, or a proxy in front of it, that sent headers
+ * and nothing more) is given up on then, and never holds a request, a slot
+ * or a Stop. `abortBodyMs`: the same for a stop's answer, which is answered
+ * from its headers and only read further to tell "not running" from
+ * "stopping" (abortRun). Tests shorten these.
+ */
+export const engineTimeouts = { callMs: 20_000, bodyMs: 20_000, abortBodyMs: 2_000 };
 
 /** The most of the engine's error body we will quote back. */
 const MAX_ERROR_BODY = 500;
@@ -72,6 +80,42 @@ export interface EngineScan {
 export class EngineUnavailable extends Error {}
 
 /**
+ * The engine did not answer within engineTimeouts.callMs. Unlike a refused
+ * connection, the request may have reached it, and it may still be doing what
+ * was asked (a retest on engine main runs to its end whoever is waiting).
+ */
+export class EngineTimedOut extends EngineUnavailable {}
+
+/**
+ * The rest of an answer whose headers are in, or null when it did not arrive
+ * within `ms` -- then the body is let go, so a stalled answer holds nothing.
+ */
+async function bodyWithin(response: Response, ms: number): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  try {
+    const read = response.text().catch(() => null);
+    const got = await Promise.race([read, late]);
+    if (got === null) void response.body?.cancel().catch(() => undefined);
+    return got;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** An answer's JSON, read within engineTimeouts.bodyMs; throws when it did not arrive, or did not parse. */
+async function jsonWithin(response: Response, what: string): Promise<unknown> {
+  const raw = await bodyWithin(response, engineTimeouts.bodyMs);
+  if (raw === null) {
+    throw new EngineUnavailable(
+      `the engine sent the headers of its answer to ${what} (${response.status}) but not the rest within ` +
+      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`,
+    );
+  }
+  return JSON.parse(raw) as unknown;
+}
+
+/**
  * The engine's `results`, read. Absent is none sent. Present and not a list is
  * an answer that could not be read: null, never an empty list. It was `[]`, so
  * a garbled answer was recorded, counted and shown as a scan that returned no
@@ -106,7 +150,7 @@ function headers(): Record<string, string> {
   return out;
 }
 
-async function call(path: string, init?: RequestInit, timeoutMs: number = TIMEOUT_MS): Promise<Response> {
+async function call(path: string, init?: RequestInit, timeoutMs: number = engineTimeouts.callMs): Promise<Response> {
   const base = baseUrl();
   if (!base) {
     throw new EngineUnavailable(
@@ -125,6 +169,9 @@ async function call(path: string, init?: RequestInit, timeoutMs: number = TIMEOU
     // A hostname, a port and a refusal are all the operator needs; the stack
     // is not, and this string reaches a browser.
     const why = cause instanceof Error ? cause.message : String(cause);
+    if (controller.signal.aborted) {
+      throw new EngineTimedOut(`the engine at ${base} did not answer within ${Math.round(timeoutMs / 1000)} s`);
+    }
     throw new EngineUnavailable(`could not reach the engine at ${base}: ${why}`);
   } finally {
     clearTimeout(timer);
@@ -132,11 +179,7 @@ async function call(path: string, init?: RequestInit, timeoutMs: number = TIMEOU
 }
 
 async function body(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, MAX_ERROR_BODY);
-  } catch {
-    return "";
-  }
+  return ((await bodyWithin(response, engineTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
 /**
@@ -706,7 +749,7 @@ export async function activeRuns(): Promise<ActiveRun[]> {
       `the engine answered ${response.status} when asked for its active runs: ${await body(response)}`,
     );
   }
-  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const payload = (await jsonWithin(response, "the list of active runs").catch(() => null)) as Record<string, unknown> | null;
   const listed = payload && typeof payload === "object" ? payload.active : undefined;
   if (!Array.isArray(listed)) {
     throw new EngineUnavailable("the engine's answer did not carry a list of active runs");
@@ -745,6 +788,12 @@ export interface AbortOutcome {
   alreadyFinished: boolean;
   /** The run's state as the engine answered it, when it did. */
   state: string | null;
+  /**
+   * The engine answered 2xx, but the rest of its answer did not arrive within
+   * engineTimeouts.abortBodyMs: taken as accepted, as its status says, though
+   * whether the run was stopping or had already ended was not read.
+   */
+  answerUnread?: boolean;
 }
 
 /** Ask a running scan to stop. */
@@ -752,8 +801,24 @@ export async function abortRun(runId: string): Promise<AbortOutcome> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}/abort`, {
     method: "POST",
   });
-  if (!response.ok) return { accepted: false, alreadyFinished: false, state: null };
-  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!response.ok) {
+    void response.body?.cancel().catch(() => undefined);
+    return { accepted: false, alreadyFinished: false, state: null };
+  }
+  // Answered from the headers: the body is read only to tell a run that had
+  // ended ("not running") from one that is stopping, and for at most
+  // engineTimeouts.abortBodyMs. A body that stalls never holds a Stop, or the
+  // kill switch, which waits on every stop's answer: the stop is taken as the
+  // engine's 2xx says, and said to be unconfirmed.
+  const raw = await bodyWithin(response, engineTimeouts.abortBodyMs);
+  if (raw === null) return { accepted: true, alreadyFinished: false, state: null, answerUnread: true };
+  let payload: Record<string, unknown> | null = null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    payload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    payload = null;
+  }
   const state = payload && typeof payload.state === "string" ? payload.state : null;
   // Both engines answer a run that has ended `{state, detail: "not running"}`.
   if (payload && payload.detail === "not running") return { accepted: false, alreadyFinished: true, state };
@@ -1037,7 +1102,11 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
       `the engine answered ${response.status}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json()) as Record<string, unknown>;
+  const read = await jsonWithin(response, "a retest");
+  if (!read || typeof read !== "object" || Array.isArray(read)) {
+    throw new UnrecognisedRetestAnswer(`Unrecognised engine answer: HTTP ${response.status} whose body is not an object. Nothing was filed.`);
+  }
+  const payload = read as Record<string, unknown>;
 
   if (!("answer" in payload)) {
     // Neither contract answers like this: main never answers 202, and never
@@ -1091,7 +1160,7 @@ export async function retestRun(engineRunId: string): Promise<RetestAnswer> {
       `the engine answered ${response.status} when asked about retest run ${engineRunId}: ${await body(response)}`,
     );
   }
-  const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  const payload = (await jsonWithin(response, `retest run ${engineRunId}`).catch(() => null)) as Record<string, unknown> | null;
   if (!payload || typeof payload !== "object") {
     throw new EngineUnavailable(`the engine's answer about retest run ${engineRunId} could not be read`);
   }
