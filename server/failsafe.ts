@@ -30,10 +30,88 @@
  * operator retunes from a screen.
  */
 
+import http from "node:http";
+import https from "node:https";
+import * as dnsCache from "./dns-cache";
+
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
 const FAILSAFE_PASSWORD_ENV = "ATHENA_FAILSAFE_PASSWORD";
 const FAILSAFE_ENGINE_ID_ENV = "ATHENA_FAILSAFE_ENGINE_ID";
+
+/**
+ * The control plane is reached over node:http (https for an https address),
+ * not global fetch (undici), for one reason: SAFETY.
+ *
+ * A stop's own call here -- drafting a pause/stand-down/terminate, relaying an
+ * operator signature -- must never depend on a live libuv-threadpool
+ * getaddrinfo. undici resolves DNS on a cold connection with no seam to pin
+ * the address, so a sign-in flood's scrypt jobs (also on the threadpool) could
+ * delay a failsafe stop exactly as they delayed the engine's when the failsafe
+ * URL is a HOSTNAME and the socket is cold. node:http takes a `lookup`, which
+ * reads the DNS cache (server/dns-cache.ts): the host is resolved once, off
+ * the stop path, and every call connects to the cached address. The hostname
+ * on the request is unchanged, so TLS SNI and certificate validation are
+ * untouched, and the address the cache holds is exactly the one getaddrinfo
+ * returned -- no host or allowlist check is weakened.
+ *
+ * Only the small surface the rest of this file uses is provided: `status`,
+ * `ok`, `text()` (read once, within a deadline) and `body.cancel()` (let the
+ * answer go -- its request is destroyed, so nothing holds a socket).
+ */
+interface ControlPlaneResponse {
+  readonly status: number;
+  readonly ok: boolean;
+  text(): Promise<string>;
+  readonly body: { cancel(): Promise<void> };
+}
+
+/** What an authenticated call sends: its method, an optional JSON body, and any extra headers. */
+type CallInit = { method?: string; headers?: Record<string, string>; body?: string };
+
+/** One request to the control plane, answered with its headers. Rejects the way fetch did (a network error), and aborts on `signal`. */
+function send(target: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<ControlPlaneResponse> {
+  const url = new URL(target);
+  const secure = url.protocol === "https:";
+  return new Promise<ControlPlaneResponse>((resolve, reject) => {
+    const req = (secure ? https : http).request(url, {
+      method: init.method ?? "GET",
+      headers: {
+        ...(init.headers ?? {}),
+        ...(init.body !== undefined ? { "Content-Length": Buffer.byteLength(init.body) } : {}),
+      },
+      signal: init.signal,
+      // SAFETY: the cached address, so a stop's call never runs a live
+      // threadpool getaddrinfo. See the note above and server/dns-cache.ts.
+      lookup: dnsCache.lookup,
+    }, (res) => {
+      res.on("error", () => undefined);
+      let reading: Promise<string> | null = null;
+      const status = res.statusCode ?? 0;
+      resolve({
+        status,
+        ok: status >= 200 && status < 300,
+        text(): Promise<string> {
+          if (reading === null) {
+            reading = new Promise<string>((resolveText, rejectText) => {
+              let raw = "";
+              let ended = false;
+              res.setEncoding("utf8");
+              res.on("data", (chunk: string) => { raw += chunk; });
+              res.on("end", () => { ended = true; resolveText(raw); });
+              res.on("close", () => { if (!ended) rejectText(new Error("the connection closed before the answer ended")); });
+            });
+          }
+          return reading;
+        },
+        body: { cancel: async () => { req.destroy(); } },
+      });
+    });
+    req.on("error", (cause) => reject(cause));
+    if (init.body !== undefined) req.write(init.body);
+    req.end();
+  });
+}
 
 /**
  * How long the control plane is waited for. `callMs`: for an answer's
@@ -191,12 +269,35 @@ function refreshNow(): void {
 export function warmUp(): void {
   const base = baseUrl();
   if (!base) return;
+  // SAFETY: resolve the control plane's address now and keep it warm in the
+  // DNS cache, off the stop path, so a failsafe stop's cold connection never
+  // runs a live threadpool getaddrinfo behind a sign-in flood. The URL is a
+  // deployment property (the environment, not a live-editable settings row),
+  // but it is re-read each tick anyway, and the timer is a single unref'd one.
+  primeFailsafeHost();
+  if (warmTimer === null) {
+    warmTimer = setInterval(primeFailsafeHost, dnsCache.TTL_MS);
+    warmTimer.unref?.();
+  }
   freshToken(base)
     .then(() => listCommands())
     .catch((cause) => {
       console.warn(`[failsafe] the control plane could not be reached at start-up (${cause instanceof Error ? cause.message : String(cause)}); ` +
         "the first call will try again");
     });
+}
+
+let warmTimer: ReturnType<typeof setInterval> | null = null;
+
+function primeFailsafeHost(): void {
+  const base = baseUrl();
+  if (!base) return;
+  try {
+    const host = new URL(base).hostname;
+    if (host) void dnsCache.prime(host);
+  } catch {
+    // An unparseable URL is surfaced when a call is actually made, not here.
+  }
 }
 
 async function obtainAccessToken(base: string): Promise<string> {
@@ -211,9 +312,9 @@ async function obtainAccessToken(base: string): Promise<string> {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
-  let response: Response;
+  let response: ControlPlaneResponse;
   try {
-    response = await fetch(`${base}/api/token/`, {
+    response = await send(`${base}/api/token/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
@@ -260,10 +361,10 @@ function linked(outer?: AbortSignal): AbortController {
  * the body's stream and closes its connection, so a stalled answer holds no
  * socket and no read.
  */
-const requestOf = new WeakMap<Response, AbortController>();
+const requestOf = new WeakMap<ControlPlaneResponse, AbortController>();
 
 /** The rest of an answer whose headers are in, or null when it did not arrive within `ms` (its request is then aborted). */
-async function textWithin(response: Response, ms: number): Promise<string | null> {
+async function textWithin(response: ControlPlaneResponse, ms: number): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
   try {
@@ -277,7 +378,7 @@ async function textWithin(response: Response, ms: number): Promise<string | null
 }
 
 /** An answer's JSON, read within `ms`: FailsafeUnavailable when it did not arrive, or did not parse. */
-async function jsonWithin(response: Response, ms: number, what: string): Promise<unknown> {
+async function jsonWithin(response: ControlPlaneResponse, ms: number, what: string): Promise<unknown> {
   const raw = await textWithin(response, ms);
   if (raw === null) {
     throw new FailsafeUnavailable(
@@ -292,7 +393,7 @@ async function jsonWithin(response: Response, ms: number, what: string): Promise
   }
 }
 
-async function body(response: Response): Promise<string> {
+async function body(response: ControlPlaneResponse): Promise<string> {
   return ((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
@@ -304,7 +405,7 @@ async function body(response: Response): Promise<string> {
  * the caller's to interpret -- a 403 from the backend is a real "you may not do
  * this", not something to retry.
  */
-async function call(path: string, init: RequestInit = {}, retryAuth = true, signal?: AbortSignal): Promise<Response> {
+async function call(path: string, init: CallInit = {}, retryAuth = true, signal?: AbortSignal): Promise<ControlPlaneResponse> {
   const base = baseUrl();
   if (!base) {
     throw new FailsafeUnavailable(
@@ -314,10 +415,11 @@ async function call(path: string, init: RequestInit = {}, retryAuth = true, sign
   const access = await accessToken(base, signal);
   const controller = linked(signal);
   const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
-  let response: Response;
+  let response: ControlPlaneResponse;
   try {
-    response = await fetch(`${base}${path}`, {
-      ...init,
+    response = await send(`${base}${path}`, {
+      method: init.method,
+      body: init.body,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${access}`,

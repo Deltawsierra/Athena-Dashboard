@@ -8,6 +8,7 @@ import path from "path";
 import { registerRoutes } from "./routes";
 import * as settings from "./settings";
 import * as health from "./health";
+import * as engine from "./engine";
 
 const SESSION_COOKIE = "athena.sid";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -111,6 +112,13 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // must not hold up the server, and until it answers the environment applies
   // -- which is what a fresh install has anyway.
   void settings.load();
+
+  // SAFETY: resolve the engine's address now and keep it warm in the DNS
+  // cache, off the stop path, so a Stop's cold connection never runs a live
+  // threadpool getaddrinfo behind a sign-in flood's scrypt jobs. Not awaited
+  // -- like settings.load, it must not hold up the server, and the cache
+  // falls back to a live lookup until it is primed.
+  engine.warmUp();
 
   registerRoutes(app);
 

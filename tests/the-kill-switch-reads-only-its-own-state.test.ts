@@ -103,3 +103,83 @@ afterEach(async () => { if (cp) await new Promise<void>((r) => cp.close(() => r(
 afterAll(() => {
   for (const k of ["ATHENA_FAILSAFE_URL", "ATHENA_FAILSAFE_USER", "ATHENA_FAILSAFE_PASSWORD"]) delete process.env[k];
 });
+
+/**
+ * #325(e), third enforcement site: markIfEngagedElsewhere -- which marks a
+ * scan the kill switch caught in flight, engaged by ANOTHER dashboard on this
+ * database -- was switched to the narrow read too, alongside enforceKillSwitch
+ * and killSwitchEngagedNow (covered above). This asserts its call-site
+ * behaviour: it is the narrow state read, NOT a full-row read, that decides a
+ * start was caught.
+ *
+ * The discriminator: the stored full row (getAIControlSettings, read here for
+ * the concurrency limit) reports the switch OFF throughout, yet the start is
+ * still refused as kill-switch-caught -- because the narrow read
+ * (getKillSwitchState) reported another dashboard's press. Had the full row
+ * been what gated it, the start would have gone through. The narrow read is
+ * made to answer "off" the first time (enforceKillSwitch, at the API gate, so
+ * the start reaches the handler) and "engaged" the next time
+ * (markIfEngagedElsewhere, just before the engine is asked) -- the very race
+ * that site exists for.
+ *
+ * On main (0a3992a) getKillSwitchState does not exist, so spying on it throws
+ * and the test fails cleanly there; on head it passes.
+ */
+let scanEngine: Server;
+it("a start caught by another dashboard's press is gated by the narrow state read, not the full row", async () => {
+  scanEngine = http.createServer((req: IncomingMessage, res: ServerResponse) => {
+    req.resume();
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url === "/health") return json(res, 200, { status: "ok" });
+      if (url === "/api/scans/active") return json(res, 200, { active: [] });
+      if (req.method === "POST" && url === "/api/scan") return json(res, 200, { run_id: "run-1", state: "running" });
+      return json(res, 404, { detail: "not here" });
+    });
+  });
+  await new Promise<void>((r) => scanEngine.listen(0, "127.0.0.1", r));
+  process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(scanEngine.address() as AddressInfo).port}`;
+  process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  vi.resetModules();
+  const app = await makeApp();
+  const admin = await signIn(app);
+  const storage = (await import("../server/storage-unified")).storage;
+
+  const clientId = (await admin.post("/api/clients").send({ name: "Elsewhere", company: "Elsewhere", email: "e@e.test" })).body.id;
+  await admin.post("/api/sites").send({ clientId, name: "Shop", url: "https://elsewhere.example" });
+
+  // The stored row is NOT engaged (a fresh install's default), and this
+  // dashboard never pressed the switch, so nothing but a read of the stored
+  // state stands between the start and the engine.
+  const fullReads = vi.spyOn(storage, "getAIControlSettings");
+  let stateReads = 0;
+  const narrowReads = vi.spyOn(storage, "getKillSwitchState").mockImplementation(async () => {
+    stateReads += 1;
+    // First read: the API gate (enforceKillSwitch) -- off, so the start is
+    // let through. Next read: markIfEngagedElsewhere, just before the engine
+    // is asked -- another dashboard's press.
+    return stateReads <= 1
+      ? { killSwitchEnabled: false, systemStatus: "active" }
+      : { killSwitchEnabled: true, systemStatus: "shutdown" };
+  });
+
+  const started = await admin.post("/api/scans").send({ clientId, target: "https://elsewhere.example/" });
+
+  // Refused as caught by the kill switch (markIfEngagedElsewhere), not as a
+  // switch already engaged at the gate.
+  expect(started.status).toBe(503);
+  expect(started.body.reason).toBe("kill_switch");
+
+  // The narrow read is what gated it (the gate + the in-flight mark).
+  expect(narrowReads.mock.calls.length).toBeGreaterThanOrEqual(2);
+  // And the full row -- read here only for the concurrency limit -- reported
+  // the switch OFF, so it was NOT what refused the start.
+  const control = await storage.getAIControlSettings();
+  expect(control?.killSwitchEnabled).toBeFalsy();
+
+  fullReads.mockRestore();
+  narrowReads.mockRestore();
+  delete process.env.ATHENA_ENGINE_URL;
+  delete process.env.ATHENA_ENGINE_KEY;
+  await new Promise<void>((r) => scanEngine.close(() => r()));
+});

@@ -1,5 +1,6 @@
 // Electron server entry point. Bundled to CommonJS by build-electron-server.cjs,
 // so it must not import Vite or anything that depends on import.meta.
+import "./boot-uv"; // Must be first: raises UV_THREADPOOL_SIZE before any libuv threadpool use.
 import express from "express";
 import { createServer } from "http";
 import path from "path";

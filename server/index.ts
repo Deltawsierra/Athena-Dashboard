@@ -1,3 +1,4 @@
+import "./boot-uv"; // Must be first: raises UV_THREADPOOL_SIZE before any libuv threadpool use.
 import { createServer } from "http";
 import { createApp, errorHandler } from "./app";
 import { setupVite, serveStatic, log } from "./vite";
