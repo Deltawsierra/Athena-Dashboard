@@ -150,12 +150,14 @@ describe("robustness", () => {
     app = await makeApp();
   });
 
-  it("treats a stored password that is not a string as a failed check", () => {
+  it("treats a stored password that is not a string as a failed check", async () => {
     // A BLOB in that column came back as a Buffer, and calling startsWith on
     // it threw, so every sign-in for that account answered 500 for good.
     for (const stored of [Buffer.from("x"), 42, true, {}, [], null, undefined]) {
-      expect(() => verifyPassword("anything", stored as unknown)).not.toThrow();
-      expect(verifyPassword("anything", stored as unknown).ok).toBe(false);
+      // A rejection here would fail this await, same as a thrown error would
+      // have against the old, synchronous verifyPassword.
+      const result = await verifyPassword("anything", stored as unknown);
+      expect(result.ok).toBe(false);
     }
   });
 
