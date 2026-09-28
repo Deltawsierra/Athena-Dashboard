@@ -9,7 +9,7 @@
     "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
     "label": "unpinned local core"
   },
-  "scenario": "verdict-closed",
+  "scenario": "scan-at-once-then-completed",
   "exchanges": [
     {
       "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
@@ -27,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "10ba7966-4521-4503-a22a-2063432bf24f",
+        "run_id": "98520db8-5066-4cf6-a5e1-75756988f75a",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-28T20:06:40.295767+00:00",
-        "updated_at": "2026-09-28T20:06:40.307566+00:00",
-        "finished_at": "2026-09-28T20:06:40.307566+00:00",
+        "started_at": "2026-09-28T20:06:41.928385+00:00",
+        "updated_at": "2026-09-28T20:06:41.934882+00:00",
+        "finished_at": "2026-09-28T20:06:41.934882+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -75,7 +75,7 @@
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=10ba7966-4521-4503-a22a-2063432bf24f&limit=101"
+        "path": "/api/decisions?run_id=98520db8-5066-4cf6-a5e1-75756988f75a&limit=101"
       },
       "status": 200,
       "body": {
@@ -84,7 +84,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "10ba7966-4521-4503-a22a-2063432bf24f",
+            "run_id": "98520db8-5066-4cf6-a5e1-75756988f75a",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -105,7 +105,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-28T20:06:40.358339+00:00",
+            "captured_at": "2026-09-28T20:06:41.988404+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -117,39 +117,95 @@
       }
     },
     {
-      "note": "the retest, answered synchronously with a closed verdict (201)",
+      "note": "the scan, as the dashboard asks for it (no wait_seconds): 202 status at once",
       "request": {
         "method": "POST",
-        "path": "/api/remediation/retest",
+        "path": "/api/scan",
         "body": {
-          "twin_id": 1,
+          "target": "https://offline.invalid/",
           "engagement_ref": "client-1:site-1",
           "scope": [
             "offline.invalid"
           ]
         }
       },
-      "status": 201,
+      "status": 202,
       "body": {
-        "twin_id": 1,
-        "verdict": "closed",
-        "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
+        "run_id": "1a9095ed-caec-4f4d-ab46-8cdc3a4d268b",
+        "state": "queued",
+        "status_url": "/api/scans/1a9095ed-caec-4f4d-ab46-8cdc3a4d268b",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "its status_url while it runs",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/1a9095ed-caec-4f4d-ab46-8cdc3a4d268b"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "1a9095ed-caec-4f4d-ab46-8cdc3a4d268b",
         "target": "https://offline.invalid/",
-        "finding_type": "xss",
-        "inventory_digest": null,
-        "run_id": 610,
-        "check": {
-          "id": 1,
-          "tenant": "default",
-          "twin_id": 1,
-          "target": "https://offline.invalid/",
-          "finding_type": "xss",
-          "verdict": "closed",
-          "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
-          "inventory_digest": null,
-          "run_id": 610,
-          "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-          "checked_at": "2026-09-28T20:06:40.403877+00:00"
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "running",
+        "reason": null,
+        "started_at": "2026-09-28T20:06:42.023950+00:00",
+        "updated_at": "2026-09-28T20:06:42.026637+00:00",
+        "finished_at": null,
+        "done": false
+      }
+    },
+    {
+      "note": "its status_url once it finished: the findings are under result",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/1a9095ed-caec-4f4d-ab46-8cdc3a4d268b"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "1a9095ed-caec-4f4d-ab46-8cdc3a4d268b",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:06:42.023950+00:00",
+        "updated_at": "2026-09-28T20:06:42.052402+00:00",
+        "finished_at": "2026-09-28T20:06:42.052402+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 700,
+          "results": [
+            {
+              "type": "xss",
+              "severity": "high",
+              "message": "Reflected input on /search",
+              "endpoint": "https://offline.invalid/search"
+            }
+          ],
+          "coverage": {
+            "checks": [
+              {
+                "check": "xss",
+                "state": "performed",
+                "probes_attempted": 4,
+                "probes_failed": 0
+              }
+            ],
+            "not_performed": [],
+            "degraded": [],
+            "unmeasured": []
+          },
+          "auth": {
+            "configured": false,
+            "authenticated": false,
+            "identities": [],
+            "verified": []
+          },
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
         }
       }
     }

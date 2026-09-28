@@ -1672,6 +1672,7 @@ function retestView(watched: RetestWatch) {
       ...watched,
       completedDespiteStop: (watched.result as { completedDespiteStop?: unknown } | null)?.completedDespiteStop === true,
       completedAfterUnreadStop: (watched.result as { completedAfterUnreadStop?: unknown } | null)?.completedAfterUnreadStop === true,
+      stoppedAfterRecording: (watched.result as { stoppedAfterRecording?: unknown } | null)?.stoppedAfterRecording ?? null,
     }),
     ...(watched.result ? { result: watched.result } : {}),
   };
@@ -1682,7 +1683,7 @@ function retestPhaseSentence(
   phase: retests.RetestPhase | "refused",
   about: {
     reason: string | null; error: string | null; stopAcceptedAt?: Date | string | null; stopUnreadAt?: Date | string | null;
-    completedDespiteStop?: boolean; completedAfterUnreadStop?: boolean;
+    completedDespiteStop?: boolean; completedAfterUnreadStop?: boolean; stoppedAfterRecording?: unknown;
   },
 ): string {
   switch (phase) {
@@ -1694,6 +1695,10 @@ function retestPhaseSentence(
             "whether it is stopping is not known. It has not reached a verdict, and nothing has been filed."
           : "The engine is still running this retest against the target. It has not reached a verdict, and nothing has been filed.";
     case "verdict":
+      if (typeof about.stoppedAfterRecording === "string") {
+        return `The retest reached a verdict and the engine filed its check; a stop (${about.stoppedAfterRecording}) ` +
+          "landed while that check was being written, so the run ended stopped. The verdict stands and was filed.";
+      }
       return about.completedDespiteStop
         ? "The engine accepted a stop for this retest, but the run completed anyway, with a verdict. The verdict was " +
           "filed, marked as completed despite a stop request."
@@ -1753,8 +1758,10 @@ async function answerRetestStatus(
   // A 202 is a run the engine has not finished answering for, whatever state
   // it names: it is watched. A state that already reads ended -- the run
   // finished between the engine's wait and its answer -- is read at once, and
-  // its verdict, if it has one, filed.
-  if (status.httpStatus === 202 || LIVE_RETEST_STATES.has(status.state)) {
+  // its verdict, if it has one, filed. So is a 500 that names a run whose
+  // work started (athena-engine #71: the engine failed after registering it,
+  // and it is running): watched, with its Stop (engine.retestMayBeRunning).
+  if (engine.retestMayBeRunning(status)) {
     if (status.engineRunId !== null) {
       // In memory, synchronously: the answer -- and the Stop's run id in it --
       // goes back without waiting on the watch's row, the log, or the finding.
@@ -2355,6 +2362,32 @@ export function registerRoutes(app: Express): void {
         ...(data.auth?.enabled ? { auth: data.auth } : {}),
       });
     } catch (cause) {
+      if (cause instanceof engine.UnrecognisedScanAnswer) {
+        // The engine took the start (2xx) and answered in a shape this
+        // dashboard does not read: nothing is recorded from it, and the run it
+        // named -- which may be scanning, with no row here to carry its Stop --
+        // is stopped, as a start that could not be recorded is.
+        if (cause.stopId === null) {
+          return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer" });
+        }
+        const stop = await sendStop(req, { runId: cause.stopId, target: data.target, testId: null }, "start_not_recorded");
+        return void res.status(502).json({
+          error: `${cause.message} ` + (stop.answerUnread
+            ? `Run ${cause.stopId} was sent a stop, and the engine answered it 2xx, but the rest of its answer was not read ` +
+              "(stop sent, answer unread): whether it is stopping is not known."
+            : stop.stopped
+              ? `Run ${cause.stopId} was sent a stop, and the engine accepted it.`
+              : stop.alreadyFinished
+                ? `Run ${cause.stopId} was sent a stop, and the engine answered that it had already ended.`
+                : `Run ${cause.stopId} was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
+                  "stop it with the kill switch or a failsafe pause."),
+          reason: "unrecognised_engine_answer",
+          runId: cause.stopId,
+          stopped: stop.stopped,
+          ...(stop.alreadyFinished ? { alreadyFinished: true } : {}),
+          ...(stop.answerUnread ? { answerUnread: true } : {}),
+        });
+      }
       if (cause instanceof engine.EngineUnavailable) {
         // 503, not 500. Nothing is broken: the engine is not there, or not
         // answering, and that is a fact about the deployment.
@@ -2382,7 +2415,10 @@ export function registerRoutes(app: Express): void {
     // be written with zero counts and no completion time, and the status
     // route never revisits a completed row -- so a scan that returned a
     // critical read as "0 reported" on every screen that reads the test.
-    const completedInline = started.state === "completed";
+    // Only an answer that is the run's end (a 200): a 202 is never done,
+    // whatever state it names (engine.EngineScan.final), and its results are
+    // collected on the status route.
+    const completedInline = started.final === true && started.state === "completed";
     let test;
     try {
       test = await storage.createTest({
@@ -2502,6 +2538,7 @@ export function registerRoutes(app: Express): void {
       // (the Failsafe console) in place of a Stop that would answer 409.
       ...(started.runId === null && !completedInline ? { stop: "failsafe" as const } : {}),
       ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
+      ...(started.warning ? { warning: started.warning } : {}),
     });
   }));
 
@@ -2882,7 +2919,7 @@ export function registerRoutes(app: Express): void {
     // engine answered with a retest still running: it is watched (its verdict,
     // if it comes to one, is filed as any is) and stopped now, by its run id.
     const liveRetest = answered.answer === "status" && answered.status.engineRunId !== null
-      && (answered.status.httpStatus === 202 || LIVE_RETEST_STATES.has(answered.status.state));
+      && engine.retestMayBeRunning(answered.status);
     if (liveRetest) await markIfEngagedElsewhere(ticket);
     if (liveRetest && answered.answer === "status" && ticket?.press) {
       const status = answered.status;

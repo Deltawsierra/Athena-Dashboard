@@ -6,7 +6,8 @@
   },
   "mythos_core": {
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
-    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
   },
   "scenario": "verdict-still-open",
   "exchanges": [
@@ -26,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "68baa0b2-e882-4b22-a602-5c19da6682f0",
+        "run_id": "d453f687-5c2d-4b4b-96bf-20692fa58ae5",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-26T23:01:32.549966+00:00",
-        "updated_at": "2026-09-26T23:01:32.555741+00:00",
-        "finished_at": "2026-09-26T23:01:32.555741+00:00",
+        "started_at": "2026-09-28T20:06:40.613020+00:00",
+        "updated_at": "2026-09-28T20:06:40.619689+00:00",
+        "finished_at": "2026-09-28T20:06:40.619689+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -74,7 +75,7 @@
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=68baa0b2-e882-4b22-a602-5c19da6682f0&limit=101"
+        "path": "/api/decisions?run_id=d453f687-5c2d-4b4b-96bf-20692fa58ae5&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +84,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "68baa0b2-e882-4b22-a602-5c19da6682f0",
+            "run_id": "d453f687-5c2d-4b4b-96bf-20692fa58ae5",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +105,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-26T23:01:32.607350+00:00",
+            "captured_at": "2026-09-28T20:06:40.673250+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -148,7 +149,7 @@
           "inventory_digest": null,
           "run_id": 611,
           "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-          "checked_at": "2026-09-26T23:01:32.638785+00:00"
+          "checked_at": "2026-09-28T20:06:40.704632+00:00"
         }
       }
     }

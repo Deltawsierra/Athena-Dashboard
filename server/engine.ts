@@ -95,6 +95,17 @@ export interface EngineScan {
    * the screens treat as none but a stop still reaches. Set by startScan only.
    */
   stopId?: string | null;
+  /**
+   * Set by startScan only: whether this answer is the run's end -- a 200, which
+   * carries the finished run (its results under `result`). A 202
+   * never is, whatever `state` it names: the engine reads the state after it
+   * hands the run over, so a scan that ended in between is answered 202
+   * `completed` with no results in it, and those are collected from
+   * `/api/scans/{run_id}`. Neither is a 500 that names a run.
+   */
+  final?: boolean;
+  /** Set by startScan only: what the engine said went wrong around a run it started all the same. */
+  warning?: string;
 }
 
 export class EngineUnavailable extends Error {}
@@ -126,6 +137,19 @@ export class EngineNotConfigured extends EngineUnavailable {}
  * started. A definite answer, unlike a reset or a timeout after sending.
  */
 export class EngineConnectionRefused extends EngineUnavailable {}
+
+/**
+ * A scan start the engine answered 2xx in a shape this dashboard does not
+ * read: nothing is recorded from it, and no state or result is made up for
+ * it. `stopId` is the run id it carried, if any: the engine may be scanning
+ * under it, so the caller stops it (routes.ts) rather than leave a run going
+ * that nothing here recorded.
+ */
+export class UnrecognisedScanAnswer extends EngineUnavailable {
+  constructor(message: string, readonly stopId: string | null) {
+    super(message);
+  }
+}
 
 /** The connect-phase failures: no connection was made, so nothing was sent. */
 const NOTHING_SENT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
@@ -683,6 +707,37 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
       refused: await body(response),
     };
   }
+  if (response.status === 500) {
+    // athena-engine #71: a launch that failed after its run was registered is
+    // a 500 `answer: "status"` that still names the run. `state: "failed"`:
+    // its work never started, and the run is recorded FAILED. `state: null`:
+    // its work did start -- it is scanning, stoppable by this id, and records
+    // its own end -- so it is recorded here as running, with its Stop, and
+    // collected from `/api/scans/{run_id}` like any other. Any other 500 is
+    // the engine's words, as it always was.
+    const raw = await body(response);
+    const named = statusAnswerOf(raw);
+    const stopId = named ? stopIdFrom(named.run_id) : null;
+    if (named && stopId !== null && named.state !== "failed") {
+      const error = typeof named.error === "string" ? named.error : "no error given";
+      return {
+        runId: runIdFrom(named.run_id),
+        stopId,
+        state: typeof named.state === "string" ? named.state : "unknown",
+        findings: [],
+        detail: "the engine started the scan, and failed after it registered it",
+        warning: `the engine failed after it registered run ${stopId} (${error}), and its work may be running: ` +
+          "it is recorded as running, with its Stop, and read from the engine until it ends",
+        final: false,
+      };
+    }
+    throw new EngineUnavailable(
+      named && stopId !== null
+        ? `the engine answered 500: run ${stopId} failed before its work started (${String(named.error ?? "no error given")}); ` +
+          "nothing was sent to the target"
+        : `the engine answered 500: ${raw}`,
+    );
+  }
   if (!response.ok) {
     throw new EngineUnavailable(
       `the engine answered ${response.status}: ${await body(response)}`,
@@ -690,6 +745,26 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   }
 
   const payload = objectOf(await jsonWithin(response, "the scan"));
+  // Which contract answered is read from one explicit field, `answer`, never
+  // guessed from a shape: athena-engine #71 marks every scan answer
+  // `answer: "status"`; engine main sends no `answer`. Both name the run by
+  // `run_id`, the id its Stop is sent by, and neither sends a scan record id
+  // here (a finished run's record is `result.scan_id`). Anything else is a
+  // shape this dashboard does not read: nothing is recorded from it, and no
+  // state or result is made up for it.
+  if ("answer" in payload && payload.answer !== "status") {
+    throw new UnrecognisedScanAnswer(
+      `the engine answered a shape this dashboard does not read: HTTP ${response.status} with answer ` +
+      `${JSON.stringify(payload.answer)} to a scan start. Nothing was recorded from it.`,
+      stopIdFrom(payload.run_id),
+    );
+  }
+  // Only a 200 -- the finished run, which the engine answers only when the
+  // run ended inside the wait it was asked for -- is the run's end. A 202 is
+  // never "done", whatever `state` it names (EngineScan.final): its results
+  // are not in it, and read as they were, a scan that ended between the
+  // engine's hand-over and its answer was recorded completed with none.
+  const final = response.status === 200;
   // Measured against a live engine: results come back under `result.results`,
   // never at the top level. This read `payload.results` -- a key the engine
   // does not send -- so a scan that completed inline had its findings silently
@@ -704,9 +779,24 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     runId: runIdFrom(payload.run_id),
     stopId: stopIdFrom(payload.run_id),
     state: (payload.state as string) ?? "running",
-    findings: inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
+    findings: !final ? [] : inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
+    final,
   };
+}
+
+/** A body that is an `answer: "status"` object (athena-engine #71), or null. */
+function statusAnswerOf(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>).answer === "status") {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Not JSON: not a status.
+  }
+  return null;
 }
 
 /**
@@ -1265,6 +1355,14 @@ export interface RetestResult {
    */
   engineRunId: string | null;
   checkedAt: string | null;
+  /**
+   * athena-engine #71 (f4610ae): a stop landed while the retest's remediation
+   * check was being filed, after the last point that could prevent it. The
+   * check is on the engine's chain and the verdict stands; the run itself
+   * ended ABORTED. The stop's reason (the engine's `stopped_after_recording`,
+   * or the run's `reason` on a status read); null for a run that completed.
+   */
+  stoppedAfterRecording: string | null;
 }
 
 /**
@@ -1281,8 +1379,25 @@ export interface RetestStatus {
   state: string;
   reason: string | null;
   error: string | null;
-  /** The HTTP status the engine answered with (202, 200 or 429; 200 for a status read). */
+  /**
+   * The HTTP status the engine answered with: 202, 200 or 429; 500 when the
+   * engine failed after it registered the run (athena-engine #71); 200 for a
+   * status read.
+   */
   httpStatus: number;
+}
+
+/**
+ * Whether a retest status may still be doing something to the target, so it
+ * is watched, with its Stop: a 202 (whatever state it names -- the run may
+ * have ended between the engine's hand-over and its answer, and is then read
+ * at once), a live state, or a 500 that names a run whose work started
+ * (athena-engine #71 answers such a run `state: null`; `failed` is one whose
+ * work never started).
+ */
+export function retestMayBeRunning(status: RetestStatus): boolean {
+  if (status.httpStatus === 202 || ["queued", "running", "aborting"].includes(status.state)) return true;
+  return status.httpStatus === 500 && status.engineRunId !== null && !RETEST_DONE_STATES.has(status.state);
 }
 
 /** Which of the two things a retest answer is. Read from `answer` before `verdict`. */
@@ -1359,6 +1474,7 @@ function verdictOf(
     runId: runIdFrom(recordId),
     engineRunId,
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
+    stoppedAfterRecording: text(payload.stopped_after_recording),
   };
 }
 
@@ -1379,12 +1495,20 @@ function statusOf(payload: Record<string, unknown>, httpStatus: number): RetestS
  * Two contracts are read, told apart by whether the answer carries `answer`:
  *
  *  - athena-engine #71: `answer: "verdict"` (201) is a verdict, its `run_id`
- *    the registry id and its record id `scan_record_id`; `answer: "status"`
- *    (202 running, 200 stopped / failed / no verdict, 429 queue full) is where
- *    the run is and never a verdict.
- *  - engine main (no `answer`): any 2xx is the verdict, answered once the
- *    retest is over, and its `run_id` is the scan record id. Read exactly as
- *    it always was.
+ *    the registry id and its record id `scan_record_id` -- `state: "aborted"`
+ *    with `stopped_after_recording` when a stop landed while its check was
+ *    being filed; `answer: "status"` (202 running, 200 stopped / failed / no
+ *    verdict, 429 queue full, 500 failed after the run was registered) is
+ *    where the run is and never a verdict.
+ *  - engine main before #71 (no `answer`): the OLD contract. Any 2xx is the
+ *    verdict, answered once the retest is over, and its `run_id` is the scan
+ *    record id (no stop can name it: the run is over). Read exactly as it
+ *    always was, and only while the answer carries no `answer` and no
+ *    `scan_record_id`.
+ *
+ * Which contract answered is decided by that one explicit field, never
+ * guessed from the rest of the shape; an answer that fits neither is refused
+ * (below), never read with a made-up value.
  *
  * `wait_seconds: 0` is sent first, so #71 answers 202 at once rather than
  * holding an engine thread for up to 30 s; main refuses the field (422,
@@ -1423,6 +1547,19 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
       return { answer: "status", status: statusOf(payload as Record<string, unknown>, 429) };
     }
     throw new EngineRefused(`the engine answered 429: ${raw}`, 429);
+  }
+  if (response.status === 500) {
+    // #71: a failure after the run was registered is a 500 status that still
+    // names the run -- `state: null` when its work started (it is running, and
+    // stoppable by this id), `failed` when it never did. Read as the status it
+    // is (retestMayBeRunning). A 500 that names no run says nothing about
+    // whether a retest started, as before.
+    const raw = await body(response);
+    const named = statusAnswerOf(raw);
+    if (named && stopIdFrom(named.run_id) !== null) {
+      return { answer: "status", status: statusOf(named, 500) };
+    }
+    throw new EngineUnavailable(`the engine answered 500: ${raw}`);
   }
   if (!response.ok) {
     const said = `the engine answered ${response.status}: ${await body(response)}`;
@@ -1480,11 +1617,12 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
  * the `status_url` #71 answers with, built here from the run id rather than
  * followed, so a status read can only ever reach that route.
  *
- * A verdict only when the run COMPLETED and its stored result carries one,
- * which is the rule the engine answers a waiting caller by. A run that was
- * stopped or failed keeps the runner's inconclusive verdict as its stored
- * result; that is not a verdict on the finding, and it is read as the status
- * it is.
+ * A verdict only by the rule the engine answers a waiting caller by: the run
+ * COMPLETED and its stored result carries one, or it was ABORTED after its
+ * check was filed (the result carries the verdict and that check). A run that
+ * failed keeps the runner's inconclusive verdict as its stored result, and one
+ * stopped before it filed anything carries none; neither is a verdict on the
+ * finding, and each is read as the status it is.
  */
 export async function retestRun(engineRunId: string): Promise<RetestAnswer> {
   const response = await call(`/api/scans/${encodeURIComponent(engineRunId)}`);
@@ -1505,6 +1643,20 @@ export async function retestRun(engineRunId: string): Promise<RetestAnswer> {
     return {
       answer: "verdict",
       result: verdictOf(result, result.scan_record_id, stopIdFrom(result.run_id) ?? engineRunId),
+    };
+  }
+  // athena-engine #71 (f4610ae): a stop that landed while the check was being
+  // filed leaves the run ABORTED with the verdict and the check it filed as
+  // its result -- the rule the engine answers a waiting caller 201 by. That
+  // verdict is on the engine's chain: it is filed here too, marked as stopped
+  // after it was recorded. A stopped run whose result filed no check (its
+  // `{stopped, scan_incomplete}`) is a status, as before.
+  if (payload.done === true && state === "aborted" && result && typeof result.verdict === "string"
+    && result.check !== null && typeof result.check === "object" && !Array.isArray(result.check)) {
+    const read = verdictOf(result, result.scan_record_id, stopIdFrom(result.run_id) ?? engineRunId);
+    return {
+      answer: "verdict",
+      result: { ...read, stoppedAfterRecording: read.stoppedAfterRecording ?? text(payload.reason) ?? "aborted" },
     };
   }
   const error = state === "failed"
