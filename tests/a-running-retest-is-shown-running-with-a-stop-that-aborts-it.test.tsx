@@ -8,7 +8,7 @@
  * a missing one as "Inconclusive". These drive the real RetestPanel and
  * RunningScans against the real routes, signed in, with an engine that
  * answers what the real engine answered (tests/fixtures/engine-retest, recorded
- * from athena-engine 143279e and 5779e99 by generate.py beside them).
+ * from athena-engine f4610ae and 5779e99 by generate.py beside them).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import http from "http";
@@ -168,7 +168,7 @@ async function pressRetest(fx: Fixture) {
 
 describe("the retest panel reads a status as a status", () => {
   it("202: shown Running, never as a verdict, with a Stop that aborts the engine's run by its run_id", async () => {
-    const fx = load("pr71-143279e", "running-then-stopped");
+    const fx = load("pr71-f4610ae", "running-then-stopped");
     const runId = retestOf(fx).body.run_id as string;
     let release!: () => void;
     state.hold = new Promise<void>((r) => { release = r; });
@@ -194,7 +194,7 @@ describe("the retest panel reads a status as a status", () => {
   });
 
   it("202 then the verdict: drawn as the verdict once the run completes", async () => {
-    const fx = load("pr71-143279e", "running-then-verdict");
+    const fx = load("pr71-f4610ae", "running-then-verdict");
     state.statusReads = statusReadsOf(fx);
     const twinId = await pressRetest(fx);
     await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent).toBe("Closed"), { timeout: 8_000 });
@@ -202,7 +202,7 @@ describe("the retest panel reads a status as a status", () => {
   });
 
   it("200 stopped while the engine waited: Stopped, with no verdict and no Stop", async () => {
-    const fx = load("pr71-143279e", "stopped-while-waiting");
+    const fx = load("pr71-f4610ae", "stopped-while-waiting");
     const twinId = await pressRetest(fx);
     await waitFor(() => expect(screen.getByTestId(`text-retest-phase-${twinId}`).textContent).toBe("Stopped"));
     expect(screen.queryByTestId(`verdict-${twinId}`)).toBeNull();
@@ -210,7 +210,7 @@ describe("the retest panel reads a status as a status", () => {
   });
 
   it("200 failed: Failed, in the engine's words", async () => {
-    const fx = load("pr71-143279e", "failed");
+    const fx = load("pr71-f4610ae", "failed");
     const twinId = await pressRetest(fx);
     await waitFor(() => expect(screen.getByTestId(`text-retest-phase-${twinId}`).textContent).toBe("Failed"));
     expect(screen.getByTestId(`text-retest-status-${twinId}`).textContent).toContain(retestOf(fx).body.error);
@@ -218,7 +218,7 @@ describe("the retest panel reads a status as a status", () => {
   });
 
   it("201 verdict on #71, and the synchronous verdict on main, are drawn as verdicts", async () => {
-    for (const [dir, word] of [["pr71-143279e", "Closed"], ["main-5779e99", "Closed"]] as const) {
+    for (const [dir, word] of [["pr71-f4610ae", "Closed"], ["main-5779e99", "Closed"]] as const) {
       const fx = load(dir, "verdict-closed");
       const twinId = await pressRetest(fx);
       await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent, dir).toBe(word));
@@ -230,11 +230,11 @@ describe("the retest panel reads a status as a status", () => {
 
 describe("Scans running now lists a running retest from the engine's list", () => {
   it("with a Stop that aborts it by its run_id", async () => {
-    const fx = load("pr71-143279e", "running-then-verdict");
+    const fx = load("pr71-f4610ae", "running-then-verdict");
     const run = pick(fx, "GET", (p) => p === "/api/scans/active")[0].body.active[0];
     state.fixture = fx;
     state.active = pick(fx, "GET", (p) => p === "/api/scans/active")[0];
-    state.abort = abortOf(load("pr71-143279e", "running-then-stopped"));
+    state.abort = abortOf(load("pr71-f4610ae", "running-then-stopped"));
     realRoutes();
     render(<QueryClientProvider client={queryClient}><RunningScans exclude={null} /></QueryClientProvider>);
     const row = await screen.findByTestId(`running-retest-${run.run_id}`);

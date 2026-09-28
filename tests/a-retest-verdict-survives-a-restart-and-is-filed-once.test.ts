@@ -34,13 +34,13 @@ afterAll(() => {
  * Driven on both backends: memory (two app instances on the one in-memory
  * store) and SQLite (app instances on one database file, each with its own
  * modules and connection, as two processes would be). The engine answers from
- * tests/fixtures/engine-retest, recorded from athena-engine at 143279e.
+ * tests/fixtures/engine-retest, recorded from athena-engine at f4610ae.
  */
 
 type Exchange = { request: { method: string; path: string }; status: number; body: any; headers?: Record<string, string> };
 type Fixture = { exchanges: Exchange[] };
 const load = (name: string): Fixture =>
-  JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures", "engine-retest", "pr71-143279e", `${name}.json`), "utf8"));
+  JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures", "engine-retest", "pr71-f4610ae", `${name}.json`), "utf8"));
 const pick = (fx: Fixture, method: string, test: (p: string) => boolean) =>
   fx.exchanges.filter((one) => one.request.method === method && test(one.request.path));
 const retestOf = (fx: Fixture) => pick(fx, "POST", (p) => p === "/api/remediation/retest")[0];

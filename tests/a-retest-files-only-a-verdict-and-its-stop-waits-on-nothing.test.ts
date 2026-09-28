@@ -20,7 +20,7 @@ import { makeApp, signIn } from "./helpers";
  *
  * Every engine answer here is one the real engine app sent: the JSON files in
  * tests/fixtures/engine-retest were recorded by driving athena-engine at
- * 143279e (#71's head) and at 5779e99 (main) through TestClient, and
+ * f4610ae (#71's head) and at 5779e99 (main) through TestClient, and
  * tests/fixtures/engine-retest/generate.py records them again. Ids are read
  * from the files, never assumed.
  *
@@ -48,7 +48,7 @@ type Exchange = {
 type Fixture = { engine: { sha: string; contract: string }; scenario: string; exchanges: Exchange[] };
 
 const FIXTURES = path.resolve(__dirname, "fixtures", "engine-retest");
-const PR71 = "pr71-143279e";
+const PR71 = "pr71-f4610ae";
 const MAIN = "main-5779e99";
 
 function load(dir: string, name: string): Fixture {
@@ -204,7 +204,7 @@ describe("the fixtures are what the engine sent, at the commits they name", () =
   it("each file names its engine commit, and the two contracts differ where #71 says they do", () => {
     const pr = load(PR71, "verdict-closed");
     const main = load(MAIN, "verdict-closed");
-    expect(pr.engine).toEqual({ repository: "athena-engine", sha: "143279e5e9d680fecf48ddd7a926cd565dfb56a8", contract: "pr71" });
+    expect(pr.engine).toEqual({ repository: "athena-engine", sha: "f4610ae03b6abacf4108990c953462fbf1880950", contract: "pr71" });
     expect(main.engine).toEqual({ repository: "athena-engine", sha: "5779e99eae1085f96e6c27ce28dbd950d8200aba", contract: "main" });
     expect(retestOf(pr).body.answer).toBe("verdict");
     expect(typeof retestOf(pr).body.run_id).toBe("string");
@@ -292,10 +292,13 @@ describe("athena-engine #71: a verdict is filed, a status never is", () => {
     const accepted = retestOf(fx).body;
     const [aborting] = abortsOf(fx);
     const [stopped] = statusReadsOf(fx);
-    // The stopped run's stored result is the runner's inconclusive verdict.
-    // It is not a verdict on the finding, and it is not filed.
+    // The stopped run's stored result names the stop and carries no verdict
+    // (f4610ae: `{stopped, scan_incomplete}`; #71's earlier head kept the
+    // runner's inconclusive verdict there). Nothing in it is filed.
     expect(stopped.body.state).toBe("aborted");
-    expect(stopped.body.result.verdict).toBe("inconclusive");
+    expect(stopped.body.result).not.toHaveProperty("verdict");
+    expect(stopped.body.result).not.toHaveProperty("check");
+    expect(stopped.body.result).toMatchObject({ stopped: "stopped by an operator", scan_incomplete: true });
 
     // The watcher's first read is held until the Stop has been sent; it then
     // reads the run as the engine recorded it once stopped.

@@ -418,8 +418,11 @@ export class RetestWatcher {
     // is not known, so the verdict is never said to have come despite one --
     // it came after a stop whose answer was not read.
     const afterUnreadStop = !despiteStop && row.stopUnreadAt != null;
+    // A verdict whose check the engine filed before a stop landed: the run
+    // ended ABORTED, and the verdict stands (engine.retestRun).
     const base: RetestWatchEnd = {
-      state: "verdict", engineState: "completed", reason: null, error: null, endedAt: new Date(),
+      state: "verdict", engineState: result.stoppedAfterRecording ? "aborted" : "completed",
+      reason: result.stoppedAfterRecording ?? null, error: null, endedAt: new Date(),
       lastReadAt: at, lastReadError: null, result: null,
     };
     let findingId = row.findingId;

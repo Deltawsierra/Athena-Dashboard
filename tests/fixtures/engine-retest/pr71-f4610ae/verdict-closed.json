@@ -1,12 +1,13 @@
 {
   "engine": {
     "repository": "athena-engine",
-    "sha": "143279e5e9d680fecf48ddd7a926cd565dfb56a8",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
     "contract": "pr71"
   },
   "mythos_core": {
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
-    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
   },
   "scenario": "verdict-closed",
   "exchanges": [
@@ -26,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "29e9f437-df75-4d0b-a357-91f0d88f4620",
+        "run_id": "71790351-a68e-4ca7-a073-101df785fe4a",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:58:15.909274+00:00",
-        "updated_at": "2026-09-27T00:58:15.917441+00:00",
-        "finished_at": "2026-09-27T00:58:15.917441+00:00",
+        "started_at": "2026-09-28T20:04:58.652212+00:00",
+        "updated_at": "2026-09-28T20:04:58.659994+00:00",
+        "finished_at": "2026-09-28T20:04:58.659994+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -67,14 +68,16 @@
           },
           "chain_outcome": null,
           "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
-        }
+        },
+        "answer": "status",
+        "status_url": "/api/scans/71790351-a68e-4ca7-a073-101df785fe4a"
       }
     },
     {
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=29e9f437-df75-4d0b-a357-91f0d88f4620&limit=101"
+        "path": "/api/decisions?run_id=71790351-a68e-4ca7-a073-101df785fe4a&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +86,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "29e9f437-df75-4d0b-a357-91f0d88f4620",
+            "run_id": "71790351-a68e-4ca7-a073-101df785fe4a",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +107,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-27T00:58:15.970024+00:00",
+            "captured_at": "2026-09-28T20:04:58.716063+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -136,7 +139,7 @@
         "target": "https://offline.invalid/",
         "finding_type": "xss",
         "inventory_digest": null,
-        "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
+        "run_id": "b89c6d54-e82d-4a57-aa9b-fc95bd28ea28",
         "scan_record_id": 500,
         "check": {
           "id": 1,
@@ -149,30 +152,30 @@
           "inventory_digest": null,
           "run_id": 500,
           "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-          "checked_at": "2026-09-27T00:58:16.012918+00:00"
+          "checked_at": "2026-09-28T20:04:58.765470+00:00"
         },
         "answer": "verdict",
         "state": "completed",
-        "status_url": "/api/scans/51548ea7-f31f-4a06-ab0b-e211e1aa4973"
+        "status_url": "/api/scans/b89c6d54-e82d-4a57-aa9b-fc95bd28ea28"
       }
     },
     {
       "note": "the same run read from its status_url",
       "request": {
         "method": "GET",
-        "path": "/api/scans/51548ea7-f31f-4a06-ab0b-e211e1aa4973"
+        "path": "/api/scans/b89c6d54-e82d-4a57-aa9b-fc95bd28ea28"
       },
       "status": 200,
       "body": {
-        "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
+        "run_id": "b89c6d54-e82d-4a57-aa9b-fc95bd28ea28",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:58:16.007074+00:00",
-        "updated_at": "2026-09-27T00:58:16.021439+00:00",
-        "finished_at": "2026-09-27T00:58:16.021439+00:00",
+        "started_at": "2026-09-28T20:04:58.758125+00:00",
+        "updated_at": "2026-09-28T20:04:58.768297+00:00",
+        "finished_at": "2026-09-28T20:04:58.768297+00:00",
         "done": true,
         "result": {
           "twin_id": 1,
@@ -181,7 +184,7 @@
           "target": "https://offline.invalid/",
           "finding_type": "xss",
           "inventory_digest": null,
-          "run_id": "51548ea7-f31f-4a06-ab0b-e211e1aa4973",
+          "run_id": "b89c6d54-e82d-4a57-aa9b-fc95bd28ea28",
           "scan_record_id": 500,
           "check": {
             "id": 1,
@@ -194,7 +197,7 @@
             "inventory_digest": null,
             "run_id": 500,
             "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-27T00:58:16.012918+00:00"
+            "checked_at": "2026-09-28T20:04:58.765470+00:00"
           }
         }
       }
