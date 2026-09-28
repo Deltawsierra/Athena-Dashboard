@@ -21,6 +21,28 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * A request the server refused or failed: its sentence as the message, and
+ * its answer as it came (null when it was not JSON), for a caller that has to
+ * read more of it than the sentence -- whether a run may still be going.
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly body: Record<string, unknown> | null) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * Whether the server said a run it could not stop may still be going
+ * (`mayStillBeRunning`): a start refused as an unread answer whose stop did
+ * not take, or a retest whose slot is held. Such a failure is never titled
+ * "did not start" or "did not run".
+ */
+export function mayStillBeRunning(error: unknown): boolean {
+  return error instanceof ApiError && error.body?.mayStillBeRunning === true;
+}
+
 type UnauthorizedListener = () => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 
@@ -52,17 +74,18 @@ export async function throwIfResNotOk(res: Response): Promise<void> {
   // failsafe routes answer with `{error}`, and the literal `{"error":"…"}` is
   // not a sentence to show a person); fall back to text, then status.
   const body = await res.clone().json().catch(() => null);
+  const answer = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
   if (body && typeof body.message === "string") {
     const issues = Array.isArray(body.issues)
       ? body.issues.map((i: { path: string; message: string }) => `${i.path}: ${i.message}`).join("; ")
       : "";
-    throw new Error(issues ? `${body.message} (${issues})` : body.message);
+    throw new ApiError(issues ? `${body.message} (${issues})` : body.message, res.status, answer);
   }
   if (body && typeof body.error === "string") {
-    throw new Error(body.error);
+    throw new ApiError(body.error, res.status, answer);
   }
   const text = (await res.text().catch(() => "")) || res.statusText;
-  throw new Error(text || `Request failed with status ${res.status}`);
+  throw new ApiError(text || `Request failed with status ${res.status}`, res.status, answer);
 }
 
 /**

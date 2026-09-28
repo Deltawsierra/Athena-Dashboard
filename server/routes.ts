@@ -251,6 +251,17 @@ function causeOf(cause: unknown): string {
 }
 
 /**
+ * A line for the console, whose engine-supplied parts (run ids, the engine's
+ * words) cannot forge another: every control character -- a newline, a
+ * carriage return, an escape, and U+2028/U+2029 -- is written as its escape
+ * (\n, \u001b), so one line is always one line.
+ */
+function logLine(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) =>
+    c === "\n" ? "\\n" : c === "\r" ? "\\r" : c === "\t" ? "\\t" : `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
  * The id the kill switch stops a test's unfinished run by (shared/engine-record.ts
  * stopIdFrom): its run id, or a non-empty id blank after trimming, which no
  * screen offers a Stop for but a stop still reaches exactly. null otherwise.
@@ -409,6 +420,8 @@ async function writeStopRecord(
   via: "kill_switch" | "delete" | "start_not_recorded" | "stop" | "retest_stop",
   outcome: StopOutcome,
   note?: string,
+  /** Where an answer this dashboard did not read named the run (engine.RunNamedBy), for a stop sent because of one. */
+  namedBy?: engine.RunNamedBy,
 ): Promise<string | null> {
   try {
     await storage.createActivityLog({
@@ -425,6 +438,7 @@ async function writeStopRecord(
         ...(run.testId === null ? { target: run.target } : {}),
         ...(outcome.detail ? { detail: outcome.detail } : {}),
         ...(note ? { note } : {}),
+        ...(namedBy ? { namedBy } : {}),
       },
       ...who,
     });
@@ -440,11 +454,20 @@ async function sendStop(
   run: { runId: string; target: string | null; testId: string | null },
   via: "kill_switch" | "delete" | "start_not_recorded",
   note?: string,
+  namedBy?: engine.RunNamedBy,
 ): Promise<StopOutcome> {
   const who = actor(req);
   const outcome = await sendAbort(run.runId);
-  await writeStopRecord(who, run, via, outcome, note);
+  await writeStopRecord(who, run, via, outcome, note, namedBy);
   return outcome;
+}
+
+/** Whether a run may still be going after its stop: the engine did not take it (or its answer was not read), and did not say the run had ended. */
+const mayRunAfter = (stop: StopOutcome): boolean => !acceptedStop(stop) && stop.alreadyFinished !== true;
+
+/** Where an unread answer named a run, said for the record of its stop. */
+function namedBySentence(namedBy: engine.RunNamedBy | undefined): string {
+  return namedBy === undefined ? "" : ` It was named by the answer's ${namedBy}.`;
 }
 
 /** What one stop sent to a run an unread answer named came to, in a sentence. */
@@ -458,6 +481,93 @@ function unreadAnswerStopSentence(runId: string, stop: StopOutcome): string {
         ? `Run ${runId} was sent a stop, and the engine answered that it had already ended.`
         : `Run ${runId} was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
           "stop it with the kill switch or a failsafe pause.";
+}
+
+/**
+ * A run a retest's unread answer named whose automatic stop did not take --
+ * refused (a 503, a 429), unreachable, or answered 2xx with the rest of its
+ * answer unread: it may still be running, so it keeps a Stop. The retest's
+ * panel lists it by its run id with that Stop (GET /api/tests/:testId/retests,
+ * GET /api/retests/:runId), the Stop sends it again (POST
+ * /api/retests/:runId/abort, for its requester, the test's owner or an
+ * admin), and the kill switch sends it one without reading anything. It is
+ * never a watch: nothing is read from the run, and nothing is filed from it
+ * -- the answer that named it was not read, so which retest it is is not
+ * known. It ends when a stop is taken or the engine answers the run had
+ * ended; after retestWatch.keepUnwatchedMs it is forgotten. In memory: a
+ * restart loses it (the engine's list, the kill switch and a failsafe pause
+ * still reach the run).
+ */
+interface UnreadRunHandle {
+  runId: string;
+  testId: string;
+  twinId: number;
+  requestedBy: string | null;
+  since: Date;
+  /** Where the unread answer named the run. */
+  namedBy: engine.RunNamedBy | null;
+  /** What the stop sent when the answer came, came to. */
+  firstStop: string;
+  /** How it ended: a stop taken, or the engine's word that it had ended; null while it may be running. */
+  ended: { how: "stopped" | "already_finished"; at: Date } | null;
+}
+const unreadRunHandles = new Map<string, UnreadRunHandle>();
+
+/** The handles still kept (retestWatch.keepUnwatchedMs); older ones are forgotten here. */
+function keptUnreadRunHandles(): UnreadRunHandle[] {
+  const since = Date.now() - retests.retestWatch.keepUnwatchedMs;
+  for (const [id, one] of Array.from(unreadRunHandles.entries())) {
+    if (one.since.getTime() < since) unreadRunHandles.delete(id);
+  }
+  return Array.from(unreadRunHandles.values());
+}
+
+/** The handles whose run may still be going: each keeps its Stop. */
+function openUnreadRunHandles(): UnreadRunHandle[] {
+  return keptUnreadRunHandles().filter((one) => one.ended === null);
+}
+
+/** Note what a stop sent to a handle's run came to: it ends when the stop was taken, or the run had ended. */
+function noteHandleStop(runId: string, stop: StopOutcome): void {
+  const handle = unreadRunHandles.get(runId);
+  if (!handle || handle.ended !== null) return;
+  if (acceptedStop(stop)) handle.ended = { how: "stopped", at: new Date() };
+  else if (stop.alreadyFinished === true) handle.ended = { how: "already_finished", at: new Date() };
+}
+
+/** A handle as the retest panel reads a retest: a status, never a verdict, with its Stop while it may be running. */
+function unreadRunView(handle: UnreadRunHandle) {
+  const phase = handle.ended === null ? "running" as const : "stopped" as const;
+  return {
+    answer: "status" as const,
+    phase,
+    engineRunId: handle.runId,
+    testId: handle.testId,
+    twinId: handle.twinId,
+    findingId: null,
+    state: "unknown",
+    reason: null,
+    error: null,
+    requestedBy: handle.requestedBy,
+    startedAt: handle.since,
+    lastReadAt: null,
+    lastReadError: null,
+    stopAcceptedAt: handle.ended?.how === "stopped" ? handle.ended.at : null,
+    stopUnreadAt: null,
+    stoppable: phase === "running",
+    unreadAnswer: true as const,
+    namedBy: handle.namedBy,
+    detail: handle.ended === null
+      ? `The engine answered this retest in a shape this dashboard does not read, naming run ${handle.runId}` +
+        (handle.namedBy ? ` (by its ${handle.namedBy})` : "") + `, and the stop sent to it did not take (${handle.firstStop}). ` +
+        "It may still be running against the target: Stop sends it the stop again, and the kill switch on the AI Control " +
+        "page, or a failsafe pause, stops it too. Nothing is read or filed from it, and the finding is unchanged."
+      : handle.ended.how === "stopped"
+        ? `The engine accepted the stop sent to run ${handle.runId}, which an answer this dashboard does not read had ` +
+          "named. Nothing was filed, and the finding is unchanged."
+        : `The engine answered that run ${handle.runId}, which an answer this dashboard does not read had named, had ` +
+          "already ended. Nothing was filed, and the finding is unchanged.",
+  };
 }
 
 /** Stop a test's engine run, reported against the test. */
@@ -556,12 +666,16 @@ async function stopEverythingRunning(
   const sendAbort = (runId: string): Promise<StopOutcome> => stopForPress(press, runId);
 
   const knownRetests = watcher.running();
-  const retestStops = Promise.all(knownRetests.filter((one) => claim(one.engineRunId)).map(async (one): Promise<EngineRunStop> => {
+  // With them, every run a retest's unread answer named whose own stop did
+  // not take (unreadRunHandles): held in memory, sent its stop by id.
+  const handled = openUnreadRunHandles().map((one) => ({ engineRunId: one.runId, testId: one.testId, handle: true }));
+  const retestStops = Promise.all([...knownRetests, ...handled].filter((one) => claim(one.engineRunId)).map(async (one): Promise<EngineRunStop> => {
     const outcome = await sendAbort(one.engineRunId);
     const run = { runId: one.engineRunId, target: null, testId: one.testId };
+    if ("handle" in one) noteHandleStop(one.engineRunId, outcome);
     // The watch's note that its stop was accepted -- only when it was -- and
     // the log line, both after every stop has been answered.
-    if (outcome.answerUnread) records.push(() => watcher.stopSentUnread(one.engineRunId));
+    else if (outcome.answerUnread) records.push(() => watcher.stopSentUnread(one.engineRunId));
     else if (outcome.stopped) records.push(() => watcher.stopAccepted(one.engineRunId));
     records.push(() => writeStopRecord(who, run, "kill_switch", outcome));
     return { ...run, ...outcome };
@@ -1842,6 +1956,8 @@ export function registerRoutes(app: Express): void {
   // a restart loses no verdict, and holds up no start-up and no stop.
   const watcher = new retests.RetestWatcher(storage, retestWatchHooks);
   app.locals.retestWatcher = watcher;
+  // For tests that reuse one engine run id across cases (as retestWatcher.reset()).
+  app.locals.unreadRunHandles = unreadRunHandles;
   watcher.resume();
   // The tests, read once in the background so a Stop finds its run in memory
   // (storage.peekTest) without asking the database. Holds up nothing.
@@ -1856,6 +1972,8 @@ export function registerRoutes(app: Express): void {
   const retestsReserved = new Set<string>();
   /** Retests the engine may still be running after this dashboard stopped waiting for them (retestSlots). */
   const retestsHeld = new Map<string, { scope: string[]; since: number }>();
+  // Read by tests, to see which slots are held (as retestWatcher is).
+  app.locals.retestsHeld = retestsHeld;
   let heldPoll = false;
   const pollHeldRetests = (): void => {
     if (heldPoll || retestsHeld.size === 0) return;
@@ -2411,24 +2529,30 @@ export function registerRoutes(app: Express): void {
         // dashboard does not read: nothing is recorded from it, and the run it
         // named -- which may be scanning, with no row here to carry its Stop --
         // is stopped, as a start that could not be recorded is.
+        // An answer that named no run a stop can address: the engine took the
+        // start, so a run it started may be live (the error says what stops it).
         if (cause.stopId === null) {
-          return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer" });
+          return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer", mayStillBeRunning: true });
         }
-        // Every run it named -- its body's, and its X-Run-Id header's when the
-        // two differ -- is sent its stop, all at once; the record of each says why.
+        // Every run it named -- its body's, and each its X-Run-Id header names
+        // when they differ -- is sent its stop, all at once; the record of each
+        // says why, and where the answer named it.
         const ids = cause.stopIds;
         const why = `sent because the engine answered a scan start in a shape this dashboard does not read, naming this run: ${cause.message}`;
         const stops = await Promise.all(ids.map((runId) =>
-          sendStop(req, { runId, target: data.target, testId: null }, "start_not_recorded", why)));
+          sendStop(req, { runId, target: data.target, testId: null }, "start_not_recorded",
+            `${why}${namedBySentence(cause.namedBy[runId])}`, cause.namedBy[runId])));
         return void res.status(502).json({
           error: `${cause.message} ${ids.map((runId, at) => unreadAnswerStopSentence(runId, stops[at])).join(" ")}`,
           reason: "unrecognised_engine_answer",
           runId: ids[0],
           runIds: ids,
           stopped: stops.every((one) => one.stopped),
-          stops: ids.map((runId, at) => ({ runId, ...stops[at] })),
+          stops: ids.map((runId, at) => ({ runId, ...stops[at], ...(cause.namedBy[runId] ? { namedBy: cause.namedBy[runId] } : {}) })),
           ...(stops.some((one) => one.alreadyFinished) ? { alreadyFinished: stops.every((one) => one.alreadyFinished === true) } : {}),
           ...(stops.some((one) => one.answerUnread) ? { answerUnread: true } : {}),
+          // A run whose stop did not take may still be scanning: said so, first.
+          ...(stops.some(mayRunAfter) ? { mayStillBeRunning: true } : {}),
         });
       }
       if (cause instanceof engine.EngineUnavailable) {
@@ -2496,7 +2620,7 @@ export function registerRoutes(app: Express): void {
         // Already stopped by the kill switch pressed while it was starting.
         const stop = await byKillSwitch;
         void writeStopRecord(actor(req), { runId: stopId, target: data.target, testId: null }, "kill_switch", stop,
-          KILL_SWITCH_START_NOTE).then((failed) => { if (failed) console.error(`[scan] ${failed}`); });
+          KILL_SWITCH_START_NOTE).then((failed) => { if (failed) console.error(logLine(`[scan] ${failed}`)); });
         return void res.status(409).json({
           error: `${killSwitchStartSentence(stopId, stop)} It could not be recorded here either (${causeOf(cause)}).`,
           reason: "kill_switch", runId: stopId, stopped: stop.stopped,
@@ -2529,7 +2653,7 @@ export function registerRoutes(app: Express): void {
       const runId = started.stopId ?? started.runId!;
       const failed = await writeStopRecord(actor(req), { runId, target: data.target, testId: test.id }, "kill_switch", stop,
         KILL_SWITCH_START_NOTE);
-      if (failed) console.error(`[scan] ${failed}`);
+      if (failed) console.error(logLine(`[scan] ${failed}`));
       return void res.status(409).json({
         error: killSwitchStartSentence(runId, stop),
         reason: "kill_switch", test, runId, stopped: stop.stopped,
@@ -2646,7 +2770,7 @@ export function registerRoutes(app: Express): void {
     // After the stop and its answer, and best-effort: a log write that failed
     // (a full disk, a locked database) neither unsends the stop nor delays it.
     const failed = await writeStopRecord(who, { runId, target: null, testId: test.id }, "stop", stopOutcome);
-    if (failed) console.error(`[abort] ${failed}`);
+    if (failed) console.error(logLine(`[abort] ${failed}`));
   }));
 
   app.get("/api/scans/:testId", asyncHandler(async (req, res) => {
@@ -2851,7 +2975,8 @@ export function registerRoutes(app: Express): void {
     // are one step in memory, before anything is awaited.
     const key = `${test.id}:${data.twinId}`;
     const runningHere = retestsInFlight.has(key) || retestsReserved.has(key) || retestsHeld.has(key)
-      || watcher.knownForTest(test.id).some((one) => one.twinId === data.twinId && one.state === "running");
+      || watcher.knownForTest(test.id).some((one) => one.twinId === data.twinId && one.state === "running")
+      || openUnreadRunHandles().some((one) => one.testId === test.id && one.twinId === data.twinId);
     const alreadyRunning = () => res.status(409).json({
       error: "a retest of this finding is already running; stop it, or wait for its verdict, before starting another",
       reason: "retest_running",
@@ -2928,29 +3053,48 @@ export function registerRoutes(app: Express): void {
         try {
           const why = `sent because the engine answered a retest in a shape this dashboard does not read, naming this run: ${cause.message}`;
           stops = await Promise.all(ids.map((runId) =>
-            sendStop(req, { runId, target: null, testId: test.id }, "start_not_recorded", why)));
+            sendStop(req, { runId, target: null, testId: test.id }, "start_not_recorded",
+              `${why}${namedBySentence(cause.namedBy[runId])}`, cause.namedBy[runId])));
         } finally {
           retestsInFlight.delete(key);
         }
         const free = stops.length === ids.length && stops.every((one) => acceptedStop(one) || one.alreadyFinished === true);
+        const logged = ids.map((one) => JSON.stringify(one)).join(", ");
         if (free) {
-          console.log(`[retest] the in-flight slot of retest ${key} is free: the engine's answer was not read, and the stop ` +
-            `sent to ${ids.join(", ")} was answered (taken, or the run had ended).`);
+          console.log(logLine(`[retest] the in-flight slot of retest ${key} is free: the engine's answer was not read, and the stop ` +
+            `sent to ${logged} was answered (taken, or the run had ended).`));
         } else {
           retestsHeld.set(key, { scope, since: Date.now() });
-          console.error(`[retest] the in-flight slot of retest ${key} is held: the engine's answer was not read, and the ` +
-            `stop sent to ${ids.join(", ")} was not taken, or its answer not read.`);
+          console.error(logLine(`[retest] the in-flight slot of retest ${key} is held: the engine's answer was not read, and the ` +
+            `stop sent to ${logged} was not taken, or its answer not read.`));
           pollHeldRetests();
         }
+        // Each run whose stop did not take keeps a Stop: on this finding's
+        // retest panel, by its run id, and in the kill switch's sweep
+        // (unreadRunHandles). Nothing is read or filed from it.
+        const handled = ids.filter((_runId, at) => mayRunAfter(stops[at]));
+        for (const runId of handled) {
+          const stop = stops[ids.indexOf(runId)];
+          unreadRunHandles.set(runId, {
+            runId, testId: test.id, twinId: data.twinId, requestedBy: req.session.userId ?? null, since: new Date(),
+            namedBy: cause.namedBy[runId] ?? null,
+            firstStop: stop.answerUnread ? "stop sent, answer unread" : stop.detail || "not taken",
+            ended: null,
+          });
+        }
+        const handleSaid = handled.length === 0 ? "" :
+          ` ${handled.length === 1 ? `Run ${handled[0]} keeps its` : `Runs ${handled.join(" and ")} keep their`} Stop on ` +
+          "this finding's retest panel: press it to send the stop again.";
         return void res.status(502).json({
           error: `${cause.message} ${ids.map((runId, at) => unreadAnswerStopSentence(runId, stops[at])).join(" ")}` +
-            (free ? "" : ` ${heldSaid}`),
+            (free ? "" : ` ${heldSaid}`) + handleSaid,
           reason: "unrecognised_engine_answer",
           runId: ids[0],
           runIds: ids,
           stopped: stops.every((one) => one.stopped),
-          stops: ids.map((runId, at) => ({ runId, ...stops[at] })),
-          ...(free ? {} : { held: heldSaid }),
+          stops: ids.map((runId, at) => ({ runId, ...stops[at], ...(cause.namedBy[runId] ? { namedBy: cause.namedBy[runId] } : {}) })),
+          ...(free ? {} : { held: heldSaid, mayStillBeRunning: true }),
+          ...(handled.length > 0 ? { stoppable: handled } : {}),
         });
       }
       retestsInFlight.delete(key);
@@ -2963,7 +3107,7 @@ export function registerRoutes(app: Express): void {
       // its end whoever is waiting. Its slot is held (retestSlots) until the
       // engine lists no live retest on its scope, or the ceiling.
       if (cause instanceof engine.EngineConnectionRefused) {
-        console.log(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (refused before anything was sent).`);
+        console.log(logLine(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (refused before anything was sent).`));
         return void res.status(503).json({
           error: `the engine refused the connection; the retest was not started (${causeOf(cause)})`,
           reason: "engine_refused_connection",
@@ -2973,19 +3117,22 @@ export function registerRoutes(app: Express): void {
         || (cause instanceof engine.UnrecognisedRetestAnswer && cause.answered);
       if (!definite) {
         retestsHeld.set(key, { scope, since: Date.now() });
-        console.error(`[retest] the in-flight slot of retest ${key} is held: ${causeOf(cause)}. The engine may still be ` +
+        console.error(logLine(`[retest] the in-flight slot of retest ${key} is held: ${causeOf(cause)}. The engine may still be ` +
           "running it; the slot is freed when the engine lists no live retest on " +
-          `${scope.join(", ")}, or after ${Math.round(retestSlots.ceilingMs / 60_000)} min.`);
+          `${scope.join(", ")}, or after ${Math.round(retestSlots.ceilingMs / 60_000)} min.`));
         pollHeldRetests();
       } else {
-        console.log(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (a definite answer).`);
+        console.log(logLine(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (a definite answer).`));
       }
       if (cause instanceof engine.UnrecognisedRetestAnswer) {
-        return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer", ...(definite ? {} : { held: heldSaid }) });
+        return void res.status(502).json({
+          error: cause.message, reason: "unrecognised_engine_answer", ...(definite ? {} : { held: heldSaid, mayStillBeRunning: true }),
+        });
       }
       return void res.status(503).json(definite ? { error: causeOf(cause) } : {
         error: `${causeOf(cause)}. ${heldSaid}`,
         reason: cause instanceof engine.EngineTimedOut ? "retest_unanswered" : "retest_unconfirmed",
+        mayStillBeRunning: true,
       });
     }
     // A definite answer: the slot is free at once.
@@ -3020,7 +3167,7 @@ export function registerRoutes(app: Express): void {
       const failed = [await noted.catch((cause) => causeOf(cause)),
         await writeStopRecord(who.actor, { runId, target: null, testId: test.id }, "kill_switch", stop, KILL_SWITCH_START_NOTE)]
         .filter((one): one is string => typeof one === "string" && one !== "");
-      for (const one of failed) console.error(`[retest] ${one}`);
+      for (const one of failed) console.error(logLine(`[retest] ${one}`));
       return;
     }
 
@@ -3063,8 +3210,11 @@ export function registerRoutes(app: Express): void {
    */
   app.get("/api/retests/:runId", asyncHandler(async (req, res) => {
     const watched = await watcher.view(req.params.runId);
-    if (!watched) return notFound(res, "Retest");
-    res.json(retestView(watched));
+    if (watched) return void res.json(retestView(watched));
+    // A run a retest's unread answer named, kept with its Stop (unreadRunHandles).
+    const handle = keptUnreadRunHandles().find((one) => one.runId === req.params.runId);
+    if (handle) return void res.json(unreadRunView(handle));
+    return notFound(res, "Retest");
   }));
 
   /**
@@ -3082,8 +3232,12 @@ export function registerRoutes(app: Express): void {
     // session's role is the account's now (auth.ts sessionUser).
     const me = sessionUser(req) ?? (req.currentUser ? { id: req.currentUser.id, role: req.currentUser.role } : null);
     const watched = watcher.peek(runId);
-    const owner = watched !== undefined && me !== null
-      && (watched.requestedBy === me.id || storage.peekTest(watched.testId)?.executedBy === me.id);
+    // A run a retest's unread answer named, whose own stop did not take
+    // (unreadRunHandles): its owner is who pressed that Retest, or ran the test.
+    const handle = watched === undefined ? unreadRunHandles.get(runId) : undefined;
+    const owned = watched ?? handle;
+    const owner = owned !== undefined && me !== null
+      && (owned.requestedBy === me.id || storage.peekTest(owned.testId)?.executedBy === me.id);
     // Until the watches on record have been read (RetestWatcher.resume, which
     // tries until it can), who owns a retest this dashboard has not read is
     // not known here -- nor whether the run id is a retest's at all -- and
@@ -3091,7 +3245,7 @@ export function registerRoutes(app: Express): void {
     // who may run retests (every signed-in user may), to whatever engine run
     // id it names, and the log says who sent it: "sent before watches loaded,
     // id not verified as a retest".
-    const unverified = watched === undefined && me !== null && !watcher.resumeState().loaded;
+    const unverified = owned === undefined && me !== null && !watcher.resumeState().loaded;
     if (me?.role !== "admin" && !owner && !unverified) {
       return void res.status(403).json({
         error: "only an admin, or the owner of the test this retest was run from, can stop it here. " +
@@ -3114,13 +3268,14 @@ export function registerRoutes(app: Express): void {
       });
     }
     const stopOutcome = outcomeOf(outcome);
+    noteHandleStop(runId, stopOutcome);
     // Noted in memory at once (a watch's own read after this knows it), on
     // the record in the background: an accepted stop only when the engine
     // took it and said so; a 2xx whose answer was not read as just that --
     // "stop sent, answer unread" -- never as accepted.
     if (outcome.accepted) {
       const noted = outcome.answerUnread ? watcher.stopSentUnread(runId) : watcher.stopAccepted(runId);
-      void noted.then((failed) => { if (failed) console.error(`[retest] ${failed}`); });
+      void noted.then((failed) => { if (failed) console.error(logLine(`[retest] ${failed}`)); });
     }
     res.json(outcome.alreadyFinished
       ? { stopped: false, alreadyFinished: true, runId, state: outcome.state, detail: ALREADY_FINISHED }
@@ -3132,9 +3287,9 @@ export function registerRoutes(app: Express): void {
         "own it was checked -- it is sent to any engine run id; stopping is the safe direction"
       : undefined;
     const failed = await writeStopRecord(who, {
-      runId, target: null, testId: watched?.testId ?? null,
+      runId, target: null, testId: owned?.testId ?? null,
     }, "retest_stop", stopOutcome, note);
-    if (failed) console.error(`[retest] ${failed}`);
+    if (failed) console.error(logLine(`[retest] ${failed}`));
   }));
 
   /** The retests this dashboard knows for a test, still open: a page opened again shows each running one with its Stop. */
@@ -3151,7 +3306,9 @@ export function registerRoutes(app: Express): void {
     for (const one of watcher.knownForTest(testId)) {
       if (!byRun.has(one.engineRunId) && (one.state === "running" || one.state === "unwatched")) byRun.set(one.engineRunId, one);
     }
-    res.json({ retests: Array.from(byRun.values()).map((one) => retestView(one)) });
+    // And each run a retest's unread answer named whose stop did not take: listed with its Stop (unreadRunHandles).
+    const handles = openUnreadRunHandles().filter((one) => one.testId === testId && !byRun.has(one.runId));
+    res.json({ retests: [...Array.from(byRun.values()).map((one) => retestView(one)), ...handles.map(unreadRunView)] });
   }));
 
   /**

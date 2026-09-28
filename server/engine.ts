@@ -52,8 +52,25 @@ const ENGINE_KEY = settings.FIELDS.engineKey.env;
  */
 export const engineTimeouts = { callMs: 20_000, bodyMs: 20_000, abortBodyMs: 2_000 };
 
-/** The most of the engine's error body we will quote back. */
+/** The most of the engine's error body we will quote back: what is shown, and what is stored. */
 const MAX_ERROR_BODY = 500;
+
+/**
+ * The most of an error answer that is read to be parsed: an answer this
+ * reader takes (a 500 or 429 `answer: "status"`, a 422 that refuses
+ * `wait_seconds`) is read by its whole body up to here, never by the part of
+ * it that is quoted back. Cut at MAX_ERROR_BODY, a real 500 whose `error`
+ * ran past about 330 characters no longer parsed, and a run the engine was
+ * scanning was refused as an unread shape and stopped. Past this the rest is
+ * never read, and the answer is let go: a body this long is not one either
+ * engine sends, and it is read as the shape it then is (not JSON).
+ */
+const MAX_PARSE_BODY = 64 * 1024;
+
+/** Engine text as it is quoted back: its first MAX_ERROR_BODY characters. */
+function quoted(text: string): string {
+  return text.slice(0, MAX_ERROR_BODY);
+}
 
 export interface EngineStatus {
   configured: boolean;
@@ -148,7 +165,16 @@ export class EngineConnectionRefused extends EngineUnavailable {}
  * than leave a run going that nothing here recorded.
  */
 export class UnrecognisedScanAnswer extends EngineUnavailable {
-  constructor(message: string, readonly stopId: string | null, readonly moreStopIds: string[] = []) {
+  /**
+   * `namedBy`: where the answer named each run -- "body", "X-Run-Id header",
+   * or "body and X-Run-Id header" -- so the record of each stop says which.
+   */
+  constructor(
+    message: string,
+    readonly stopId: string | null,
+    readonly moreStopIds: string[] = [],
+    readonly namedBy: Record<string, RunNamedBy> = {},
+  ) {
     super(message);
   }
 
@@ -158,13 +184,41 @@ export class UnrecognisedScanAnswer extends EngineUnavailable {
   }
 }
 
+/** Where an answer named a run: its body's `run_id`, its X-Run-Id header, or both. */
+export type RunNamedBy = "body" | "X-Run-Id header" | "body and X-Run-Id header";
+
+/** The runs an answer names (runsNamed). */
+interface RunsNamed {
+  /** Its body's top-level `run_id`, as a stop can address it; null when it names none. */
+  bodyId: string | null;
+  /** Every run its X-Run-Id header names (headerRunIds): none, one, or -- sent more than once, or joined -- several. */
+  headerIds: string[];
+  /** Every run named, each once, the body's first. */
+  ids: string[];
+}
+
+/**
+ * Every run the X-Run-Id header names. Sent more than once, node joins the
+ * values with ", " -- and a proxy may have joined them already -- so each
+ * value, and each comma-separated part of one, names a run of its own: a
+ * stop is never sent to "A, B", which names no run. Each id once, as a stop
+ * can address it (stopIdFrom); a part that names none is left out.
+ */
+function headerRunIds(response: EngineAnswer): string[] {
+  const ids = response.headerValues("x-run-id")
+    .flatMap((value) => value.split(","))
+    .map((part) => stopIdFrom(part.replace(/^[ \t]+|[ \t]+$/g, "")))
+    .filter((one): one is string => one !== null);
+  return ids.filter((one, at) => ids.indexOf(one) === at);
+}
+
 /**
  * The runs an answer names wherever they can be read without guessing at its
  * shape: `run_id` at the top of a JSON object body, and the `X-Run-Id` header
  * (athena-engine #71 sends it on every answer that registered a run). Each id
  * once, the body's first. Never an id from inside an array or a nested object.
  */
-function runsNamed(raw: string | null, response: EngineAnswer): { bodyId: string | null; headerId: string | null; ids: string[] } {
+function runsNamed(raw: string | null, response: EngineAnswer): RunsNamed {
   let bodyId: string | null = null;
   if (raw !== null) {
     try {
@@ -176,21 +230,43 @@ function runsNamed(raw: string | null, response: EngineAnswer): { bodyId: string
       // Not JSON: its body names no run.
     }
   }
-  const headerId = stopIdFrom(response.header("x-run-id"));
-  const ids = [bodyId, headerId].filter((one, at, all): one is string => one !== null && all.indexOf(one) === at);
-  return { bodyId, headerId, ids };
+  const headerIds = headerRunIds(response);
+  const ids = [bodyId, ...headerIds].filter((one, at, all): one is string => one !== null && all.indexOf(one) === at);
+  return { bodyId, headerIds, ids };
+}
+
+/**
+ * Whether the X-Run-Id header takes `id` as the run: it names no run, or
+ * only that one. A header naming another run, or several, does not.
+ */
+function headerAgrees(named: { headerIds: string[] }, id: string | null): boolean {
+  return named.headerIds.every((one) => one === id);
+}
+
+/** Where the answer named each of its runs. */
+function namedByOf(named: { bodyId: string | null; headerIds: string[] }): Record<string, RunNamedBy> {
+  const out: Record<string, RunNamedBy> = {};
+  if (named.bodyId !== null) out[named.bodyId] = "body";
+  for (const id of named.headerIds) out[id] = out[id] === "body" ? "body and X-Run-Id header" : "X-Run-Id header";
+  return out;
 }
 
 /** What an answer's ids were, said: which named which, and that they differ when they do. */
-function namedSentence(named: { bodyId: string | null; headerId: string | null }): string {
-  if (named.bodyId !== null && named.headerId !== null && named.bodyId !== named.headerId) {
-    return `Its body names run ${named.bodyId} and its X-Run-Id header names run ${named.headerId}: the two differ, ` +
-      "so neither is taken as the run, and both are sent a stop.";
+function namedSentence(named: { bodyId: string | null; headerIds: string[] }): string {
+  const header = named.headerIds;
+  const runs = (ids: string[]) => (ids.length === 1 ? `run ${ids[0]}` : `runs ${ids.join(" and ")}`);
+  if (named.bodyId !== null && !headerAgrees(named, named.bodyId)) {
+    return `Its body names run ${named.bodyId} and its X-Run-Id header names ${runs(header)}: they differ, ` +
+      "so none is taken as the run, and each is sent a stop.";
   }
   if (named.bodyId !== null) return `It names run ${named.bodyId}, which is sent a stop.`;
-  if (named.headerId !== null) return `Its X-Run-Id header names run ${named.headerId}, which is sent a stop.`;
-  return "It names no run anywhere this dashboard can read, so no stop could be sent to it: if the engine started " +
-    "anything, the kill switch on the AI Control page, or a failsafe pause, stops it.";
+  if (header.length > 1) {
+    return `Its X-Run-Id header names ${header.length} runs, ${runs(header)} (sent more than once, or joined): none is ` +
+      "taken as the run, and each is sent a stop.";
+  }
+  if (header.length === 1) return `Its X-Run-Id header names run ${header[0]}, which is sent a stop.`;
+  return "It names no run anywhere this dashboard can read, so no stop could be sent to it: a run it started may be " +
+    "live, and the kill switch on the AI Control page, or a failsafe pause, stops it.";
 }
 
 /** The connect-phase failures: no connection was made, so nothing was sent. */
@@ -226,10 +302,16 @@ export class EngineAnswer {
     return this.status >= 200 && this.status < 300;
   }
 
-  /** One header of the answer, as sent; null when it was not sent (or sent more than once). */
+  /** One header of the answer, as sent; null when it was not sent, or was sent more than once (headerValues has each). */
   header(name: string): string | null {
-    const value = this.res.headers[name.toLowerCase()];
-    return typeof value === "string" ? value : null;
+    const values = this.headerValues(name);
+    return values.length === 1 ? values[0] : null;
+  }
+
+  /** Every value a header was sent with, each as sent, never joined; none when it was not sent. */
+  headerValues(name: string): string[] {
+    const values = this.res.headersDistinct[name.toLowerCase()];
+    return Array.isArray(values) ? [...values] : [];
   }
 
   /** Where a redirect (301, 302, 303, 307, 308) sends the request; null for any other answer, or one with no location. */
@@ -239,15 +321,28 @@ export class EngineAnswer {
     return typeof location === "string" && location !== "" ? location : null;
   }
 
-  /** The rest of the answer; rejects when the connection closed before it ended. */
-  text(): Promise<string> {
+  /**
+   * The rest of the answer; rejects when the connection closed before it
+   * ended. `limit`: at most this many characters are read -- past it, the
+   * first `limit` are the answer, and the rest is never read (the answer is
+   * let go). Read once: a second call has what the first read.
+   */
+  text(limit = Number.POSITIVE_INFINITY): Promise<string> {
     if (this.reading === null) {
       this.reading = new Promise<string>((resolve, reject) => {
         let raw = "";
         let ended = false;
         this.res.setEncoding("utf8");
-        this.res.on("data", (chunk: string) => { raw += chunk; });
-        this.res.on("end", () => { ended = true; resolve(raw); });
+        this.res.on("data", (chunk: string) => {
+          if (ended) return;
+          raw += chunk;
+          if (raw.length > limit) {
+            ended = true;
+            resolve(raw.slice(0, limit));
+            this.release();
+          }
+        });
+        this.res.on("end", () => { if (!ended) { ended = true; resolve(raw); } });
         this.res.on("close", () => { if (!ended) reject(new Error("the connection closed before the answer ended")); });
       });
     }
@@ -312,11 +407,11 @@ const MAX_REDIRECTS = 20;
  * within `ms` -- then the answer is let go: its connection is closed, so a
  * stalled answer holds no socket and no read.
  */
-async function bodyWithin(response: EngineAnswer, ms: number): Promise<string | null> {
+async function bodyWithin(response: EngineAnswer, ms: number, limit?: number): Promise<string | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), ms); });
   try {
-    const read = response.text().catch(() => null);
+    const read = response.text(limit).catch(() => null);
     const got = await Promise.race([read, late]);
     if (got === null) response.release();
     return got;
@@ -566,7 +661,18 @@ function send(url: URL, method: string, payload: string | undefined, deadline: n
 }
 
 async function body(response: EngineAnswer): Promise<string> {
-  return ((await bodyWithin(response, engineTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
+  return quoted((await bodyWithin(response, engineTimeouts.bodyMs)) ?? "");
+}
+
+/**
+ * An error answer read to be parsed: its whole body up to MAX_PARSE_BODY
+ * (within engineTimeouts.bodyMs), with `shown` -- its first MAX_ERROR_BODY
+ * characters -- for what is said and stored. The answer is read by `whole`,
+ * never by `shown`.
+ */
+async function errorBody(response: EngineAnswer): Promise<{ whole: string; shown: string }> {
+  const whole = (await bodyWithin(response, engineTimeouts.bodyMs, MAX_PARSE_BODY)) ?? "";
+  return { whole, shown: quoted(whole) };
 }
 
 /**
@@ -762,21 +868,23 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     // its work did start -- it is scanning, stoppable by this id, and records
     // its own end -- so it is recorded here as running, with its Stop, and
     // collected from `/api/scans/{run_id}` like any other. Any other 500 is
-    // the engine's words, as it always was.
-    const raw = await body(response);
-    const named = statusAnswerOf(raw);
+    // the engine's words, as it always was. Read by its whole body (up to
+    // MAX_PARSE_BODY), and quoted by its first MAX_ERROR_BODY characters.
+    const { whole, shown: raw } = await errorBody(response);
+    const named = statusAnswerOf(whole);
     const stopId = named ? stopIdFrom(named.run_id) : null;
-    const said = runsNamed(raw, response);
-    if (said.headerId !== null && stopId !== null && said.headerId !== stopId) {
-      // The body and the X-Run-Id header name two different runs: which one
-      // is this start's is not guessed. Nothing is recorded; both are stopped.
+    const said = runsNamed(whole, response);
+    if (stopId !== null && !headerAgrees(said, stopId)) {
+      // The body and the X-Run-Id header name different runs (or the header
+      // names several): which one is this start's is not guessed. Nothing is
+      // recorded; every one is stopped.
       throw new UnrecognisedScanAnswer(
-        `the engine answered 500 to a scan start naming two different runs. ${namedSentence(said)} Nothing was recorded from it.`,
-        stopId, [said.headerId],
+        `the engine answered 500 to a scan start naming different runs. ${namedSentence(said)} Nothing was recorded from it.`,
+        stopId, said.ids.filter((one) => one !== stopId), namedByOf(said),
       );
     }
     if (named && stopId !== null && named.state !== "failed") {
-      const error = typeof named.error === "string" ? named.error : "no error given";
+      const error = typeof named.error === "string" ? quoted(named.error) : "no error given";
       return {
         runId: runIdFrom(named.run_id),
         stopId,
@@ -790,7 +898,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     }
     if (named && stopId !== null) {
       throw new EngineUnavailable(
-        `the engine answered 500: run ${stopId} failed before its work started (${String(named.error ?? "no error given")}); ` +
+        `the engine answered 500: run ${stopId} failed before its work started (${quoted(String(named.error ?? "no error given"))}); ` +
         "nothing was sent to the target",
       );
     }
@@ -802,7 +910,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
       throw new UnrecognisedScanAnswer(
         `the engine answered 500 to a scan start in a shape this dashboard does not read: ${raw || "(no body)"}. ` +
         `${namedSentence(said)} Nothing was recorded from it.`,
-        said.ids[0], said.ids.slice(1),
+        said.ids[0], said.ids.slice(1), namedByOf(said),
       );
     }
     throw new EngineUnavailable(`the engine answered 500: ${raw}`);
@@ -832,12 +940,12 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     scanIsJson = false;
   }
   if (!scanIsJson || !readScan || typeof readScan !== "object" || Array.isArray(readScan)) {
-    const named = { bodyId: null, headerId: stopIdFrom(response.header("x-run-id")) };
+    const named = { bodyId: null, headerIds: headerRunIds(response) };
     throw new UnrecognisedScanAnswer(
       `the engine answered HTTP ${response.status} to a scan start with a body that is not a JSON object ` +
       `(${rawScan.slice(0, 200) || "no body"}), a shape this dashboard does not read. ${namedSentence(named)} ` +
       "Nothing was recorded from it.",
-      named.headerId,
+      named.headerIds[0] ?? null, named.headerIds.slice(1), namedByOf(named),
     );
   }
   const payload = objectOf(readScan);
@@ -850,10 +958,13 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   // state or result is made up for it.
   const named2xx = runsNamed(rawScan, response);
   if ("answer" in payload && payload.answer !== "status") {
+    // Said like every other unread answer (namedSentence): the run it named
+    // is sent a stop -- or, when it named none a stop can address, that a
+    // run it started may be live, and what stops it.
     throw new UnrecognisedScanAnswer(
       `the engine answered a shape this dashboard does not read: HTTP ${response.status} with answer ` +
-      `${JSON.stringify(payload.answer)} to a scan start. Nothing was recorded from it.`,
-      named2xx.ids[0] ?? null, named2xx.ids.slice(1),
+      `${JSON.stringify(payload.answer)} to a scan start. ${namedSentence(named2xx)} Nothing was recorded from it.`,
+      named2xx.ids[0] ?? null, named2xx.ids.slice(1), namedByOf(named2xx),
     );
   }
   // Only a 200 -- the finished run, which the engine answers only when the
@@ -862,15 +973,15 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   // are not in it, and read as they were, a scan that ended between the
   // engine's hand-over and its answer was recorded completed with none.
   const final = response.status === 200;
-  // A run named only by its X-Run-Id header, or by a header and a body that
-  // disagree: which run this start is is not guessed. Nothing is recorded,
-  // and every run named is stopped.
-  if (named2xx.headerId !== null && named2xx.bodyId !== named2xx.headerId) {
+  // A run named only by its X-Run-Id header, by a header and a body that
+  // disagree, or by a header naming several: which run this start is is not
+  // guessed. Nothing is recorded, and every run named is stopped.
+  if (named2xx.headerIds.length > 0 && (named2xx.bodyId === null || !headerAgrees(named2xx, named2xx.bodyId))) {
     throw new UnrecognisedScanAnswer(
       `the engine answered HTTP ${response.status} to a scan start ` +
-      (named2xx.bodyId === null ? "whose body names no run id. " : "naming two different runs. ") +
+      (named2xx.bodyId === null ? "whose body names no run id. " : "naming different runs. ") +
       `${namedSentence(named2xx)} Nothing was recorded from it.`,
-      named2xx.ids[0], named2xx.ids.slice(1),
+      named2xx.ids[0], named2xx.ids.slice(1), namedByOf(named2xx),
     );
   }
   // Measured against a live engine: results come back under `result.results`,
@@ -1543,7 +1654,13 @@ export class UnrecognisedRetestAnswer extends EngineUnavailable {
    * a definite answer, if not one this reads: the retest's slot is freed at
    * once. Without one (a body that is not an object) it is not.
    */
-  constructor(message: string, readonly answered = false, readonly stopIds: string[] = []) {
+  constructor(
+    message: string,
+    readonly answered = false,
+    readonly stopIds: string[] = [],
+    /** Where the answer named each run (UnrecognisedScanAnswer.namedBy). */
+    readonly namedBy: Record<string, RunNamedBy> = {},
+  ) {
     super(message);
   }
 }
@@ -1594,6 +1711,11 @@ function verdictOf(
     checkedAt: typeof check.checked_at === "string" ? check.checked_at : null,
     stoppedAfterRecording: text(payload.stopped_after_recording),
   };
+}
+
+/** A status read from an error answer, its `error` quoted as every error body is (MAX_ERROR_BODY). */
+function quotedStatus(status: RetestStatus): RetestStatus {
+  return status.error === null ? status : { ...status, error: quoted(status.error) };
 }
 
 /** A status answer, read. */
@@ -1648,9 +1770,9 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
     body: JSON.stringify({ ...fields, wait_seconds: 0 }),
   });
   if (response.status === 422) {
-    const raw = await body(response);
-    if (!refusesWaitSeconds(422, raw)) {
-      throw new EngineRefused(`the engine answered 422: ${raw}`, 422);
+    const { whole, shown } = await errorBody(response);
+    if (!refusesWaitSeconds(422, whole)) {
+      throw new EngineRefused(`the engine answered 422: ${shown}`, 422);
     }
     response = await call("/api/remediation/retest", { method: "POST", body: JSON.stringify(fields) });
   }
@@ -1658,26 +1780,27 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   if (response.status === 429) {
     // #71 refuses a full queue with a status that names the run it recorded
     // FAILED. Anything else on a 429 is the engine's words, as any refusal is.
-    const raw = await body(response);
+    const { whole, shown } = await errorBody(response);
     let payload: unknown = null;
-    try { payload = JSON.parse(raw); } catch { payload = null; }
+    try { payload = JSON.parse(whole); } catch { payload = null; }
     if (payload && typeof payload === "object" && (payload as Record<string, unknown>).answer === "status") {
-      return { answer: "status", status: statusOf(payload as Record<string, unknown>, 429) };
+      return { answer: "status", status: quotedStatus(statusOf(payload as Record<string, unknown>, 429)) };
     }
-    throw new EngineRefused(`the engine answered 429: ${raw}`, 429);
+    throw new EngineRefused(`the engine answered 429: ${shown}`, 429);
   }
   if (response.status === 500) {
     // #71: a failure after the run was registered is a 500 status that still
     // names the run -- `state: null` when its work started (it is running, and
     // stoppable by this id), `failed` when it never did. Read as the status it
     // is (retestMayBeRunning). A 500 that names no run says nothing about
-    // whether a retest started, as before.
-    const raw = await body(response);
-    const named = statusAnswerOf(raw);
-    const said = runsNamed(raw, response);
+    // whether a retest started, as before. Read by its whole body (up to
+    // MAX_PARSE_BODY), and quoted by its first MAX_ERROR_BODY characters.
+    const { whole, shown: raw } = await errorBody(response);
+    const named = statusAnswerOf(whole);
+    const said = runsNamed(whole, response);
     const bodyId = named ? stopIdFrom(named.run_id) : null;
-    if (named && bodyId !== null && (said.headerId === null || said.headerId === bodyId)) {
-      return { answer: "status", status: statusOf(named, 500) };
+    if (named && bodyId !== null && headerAgrees(said, bodyId)) {
+      return { answer: "status", status: quotedStatus(statusOf(named, 500)) };
     }
     // A 500 in a shape this reader does not take that still names a run, in
     // its body or its X-Run-Id header (or names two that differ): that run may
@@ -1686,7 +1809,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
       throw new UnrecognisedRetestAnswer(
         `Unrecognised engine answer: HTTP 500 in a shape this dashboard does not read: ${raw || "(no body)"}. ` +
         `${namedSentence(said)} Nothing was filed.`,
-        false, said.ids,
+        false, said.ids, namedByOf(said),
       );
     }
     throw new EngineUnavailable(`the engine answered 500: ${raw}`);
@@ -1718,7 +1841,7 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
     // from anything but an object's top level).
     throw new UnrecognisedRetestAnswer(
       `Unrecognised engine answer: HTTP ${response.status} whose body is not an object. ${namedSentence(named)} Nothing was filed.`,
-      false, named.ids,
+      false, named.ids, namedByOf(named),
     );
   }
   const payload = read as Record<string, unknown>;
@@ -1726,9 +1849,12 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   // Every answer below that is refused sends a stop to each run it names
   // (routes.ts): a 202 is a live run, and an unread answer is never taken
   // as one that ended.
-  const unread = (message: string) => new UnrecognisedRetestAnswer(`${message} ${namedSentence(named)} Nothing was filed.`, carriesRunId, named.ids);
-  if (named.bodyId !== null && named.headerId !== null && named.bodyId !== named.headerId) {
-    throw unread(`Unrecognised engine answer: HTTP ${response.status} naming two different runs.`);
+  const unread = (message: string) =>
+    new UnrecognisedRetestAnswer(`${message} ${namedSentence(named)} Nothing was filed.`, carriesRunId, named.ids, namedByOf(named));
+  // A body and an X-Run-Id header that name different runs, or a header that
+  // names several: which run this retest is is not guessed.
+  if (named.headerIds.length > 1 || (named.bodyId !== null && !headerAgrees(named, named.bodyId))) {
+    throw unread(`Unrecognised engine answer: HTTP ${response.status} naming different runs.`);
   }
 
   if (!("answer" in payload)) {

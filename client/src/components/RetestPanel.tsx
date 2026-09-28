@@ -26,7 +26,7 @@ import { AlertTriangle, Loader2, RotateCcw, ShieldCheck, ShieldX, Square } from 
 import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, mayStillBeRunning } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { ratingOf } from "@shared/latest-scans";
 
@@ -338,8 +338,18 @@ export default function RetestPanel({ testId }: { testId: string }) {
       // Refused because one is already running (maybe started elsewhere): show it.
       void open$.refetch();
       // The engine's or the server's own words. "Retest failed" tells an
-      // operator nothing about whether anything was reached.
-      toast({ title: "The retest did not run", description: error.message, variant: "destructive" });
+      // operator nothing about whether anything was reached. A retest the
+      // server says may still be running -- its answer unread and its stop not
+      // taken, or its slot held -- is never titled "did not run": the title
+      // says it may be running, and what stops it (its Stop, when it keeps
+      // one, is on this panel).
+      toast(mayStillBeRunning(error)
+        ? {
+          title: "The retest may still be running: stop it here, with the kill switch on the AI Control page, or a failsafe pause",
+          description: error.message,
+          variant: "destructive",
+        }
+        : { title: "The retest did not run", description: error.message, variant: "destructive" });
     },
   });
 
