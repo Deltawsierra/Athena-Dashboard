@@ -238,4 +238,53 @@ describe("a flood of failed sign-ins", () => {
       engine.kill();
     }
   }, 60_000);
+
+  it("delays no Stop after the engine URL is retuned to an unprimed host (the save path primes it)", async () => {
+    // The realistic F-A window: an operator retunes the engine URL on the
+    // Settings screen. Start-up warm-up (server/engine.ts warmUp) primed the
+    // OLD host; the newly-saved host is unprimed until the next 30 s warm tick
+    // or the first live lookup. So the first Stop to it during a sign-in flood
+    // ran a live threadpool getaddrinfo queued behind the flood's scrypt jobs
+    // -- 385-570 ms at 20 concurrent here on the unfixed head (4620301), the
+    // same starved-getaddrinfo delay the cold-hostname case above measures, and
+    // seconds under a distributed flood. The fix primes the new host in the DNS
+    // cache the moment it is saved (server/settings.ts save), OFF the stop
+    // path, so the Stop reads a cached address and behaves like the primed
+    // cases above (~50 ms here).
+    //
+    // The engine is bound to `localhost` (as in the cold-hostname case) so the
+    // app and engine agree on the address on any runner. Each round clears the
+    // cache to model the just-saved host being unprimed at save time, then goes
+    // through the REAL save path (PATCH /api/settings/connections): on the
+    // unfixed head that save does not prime, so the following Stop is slow; the
+    // fix primes on save, so it is fast.
+    const engine = await spawnEngine("localhost");
+    try {
+      const { client } = await bootApp(`http://localhost:${engine.port}`);
+      const dnsCache = await import("../server/dns-cache");
+      const latencies: number[] = [];
+      for (let round = 0; round < 3; round += 1) {
+        // A COLD socket each round (see the cold-hostname case), so the Stop
+        // must open a fresh connection -- the one that resolves DNS.
+        await sleep(4_500);
+        // Unprimed at the moment of the retune, then saved through the route an
+        // operator's Settings screen calls. The fix's prime rides on this save.
+        dnsCache._resetForTests();
+        const saved = await call(
+          "PATCH", "/api/settings/connections",
+          { engineUrl: `http://localhost:${engine.port}` }, sessionCookie,
+        );
+        expect(saved.status, saved.body).toBe(200);
+        latencies.push(await floodAndStop(engine, client.id, `retune-${round}`));
+      }
+      console.log(`[flood] retuned HOSTNAME engine (cold socket): a scan's Stop reached the engine after ${latencies.join(", ")} ms`);
+      // The same 200 ms bound as the cold-hostname case: the fix's primed-on-
+      // save path measures tens of ms, while the unfixed head's starved
+      // getaddrinfo puts every retuned round well over it. No assertion
+      // weakened, no timeout raised.
+      expect(Math.max(...latencies)).toBeLessThanOrEqual(200);
+    } finally {
+      engine.kill();
+    }
+  }, 60_000);
 });

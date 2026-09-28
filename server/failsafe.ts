@@ -290,13 +290,24 @@ export function warmUp(): void {
 let warmTimer: ReturnType<typeof setInterval> | null = null;
 
 function primeFailsafeHost(): void {
+  void primeNow();
+}
+
+/**
+ * Prime the control plane's address now, AWAITABLY -- for the boot race. An
+ * entry point awaits this before the server accepts requests, so the very
+ * first failsafe Stop reads a cached address and never runs a live threadpool
+ * getaddrinfo behind a sign-in flood. Resolves when the prime settles; never
+ * rejects. An unparseable URL is surfaced when a call is actually made.
+ */
+export function primeNow(): Promise<void> {
   const base = baseUrl();
-  if (!base) return;
+  if (!base) return Promise.resolve();
   try {
     const host = new URL(base).hostname;
-    if (host) void dnsCache.prime(host);
+    return host ? dnsCache.prime(host) : Promise.resolve();
   } catch {
-    // An unparseable URL is surfaced when a call is actually made, not here.
+    return Promise.resolve();
   }
 }
 

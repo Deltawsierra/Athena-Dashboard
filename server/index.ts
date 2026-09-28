@@ -4,7 +4,9 @@ import { createApp, errorHandler } from "./app";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeDefaultData } from "./init-data";
 import { startSampling } from "./health";
-import { warmUp as warmFailsafe } from "./failsafe";
+import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
+import * as settings from "./settings";
+import { primeNow as primeEngineHost } from "./engine";
 
 (async () => {
   const app = createApp({ deferErrorHandler: true });
@@ -26,6 +28,17 @@ import { warmUp as warmFailsafe } from "./failsafe";
     serveStatic(app);
   }
   app.use(errorHandler);
+
+  // SAFETY: close the boot race BEFORE the server accepts its first request.
+  // createApp/warmFailsafe prime the DNS cache fire-and-forget, so a Stop
+  // arriving before that first prime landed still ran a live threadpool
+  // getaddrinfo (server/dns-cache.ts). settings.load() is idempotent and makes
+  // the stored engine URL readable first; then both hosts are primed and
+  // awaited, so the very first Stop reads a cached address. Neither prime
+  // rejects, and a slow resolver is bounded by the wait below not blocking any
+  // Stop -- there are no requests yet.
+  await settings.load();
+  await Promise.allSettled([primeEngineHost(), primeFailsafeHost()]);
 
   // Bind to loopback by default. Set HOST=0.0.0.0 deliberately to expose the
   // server on the network; there is no reason to do so for a desktop install.

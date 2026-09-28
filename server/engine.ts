@@ -334,6 +334,18 @@ export function warmUp(): void {
   }
 }
 
+/**
+ * Prime the engine's address now, AWAITABLY -- for the boot race. warmUp()
+ * primes fire-and-forget, so a Stop arriving before that first prime lands
+ * still ran a live threadpool getaddrinfo. An entry point awaits this (after
+ * settings are loaded) before the server accepts requests, so the very first
+ * Stop reads a cached address. Resolves when the prime settles; never rejects.
+ */
+export function primeNow(): Promise<void> {
+  const host = engineHost();
+  return host ? dnsCache.prime(host) : Promise.resolve();
+}
+
 function headers(): Record<string, string> {
   const key = settings.get("engineKey");
   const out: Record<string, string> = { "Content-Type": "application/json" };
