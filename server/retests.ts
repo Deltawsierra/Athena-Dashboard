@@ -76,6 +76,43 @@ const LIVE_ENGINE_STATES: ReadonlySet<string> = new Set(["queued", "running", "a
 /** What filing a verdict came to. */
 export interface Applied { findingId: string; status: string; detail: string }
 
+/**
+ * How a collected verdict stands to a stop, as the engine said it and as this
+ * dashboard's own stop came to:
+ *   - stoppedAfterRecording: the engine ended the run ABORTED by a stop that
+ *     landed after its check was filed (its reason). The run did not finish
+ *     anyway, so nothing else here says it did: `stopTakenHere` when the
+ *     engine had accepted this dashboard's stop for it, `stopSentUnreadHere`
+ *     when one was sent and its answer not read;
+ *   - completedDespiteStop: the run COMPLETED although the engine had
+ *     accepted a stop for it (only ever when it did not end aborted);
+ *   - completedAfterUnreadStop: it COMPLETED after a stop whose answer was
+ *     not read.
+ */
+export interface StopMarking {
+  stoppedAfterRecording: string | null;
+  stopTakenHere: boolean;
+  stopSentUnreadHere: boolean;
+  completedDespiteStop: boolean;
+  completedAfterUnreadStop: boolean;
+}
+
+export function stopMarkingOf(
+  watch: { stopAcceptedAt?: Date | string | null; stopUnreadAt?: Date | string | null },
+  result: { stoppedAfterRecording?: string | null },
+): StopMarking {
+  const stoppedAfterRecording = result.stoppedAfterRecording ? result.stoppedAfterRecording : null;
+  const accepted = watch.stopAcceptedAt != null;
+  const unread = !accepted && watch.stopUnreadAt != null;
+  return {
+    stoppedAfterRecording,
+    stopTakenHere: stoppedAfterRecording !== null && accepted,
+    stopSentUnreadHere: stoppedAfterRecording !== null && unread,
+    completedDespiteStop: stoppedAfterRecording === null && accepted,
+    completedAfterUnreadStop: stoppedAfterRecording === null && unread,
+  };
+}
+
 /** A new watch: who asked, for what, and where the engine said the run was. */
 export interface WatchStart {
   engineRunId: string;
@@ -412,14 +449,13 @@ export class RetestWatcher {
   private async fileVerdict(row: RetestWatch, token: symbol, result: engine.RetestResult, at: Date): Promise<void> {
     // A run the engine accepted a stop for, that completed anyway with a
     // verdict: the run did finish and the engine did decide, so it is filed --
-    // and said to have completed despite the stop.
-    const despiteStop = row.stopAcceptedAt != null;
-    // A stop was sent, but its answer was not read: whether the engine took it
-    // is not known, so the verdict is never said to have come despite one --
-    // it came after a stop whose answer was not read.
-    const afterUnreadStop = !despiteStop && row.stopUnreadAt != null;
-    // A verdict whose check the engine filed before a stop landed: the run
-    // ended ABORTED, and the verdict stands (engine.retestRun).
+    // and said to have completed despite the stop. A stop sent whose answer
+    // was not read: the verdict is never said to have come despite one. And a
+    // verdict whose check the engine filed before a stop landed: the run ended
+    // ABORTED (engine.retestRun), so it is never said to have finished anyway
+    // -- it is marked stopped after recording, and whether this dashboard's
+    // stop was the one taken (stopMarkingOf).
+    const marking = stopMarkingOf(row, result);
     const base: RetestWatchEnd = {
       state: "verdict", engineState: result.stoppedAfterRecording ? "aborted" : "completed",
       reason: result.stoppedAfterRecording ?? null, error: null, endedAt: new Date(),
@@ -439,7 +475,7 @@ export class RetestWatcher {
         try {
           await this.end(row, token, {
             ...base, findingId,
-            result: { ...result, applied: planned.applied, notFiled: null, completedDespiteStop: despiteStop, completedAfterUnreadStop: afterUnreadStop },
+            result: { ...result, applied: planned.applied, notFiled: null, ...marking },
           }, planned.filing);
           return;
         } catch (cause) {
@@ -450,7 +486,7 @@ export class RetestWatcher {
       }
     }
     await this.end(row, token, {
-      ...base, findingId, result: { ...result, applied: null, notFiled: missing, completedDespiteStop: despiteStop, completedAfterUnreadStop: afterUnreadStop },
+      ...base, findingId, result: { ...result, applied: null, notFiled: missing, ...marking },
     });
   }
 

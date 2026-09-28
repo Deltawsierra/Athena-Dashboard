@@ -10,7 +10,7 @@
  * answers what the real engine answered (tests/fixtures/engine-retest, recorded
  * from athena-engine f4610ae and 5779e99 by generate.py beside them).
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import http from "http";
 import fs from "fs";
 import path from "path";
@@ -241,5 +241,62 @@ describe("Scans running now lists a running retest from the engine's list", () =
     expect(row.textContent).toContain(`retest · engine run ${run.run_id} · running`);
     fireEvent.click(screen.getByTestId(`button-stop-retest-run-${run.run_id}`));
     await waitFor(() => expect(calls).toContain(`POST /api/scans/${run.run_id}/abort`));
+  });
+});
+
+describe("a verdict whose run was stopped after its check was recorded is drawn so, never as a clean pass (round 1)", () => {
+  // The fixtures' run ids are reused across cases, which a real engine never does: one check per engine run.
+  beforeEach(() => { (storageOf as { checks: unknown[] }).checks.length = 0; });
+
+  it("a stop from elsewhere: the verdict panel says stopped after its check was recorded, with the engine's reason", async () => {
+    const fx = load("pr71-f4610ae", "at-once-then-stopped-after-recording");
+    state.statusReads = statusReadsOf(fx);
+    const twinId = await pressRetest(fx);
+    await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent).toBe("Closed"), { timeout: 8_000 });
+    const marked = screen.getByTestId(`text-verdict-stopped-after-recording-${twinId}`);
+    expect(marked.textContent).toContain("Stopped after its check was recorded (customer called)");
+    expect(marked.textContent).not.toContain("The stop sent from this dashboard was taken");
+    expect(screen.queryByTestId(`text-verdict-despite-stop-${twinId}`)).toBeNull();
+  });
+
+  it("this operator's Stop accepted first: 'stop taken', never 'completed despite a stop request'", async () => {
+    const fx = load("pr71-f4610ae", "at-once-then-stopped-after-recording");
+    const runId = retestOf(fx).body.run_id as string;
+    // derived: the recorded accepted Stop from running-then-stopped, its run_id set to this run.
+    const recordedAbort = abortOf(load("pr71-f4610ae", "running-then-stopped"));
+    state.abort = { ...recordedAbort, body: { ...recordedAbort.body, run_id: runId } };
+    let release!: () => void;
+    state.hold = new Promise<void>((r) => { release = r; });
+    state.statusReads = statusReadsOf(fx);
+    const twinId = await pressRetest(fx);
+    await waitFor(() => expect(screen.getByTestId(`text-retest-phase-${twinId}`).textContent).toBe("Running"));
+    fireEvent.click(screen.getByTestId(`button-stop-retest-${twinId}`));
+    await waitFor(() => expect(calls).toContain(`POST /api/scans/${runId}/abort`));
+    await waitFor(async () => expect((await agent.get(`/api/retests/${runId}`)).body.stopAcceptedAt).toBeTruthy());
+    release();
+    state.hold = null;
+    await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent).toBe("Closed"), { timeout: 8_000 });
+    const marked = screen.getByTestId(`text-verdict-stopped-after-recording-${twinId}`);
+    expect(marked.textContent).toContain("Stopped after its check was recorded (customer called)");
+    expect(marked.textContent).toContain("The stop sent from this dashboard was taken");
+    expect(screen.queryByTestId(`text-verdict-despite-stop-${twinId}`)).toBeNull();
+    expect(screen.getByTestId(`verdict-${twinId}`).textContent).not.toMatch(/finished anyway|completed anyway/i);
+  });
+
+  it("answered inline (201, state aborted): the verdict panel carries the marking too", async () => {
+    const fx = load("pr71-f4610ae", "stopped-after-recording");
+    const twinId = await pressRetest(fx);
+    await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent).toBe("Closed"));
+    expect(screen.getByTestId(`text-verdict-stopped-after-recording-${twinId}`).textContent)
+      .toContain("Stopped after its check was recorded (customer called)");
+  });
+
+  it("a clean verdict carries no stop marking", async () => {
+    const fx = load("pr71-f4610ae", "at-once-then-verdict");
+    state.statusReads = statusReadsOf(fx);
+    const twinId = await pressRetest(fx);
+    await waitFor(() => expect(screen.getByTestId(`text-verdict-${twinId}`).textContent).toBe("Closed"), { timeout: 8_000 });
+    expect(screen.queryByTestId(`text-verdict-stopped-after-recording-${twinId}`)).toBeNull();
+    expect(screen.getByTestId(`verdict-${twinId}`).textContent).not.toMatch(/stop/i);
   });
 });

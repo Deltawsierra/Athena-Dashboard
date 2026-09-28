@@ -439,11 +439,25 @@ async function sendStop(
   req: Request,
   run: { runId: string; target: string | null; testId: string | null },
   via: "kill_switch" | "delete" | "start_not_recorded",
+  note?: string,
 ): Promise<StopOutcome> {
   const who = actor(req);
   const outcome = await sendAbort(run.runId);
-  await writeStopRecord(who, run, via, outcome);
+  await writeStopRecord(who, run, via, outcome, note);
   return outcome;
+}
+
+/** What one stop sent to a run an unread answer named came to, in a sentence. */
+function unreadAnswerStopSentence(runId: string, stop: StopOutcome): string {
+  return stop.answerUnread
+    ? `Run ${runId} was sent a stop, and the engine answered it 2xx, but the rest of its answer was not read ` +
+      "(stop sent, answer unread): whether it is stopping is not known."
+    : stop.stopped
+      ? `Run ${runId} was sent a stop, and the engine accepted it.`
+      : stop.alreadyFinished
+        ? `Run ${runId} was sent a stop, and the engine answered that it had already ended.`
+        : `Run ${runId} was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
+          "stop it with the kill switch or a failsafe pause.";
 }
 
 /** Stop a test's engine run, reported against the test. */
@@ -1497,21 +1511,30 @@ function retestFiling(
     completedDespiteStop?: boolean;
     /** A stop was sent for this run, its answer unread, and it completed with this verdict after it. */
     completedAfterUnreadStop?: boolean;
+    /** The run ended stopped after its check was recorded, by a stop this dashboard sent and the engine took. */
+    stopTakenHere?: boolean;
+    /** The run ended stopped after its check was recorded; this dashboard had sent a stop whose answer was not read. */
+    stopSentUnreadHere?: boolean;
   },
 ): { filing: RetestFiling; applied: retests.Applied } {
   const decided = lifecycle.statusFromVerdict(result.verdict, finding.status);
-  // A run stopped too late to stop it: the engine did finish, and did decide,
-  // so the verdict is filed -- and says so, on the check and the finding.
-  const despite = how.completedDespiteStop
-    ? " Completed despite a stop request."
-    : how.completedAfterUnreadStop ? ` ${AFTER_UNREAD_STOP}.` : "";
+  // A run the engine ended ABORTED after its check was filed: the verdict
+  // stands, and is filed -- marked, on the check and the finding, as stopped
+  // after its check was recorded, never as a run that finished (anyway).
+  // Otherwise a run stopped too late to stop it: the engine did finish, and
+  // did decide, so the verdict is filed -- and says so.
+  const despite = result.stoppedAfterRecording
+    ? ` ${stoppedAfterRecordingSentence(result.stoppedAfterRecording, how)}`
+    : how.completedDespiteStop
+      ? " Completed despite a stop request."
+      : how.completedAfterUnreadStop ? ` ${AFTER_UNREAD_STOP}.` : "";
   // Said on the finding as well as on the check: a verdict the watch collected
   // is the requester's retest, filed when the engine finished it -- not a
   // status they set by hand at that moment.
   const note = how.filedVia === "retest_watch"
-    ? `${decided.detail} (Filed by the dashboard when the engine finished the retest requested at ` +
-      `${how.requestedAt.toISOString()}.${despite})`
-    : decided.detail;
+    ? `${decided.detail} (Filed by the dashboard when the engine ${result.stoppedAfterRecording ? "ended" : "finished"} ` +
+      `the retest requested at ${how.requestedAt.toISOString()}.${despite})`
+    : `${decided.detail}${despite}`;
   return {
     filing: {
       findingId: finding.id,
@@ -1543,6 +1566,18 @@ function retestFiling(
     },
     applied: { findingId: finding.id, status: decided.status, detail: decided.detail },
   };
+}
+
+/**
+ * How a verdict whose run ended stopped after its check was recorded is
+ * marked, on the check and the finding: with the engine's reason, and whether
+ * the stop this dashboard sent was the one taken.
+ */
+function stoppedAfterRecordingSentence(reason: string, how: { stopTakenHere?: boolean; stopSentUnreadHere?: boolean }): string {
+  return `Stopped after its check was recorded (${reason}): the engine filed this verdict's check, then a stop landed ` +
+    "and the run ended stopped. The verdict stands." +
+    (how.stopTakenHere ? " The stop sent from this dashboard was taken."
+      : how.stopSentUnreadHere ? " A stop was sent from this dashboard; its answer was not read." : "");
 }
 
 /**
@@ -1592,8 +1627,9 @@ const retestWatchHooks: retests.WatchHooks = {
     if (!finding) return { missing: "the finding this retest was about is no longer on record" };
     return retestFiling(finding, result, {
       requestedBy: watch.requestedBy, requestedAt: watch.startedAt, filedVia: "retest_watch",
-      completedDespiteStop: watch.stopAcceptedAt != null,
-      completedAfterUnreadStop: watch.stopAcceptedAt == null && watch.stopUnreadAt != null,
+      // Never "completed despite a stop" for a run the engine ended aborted
+      // after recording (retests.stopMarkingOf).
+      ...retests.stopMarkingOf(watch, result),
     });
   },
   async recordEnd(watch) {
@@ -1616,7 +1652,10 @@ const retestWatchHooks: retests.WatchHooks = {
           ? { verdict: result.verdict, findingType: result.findingType, target: result.target,
             applied: result.applied ?? null, notFiled: result.notFiled ?? null,
             completedDespiteStop: (result as { completedDespiteStop?: unknown }).completedDespiteStop === true,
-            completedAfterUnreadStop: (result as { completedAfterUnreadStop?: unknown }).completedAfterUnreadStop === true }
+            completedAfterUnreadStop: (result as { completedAfterUnreadStop?: unknown }).completedAfterUnreadStop === true,
+            stoppedAfterRecording: result.stoppedAfterRecording || null,
+            stopTakenHere: (result as { stopTakenHere?: unknown }).stopTakenHere === true,
+            stopSentUnreadHere: (result as { stopSentUnreadHere?: unknown }).stopSentUnreadHere === true }
           : { reason: watch.reason, error: watch.error }),
       },
       userId: watch.requestedBy,
@@ -1673,6 +1712,8 @@ function retestView(watched: RetestWatch) {
       completedDespiteStop: (watched.result as { completedDespiteStop?: unknown } | null)?.completedDespiteStop === true,
       completedAfterUnreadStop: (watched.result as { completedAfterUnreadStop?: unknown } | null)?.completedAfterUnreadStop === true,
       stoppedAfterRecording: (watched.result as { stoppedAfterRecording?: unknown } | null)?.stoppedAfterRecording ?? null,
+      stopTakenHere: (watched.result as { stopTakenHere?: unknown } | null)?.stopTakenHere === true,
+      stopSentUnreadHere: (watched.result as { stopSentUnreadHere?: unknown } | null)?.stopSentUnreadHere === true,
     }),
     ...(watched.result ? { result: watched.result } : {}),
   };
@@ -1684,6 +1725,7 @@ function retestPhaseSentence(
   about: {
     reason: string | null; error: string | null; stopAcceptedAt?: Date | string | null; stopUnreadAt?: Date | string | null;
     completedDespiteStop?: boolean; completedAfterUnreadStop?: boolean; stoppedAfterRecording?: unknown;
+    stopTakenHere?: boolean; stopSentUnreadHere?: boolean;
   },
 ): string {
   switch (phase) {
@@ -1695,9 +1737,11 @@ function retestPhaseSentence(
             "whether it is stopping is not known. It has not reached a verdict, and nothing has been filed."
           : "The engine is still running this retest against the target. It has not reached a verdict, and nothing has been filed.";
     case "verdict":
-      if (typeof about.stoppedAfterRecording === "string") {
+      if (typeof about.stoppedAfterRecording === "string" && about.stoppedAfterRecording !== "") {
         return `The retest reached a verdict and the engine filed its check; a stop (${about.stoppedAfterRecording}) ` +
-          "landed while that check was being written, so the run ended stopped. The verdict stands and was filed.";
+          "landed while that check was being written, so the run ended stopped. The verdict stands and was filed." +
+          (about.stopTakenHere ? " The stop sent from this dashboard was taken."
+            : about.stopSentUnreadHere ? " A stop was sent from this dashboard; its answer was not read." : "");
       }
       return about.completedDespiteStop
         ? "The engine accepted a stop for this retest, but the run completed anyway, with a verdict. The verdict was " +
@@ -2370,22 +2414,21 @@ export function registerRoutes(app: Express): void {
         if (cause.stopId === null) {
           return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer" });
         }
-        const stop = await sendStop(req, { runId: cause.stopId, target: data.target, testId: null }, "start_not_recorded");
+        // Every run it named -- its body's, and its X-Run-Id header's when the
+        // two differ -- is sent its stop, all at once; the record of each says why.
+        const ids = cause.stopIds;
+        const why = `sent because the engine answered a scan start in a shape this dashboard does not read, naming this run: ${cause.message}`;
+        const stops = await Promise.all(ids.map((runId) =>
+          sendStop(req, { runId, target: data.target, testId: null }, "start_not_recorded", why)));
         return void res.status(502).json({
-          error: `${cause.message} ` + (stop.answerUnread
-            ? `Run ${cause.stopId} was sent a stop, and the engine answered it 2xx, but the rest of its answer was not read ` +
-              "(stop sent, answer unread): whether it is stopping is not known."
-            : stop.stopped
-              ? `Run ${cause.stopId} was sent a stop, and the engine accepted it.`
-              : stop.alreadyFinished
-                ? `Run ${cause.stopId} was sent a stop, and the engine answered that it had already ended.`
-                : `Run ${cause.stopId} was sent a stop and it did not take (${stop.detail}): it may still be running -- ` +
-                  "stop it with the kill switch or a failsafe pause."),
+          error: `${cause.message} ${ids.map((runId, at) => unreadAnswerStopSentence(runId, stops[at])).join(" ")}`,
           reason: "unrecognised_engine_answer",
-          runId: cause.stopId,
-          stopped: stop.stopped,
-          ...(stop.alreadyFinished ? { alreadyFinished: true } : {}),
-          ...(stop.answerUnread ? { answerUnread: true } : {}),
+          runId: ids[0],
+          runIds: ids,
+          stopped: stops.every((one) => one.stopped),
+          stops: ids.map((runId, at) => ({ runId, ...stops[at] })),
+          ...(stops.some((one) => one.alreadyFinished) ? { alreadyFinished: stops.every((one) => one.alreadyFinished === true) } : {}),
+          ...(stops.some((one) => one.answerUnread) ? { answerUnread: true } : {}),
         });
       }
       if (cause instanceof engine.EngineUnavailable) {
@@ -2524,7 +2567,7 @@ export function registerRoutes(app: Express): void {
     try {
       await storage.createActivityLog({
         action: "started", entityType: "test", entityId: test.id,
-        details: { target: data.target, engagementRef, runId: started.runId, filed },
+        details: { target: data.target, engagementRef, runId: started.runId, filed, ...(started.warning ? { warning: started.warning } : {}) },
         ...actor(req),
       });
     } catch {
@@ -2871,6 +2914,45 @@ export function registerRoutes(app: Express): void {
     try {
       answered = await engine.retest({ twinId: data.twinId, engagementRef, scope });
     } catch (cause) {
+      const heldSaid = "It may still be running this retest: this finding cannot be retested again, and its place among the " +
+        "retests sent at once stays taken, until the engine lists no live retest on its target or " +
+        `${Math.round(retestSlots.ceilingMs / 60_000)} min pass. The kill switch stops it.`;
+      if (cause instanceof engine.UnrecognisedRetestAnswer && cause.stopIds.length > 0) {
+        // An answer this dashboard does not read that names a run: a 202 is a
+        // live run, and so may any other be. Refused (nothing is filed) and
+        // each run it named is sent its stop -- its slot stays taken until the
+        // stop is answered, and after, unless every stop was taken or found
+        // the run ended.
+        const ids = cause.stopIds;
+        let stops: StopOutcome[] = [];
+        try {
+          const why = `sent because the engine answered a retest in a shape this dashboard does not read, naming this run: ${cause.message}`;
+          stops = await Promise.all(ids.map((runId) =>
+            sendStop(req, { runId, target: null, testId: test.id }, "start_not_recorded", why)));
+        } finally {
+          retestsInFlight.delete(key);
+        }
+        const free = stops.length === ids.length && stops.every((one) => acceptedStop(one) || one.alreadyFinished === true);
+        if (free) {
+          console.log(`[retest] the in-flight slot of retest ${key} is free: the engine's answer was not read, and the stop ` +
+            `sent to ${ids.join(", ")} was answered (taken, or the run had ended).`);
+        } else {
+          retestsHeld.set(key, { scope, since: Date.now() });
+          console.error(`[retest] the in-flight slot of retest ${key} is held: the engine's answer was not read, and the ` +
+            `stop sent to ${ids.join(", ")} was not taken, or its answer not read.`);
+          pollHeldRetests();
+        }
+        return void res.status(502).json({
+          error: `${cause.message} ${ids.map((runId, at) => unreadAnswerStopSentence(runId, stops[at])).join(" ")}` +
+            (free ? "" : ` ${heldSaid}`),
+          reason: "unrecognised_engine_answer",
+          runId: ids[0],
+          runIds: ids,
+          stopped: stops.every((one) => one.stopped),
+          stops: ids.map((runId, at) => ({ runId, ...stops[at] })),
+          ...(free ? {} : { held: heldSaid }),
+        });
+      }
       retestsInFlight.delete(key);
       // Only a definite answer frees the slot at once: a refusal (4xx), no
       // engine to send to, or a connection the engine's host refused before
@@ -2898,9 +2980,6 @@ export function registerRoutes(app: Express): void {
       } else {
         console.log(`[retest] the in-flight slot of retest ${key} is free at once: ${causeOf(cause)} (a definite answer).`);
       }
-      const heldSaid = "It may still be running this retest: this finding cannot be retested again, and its place among the " +
-        "retests sent at once stays taken, until the engine lists no live retest on its target or " +
-        `${Math.round(retestSlots.ceilingMs / 60_000)} min pass. The kill switch stops it.`;
       if (cause instanceof engine.UnrecognisedRetestAnswer) {
         return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer", ...(definite ? {} : { held: heldSaid }) });
       }
@@ -2967,6 +3046,9 @@ export function registerRoutes(app: Express): void {
         findingType: result.findingType,
         target: result.target,
         applied,
+        // A verdict whose run the engine ended aborted after its check was
+        // filed: said so in the record, never as a clean run.
+        stoppedAfterRecording: result.stoppedAfterRecording || null,
       },
       ...who.actor,
     });

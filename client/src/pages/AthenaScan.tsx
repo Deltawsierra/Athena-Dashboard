@@ -172,7 +172,7 @@ export default function AthenaScan() {
         siteId: siteId || undefined,
         target: target.trim(),
       });
-      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe" };
+      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string };
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
@@ -226,6 +226,9 @@ export default function AthenaScan() {
   // stop can name): NoStopPanel stands in place of the Stop, and says what
   // stops it. Only when the server said so, in the start's answer or a read;
   // where the page does not know, the normal Stop stays.
+  // The start's warning, for the scan it started, while that scan is on this page.
+  const startWarning = start.data !== undefined && start.data.test.id === testId && typeof start.data.warning === "string"
+    ? start.data.warning : null;
   const failsafeOnly = testId !== null
     && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
   const finished = scan !== undefined && FINISHED.has(scan.state);
@@ -470,6 +473,14 @@ export default function AthenaScan() {
             </div>
           )}
           {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
+          {/* What the engine said went wrong around a run it started all the
+              same (a 500 that named a run whose work started, or an answer
+              that named no run id): the server's words, as it said them. */}
+          {startWarning !== null && (
+            <p className="mt-3 text-[12px] athena-gold" data-testid="text-start-warning">
+              {startWarning}
+            </p>
+          )}
         </form>
       </GlassCard>
 

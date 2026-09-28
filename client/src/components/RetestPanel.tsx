@@ -59,6 +59,16 @@ interface RetestResult {
   completedDespiteStop?: boolean;
   /** A stop was sent for this run, its answer unread, and it completed with this verdict after it. */
   completedAfterUnreadStop?: boolean;
+  /**
+   * The engine ended this run ABORTED by a stop that landed after its check
+   * was filed (the stop's reason): the verdict stands, and the run did not
+   * finish. Null or absent for a run that completed.
+   */
+  stoppedAfterRecording?: string | null;
+  /** That stop was the one this dashboard sent, and the engine took it. */
+  stopTakenHere?: boolean;
+  /** This dashboard had sent a stop for the run, its answer unread. */
+  stopSentUnreadHere?: boolean;
 }
 
 /**
@@ -166,13 +176,24 @@ function VerdictView({ twinId, result }: { twinId: number; result: RetestResult 
             is how "inconclusive" starts reading as "fine". */}
         <p className="text-sm text-muted-foreground">{result.detail}</p>
         <p className="text-xs text-muted-foreground">{style.meaning}</p>
-        {result.completedDespiteStop && (
+        {/* A run the engine ended stopped after its check was recorded is
+            never drawn as one that finished -- anyway, or cleanly. */}
+        {result.stoppedAfterRecording ? (
+          <p className="text-xs athena-gold" data-testid={`text-verdict-stopped-after-recording-${twinId}`}>
+            Stopped after its check was recorded ({result.stoppedAfterRecording}): the engine filed this verdict&apos;s
+            check, then a stop landed and the run ended stopped. The verdict stands and was filed.
+            {result.stopTakenHere
+              ? " The stop sent from this dashboard was taken."
+              : result.stopSentUnreadHere ? " A stop was sent from this dashboard; its answer was not read." : ""}
+          </p>
+        ) : null}
+        {!result.stoppedAfterRecording && result.completedDespiteStop && (
           <p className="text-xs athena-gold" data-testid={`text-verdict-despite-stop-${twinId}`}>
             Completed despite a stop request: the engine accepted a stop for this retest, but the run finished anyway
             with this verdict, which was filed.
           </p>
         )}
-        {!result.completedDespiteStop && result.completedAfterUnreadStop && (
+        {!result.stoppedAfterRecording && !result.completedDespiteStop && result.completedAfterUnreadStop && (
           <p className="text-xs athena-gold" data-testid={`text-verdict-after-unread-stop-${twinId}`}>
             Completed after a stop whose answer was not read: a stop was sent for this retest, but the engine&apos;s answer
             to it was not read, and the run finished with this verdict, which was filed.
