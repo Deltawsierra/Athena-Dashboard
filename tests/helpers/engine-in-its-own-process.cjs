@@ -68,4 +68,10 @@ const server = http.createServer((req, res) => {
     res.end("{}");
   });
 });
-server.listen(0, "127.0.0.1", () => process.stdout.write(JSON.stringify({ port: server.address().port }) + "\n"));
+// The bind host defaults to 127.0.0.1 (every existing caller connects there).
+// ENGINE_BIND_HOST lets a caller bind to a name instead (e.g. "localhost"), so
+// a test that reaches this engine by hostname binds it to whatever that name
+// resolves to on this machine -- IPv4 here, IPv6 (::1) on a dual-stack CI
+// runner -- and the two agree however localhost is ordered.
+const bindHost = process.env.ENGINE_BIND_HOST || "127.0.0.1";
+server.listen(0, bindHost, () => process.stdout.write(JSON.stringify({ port: server.address().port }) + "\n"));

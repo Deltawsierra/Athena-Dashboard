@@ -41,44 +41,58 @@ import path from "path";
  * which swamps the very delay this measures). The stand-in engine runs in a
  * process of its own, so when the Stop arrives is measured by a clock this
  * process's own event loop cannot hold up.
+ *
+ * The IP case reaches its engine at 127.0.0.1 (an IP literal, no DNS). The
+ * HOSTNAME case reaches its engine at `localhost` (a name, so getaddrinfo runs
+ * on a cold connection); that engine is bound to `localhost` too, so the app
+ * and the engine agree on whatever it resolves to -- 127.0.0.1 here, ::1 on a
+ * dual-stack CI runner where localhost sorts IPv6-first.
  */
 
-const calls: Array<{ line: string; at: number }> = [];
-let child: ChildProcess;
-let enginePort = 0;
-
-beforeAll(async () => {
-  child = spawn(process.execPath, [path.join(__dirname, "helpers", "engine-in-its-own-process.cjs")], { stdio: ["ignore", "pipe", "inherit"] });
+/** A stand-in engine in its own process, bound to `bindHost`, recording when each request arrives. */
+interface Engine {
+  port: number;
+  calls: Array<{ line: string; at: number }>;
+  kill: () => void;
+}
+async function spawnEngine(bindHost: string): Promise<Engine> {
+  const calls: Array<{ line: string; at: number }> = [];
+  const child: ChildProcess = spawn(
+    process.execPath,
+    [path.join(__dirname, "helpers", "engine-in-its-own-process.cjs")],
+    { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, ENGINE_BIND_HOST: bindHost } },
+  );
   let buffer = "";
-  await new Promise<void>((ready) => {
+  const port = await new Promise<number>((ready) => {
     child.stdout!.on("data", (chunk: Buffer) => {
       buffer += chunk.toString();
       let at: number;
       while ((at = buffer.indexOf("\n")) >= 0) {
         const one = JSON.parse(buffer.slice(0, at));
         buffer = buffer.slice(at + 1);
-        if (one.port) { enginePort = one.port; ready(); } else calls.push(one);
+        if (one.port) ready(one.port); else calls.push(one);
       }
     });
   });
-  process.env.ATHENA_ENGINE_KEY = "ce_op_test";
-});
-afterAll(() => {
-  delete process.env.ATHENA_ENGINE_URL;
-  delete process.env.ATHENA_ENGINE_KEY;
-  process.env.ATHENA_STORAGE = "memory";
-  child.kill();
-});
+  return { port, calls, kill: () => child.kill() };
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function arrived(line: string, ms = 8_000) {
+async function arrived(engine: Engine, line: string, ms = 8_000) {
   const deadline = Date.now() + ms;
   for (;;) {
-    const one = calls.find((c) => c.line === line);
+    const one = engine.calls.find((c) => c.line === line);
     if (one || Date.now() > deadline) return one;
     await sleep(5);
   }
 }
+
+beforeAll(() => { process.env.ATHENA_ENGINE_KEY = "ce_op_test"; });
+afterAll(() => {
+  delete process.env.ATHENA_ENGINE_URL;
+  delete process.env.ATHENA_ENGINE_KEY;
+  process.env.ATHENA_STORAGE = "memory";
+});
 
 let server: http.Server;
 let appPort = 0;
@@ -106,7 +120,7 @@ function call(method: string, reqPath: string, body?: unknown, cookie = ""): Pro
   });
 }
 
-/** Boot a fresh in-memory app whose engine URL is `engineUrl`, signed in as admin, with one running scan per round to stop. */
+/** Boot a fresh in-memory app whose engine URL is `engineUrl`, signed in as admin. */
 async function bootApp(engineUrl: string): Promise<{ client: { id: string } }> {
   process.env.ATHENA_STORAGE = "memory";
   process.env.SESSION_SECRET = "test-secret-that-is-at-least-32-characters";
@@ -133,7 +147,7 @@ async function bootApp(engineUrl: string): Promise<{ client: { id: string } }> {
 }
 
 /** One round: 20 concurrent failed sign-ins in flight, a scan's Stop sent right behind; returns the Stop's latency to the engine. */
-async function floodAndStop(clientId: string, tag: string): Promise<number> {
+async function floodAndStop(engine: Engine, clientId: string, tag: string): Promise<number> {
   const storage = (await import("../server/storage-unified")).storage;
   const { resetLoginThrottle } = await import("../server/routes");
   const test = await storage.createTest({
@@ -141,7 +155,7 @@ async function floodAndStop(clientId: string, tag: string): Promise<number> {
     findings: { runId: `victim-${tag}`, target: "https://victim.example.test/", results: [] },
   });
   resetLoginThrottle();
-  calls.length = 0;
+  engine.calls.length = 0;
 
   // 20 concurrent failed sign-ins, distinct usernames so neither the
   // per-username nor the per-address throttle blocks any of them before its
@@ -154,8 +168,8 @@ async function floodAndStop(clientId: string, tag: string): Promise<number> {
   const pressed = Date.now();
   const stop = call("POST", `/api/scans/${test.id}/abort`, undefined, sessionCookie);
   const answer = await stop;
-  expect(answer.status).toBe(200);
-  const got = await arrived(`POST /api/scans/victim-${tag}/abort`, 8_000);
+  expect(answer.status, answer.body).toBe(200);
+  const got = await arrived(engine, `POST /api/scans/victim-${tag}/abort`, 8_000);
   expect(got).toBeDefined();
   await Promise.all(flood);
   return got!.at - pressed;
@@ -167,46 +181,61 @@ describe("a flood of failed sign-ins", () => {
     // done: this isolates the event-loop cost of scrypt. A synchronous scrypt
     // call put this over 1,100 ms every round, measured the same way on this
     // machine.
-    const { client } = await bootApp(`http://127.0.0.1:${enginePort}`);
-    const latencies: number[] = [];
-    for (let round = 0; round < 5; round += 1) latencies.push(await floodAndStop(client.id, `ip-${round}`));
-    console.log(`[flood] IP-literal engine: a scan's Stop reached the engine after ${latencies.join(", ")} ms`);
-    // Off the loop it is a two-digit number of milliseconds most rounds,
-    // occasionally more on a loaded machine (twenty brand-new connections
-    // arriving together cost something on their own, before scrypt is ever
-    // reached) -- generous next to that 1,100 ms+ failure mode, and still an
-    // order of magnitude under it.
-    expect(Math.max(...latencies)).toBeLessThanOrEqual(400);
+    const engine = await spawnEngine("127.0.0.1");
+    try {
+      const { client } = await bootApp(`http://127.0.0.1:${engine.port}`);
+      const latencies: number[] = [];
+      for (let round = 0; round < 5; round += 1) latencies.push(await floodAndStop(engine, client.id, `ip-${round}`));
+      console.log(`[flood] IP-literal engine: a scan's Stop reached the engine after ${latencies.join(", ")} ms`);
+      // Off the loop it is a two-digit number of milliseconds most rounds,
+      // occasionally more on a loaded machine (twenty brand-new connections
+      // arriving together cost something on their own, before scrypt is ever
+      // reached) -- generous next to that 1,100 ms+ failure mode, and still an
+      // order of magnitude under it.
+      expect(Math.max(...latencies)).toBeLessThanOrEqual(400);
+    } finally {
+      engine.kill();
+    }
   }, 60_000);
 
   it("delays no Stop with a HOSTNAME engine URL on a cold socket (the Stop is off the threadpool)", async () => {
-    // The engine at `localhost` -- a name, so a cold connection resolves it
-    // with getaddrinfo, on the same threadpool the flood's scrypt jobs fill.
-    // Before the address was pinned (server/dns-cache.ts), the Stop queued
-    // behind that starved getaddrinfo: ~385-570 ms at 20 concurrent here on
-    // the unfixed head, ~1.3 s at 48 -- and a distributed flood, which the
+    // The engine reached at `localhost` -- a name, so a cold connection
+    // resolves it with getaddrinfo, on the same threadpool the flood's scrypt
+    // jobs fill. Before the address was pinned (server/dns-cache.ts), the Stop
+    // queued behind that starved getaddrinfo: ~385-570 ms at 20 concurrent
+    // here on the unfixed head -- and a distributed flood, which the
     // per-address sign-in cap does not bound, drove it into seconds. With the
     // address served from the cache, the Stop connects without a live
     // getaddrinfo and behaves like the IP-literal path above (~50 ms here).
-    const { client } = await bootApp(`http://localhost:${enginePort}`);
-    const latencies: number[] = [];
-    for (let round = 0; round < 3; round += 1) {
-      // A COLD socket each round: the engine's keep-alive connection closes
-      // after IDLE_SOCKET_MS (4 s), so waiting past it guarantees the Stop
-      // must open a fresh connection -- the case that resolves DNS. Without
-      // this, rounds after the first would reuse a warm socket and never
-      // resolve, hiding the regression this measures.
-      await sleep(4_500);
-      latencies.push(await floodAndStop(client.id, `host-${round}`));
+    //
+    // The engine is BOUND to `localhost` too (ENGINE_BIND_HOST), so the app
+    // and the engine reach the same address however localhost is ordered:
+    // 127.0.0.1 here, ::1 on a dual-stack CI runner. The point is only that a
+    // NAME (not an IP literal) is resolved on the cold stop connection.
+    const engine = await spawnEngine("localhost");
+    try {
+      const { client } = await bootApp(`http://localhost:${engine.port}`);
+      const latencies: number[] = [];
+      for (let round = 0; round < 3; round += 1) {
+        // A COLD socket each round: the engine's keep-alive connection closes
+        // after IDLE_SOCKET_MS (4 s), so waiting past it guarantees the Stop
+        // must open a fresh connection -- the case that resolves DNS. Without
+        // this, rounds after the first would reuse a warm socket and never
+        // resolve, hiding the regression this measures.
+        await sleep(4_500);
+        latencies.push(await floodAndStop(engine, client.id, `host-${round}`));
+      }
+      console.log(`[flood] HOSTNAME engine (cold socket): a scan's Stop reached the engine after ${latencies.join(", ")} ms`);
+      // Bound at 200 ms: the pinned-address path measures ~50-60 ms here (up to
+      // ~140 ms on a loaded machine, the cost of twenty fresh connections
+      // arriving together -- the same noise the IP case absorbs), while the
+      // unfixed head's starved getaddrinfo put every cold round at 385 ms or
+      // more. 200 ms clears the fix with room and fails the regression outright
+      // -- unlike the IP case's 400 ms, which the 385 ms hostname delay slipped
+      // under. It is deliberately tighter than that 400 ms and never raises it.
+      expect(Math.max(...latencies)).toBeLessThanOrEqual(200);
+    } finally {
+      engine.kill();
     }
-    console.log(`[flood] HOSTNAME engine (cold socket): a scan's Stop reached the engine after ${latencies.join(", ")} ms`);
-    // Bound at 200 ms: the pinned-address path measures ~50-60 ms here (up to
-    // ~140 ms on a loaded machine, the cost of twenty fresh connections
-    // arriving together -- the same noise the IP case absorbs), while the
-    // unfixed head's starved getaddrinfo put every cold round at 385 ms or
-    // more. 200 ms clears the fix with room and fails the regression outright
-    // -- unlike the IP case's 400 ms, which the 385 ms hostname delay slipped
-    // under. It is deliberately tighter than that 400 ms and never raises it.
-    expect(Math.max(...latencies)).toBeLessThanOrEqual(200);
   }, 60_000);
 });
