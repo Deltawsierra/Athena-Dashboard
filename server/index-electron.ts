@@ -1,12 +1,15 @@
 // Electron server entry point. Bundled to CommonJS by build-electron-server.cjs,
 // so it must not import Vite or anything that depends on import.meta.
+import "./boot-uv"; // Must be first: raises UV_THREADPOOL_SIZE before any libuv threadpool use.
 import express from "express";
 import { createServer } from "http";
 import path from "path";
 import { createApp, errorHandler } from "./app";
 import { initializeDefaultData } from "./init-data";
 import { startSampling } from "./health";
-import { warmUp as warmFailsafe } from "./failsafe";
+import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
+import * as settings from "./settings";
+import { primeNow as primeEngineHost } from "./engine";
 
 function serveStatic(app: express.Application): void {
   // The bundle lives in dist/, the client build in dist/public.
@@ -33,6 +36,13 @@ function serveStatic(app: express.Application): void {
   const server = createServer(app);
   serveStatic(app);
   app.use(errorHandler);
+
+  // SAFETY: close the boot race BEFORE the server accepts its first request --
+  // see the note in server/index.ts. Both outbound hosts are primed in the DNS
+  // cache and awaited so the very first Stop reads a cached address rather than
+  // running a live threadpool getaddrinfo behind a sign-in flood.
+  await settings.load();
+  await Promise.allSettled([primeEngineHost(), primeFailsafeHost()]);
 
   const port = parseInt(process.env.PORT || "5000", 10);
   const host = process.env.HOST || "127.0.0.1";

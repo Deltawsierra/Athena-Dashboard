@@ -11,5 +11,7 @@
   "tests/a-stop-follows-the-account-and-no-failed-read-or-stalled-answer-holds-it.test.ts",
   "tests/findings-summary-holds-at-estate-scale.test.ts",
   "tests/a-relayed-signature-is-read-back-at-once.test.tsx",
-  "tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts"
+  "tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts",
+  "tests/a-tests-table-at-estate-scale-never-delays-a-stop.test.ts",
+  "tests/a-sign-in-flood-never-delays-a-stop.test.ts"
 ]

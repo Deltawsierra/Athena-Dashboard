@@ -369,7 +369,12 @@ describe("no failed read stands between an operator and a stop", () => {
 
   it("when the kill switch setting cannot be read, a stop still goes through, and an ordinary write does not", async () => {
     const { storage } = await import("../server/storage-unified");
+    // Both reads of the settings row: the wide one the settings screen uses,
+    // and the narrow one (#325(e)) an ordinary write's own enforcement now
+    // uses instead, so this still simulates the row itself being unreadable
+    // rather than only the method this dashboard happens to call.
     vi.spyOn(storage, "getAIControlSettings").mockRejectedValue(new Error("database is locked"));
+    vi.spyOn(storage, "getKillSwitchState").mockRejectedValue(new Error("database is locked"));
     expect((await admin.post(`/api/scans/${scan.testId}/abort`)).status).toBe(200);
     expect((await admin.post("/api/failsafe/commands").send({ action: "pause", engineId: "athena-1" })).status).toBe(201);
     expect((await admin.post("/api/failsafe/commands/standdown-9/signatures").send({ keyId: "b", sig: "ab" })).status).toBe(200);

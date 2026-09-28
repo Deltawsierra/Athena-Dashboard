@@ -21,6 +21,7 @@
  */
 
 import { storage } from "./storage-unified";
+import * as dnsCache from "./dns-cache";
 import type { ConnectionSetting, UpdateConnectionSettings } from "@shared/schema";
 
 /** A setting, its environment fallback, and whether it is a credential. */
@@ -122,4 +123,30 @@ export async function save(
     cleaned[key] = value === "" ? null : value;
   }
   cache = await storage.updateConnectionSettings(cleaned as UpdateConnectionSettings, updatedBy);
+
+  // SAFETY: if the engine URL was just retuned, prime its (possibly new) host
+  // in the DNS cache immediately -- OFF the stop path, fire-and-forget -- so a
+  // Stop never has to. Without this the new host stays unprimed until the next
+  // 30 s warm-up tick (server/engine.ts warmUp) or the first live lookup, and
+  // the first Stop to it during a sign-in flood would run a live threadpool
+  // getaddrinfo queued behind the flood's scrypt jobs (server/dns-cache.ts).
+  // The hostname on the request is unchanged, so TLS SNI and certificate
+  // validation are untouched. (The failsafe URL is a deployment/environment
+  // property with no settings writer, so there is nothing to prime for it
+  // here; server/failsafe.ts warms and re-reads it on its own.)
+  if ("engineUrl" in cleaned) {
+    const host = hostOf(get("engineUrl"));
+    if (host) void dnsCache.prime(host);
+  }
+}
+
+/** The hostname of an engine/service URL, or null when it is empty or unparseable. An IP literal is returned as-is and priming it is a no-op. */
+function hostOf(url: string): string | null {
+  const raw = url.trim().replace(/\/+$/, "");
+  if (!raw) return null;
+  try {
+    return new URL(raw).hostname || null;
+  } catch {
+    return null;
+  }
 }

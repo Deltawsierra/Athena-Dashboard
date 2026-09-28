@@ -18,6 +18,7 @@
 import http from "http";
 import https from "https";
 import * as settings from "./settings";
+import * as dnsCache from "./dns-cache";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 
 /**
@@ -300,6 +301,51 @@ export function isConfigured(): boolean {
   return baseUrl() !== null;
 }
 
+/** The engine's hostname now, for priming its address off the stop path; null when none, or an IP literal (nothing to resolve). */
+function engineHost(): string | null {
+  const base = baseUrl();
+  if (!base) return null;
+  try {
+    return new URL(base).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+let warmTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Keep the engine's address warm in the DNS cache, OFF the stop path: resolve
+ * it now and re-resolve it in the background (the operator may retune the URL
+ * from the settings screen, so the current host is read each time). A Stop's
+ * connection then reads a cached address and never runs a live threadpool
+ * getaddrinfo -- see server/dns-cache.ts. Safe to call more than once; the
+ * timer is a single unref'd one.
+ */
+export function warmUp(): void {
+  const host = engineHost();
+  if (host) void dnsCache.prime(host);
+  if (warmTimer === null) {
+    warmTimer = setInterval(() => {
+      const h = engineHost();
+      if (h) void dnsCache.prime(h);
+    }, dnsCache.TTL_MS);
+    warmTimer.unref?.();
+  }
+}
+
+/**
+ * Prime the engine's address now, AWAITABLY -- for the boot race. warmUp()
+ * primes fire-and-forget, so a Stop arriving before that first prime lands
+ * still ran a live threadpool getaddrinfo. An entry point awaits this (after
+ * settings are loaded) before the server accepts requests, so the very first
+ * Stop reads a cached address. Resolves when the prime settles; never rejects.
+ */
+export function primeNow(): Promise<void> {
+  const host = engineHost();
+  return host ? dnsCache.prime(host) : Promise.resolve();
+}
+
 function headers(): Record<string, string> {
   const key = settings.get("engineKey");
   const out: Record<string, string> = { "Content-Type": "application/json" };
@@ -422,6 +468,12 @@ function send(url: URL, method: string, payload: string | undefined, deadline: n
         ...(payload !== undefined ? { "Content-Length": Buffer.byteLength(payload) } : {}),
       },
       agent: mayReuse ? (secure ? agents.https : agents.http) : false,
+      // SAFETY: resolve the host from the cache (server/dns-cache.ts), so a
+      // Stop on a cold connection never runs a live threadpool getaddrinfo
+      // behind a sign-in flood's scrypt jobs. An IP literal is passed straight
+      // through; the hostname on `url` is unchanged, so TLS SNI and cert
+      // validation are untouched.
+      lookup: dnsCache.lookup,
     }, (res) => {
       clearTimeout(timer);
       resolve(new EngineAnswer(res.statusCode ?? 0, res, req));

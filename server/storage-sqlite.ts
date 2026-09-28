@@ -1,6 +1,6 @@
 import { db, sqlite } from "./db-sqlite";
 import * as schema from "@shared/schema";
-import { and, desc, eq, gte, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, gte, isNull, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
@@ -93,7 +93,7 @@ export class SqliteStorage implements IStorage {
       email: null,
       isActive: true,
       ...user,
-      password: hashPassword(user.password),
+      password: await hashPassword(user.password),
       id: crypto.randomUUID(),
       createdAt: new Date(),
     };
@@ -102,7 +102,7 @@ export class SqliteStorage implements IStorage {
   }
   async updateUser(id: string, user: Partial<InsertUser>): Promise<User | undefined> {
     const updates = { ...user };
-    if (updates.password) updates.password = hashPassword(updates.password);
+    if (updates.password) updates.password = await hashPassword(updates.password);
     if (definedKeys(updates).length > 0) {
       db.update(schema.users).set(updates).where(eq(schema.users.id, id)).run();
     }
@@ -117,13 +117,13 @@ export class SqliteStorage implements IStorage {
       // Spend the same work as a real check. Returning immediately made login
       // timing a username oracle: an unknown name answered in about a
       // twentieth of the time a real one took.
-      dummyVerify(password);
+      await dummyVerify(password);
       return undefined;
     }
-    const result = verifyPassword(password, user.password);
+    const result = await verifyPassword(password, user.password);
     if (!result.ok) return undefined;
     if (result.needsRehash) {
-      const rehashed = hashPassword(password);
+      const rehashed = await hashPassword(password);
       db.update(schema.users).set({ password: rehashed }).where(eq(schema.users.id, user.id)).run();
       user.password = rehashed;
     }
@@ -242,8 +242,41 @@ export class SqliteStorage implements IStorage {
   async getTest(id: string): Promise<Test | undefined> {
     return this.remember(db.select().from(schema.tests).where(eq(schema.tests.id, id)).get());
   }
+  /**
+   * How many rows one page of the full table scan below reads before the
+   * event loop is given back.
+   *
+   * One unbounded `SELECT * FROM tests` (better-sqlite3 runs it synchronously)
+   * held the loop for 623 ms at 60,000 rows with realistic column sizes here --
+   * and every Stop that arrived while it ran queued behind it, however far
+   * past this suite's 50 ms bound that pushed it. A page this size reads in
+   * single-digit milliseconds, so a Stop waiting behind at most one page is
+   * answered on schedule.
+   */
+  private static readonly TESTS_PAGE_SIZE = 1000;
   async getAllTests(): Promise<Test[]> {
-    const rows = db.select().from(schema.tests).all();
+    const rows: Test[] = [];
+    // Paged by rowid, not OFFSET: OFFSET counts live rows from the start on
+    // every page, so a row deleted behind the cursor would shift every page
+    // after it and could skip or repeat a row. A page's own last rowid names
+    // exactly where the next one starts, whatever else is written meanwhile.
+    let lastRowid = 0;
+    for (;;) {
+      const page = db
+        .select({ ...getTableColumns(schema.tests), __rowid: sql<number>`tests."rowid"` })
+        .from(schema.tests)
+        .where(sql`tests."rowid" > ${lastRowid}`)
+        .orderBy(sql`tests."rowid"`)
+        .limit(SqliteStorage.TESTS_PAGE_SIZE)
+        .all();
+      if (page.length === 0) break;
+      for (const { __rowid, ...row } of page) rows.push(row as Test);
+      lastRowid = page[page.length - 1].__rowid;
+      if (page.length < SqliteStorage.TESTS_PAGE_SIZE) break;
+      // A start caught mid-scan by a fresh row past the cursor is not missed:
+      // trackStart marks it directly (routes.ts), off this read entirely.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     this.testCache = new Map(rows.map((row) => [row.id, { ...row }]));
     this.testsListed = true;
     return rows;
@@ -609,6 +642,16 @@ export class SqliteStorage implements IStorage {
   async getAIControlSettings(): Promise<AIControlSetting | undefined> {
     return db
       .select()
+      .from(schema.aiControlSettings)
+      .where(eq(schema.aiControlSettings.id, AI_CONTROL_ID))
+      .get();
+  }
+  async getKillSwitchState(): Promise<{ killSwitchEnabled: boolean; systemStatus: string | null } | undefined> {
+    return db
+      .select({
+        killSwitchEnabled: schema.aiControlSettings.killSwitchEnabled,
+        systemStatus: schema.aiControlSettings.systemStatus,
+      })
       .from(schema.aiControlSettings)
       .where(eq(schema.aiControlSettings.id, AI_CONTROL_ID))
       .get();

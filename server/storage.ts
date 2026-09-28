@@ -152,6 +152,16 @@ export interface IStorage {
   ): Promise<ConnectionSetting>;
   getAIControlSettings(): Promise<AIControlSetting | undefined>;
   updateAIControlSettings(settings: Partial<InsertAIControlSetting>): Promise<AIControlSetting>;
+  /**
+   * Whether the kill switch is engaged, and the system status shown beside a
+   * refusal -- the only two fields the switch itself ever decides anything
+   * from. Every other column of the settings row (`activeSystems`, the
+   * concurrency and shutdown thresholds, who last changed it, when) is the
+   * settings screen's business, not the switch's, and reading it costs
+   * something no decision on a Stop-safety path should pay for what it does
+   * not need.
+   */
+  getKillSwitchState(): Promise<{ killSwitchEnabled: boolean; systemStatus: string | null } | undefined>;
 
   // Chat
   getChatMessage(id: string): Promise<AIChatMessage | undefined>;
@@ -274,7 +284,7 @@ export class MemStorage implements IStorage {
       email: null,
       isActive: true,
       ...insertUser,
-      password: hashPassword(insertUser.password),
+      password: await hashPassword(insertUser.password),
       id: randomUUID(),
       createdAt: new Date(),
     };
@@ -285,7 +295,7 @@ export class MemStorage implements IStorage {
     const user = this.users.get(id);
     if (!user) return undefined;
     const next = { ...updates };
-    if (next.password) next.password = hashPassword(next.password);
+    if (next.password) next.password = await hashPassword(next.password);
     const updated: User = { ...user, ...next };
     this.users.set(id, updated);
     return updated;
@@ -297,13 +307,13 @@ export class MemStorage implements IStorage {
       // Spend the same work as a real check. Returning immediately made login
       // timing a username oracle: an unknown name answered in about a
       // twentieth of the time a real one took.
-      dummyVerify(password);
+      await dummyVerify(password);
       return undefined;
     }
-    const result = verifyPassword(password, user.password);
+    const result = await verifyPassword(password, user.password);
     if (!result.ok) return undefined;
     if (result.needsRehash) {
-      user.password = hashPassword(password);
+      user.password = await hashPassword(password);
       this.users.set(user.id, user);
     }
     return user;
@@ -684,6 +694,10 @@ export class MemStorage implements IStorage {
     const base = this.aiControlSettings ?? defaultControlSettings();
     this.aiControlSettings = { ...base, ...updates, lastModifiedAt: new Date() };
     return this.aiControlSettings;
+  }
+  async getKillSwitchState() {
+    const s = this.aiControlSettings;
+    return s ? { killSwitchEnabled: s.killSwitchEnabled, systemStatus: s.systemStatus } : undefined;
   }
 
   // Chat

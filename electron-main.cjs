@@ -1,3 +1,12 @@
+// SAFETY defense-in-depth (must precede any libuv threadpool use, so before
+// Electron loads): raise UV_THREADPOOL_SIZE above its default of 4 so a
+// sign-in flood's scrypt jobs cannot starve the getaddrinfo a Stop needs. The
+// packaged app requires the server in-process, so this process runs scrypt.
+// The real guarantee is the pinned DNS cache (server/dns-cache.ts).
+if (!process.env.UV_THREADPOOL_SIZE) {
+  process.env.UV_THREADPOOL_SIZE = '16';
+}
+
 const { app, BrowserWindow, Menu, shell, net, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');

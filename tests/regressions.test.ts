@@ -25,14 +25,14 @@ describe("password verification refuses anything that is not a real hash", () =>
     ["digest truncated to one byte", "scrypt$aabbccddaabbccddaabbccddaabbccdd$ab"],
     ["digest of the wrong length", "scrypt$aabbccddaabbccddaabbccddaabbccdd$" + "ab".repeat(16)],
     ["salt of the wrong length", "scrypt$aa$" + "ab".repeat(64)],
-  ])("rejects a stored hash with %s", (_name, stored) => {
-    expect(verifyPassword("any password at all", stored).ok).toBe(false);
+  ])("rejects a stored hash with %s", async (_name, stored) => {
+    expect((await verifyPassword("any password at all", stored)).ok).toBe(false);
   });
 
-  it("still accepts a hash it produced itself", () => {
-    const stored = hashPassword("correct horse battery staple");
-    expect(verifyPassword("correct horse battery staple", stored).ok).toBe(true);
-    expect(verifyPassword("wrong", stored).ok).toBe(false);
+  it("still accepts a hash it produced itself", async () => {
+    const stored = await hashPassword("correct horse battery staple");
+    expect((await verifyPassword("correct horse battery staple", stored)).ok).toBe(true);
+    expect((await verifyPassword("wrong", stored)).ok).toBe(false);
   });
 });
 

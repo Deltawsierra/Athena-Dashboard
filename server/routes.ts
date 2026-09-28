@@ -1201,7 +1201,7 @@ function stoppedByKillSwitch(
  */
 async function markIfEngagedElsewhere(ticket: StartTicket | null): Promise<void> {
   if (ticket === null || ticket.press !== null) return;
-  const stored = await storage.getAIControlSettings().then((one) => one?.killSwitchEnabled === true, () => false);
+  const stored = await storage.getKillSwitchState().then((one) => one?.killSwitchEnabled === true, () => false);
   if (stored && ticket.press === null) ticket.press = { seq: 0, claimed: new Set(), stops: new Map() };
 }
 
@@ -1219,8 +1219,8 @@ function killSwitchStartSentence(runId: string, stop: StopOutcome): string {
 /** Whether the switch is engaged now: in memory, or on the stored row (read only when memory does not already say so). */
 async function killSwitchEngagedNow(): Promise<{ engaged: boolean; systemStatus: string | null }> {
   if (killSwitchMemory.engaged) return { engaged: true, systemStatus: "shutdown" };
-  const settings = await storage.getAIControlSettings();
-  return { engaged: settings?.killSwitchEnabled === true, systemStatus: settings?.systemStatus ?? null };
+  const state = await storage.getKillSwitchState();
+  return { engaged: state?.killSwitchEnabled === true, systemStatus: state?.systemStatus ?? null };
 }
 
 /**
@@ -1291,9 +1291,9 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
     return;
   }
   (async () => {
-    const settings = await storage.getAIControlSettings();
-    if (!settings?.killSwitchEnabled && !killSwitchMemory.engaged) return void next();
-    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: settings?.systemStatus ?? "shutdown" });
+    const state = await storage.getKillSwitchState();
+    if (!state?.killSwitchEnabled && !killSwitchMemory.engaged) return void next();
+    res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: state?.systemStatus ?? "shutdown" });
   })().catch(next);
 };
 
@@ -1880,16 +1880,23 @@ export function registerRoutes(app: Express): void {
 
       // Per username and per address. Only the first existed, so a flood of
       // distinct usernames from one address never engaged the throttle and
-      // each attempt still paid for a synchronous key derivation.
+      // each attempt still paid for a key derivation.
       if (loginBlocked(key, now) || loginBlocked(byAddress, now, LOGIN_MAX_FAILURES_PER_ADDRESS)) {
         res.status(429).json({ message: "Too many failed sign-in attempts. Try again later." });
         return;
       }
 
+      // Counted before the password is verified, not after: the hash now runs
+      // off the loop (server/password.ts), so many concurrent attempts can be
+      // mid-hash at once, and none of them would yet look like a failure to
+      // the next one's check if this ran after theirs resolved -- a flood
+      // limited to 10 or 50 by this counter could otherwise all reach the
+      // hash together. Counting first closes that: a success below undoes it.
+      recordLoginFailure(key, now);
+      recordLoginFailure(byAddress, now);
+
       const user = await storage.validateUser(parsed.data.username, parsed.data.password);
       if (!user || !user.isActive) {
-        recordLoginFailure(key, now);
-        recordLoginFailure(byAddress, now);
         res.status(401).json({ message: "Invalid username or password" });
         return;
       }
