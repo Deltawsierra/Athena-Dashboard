@@ -22,7 +22,7 @@ The platform transitioned from a web application to a desktop application using 
 - **Backend**: An embedded Express server handles API requests and interacts with the SQLite database.
 - **Animation System**: Utilizes Framer Motion for advanced spring animations, Lenis for smooth scrolling, and custom CSS utilities for GPU-accelerated effects, focusing on performance, accessibility, and natural motion.
 - **Admin Features**: Expanded with dedicated pages for AI Control Panel (emergency kill switch, override), AI Chat Interface, Deletion Management, and ML Classifier management.
-- **Database Schema**: Includes tables for `users`, `scanResults`, `cveResults`, `auditLogs`, `clients`, `tests`, `documents`, `aiControlSettings`, `aiChatMessages`, and `classifiers`.
+- **Database Schema** (`shared/schema.ts`, sixteen tables): `users`, `clients`, `sites`, `tests`, `findings`, `findingSightings`, `findingChecks`, `retestWatches`, `documents`, `activityLogs`, `aiHealthMetrics`, `aiControlSettings`, `connectionSettings`, `aiChatMessages`, `classifiers`, and `apiKeys`.
 
 ### Key Features
 - **Dashboard**: Real-time threat monitoring with animated ticker tape, metric cards, and interactive charts.

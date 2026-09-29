@@ -8,6 +8,26 @@ backend that actually produces the JSON (`athena-backend/assurance/` —
 file:line, a concrete failure scenario, and a minimal fix. Review only — no code
 was modified.
 
+## Status at `main` f0b03f0
+
+This audit is of an earlier tree and is not regenerated: it cites lines of
+`Assurance.tsx` up to 2116, and that file is 8,762 lines now, so every file:line
+below is a line of the audited tree. Checked against `main` at f0b03f0:
+
+| Finding | Status at f0b03f0 | Evidence |
+|---|---|---|
+| Scope note: no AI-BOM panel, no backend `bom.py` | No longer true: both exist. | `client/src/pages/Assurance.tsx:1939` (`AiBomPanel`), `:1942` (its `ai-bom` route); athena-backend `assurance/bom.py` |
+| H1: Recompute clears a paused failsafe stop | Fixed. The client posts `{}`, the BFF forwards `paused` only when the caller names it, and the button is disabled while the deployment reads paused. | `Assurance.tsx:7930-7934`, `:8330-8341`, `:8636-8647`; `server/routes.ts:5002-5005` |
+| H2: Recompute and Unknown disposition shown to non-admins | Fixed. | `Assurance.tsx:8330`, `:8636` (`admin &&`); `UnknownCard` takes `admin` (`:1825`, `:1853`) |
+| M1: a provider edit does not invalidate the boundary panel | Fixed: `invalidateProviders` refreshes every computed panel. | `Assurance.tsx:8017-8020` |
+| M2: the computed panels are not lazy | Fixed: every deployment but the first starts collapsed. | `Assurance.tsx:8135-8142` |
+| L1: AthenaScan's totals and its list come from two sources | Open as written, not re-tested for disagreement: the counts are still `scan.test.*Count`, the list `scan.engine.findings`. | `client/src/pages/AthenaScan.tsx:215`, `:238-244` |
+| L2: the shadow-destination key can collide | Open. | `Assurance.tsx:2958` (`key={s.identifier \|\| s.assetName}`) |
+| L3: Recompute cannot restore a paused decision | Folded into H1, fixed with it. | as H1 |
+
+Open at f0b03f0: L1 and L2, both LOW. The severity table below is the audited
+tree's.
+
 ## Scope note: the AI-BOM does not exist in this tree
 
 The brief named an `AiBomPanel` (with "Export JSON blob/URL handling") and a
