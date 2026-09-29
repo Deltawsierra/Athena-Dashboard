@@ -39,6 +39,14 @@ const MAX_ERROR_BODY = 500;
  */
 export class ControlPlaneUnavailable extends Error {}
 
+/**
+ * The request itself was sent and no answer came back (the connection failed
+ * or was cut): it may have reached the backend, and may have been acted on.
+ * Unlike every other ControlPlaneUnavailable -- no address, no credential, no
+ * token -- which is raised before the request is sent.
+ */
+export class ControlPlaneUnanswered extends ControlPlaneUnavailable {}
+
 /** The configured backend base URL with any trailing slash removed, or null. */
 export function baseUrl(): string | null {
   const raw = (process.env[URL_ENV] ?? "").trim();
@@ -135,7 +143,7 @@ export async function call(path: string, init: RequestInit = {}, retryAuth = tru
     });
   } catch (cause) {
     const why = cause instanceof Error ? cause.message : String(cause);
-    throw new ControlPlaneUnavailable(`could not reach the Athena control plane at ${base}: ${why}`);
+    throw new ControlPlaneUnanswered(`could not reach the Athena control plane at ${base}: ${why}`);
   } finally {
     clearTimeout(timer);
   }

@@ -59,6 +59,15 @@ export function keptStops(error: unknown): string[] {
  * else did not start.
  */
 export function scanStartFailureTitle(error: unknown): string {
+  // A press sent again (lib/keyedPress.ts) whose first send's outcome nobody
+  // knows yet is neither "did not start" nor "started": it is said as unknown.
+  const reason = error instanceof ApiError && typeof error.body?.reason === "string" ? error.body.reason : null;
+  if (reason === "scan_outcome_unknown" || reason === "idempotency_in_flight") {
+    return "We don't know whether this scan started: check the scans list before starting it again";
+  }
+  if (reason === "idempotency_bug" || reason === "idempotency_key_invalid") {
+    return "The scan was not started: this page sent its key wrongly, which is a bug";
+  }
   if (mayStillBeRunning(error)) {
     return "The scan may still be running: stop it with the kill switch on the AI Control page, or a failsafe pause";
   }
@@ -120,19 +129,24 @@ export async function throwIfResNotOk(res: Response): Promise<void> {
 /**
  * The request apiRequest sends, answered as it came: for the caller that has
  * to read a failure's body itself (the kill switch's, whose 500 still says
- * which stops were sent). Anything else should use apiRequest.
+ * which stops were sent). Anything else should use apiRequest. `headers`: any
+ * of the request's own -- a press's Idempotency-Key (lib/keyedPress.ts).
  */
-export async function apiFetch(method: string, url: string, data?: unknown): Promise<Response> {
+export async function apiFetch(
+  method: string, url: string, data?: unknown, headers: Record<string, string> = {},
+): Promise<Response> {
   return fetch(getApiUrl(url), {
     method,
-    headers: data !== undefined ? { "Content-Type": "application/json" } : {},
+    headers: data !== undefined ? { ...headers, "Content-Type": "application/json" } : headers,
     body: data !== undefined ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
 }
 
-export async function apiRequest(method: string, url: string, data?: unknown): Promise<Response> {
-  const res = await apiFetch(method, url, data);
+export async function apiRequest(
+  method: string, url: string, data?: unknown, headers: Record<string, string> = {},
+): Promise<Response> {
+  const res = await apiFetch(method, url, data, headers);
   await throwIfResNotOk(res);
   return res;
 }

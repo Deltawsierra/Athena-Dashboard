@@ -1,0 +1,97 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "stood-down-repeat",
+  "exchanges": [
+    {
+      "note": "the first launch with its key",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-stood-down"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "2e13612a-25a3-4c36-8ec6-cc98dbe6e67e",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/2e13612a-25a3-4c36-8ec6-cc98dbe6e67e",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "the same launch, the same key, while the engine is stood down (governor state stood in)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-stood-down"
+        }
+      },
+      "status": 409,
+      "body": {
+        "detail": "the engine is stood_down; not accepting new work"
+      }
+    },
+    {
+      "note": "the same launch, the same key, once the engine runs again",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-stood-down"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "2e13612a-25a3-4c36-8ec6-cc98dbe6e67e",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/2e13612a-25a3-4c36-8ec6-cc98dbe6e67e",
+        "detail": "the scan is running; collect it from status_url"
+      },
+      "headers": {
+        "Idempotent-Replayed": "true"
+      }
+    }
+  ]
+}

@@ -153,7 +153,58 @@ written by older builds are verified once and transparently upgraded.
   and the engine verifies every signature itself before acting. So neither a
   compromised server nor the engine itself can trigger a failsafe.
 
+## Retries and duplicates
+
+People press again when a button's answer never arrives: the connection
+dropped, the page reloaded, or the wait gave up. Before this change, a second
+press of Start scan started a second scan of the same customer, and a second
+Push filed a second ticket. Now each press of Start scan, Retest or a
+connector's Push gets its own `Idempotency-Key` (`crypto.randomUUID`, made by
+the page: `client/src/lib/keyedPress.ts`, `shared/idempotency.ts`). The same
+key goes with a press sent again only while that press's outcome is unknown,
+and only when it asks for exactly the same thing. Every other press is a new
+action with a new key. No key is ever made or sent again with a new key on its
+own.
+
+This server checks the key (1 to 255 printable ASCII characters; anything else
+is refused 400 as a bug in the page, and nothing is sent). It passes the key on
+scoped to the signed-in account (`server/idempotency.ts`):
+
+| Press | Passed on to | What a press sent again gets |
+|---|---|---|
+| Start scan (`POST /api/scans`) | the engine's `POST /api/scan`, which reads the key (athena-engine #77) | The first press's answer, naming the same run and marked `replayed`. The row that press recorded is the answer: no second row, no second filing, no second log line. A run the first press started but never recorded here is recorded once, by this press. |
+| Retest (`POST /api/tests/:testId/retest`) | the engine's `POST /api/remediation/retest`, which does not read a key yet | Unchanged: while the first retest may still be running, its held slot refuses a second one (409), with no engine call. |
+| Push (`POST /api/assurance/deployments/:uuid/connectors/:connector/push`) | the backend's push, which reads the key (athena-backend #113) | The first push's answer, marked `replayed`, with no second ticket and no second log line. |
+
+What the answers mean on screen:
+
+- **Replayed:** this is the scan (or push) the earlier press started, and no new one was started.
+- **Unknown** (`scan_outcome_unknown`, `push_outcome_unknown`, `idempotency_in_flight`):
+  "We don't know whether this started. Check the scans list" (for a push, the
+  connector's system). The first press is still being answered, or it raised,
+  or no answer came back. The same press may be sent again with its key; it is
+  never sent again with a new one.
+- **A bug** (`idempotency_bug`, `idempotency_key_invalid`): the key itself was
+  refused (the same key with another request, or a key that is not one). It is
+  shown as a bug, and nothing was started.
+
+A stopped engine refuses a scan pressed again exactly as it refuses a new one,
+and that refusal is shown as a refusal. Admission runs first on every request:
+the session, the kill switch, the AI Control switches and Max Concurrent Tests.
+Stops never carry a key: a scan's or a retest's Stop, the kill switch and the
+failsafe relays send none, and every stop is processed every time. Without a
+key (a caller other than these pages), nothing changes: a start sent again
+starts again. Tests:
+`tests/a-press-sent-again-with-its-key-starts-one-scan-and-is-recorded-once.test.ts`
+(against answers the engine sent at 79ba4af,
+`tests/fixtures/engine-idempotency/`) and
+`tests/a-press-keeps-its-key-only-while-its-outcome-is-unknown.test.ts`.
+
 ## Known gaps
+
+- A retest pressed again after its first retest has finished starts a second
+  retest. The engine reads the key only on `POST /api/scan` so far, and the held
+  slot covers a retest only while it may be running.
 
 - The Windows icon at `build/icon.ico` is a placeholder and must be replaced
   before shipping an installer.

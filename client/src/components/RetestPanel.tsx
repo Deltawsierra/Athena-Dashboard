@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, keptStops, mayStillBeRunning } from "@/lib/queryClient";
+import { isKeyBug, useKeyedPress } from "@/lib/keyedPress";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { isAdmin } from "@/utils/auth";
 import type { PublicUser } from "@shared/schema";
@@ -420,12 +421,19 @@ export default function RetestPanel({ testId }: { testId: string }) {
   }, [open$.data, remembered]);
   const data = decisions$.state === "ready" ? decisions$.data : undefined;
 
+  // One Idempotency-Key per press of Retest, sent again only for the same
+  // finding while its outcome is unknown (lib/keyedPress.ts). The engine reads
+  // it on scans only so far; this retest's held slot is what refuses a second
+  // retest while the first may be running.
+  const press = useKeyedPress();
   const run = useMutation({
     mutationFn: async (twinId: number) => {
-      const response = await apiRequest("POST", `/api/tests/${testId}/retest`, { twinId });
+      const response = await apiRequest("POST", `/api/tests/${testId}/retest`, { twinId },
+        press.headersFor({ testId, twinId }));
       return (await response.json()) as RetestAnswer;
     },
     onSuccess: (result, twinId) => {
+      press.answered();
       // Read `answer` first: a status is where the run is, not a verdict, and
       // changed no finding.
       if (isStatus(result)) {
@@ -439,8 +447,13 @@ export default function RetestPanel({ testId }: { testId: string }) {
       }
     },
     onError: (error: Error) => {
+      press.failed(error);
       // Refused because one is already running (maybe started elsewhere): show it.
       void open$.refetch();
+      if (isKeyBug(error)) {
+        toast({ title: "The retest was not started: this page sent its key wrongly, which is a bug", description: error.message, variant: "destructive" });
+        return;
+      }
       // The engine's or the server's own words. "Retest failed" tells an
       // operator nothing about whether anything was reached. A retest the
       // server says may still be running -- its answer unread and its stop not

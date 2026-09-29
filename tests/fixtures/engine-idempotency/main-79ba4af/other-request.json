@@ -1,0 +1,71 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "other-request",
+  "exchanges": [
+    {
+      "note": "the first launch with its key",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-other"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "cbb75511-9a77-4385-9cdd-cd8909445706",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/cbb75511-9a77-4385-9cdd-cd8909445706",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "the same key with another request",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://other.offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "other.offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-other"
+        }
+      },
+      "status": 422,
+      "body": {
+        "detail": "This Idempotency-Key was already used on this route by this operator key for a different request. Nothing was done: send a new request with a new key.",
+        "idempotency": {
+          "state": "done",
+          "since": "2026-09-29T09:22:03.395082+00:00"
+        }
+      }
+    }
+  ]
+}
