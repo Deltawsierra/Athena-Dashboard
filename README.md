@@ -76,7 +76,7 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_SEED_SAMPLE_DATA` | unset (off)                    | `1` writes the sample clients, sites, tests and documents on the first start, for a demo. Any other value, or unset, writes none. |
 | `ATHENA_SKIP_SAMPLE_DATA` | unset                          | Older opt-out. `true` still means no sample records, and wins over `ATHENA_SEED_SAMPLE_DATA`. |
 | `COOKIE_SECURE`           | `false`                        | Set to `true` when serving over HTTPS |
-| `ATHENA_ENGINE_URL`       | unset                          | Base URL of the Mythos engine (athena-engine). Pentest Scan, Athena Scan and the CVE Classifier need it. Can be set on the Settings screen instead; a stored value wins over the variable. |
+| `ATHENA_ENGINE_URL`       | unset                          | Base URL of the Mythos engine (athena-engine). Pentest Scan, Athena Scan, the CVE Classifier and the detection figures on AI Health need it. Can be set on the Settings screen instead; a stored value wins over the variable. |
 | `ATHENA_ENGINE_KEY`       | unset                          | The engine's operator key. Same two places. |
 | `ATHENA_ASSISTANT_URL`, `ATHENA_ASSISTANT_KEY`, `ATHENA_ASSISTANT_MODEL` | unset | An OpenAI-compatible endpoint, its key and its model, for AI Chat. With none set, AI Chat records the message and answers nothing. Same two places. |
 | `ATHENA_MAX_INFLIGHT_RETESTS` | `4`                        | The most retests this dashboard asks of the engine at once. |
@@ -157,11 +157,24 @@ written by older builds are verified once and transparently upgraded.
 
 - The Windows icon at `build/icon.ico` is a placeholder and must be replaced
   before shipping an installer.
-- Pentest Scan, Athena Scan and the CVE Classifier read the Mythos engine, AI
-  Chat reads the assistant endpoint, and AI Health shows readings the server
-  takes every minute; none shows placeholder data. Each is only as connected
-  as its configuration (see the table above): with no engine set, the scan
-  screens say so and their button stays down, and with no assistant set, AI
-  Chat answers nothing. AI Health does not show detection accuracy or the
-  false-positive rate, because those come from a benchmark that runs in the
-  engine's CI and is on no route.
+- Pentest Scan, Athena Scan and the CVE Classifier read the Mythos engine, and AI
+  Chat reads the assistant endpoint; none shows placeholder data. Each is only as
+  connected as its configuration (see the table above): with no engine set, the
+  scan screens say so and their button stays down, and with no assistant set, AI
+  Chat answers nothing.
+- The **AI Health** screen shows readings the server takes every minute, and
+  detection only as the engine measured it: the engine runs its detection
+  benchmark once each time it starts and reports it on its `/health`. The
+  screen shows the share of attack cases caught
+  (security retained) beside the share of legitimate cases let through
+  (utility retained, 1 − the false-positive rate), for the tuned and the
+  holdout corpus, with the counts, the run, the commit and the time. Each share
+  shows its change since the latest earlier measurement that differs, so a
+  change that raises one and lowers the other is visible. These figures
+  describe the corpora checked in beside the engine's code, not traffic in
+  general, and no Validity Card has been issued for that benchmark. When there
+  is no measurement, the screen shows no number and says why. That covers no
+  engine, an engine older than the report, a run not finished, and a report the
+  dashboard cannot read. Detection accuracy and the false-positive rate are
+  not shown as single figures, and the Achilles and Minotaur measurements are
+  not on this screen.

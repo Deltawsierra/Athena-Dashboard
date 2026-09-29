@@ -320,10 +320,11 @@ export const activityLogs = sqliteTable("activity_logs", {
  *
  * They are nullable now, because null is the honest value for a figure with
  * no source, and a screen can render "not measured" from a null and cannot
- * render it from a 94. Detection accuracy and the false-positive rate are
- * always null here: they come from a benchmark that runs in the engine's CI
- * and is not exposed on any route, so this app has no way to know them and
- * will not print a number that looks like it does.
+ * render it from a 94. Detection accuracy and the false-positive rate stay
+ * null: a lone figure with no run and no commit behind it is what this table
+ * used to invent. What the engine measured is in `benchmark` instead: its
+ * benchmark's two numbers together, attacks caught and legitimate work let
+ * through, with the run, commit and time they came from.
  */
 export const aiHealthMetrics = sqliteTable("ai_health_metrics", {
   id: id(),
@@ -338,14 +339,67 @@ export const aiHealthMetrics = sqliteTable("ai_health_metrics", {
   averageResponseTime: integer("average_response_time"),
   modelsLoaded: json<string[]>("models_loaded"),
   lastTrainingDate: timestamp("last_training_date"),
-  /** No source in this app. Always null; the screen says why. */
+  /** Always null: a single figure with no provenance. See `benchmark`. */
   detectionAccuracy: integer("detection_accuracy"),
-  /** No source in this app. Always null; the screen says why. */
+  /** Always null: a single figure with no provenance. See `benchmark`. */
   falsePositiveRate: integer("false_positive_rate"),
   /** The engine's boot canary, when an engine answered. */
   guardsChecked: integer("guards_checked"),
   guardsFailing: integer("guards_failing"),
+  /**
+   * The engine's benchmark as its /health reported it when this reading was
+   * taken, with the different measurement before it. Null when the reading
+   * holds none, and `benchmarkUnmeasured` says why. Written by the sampler
+   * (server/health.ts) only: the API's insert schema omits both columns.
+   */
+  benchmark: json<BenchmarkReading>("benchmark"),
+  benchmarkUnmeasured: text("benchmark_unmeasured"),
 });
+
+/**
+ * One of the engine benchmark's pairs: the share of attack cases caught
+ * (security retained, the recall) and the share of legitimate cases let
+ * through (utility retained, 1 - the false-positive rate), each with the
+ * counts it is a share of. The two are never read or shown apart.
+ */
+export interface MeasuredPair {
+  securityRetained: number;
+  utilityRetained: number;
+  attacks: number;
+  caught: number;
+  legitimate: number;
+  flagged: number;
+}
+
+/**
+ * One benchmark run the engine made of its own code, as it reported it: the
+ * tuned and holdout pairs, and which run, which commit, and when.
+ */
+export interface EngineMeasurement {
+  run: string;
+  measuredAt: string;
+  /** The engine checkout's HEAD. Null when git could not say; `commitUnknown` says why. */
+  commit: string | null;
+  /** Whether tracked files differed from `commit`; null when there is no commit or it could not be read. */
+  commitModified: boolean | null;
+  commitUnknown: string | null;
+  tuned: MeasuredPair;
+  /** Null when the engine measured no holdout pair; `holdoutUnmeasured` says why. */
+  holdout: MeasuredPair | null;
+  holdoutUnmeasured: string | null;
+}
+
+/** What a reading holds of the engine's benchmark. */
+export interface BenchmarkReading {
+  current: EngineMeasurement;
+  /**
+   * The latest earlier measurement recorded here that differs from `current`:
+   * another commit, or other numbers. Null when none is on record here. Two
+   * engine starts that measured the same code and got the same numbers are
+   * one measurement, so a restart does not hide a change.
+   */
+  previous: EngineMeasurement | null;
+}
 
 export const aiControlSettings = sqliteTable("ai_control_settings", {
   id: id(),
@@ -490,10 +544,15 @@ export const insertActivityLogSchema = createInsertSchema(activityLogs, {
   details: optionalJson,
 }).omit({ id: true, timestamp: true });
 
+/**
+ * What POST /api/ai-health may set. Never the engine's benchmark: a figure a
+ * person typed in would read as the engine's measurement, so both columns are
+ * omitted and the sampler is their only writer.
+ */
 export const insertAIHealthMetricSchema = createInsertSchema(aiHealthMetrics, {
   modelsLoaded: optionalStringArray,
   lastTrainingDate: optionalDate,
-}).omit({ id: true, timestamp: true });
+}).omit({ id: true, timestamp: true, benchmark: true, benchmarkUnmeasured: true });
 
 export const insertAIControlSettingSchema = createInsertSchema(aiControlSettings, {
   activeSystems: optionalStringArray,
@@ -583,7 +642,11 @@ export type InsertDocument = z.infer<typeof insertDocumentSchema>;
 export type Document = typeof documents.$inferSelect;
 export type InsertActivityLog = z.infer<typeof insertActivityLogSchema>;
 export type ActivityLog = typeof activityLogs.$inferSelect;
-export type InsertAIHealthMetric = z.infer<typeof insertAIHealthMetricSchema>;
+/** A reading as the sampler writes it: what the API may set, and the engine's benchmark. */
+export type InsertAIHealthMetric = z.infer<typeof insertAIHealthMetricSchema> & {
+  benchmark?: BenchmarkReading | null;
+  benchmarkUnmeasured?: string | null;
+};
 export type AIHealthMetric = typeof aiHealthMetrics.$inferSelect;
 export type InsertAIControlSetting = z.infer<typeof insertAIControlSettingSchema>;
 export type AIControlSetting = typeof aiControlSettings.$inferSelect;

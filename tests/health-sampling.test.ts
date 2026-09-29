@@ -59,8 +59,10 @@ describe("measuring this deployment", () => {
     const { measure } = await import("../server/health");
     const reading = await measure();
 
-    // Null, not zero. There is no benchmark route on the engine, so this app
-    // cannot know either figure, and a zero would read as a measured zero.
+    // Null, not zero. Neither single figure has a run or a commit behind it,
+    // and a zero would read as a measured zero. What the engine measured is
+    // on `benchmark`, with where it came from
+    // (the-engine-s-measured-pair-reaches-the-reading-with-the-one-before-it).
     expect(reading.detectionAccuracy).toBeNull();
     expect(reading.falsePositiveRate).toBeNull();
   });
@@ -96,6 +98,9 @@ describe("measuring this deployment", () => {
     // and the reading says so rather than carrying a zero.
     expect(reading.guardsChecked).toBeNull();
     expect(reading.guardsFailing).toBeNull();
+    // Nor a detection benchmark: no number, and why.
+    expect(reading.benchmark).toBeNull();
+    expect(reading.benchmarkUnmeasured).toBe("no engine is configured, so nothing has measured its detection");
   });
 
   it("stores a reading with its unmeasured columns null", async () => {
