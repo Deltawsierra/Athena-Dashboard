@@ -1,6 +1,6 @@
 import { db, sqlite } from "./db-sqlite";
 import * as schema from "@shared/schema";
-import { and, desc, eq, getTableColumns, gte, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, gte, isNotNull, isNull, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
@@ -17,7 +17,7 @@ import type {
   FindingSighting, FindingCheck, RetestWatch,
   Document, InsertDocument,
   ActivityLog, InsertActivityLog,
-  AIHealthMetric, InsertAIHealthMetric,
+  AIHealthMetric, InsertAIHealthMetric, BenchmarkReading,
   AIControlSetting, InsertAIControlSetting,
   AIChatMessage, InsertAIChatMessage,
   Classifier, InsertClassifier,
@@ -593,12 +593,25 @@ export class SqliteStorage implements IStorage {
       falsePositiveRate: null,
       guardsChecked: null,
       guardsFailing: null,
+      benchmark: null,
+      benchmarkUnmeasured: null,
       ...metric,
       id: crypto.randomUUID(),
       timestamp: new Date(),
     };
     db.insert(schema.aiHealthMetrics).values(row).run();
     return (await this.readBack(() => db.select().from(schema.aiHealthMetrics).where(eq(schema.aiHealthMetrics.id, row.id)).get()))!;
+  }
+  async getLatestBenchmarkReading(): Promise<BenchmarkReading | null> {
+    const held = db
+      .select({ benchmark: schema.aiHealthMetrics.benchmark })
+      .from(schema.aiHealthMetrics)
+      .where(isNotNull(schema.aiHealthMetrics.benchmark))
+      // rowid breaks a tie between two readings written in one millisecond.
+      .orderBy(desc(schema.aiHealthMetrics.timestamp), desc(sql`rowid`))
+      .limit(1)
+      .get();
+    return held?.benchmark ?? null;
   }
 
   // AI control: exactly one row, under a fixed id.
