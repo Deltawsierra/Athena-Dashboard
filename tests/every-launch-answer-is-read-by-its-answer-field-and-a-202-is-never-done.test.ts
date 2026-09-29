@@ -99,7 +99,9 @@ const engineState: {
   abortFor: ((runId: string) => Exchange | "destroy" | "stall") | null;
   /** The engine's list of live runs (`/api/scans/active`). */
   active: unknown[];
-} = { fixture: null, scan: null, statusReads: [], aborts: [], retest: null, abortHold: null, abortFor: null, active: [] };
+  /** Round 3: answers a request itself (a stalled body, no answer at all) when it returns true. */
+  custom: ((req: IncomingMessage, res: ServerResponse, url: string) => boolean) | null;
+} = { fixture: null, scan: null, statusReads: [], aborts: [], retest: null, abortHold: null, abortFor: null, active: [], custom: null };
 
 const calls: string[] = [];
 
@@ -109,6 +111,8 @@ let storage: IStorage;
 let watcher: import("../server/retests").RetestWatcher;
 /** The app's locals: its retest watcher, and (round 2) its held slots and unread-run handles, read and cleared by tests. */
 let locals: Record<string, any>;
+/** The app itself (round 3: other accounts sign in to it). */
+let theApp: Awaited<ReturnType<typeof makeApp>>;
 
 beforeAll(async () => {
   engine = http.createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -118,6 +122,7 @@ beforeAll(async () => {
       const url = req.url ?? "";
       const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
       calls.push(`${req.method} ${url}`);
+      if (engineState.custom?.(req, res, url)) return;
       const fx = engineState.fixture;
       if (url === "/health") return json(res, 200, { status: "ok" });
       if (url === "/api/scans/active") return json(res, 200, { active: engineState.active });
@@ -157,6 +162,7 @@ beforeAll(async () => {
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
   vi.resetModules();
   const app = await makeApp();
+  theApp = app;
   watcher = app.locals.retestWatcher;
   locals = app.locals;
   agent = await signIn(app);
@@ -182,6 +188,7 @@ beforeEach(() => {
   engineState.abortHold = null;
   engineState.abortFor = null;
   engineState.active = [];
+  engineState.custom = null;
   calls.length = 0;
   watcher.reset();
   (storage as unknown as { retestWatches: Map<string, unknown> }).retestWatches.clear();
@@ -1252,6 +1259,493 @@ describe("round 2 #3: a run an unread retest answer named, whose stop did not ta
       expect((await agent.get(`/api/retests/${R2_A}`)).body).toMatchObject({ phase: "stopped", stoppable: false });
     } finally {
       await agent.patch("/api/ai-control").send({ killSwitchEnabled: false, systemStatus: "operational" });
+    }
+  });
+});
+
+// ---- Round 3 ----
+// Recorded answers as before; "derived" where a field, a header or how the
+// answer arrived (a body that never ends, no answer at all) was changed. The
+// engine's 404 to a stop by a run id it has no record of is recorded
+// (pr71-f4610ae/abort-unknown-run.json).
+
+const unknownRunStop = () => abortsOf(load(PR71, "abort-unknown-run"))[0];
+/** derived: the recorded "not running" Stop answer (running-then-stopped's second stop), its run_id set to this run. */
+const notRunningStopOf = (runId: string) => {
+  const one = abortsOf(load(PR71, "running-then-stopped"))[1];
+  return derive(one, { ...one.body, run_id: runId });
+};
+const heldSlots = () => locals.retestsHeld as Map<string, unknown>;
+const handleStore = () => locals.unreadRunHandles as Map<string, { runId: string; testId: string; since: Date }>;
+const listed = async (testId: string) =>
+  ((await agent.get(`/api/tests/${testId}/retests`)).body.retests as Array<Record<string, unknown>>).map((one) => one.engineRunId);
+
+/** A retest whose answer (the recorded 202 with answer "Status") names R2_A, whose stop the engine refused (the recorded 503): a kept Stop. */
+async function keptStop() {
+  engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status" });
+  engineState.abortFor = () => refusedStop();
+  const done = await retest(r2Verdict);
+  expect(done.res.status, JSON.stringify(done.res.body)).toBe(502);
+  expect(done.res.body.stoppable).toEqual([R2_A]);
+  expect(await listed(done.testId)).toContain(R2_A);
+  return done;
+}
+
+async function anAccount(name: string) {
+  const made = await agent.post("/api/users").send({ username: name, password: "a-long-enough-password", role: "user", email: `${name}@r3.test` });
+  expect(made.status, JSON.stringify(made.body)).toBe(201);
+  return signIn(theApp, name, "a-long-enough-password");
+}
+
+describe("round 3 #1 (M1): a scan start that may have reached the engine is never \"did not start\"", () => {
+  beforeEach(clearChecks);
+  const recorded202 = launchOf(load(PR71, "scan-at-once-then-completed"), "/api/scan");
+  const C = recorded202.body.run_id as string;
+  const mayRun = (res: { status: number; body: Record<string, unknown> }, reason: string) => {
+    expect(res.status, JSON.stringify(res.body)).toBe(503);
+    expect(res.body.mayStillBeRunning).toBe(true);
+    expect(res.body.reason).toBe(reason);
+    expect(String(res.body.error)).toContain("may still be running");
+    expect(String(res.body.error)).toContain("kill switch");
+    expect(String(res.body.error)).toContain("failsafe pause");
+  };
+
+  it("(derived: the engine never answers the start within the call's time) the scan may still be running", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.callMs;
+    eng.engineTimeouts.callMs = 300;
+    engineState.custom = (req, _res, url) => req.method === "POST" && url === "/api/scan";
+    try {
+      const { res, rowsWritten } = await startWith(recorded202);
+      mayRun(res, "scan_unanswered");
+      expect(rowsWritten).toBe(0);
+    } finally {
+      eng.engineTimeouts.callMs = was;
+    }
+  });
+
+  it("(derived: engine main's unhandled 500, Starlette's text body, no X-Run-Id) the scan may still be running", async () => {
+    const { res, rowsWritten } = await startWith({ ...derive(recorded202, "Internal Server Error", {}), status: 500 });
+    mayRun(res, "scan_unconfirmed");
+    expect(rowsWritten).toBe(0);
+    expect(abortCalls()).toEqual([]);
+  });
+
+  it("(derived: the recorded 503 not-admitted, as a 5xx that names no run) the scan may still be running -- as a retest's 503 is", async () => {
+    const { res } = await startWith(scenarioOf(load(PR71, "scan-not-admitted"))[0]);
+    mayRun(res, "scan_unconfirmed");
+  });
+
+  it("(derived: the recorded 202's headers, its body never finished, no X-Run-Id) the scan may still be running", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.bodyMs;
+    eng.engineTimeouts.bodyMs = 300;
+    engineState.custom = (req, res, url) => {
+      if (!(req.method === "POST" && url === "/api/scan")) return false;
+      res.writeHead(202, { "Content-Type": "application/json" });
+      res.write(JSON.stringify(recorded202.body).slice(0, 20));
+      return true;
+    };
+    try {
+      const { res, rowsWritten } = await startWith(recorded202);
+      mayRun(res, "scan_unconfirmed");
+      expect(rowsWritten).toBe(0);
+    } finally {
+      eng.engineTimeouts.bodyMs = was;
+    }
+  });
+
+  it("(derived: the recorded 202's headers with an X-Run-Id naming its run, its body never finished) that run is sent a stop", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.bodyMs;
+    eng.engineTimeouts.bodyMs = 300;
+    engineState.custom = (req, res, url) => {
+      if (!(req.method === "POST" && url === "/api/scan")) return false;
+      res.writeHead(202, { "Content-Type": "application/json", "X-Run-Id": C });
+      res.write(JSON.stringify(recorded202.body).slice(0, 20));
+      return true;
+    };
+    engineState.abortFor = () => refusedStop();
+    try {
+      const { res, rowsWritten } = await startWith(recorded202);
+      expect(res.status, JSON.stringify(res.body)).toBe(502);
+      expect(res.body.runIds).toEqual([C]);
+      expect(res.body.stops).toEqual([expect.objectContaining({ runId: C, stopped: false, namedBy: "X-Run-Id header" })]);
+      expect(res.body.mayStillBeRunning).toBe(true);
+      expect(abortCalls()).toEqual([`POST /api/scans/${C}/abort`]);
+      expect(rowsWritten).toBe(0);
+    } finally {
+      eng.engineTimeouts.bodyMs = was;
+    }
+  });
+
+  it("the recorded 500 whose run failed before its work started, and the recorded 429: did not start, and never said to be running", async () => {
+    for (const name of ["scan-failed-before-start", "scan-queue-full"]) {
+      const { res } = await startScan(load(PR71, name));
+      expect(res.status, name).toBe(503);
+      expect(res.body.mayStillBeRunning, name).toBeUndefined();
+      expect(res.body.reason, name).toBeUndefined();
+    }
+  });
+
+  it("(derived: the recorded 202 naming A, its X-Run-Id naming B; A's stop taken, B's refused) the scan may still be running (pins R13)", async () => {
+    engineState.abortFor = (runId) => (runId === C ? acceptedStopOf(C) : refusedStop());
+    const { res } = await startWith(derive(recorded202, recorded202.body, { "X-Run-Id": R2_B }));
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(res.body.stops).toEqual([
+      expect.objectContaining({ runId: C, stopped: true }),
+      expect.objectContaining({ runId: R2_B, stopped: false }),
+    ]);
+    expect(res.body.mayStillBeRunning).toBe(true);
+  });
+
+  it("(derived: as above, both stops taken) nothing may still be running: not said", async () => {
+    engineState.abortFor = (runId) => acceptedStopOf(runId);
+    const { res } = await startWith(derive(recorded202, recorded202.body, { "X-Run-Id": R2_B }));
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(res.body.mayStillBeRunning).toBeUndefined();
+    expect(res.body.runIds).toEqual([C, R2_B]);
+  });
+});
+
+describe("round 3 #3: a retest 2xx unread answer whose run_id no stop can address holds its slot", () => {
+  beforeEach(clearChecks);
+  for (const [label, runId] of [['run_id "a/b"', "a/b"], ["run_id 1.5", 1.5]] as const) {
+    it(`(derived: the recorded 202 with answer "Status" and ${label}) may still be running, its slot held, a second Retest refused`, async () => {
+      engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status", run_id: runId });
+      const { res, testId } = await retest(r2Verdict);
+      expect(res.status, JSON.stringify(res.body)).toBe(502);
+      expect(res.body.mayStillBeRunning).toBe(true);
+      expect(res.body.held).toContain("may still be running");
+      expect(res.body.error).toContain("kill switch");
+      expect(abortCalls()).toEqual([]);
+      expect(heldSlots().has(`${testId}:${r2Twin}`)).toBe(true);
+      engineState.retest = null;
+      const sent = retestCalls().length;
+      const again = await agent.post(`/api/tests/${testId}/retest`).send({ twinId: r2Twin });
+      expect(again.status, JSON.stringify(again.body)).toBe(409);
+      expect(retestCalls().length).toBe(sent);
+    });
+  }
+
+  it("(derived: the engine never answers the retest within the call's time) 503 retest_unanswered, may still be running (pins R19)", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.callMs;
+    engineState.custom = (req, _res, url) => req.method === "POST" && url === "/api/remediation/retest" && eng.engineTimeouts.callMs === 300;
+    try {
+      engineState.fixture = r2Verdict;
+      const { clientId, siteId } = await aClientAndSite();
+      const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+      expect(started.status).toBe(201);
+      eng.engineTimeouts.callMs = 300;
+      const res = await agent.post(`/api/tests/${started.body.test.id}/retest`).send({ twinId: r2Twin });
+      expect(res.status, JSON.stringify(res.body)).toBe(503);
+      expect(res.body.reason).toBe("retest_unanswered");
+      expect(res.body.mayStillBeRunning).toBe(true);
+    } finally {
+      eng.engineTimeouts.callMs = was;
+    }
+  });
+});
+
+describe("round 3 #4: a kept Stop the engine answers \"No such scan run\" ends, said as that", () => {
+  beforeEach(clearChecks);
+
+  it("the recorded 404 to a stop: the handle ends (not known to the engine), and the finding can be retested again", async () => {
+    const { testId, finding } = await keptStop();
+    engineState.abortFor = () => unknownRunStop();
+    const stop = await agent.post(`/api/retests/${R2_A}/abort`);
+    expect(stop.status, JSON.stringify(stop.body)).toBe(200);
+    expect(stop.body).toMatchObject({ stopped: false, unknownRun: true, runId: R2_A });
+    expect(stop.body.detail).toContain("does not know this run");
+    const view = (await agent.get(`/api/retests/${R2_A}`)).body;
+    expect(view).toMatchObject({ phase: "not_known", stoppable: false, stopAcceptedAt: null });
+    expect(view.detail).toContain("does not know");
+    expect(view.detail).not.toMatch(/accepted the stop/);
+    expect(await listed(testId)).not.toContain(R2_A);
+    // Every run the unread answer named has ended here: its slot is free, and Retest is sent.
+    expect(heldSlots().has(`${testId}:${r2Twin}`)).toBe(false);
+    engineState.retest = null;
+    engineState.abortFor = null;
+    const sent = retestCalls().length;
+    const again = await agent.post(`/api/tests/${testId}/retest`).send({ twinId: r2Twin });
+    expect(again.status, JSON.stringify(again.body)).not.toBe(409);
+    expect(retestCalls().length).toBe(sent + 1);
+    const logged = (await storage.getAllActivityLogs()).filter((one) => one.action === "abort_run_unknown");
+    expect(logged.length).toBeGreaterThan(0);
+    expect(await storage.getChecks(finding.id)).toEqual([]);
+  });
+
+  it("the kill switch's stop answered the recorded 404: the handle ends too", async () => {
+    await keptStop();
+    engineState.abortFor = () => unknownRunStop();
+    const engaged = await agent.patch("/api/ai-control").send({ killSwitchEnabled: true });
+    try {
+      expect(engaged.status, JSON.stringify(engaged.body)).toBe(200);
+      expect((await agent.get(`/api/retests/${R2_A}`)).body).toMatchObject({ phase: "not_known", stoppable: false });
+    } finally {
+      await agent.patch("/api/ai-control").send({ killSwitchEnabled: false, systemStatus: "operational" });
+    }
+  });
+
+  it("an admin can clear a kept Stop (nothing is sent), anyone else cannot; the finding can then be retested", async () => {
+    const { testId } = await keptStop();
+    const other = await anAccount("r3-clearer");
+    const refused = await other.post(`/api/retests/${R2_A}/clear`);
+    expect(refused.status).toBe(403);
+    expect((await agent.get(`/api/retests/${R2_A}`)).body.phase).toBe("running");
+    const sent = abortCalls().length;
+    const cleared = await agent.post(`/api/retests/${R2_A}/clear`);
+    expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
+    expect(cleared.body.cleared).toBe(1);
+    expect(abortCalls().length).toBe(sent);
+    expect((await agent.get(`/api/retests/${R2_A}`)).body).toMatchObject({ phase: "cleared", stoppable: false });
+    expect(await listed(testId)).not.toContain(R2_A);
+    expect(heldSlots().has(`${testId}:${r2Twin}`)).toBe(false);
+    engineState.retest = null;
+    engineState.abortFor = null;
+    const again = await agent.post(`/api/tests/${testId}/retest`).send({ twinId: r2Twin });
+    expect(again.status, JSON.stringify(again.body)).not.toBe(409);
+    expect((await agent.post(`/api/retests/${R2_A}/clear`)).status).toBe(404);
+    expect((await storage.getAllActivityLogs()).some((one) => one.action === "retest_stop_cleared" && one.entityId === testId)).toBe(true);
+  });
+});
+
+describe("round 3 #5: a kept Stop for a run that ended on its own reads \"Already finished\", never \"Stopped\" (pins R4)", () => {
+  beforeEach(clearChecks);
+  it("(derived: the recorded 'not running' stop answer) already finished: not stopped, not accepted, no longer blocking", async () => {
+    const { testId } = await keptStop();
+    engineState.abortFor = (runId) => notRunningStopOf(runId);
+    const stop = await agent.post(`/api/retests/${R2_A}/abort`);
+    expect(stop.status).toBe(200);
+    expect(stop.body).toMatchObject({ stopped: false, alreadyFinished: true });
+    const view = (await agent.get(`/api/retests/${R2_A}`)).body;
+    expect(view).toMatchObject({ phase: "already_finished", stoppable: false, stopAcceptedAt: null });
+    expect(view.detail).toMatch(/^Already finished/);
+    expect(view.detail).not.toMatch(/accepted the stop/);
+    expect(await listed(testId)).not.toContain(R2_A);
+    expect(heldSlots().has(`${testId}:${r2Twin}`)).toBe(false);
+  });
+});
+
+describe("round 3 #6: the kept Stop's rules, each pinned", () => {
+  beforeEach(clearChecks);
+
+  it("its requester, not an admin, can press it; another account cannot (pins R3)", async () => {
+    const requester = await anAccount("r3-requester");
+    const stranger = await anAccount("r3-stranger");
+    engineState.fixture = r2Verdict;
+    engineState.statusReads = statusReadsOf(r2Verdict);
+    const { clientId, siteId } = await aClientAndSite();
+    const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+    expect(started.status).toBe(201);
+    engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status" });
+    engineState.abortFor = () => refusedStop();
+    const res = await requester.post(`/api/tests/${started.body.test.id}/retest`).send({ twinId: r2Twin });
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(res.body.stoppable).toEqual([R2_A]);
+    const sent = abortCalls().length;
+    expect((await stranger.post(`/api/retests/${R2_A}/abort`)).status).toBe(403);
+    expect(abortCalls().length).toBe(sent);
+    engineState.abortFor = (runId) => acceptedStopOf(runId);
+    const own = await requester.post(`/api/retests/${R2_A}/abort`);
+    expect(own.status, JSON.stringify(own.body)).toBe(200);
+    expect(own.body.stopped).toBe(true);
+    expect(abortCalls().length).toBe(sent + 1);
+  });
+
+  it("it is listed on its own test's retests only (pins R5)", async () => {
+    const { testId } = await keptStop();
+    engineState.retest = null;
+    engineState.abortFor = null;
+    // Another test, which no retest was run from.
+    const { clientId, siteId } = await aClientAndSite();
+    const other = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+    expect(other.status).toBe(201);
+    expect(await listed(other.body.test.id)).toEqual([]);
+    expect(await listed(testId)).toContain(R2_A);
+  });
+
+  it("it blocks a second retest of its own finding only, not another finding of the test (derived: a second twin id) (pins R6)", async () => {
+    const { testId } = await keptStop();
+    engineState.retest = null;
+    engineState.abortFor = null;
+    const sent = retestCalls().length;
+    const otherTwin = await agent.post(`/api/tests/${testId}/retest`).send({ twinId: r2Twin + 1 });
+    expect(otherTwin.status, JSON.stringify(otherTwin.body)).not.toBe(409);
+    expect(retestCalls().length).toBe(sent + 1);
+  });
+
+  it("(derived: its stop answered 200, the rest of that answer never sent) a stop whose answer was not read keeps the Stop (pins R7)", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.abortBodyMs;
+    eng.engineTimeouts.abortBodyMs = 150;
+    try {
+      engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status" });
+      engineState.abortFor = () => "stall";
+      const { res, testId } = await retest(r2Verdict);
+      expect(res.status).toBe(502);
+      expect(res.body.stoppable).toEqual([R2_A]);
+      expect(await listed(testId)).toContain(R2_A);
+    } finally {
+      eng.engineTimeouts.abortBodyMs = was;
+    }
+  });
+
+  it("it is forgotten after the time a watch is kept, and blocks nothing after (pins R8)", async () => {
+    const { testId } = await keptStop();
+    // Kept since the epoch: far longer ago than a watch is kept (retestWatch.keepUnwatchedMs).
+    for (const one of handleStore().values()) one.since = new Date(0);
+    heldSlots().clear();
+    expect(await listed(testId)).not.toContain(R2_A);
+    expect(handleStore().size).toBe(0);
+    expect((await agent.get(`/api/retests/${R2_A}`)).status).toBe(404);
+    engineState.retest = null;
+    engineState.abortFor = null;
+    const again = await agent.post(`/api/tests/${testId}/retest`).send({ twinId: r2Twin });
+    expect(again.status, JSON.stringify(again.body)).not.toBe(409);
+  });
+
+  it("(derived: the recorded 202 with answer \"Status\" and a run_id carrying U+2028 and U+2029; its stop refused) each is escaped on the console (pins R10)", async () => {
+    const forged = "zzz\u2028[retest] FORGED\u2029line";
+    engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status", run_id: forged });
+    engineState.abortFor = () => refusedStop();
+    const lines: string[] = [];
+    const error = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")); });
+    const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { lines.push(args.map(String).join(" ")); });
+    try {
+      const { res } = await retest(r2Verdict);
+      expect(res.status).toBe(502);
+    } finally {
+      error.mockRestore();
+      log.mockRestore();
+    }
+    const retestLines = lines.filter((one) => one.includes("[retest]") && one.includes("zzz"));
+    expect(retestLines.length).toBeGreaterThan(0);
+    for (const one of retestLines) {
+      expect(one).not.toMatch(/[\u2028\u2029]/);
+      expect(one).toContain("zzz\\u2028[retest] FORGED\\u2029line");
+    }
+  });
+});
+
+describe("round 3 #7: an answer's runs are capped, keyed per test, and a quoted X-Run-Id is its id", () => {
+  beforeEach(clearChecks);
+  const nine = Array.from({ length: 9 }, (_v, i) => `r3-run-${i}`);
+
+  it("(derived: the recorded 202 status, its X-Run-Id joined from 9 runs; stops refused) refused, no stop sent, no Stop kept, the kill switch named", async () => {
+    engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status" }, { "X-Run-Id": nine.join(", ") });
+    engineState.abortFor = () => refusedStop();
+    const { res, testId } = await retest(r2Verdict);
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(abortCalls()).toEqual([]);
+    expect(handleStore().size).toBe(0);
+    expect(res.body.error).toContain("more than the 8 one answer may name");
+    expect(res.body.error).toContain("kill switch");
+    expect(res.body.mayStillBeRunning).toBe(true);
+    expect(heldSlots().has(`${testId}:${r2Twin}`)).toBe(true);
+    expect(String(res.body.error).length).toBeLessThan(2_000);
+  });
+
+  it("(derived: the recorded 202 status, its X-Run-Id naming 7 more runs: 8 in all) each of the 8 is sent its stop", async () => {
+    engineState.retest = derive(r2Launch, { ...r2Launch.body, answer: "Status" }, { "X-Run-Id": [R2_A, ...nine.slice(0, 7)].join(", ") });
+    engineState.abortFor = (runId) => acceptedStopOf(runId);
+    const { res } = await retest(r2Verdict);
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(abortCalls()).toHaveLength(8);
+  });
+
+  it("(derived: the recorded scan 202, its X-Run-Id joined from 9 runs) refused, nothing recorded, no stop sent, may still be running", async () => {
+    const recorded = launchOf(load(PR71, "scan-at-once-then-completed"), "/api/scan");
+    const { res, rowsWritten } = await startWith(derive(recorded, recorded.body, { "X-Run-Id": nine.join(",") }));
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(res.body.mayStillBeRunning).toBe(true);
+    expect(res.body.error).toContain("more than the 8");
+    expect(abortCalls()).toEqual([]);
+    expect(rowsWritten).toBe(0);
+  });
+
+  it("two tests' answers naming the same run each keep their own Stop: one never overwrites the other", async () => {
+    const first = await keptStop();
+    const second = await keptStop();
+    expect(second.testId).not.toBe(first.testId);
+    expect(await listed(first.testId)).toContain(R2_A);
+    expect(await listed(second.testId)).toContain(R2_A);
+    engineState.retest = null;
+    const again = await agent.post(`/api/tests/${first.testId}/retest`).send({ twinId: r2Twin });
+    expect(again.status).toBe(409);
+    // One Stop ends both: the stop is the run's.
+    engineState.abortFor = (runId) => acceptedStopOf(runId);
+    expect((await agent.post(`/api/retests/${R2_A}/abort`)).status).toBe(200);
+    expect(await listed(first.testId)).not.toContain(R2_A);
+    expect(await listed(second.testId)).not.toContain(R2_A);
+  });
+
+  it("(derived: the recorded 500, state null, its X-Run-Id the same id in quotes) read as that run: recorded running, no stop to the quoted id", async () => {
+    const scan500 = launchOf(load(PR71, "scan-failed-after-registration"), "/api/scan");
+    const id = scan500.body.run_id as string;
+    const { res, rowsWritten } = await startWith(derive(scan500, scan500.body, { "x-run-id": `"${id}"` }));
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.runId).toBe(id);
+    expect(rowsWritten).toBe(1);
+    expect(calls.some((one) => one.includes("%22"))).toBe(false);
+  });
+
+  it("(derived: the recorded 202's body replaced by [], its X-Run-Id its run's id in quotes) that run is sent a stop by its id, unquoted", async () => {
+    const recorded = launchOf(load(PR71, "scan-at-once-then-completed"), "/api/scan");
+    const C = recorded.body.run_id as string;
+    const { res, rowsWritten } = await startWith(derive(recorded, "[]", { "x-run-id": `"${C}"` }));
+    expect(res.status, JSON.stringify(res.body)).toBe(502);
+    expect(res.body.runIds).toEqual([C]);
+    expect(abortCalls()).toEqual([`POST /api/scans/${C}/abort`]);
+    expect(rowsWritten).toBe(0);
+  });
+
+  it("(derived: the recorded 202's body replaced by {}, its X-Run-Id a quoted id with a quote inside) names no run: no stop is sent to it", async () => {
+    const recorded = launchOf(load(PR71, "scan-at-once-then-completed"), "/api/scan");
+    const { res } = await startWith(derive(recorded, {}, { "x-run-id": "\"a\"b\"" }));
+    // As a 202 {} naming no run: recorded running with no Stop, pointed at the kill switch and a failsafe pause.
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.runId).toBeNull();
+    expect(res.body.stop).toBe("failsafe");
+    expect(abortCalls()).toEqual([]);
+    expect(calls.some((one) => one.includes("%22"))).toBe(false);
+  });
+});
+
+describe("round 3 #9: a stop the engine refuses lets its answer go", () => {
+  it("(derived: a 503 to a stop whose body never ends) the connection is closed from this side, not left holding a socket", async () => {
+    let closed = false;
+    engineState.custom = (req, res, url) => {
+      if (!(req.method === "POST" && url === "/api/scans/r3-refused/abort")) return false;
+      req.socket.on("close", () => { closed = true; });
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.write("{\"detail\": \"the registry is ");
+      return true;
+    };
+    const stop = await agent.post("/api/retests/r3-refused/abort");
+    expect(stop.status, JSON.stringify(stop.body)).toBe(502);
+    expect(await until(async () => closed, (done) => done)).toBe(true);
+  });
+
+  it("(derived: a 404 to a stop whose body never ends) read no longer than a stop's answer is, refused, and let go", async () => {
+    const eng = await import("../server/engine");
+    const was = eng.engineTimeouts.abortBodyMs;
+    eng.engineTimeouts.abortBodyMs = 150;
+    let closed = false;
+    engineState.custom = (req, res, url) => {
+      if (!(req.method === "POST" && url === "/api/scans/r3-proxy/abort")) return false;
+      req.socket.on("close", () => { closed = true; });
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.write("{\"detail\": \"No such");
+      return true;
+    };
+    try {
+      const stop = await agent.post("/api/retests/r3-proxy/abort");
+      expect(stop.status, JSON.stringify(stop.body)).toBe(502);
+      expect(await until(async () => closed, (done) => done)).toBe(true);
+    } finally {
+      eng.engineTimeouts.abortBodyMs = was;
     }
   });
 });

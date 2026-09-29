@@ -26,8 +26,10 @@ import { AlertTriangle, Loader2, RotateCcw, ShieldCheck, ShieldX, Square } from 
 import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, mayStillBeRunning } from "@/lib/queryClient";
+import { apiRequest, keptStops, mayStillBeRunning } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
+import { isAdmin } from "@/utils/auth";
+import type { PublicUser } from "@shared/schema";
 import { ratingOf } from "@shared/latest-scans";
 
 interface DecisionTwin {
@@ -78,7 +80,12 @@ interface RetestResult {
  */
 interface RetestStatusView {
   answer: "status";
-  phase: "running" | "stopped" | "failed" | "no_verdict" | "unwatched";
+  /**
+   * `already_finished`, `not_known` and `cleared` are how a Stop kept for a
+   * run an unread answer named ends when nothing stopped it (server/routes.ts
+   * handlePhase): never drawn as "Stopped".
+   */
+  phase: "running" | "stopped" | "failed" | "no_verdict" | "unwatched" | "already_finished" | "not_known" | "cleared";
   engineRunId: string | null;
   twinId: number;
   state: string;
@@ -90,6 +97,8 @@ interface RetestStatusView {
   stopAcceptedAt?: string | null;
   /** A stop was sent and answered 2xx, the rest of its answer unread: never an accepted stop. */
   stopUnreadAt?: string | null;
+  /** A Stop kept for a run an answer this dashboard did not read had named (server/routes.ts unreadRunView): an admin may clear it. */
+  unreadAnswer?: true;
 }
 
 /** A watched retest as the poll route answers it: a status, or -- once it completed with one -- the verdict. */
@@ -98,6 +107,15 @@ type RetestWatchView =
   | (Omit<RetestStatusView, "answer" | "phase"> & { answer: "verdict"; phase: "verdict"; result: RetestResult });
 
 type RetestAnswer = RetestResult | RetestStatusView;
+
+/** What a retest's Stop answers (server/routes.ts POST /api/retests/:runId/abort). */
+interface StopAnswer {
+  stopped: boolean;
+  runId: string;
+  alreadyFinished?: boolean;
+  /** The engine does not know the run: it has ended or never ran. Nothing was stopped. */
+  unknownRun?: boolean;
+}
 
 /** Read `answer` before `verdict`: a status is never a verdict. */
 function isStatus(answer: RetestAnswer): answer is RetestStatusView {
@@ -114,7 +132,13 @@ const PHASE_LABEL: Record<RetestStatusView["phase"], string> = {
   failed: "Failed",
   no_verdict: "No verdict",
   unwatched: "No longer watched",
+  already_finished: "Already finished",
+  not_known: "Not known to the engine",
+  cleared: "Cleared by an admin",
 };
+
+/** Whether a status still keeps its Stop. */
+const isOpen = (view: RetestStatusView): boolean => view.phase === "running" || view.phase === "unwatched";
 
 interface DecisionsView {
   decisions: DecisionTwin[];
@@ -210,14 +234,17 @@ function VerdictView({ twinId, result }: { twinId: number; result: RetestResult 
  * Stop is a separate request by the engine run id -- it never waits on a
  * read, and a read that failed never takes it away.
  */
-function RetestStatusPanel({ twinId, initial, onVerdict }: {
+function RetestStatusPanel({ twinId, initial, onVerdict, onStopAnswered }: {
   twinId: number;
   initial: RetestStatusView;
   onVerdict: (result: RetestResult) => void;
+  /** The engine answered a Stop: the finding's open retests are read again (a run that ended no longer blocks Retest). */
+  onStopAnswered: () => void;
 }) {
   const { toast } = useToast();
   const [since] = useState(() => Date.now());
   const runId = initial.engineRunId;
+  const { data: session } = useQuery<{ authenticated: boolean; user: PublicUser | null }>({ queryKey: ["/api/auth/check"] });
   const watch = useQuery<RetestWatchView>({
     queryKey: [`/api/retests/${runId}`],
     enabled: runId !== null && initial.phase === "running",
@@ -237,13 +264,19 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
   const stop = useMutation({
     mutationFn: async () => {
       const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId as string)}/abort`, undefined);
-      return (await response.json()) as { stopped: boolean; runId: string; alreadyFinished?: boolean };
+      return (await response.json()) as StopAnswer;
     },
-    onSuccess: (result: { stopped: boolean; runId: string; alreadyFinished?: boolean }) => {
+    onSuccess: (result: StopAnswer) => {
       void watch.refetch();
+      onStopAnswered();
       toast(result.alreadyFinished
         ? { title: "Already finished", description: `Retest run ${result.runId} had already ended; nothing was stopped.` }
-        : { title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
+        : result.unknownRun
+          ? {
+            title: "Not known to the engine",
+            description: `The engine does not know retest run ${result.runId} -- it has ended or never ran -- so nothing was stopped.`,
+          }
+          : { title: "Stop sent", description: `The engine accepted the stop for retest run ${result.runId}.` });
     },
     onError: (error: Error) => toast({
       title: "Not stopped",
@@ -252,12 +285,38 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
     }),
   });
 
+  // An admin may clear a Stop kept for a run an unread answer named, when
+  // the run is known to be gone and its Stop cannot say so (POST
+  // /api/retests/:runId/clear): nothing is sent to the engine.
+  const clear = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("POST", `/api/retests/${encodeURIComponent(runId as string)}/clear`, undefined);
+      return (await response.json()) as { cleared: number; runId: string };
+    },
+    onSuccess: (result: { cleared: number; runId: string }) => {
+      void watch.refetch();
+      onStopAnswered();
+      toast({
+        title: "Stop cleared",
+        description: `The Stop kept for run ${result.runId} was cleared; nothing was sent to the engine. The kill switch on the ` +
+          "AI Control page, or a failsafe pause, stops it if it is still running.",
+      });
+    },
+    onError: (error: Error) => toast({ title: "Not cleared", description: error.message, variant: "destructive" }),
+  });
+
   const view: RetestStatusView = latest && latest.answer === "status" ? latest : initial;
-  const stoppable = runId !== null && (view.phase === "running" || view.phase === "unwatched");
-  const colour = view.phase === "running" ? "hsl(var(--primary))" : view.phase === "stopped" ? "hsl(var(--muted-foreground))" : "hsl(var(--gold))";
+  const stoppable = runId !== null && isOpen(view);
+  const clearable = stoppable && view.unreadAnswer === true && isAdmin(session?.user ?? null);
+  const ended = ["stopped", "already_finished", "not_known", "cleared"].includes(view.phase);
+  const colour = view.phase === "running" ? "hsl(var(--primary))" : ended ? "hsl(var(--muted-foreground))" : "hsl(var(--gold))";
 
   return (
-    <div className="mt-3 flex flex-wrap items-start justify-between gap-3 border-t border-border/60 pt-3" data-testid={`retest-status-${twinId}`}>
+    <div
+      className="mt-3 flex flex-wrap items-start justify-between gap-3 border-t border-border/60 pt-3"
+      data-testid={`retest-status-${twinId}`}
+      data-run-id={runId ?? undefined}
+    >
       <div className="min-w-0 space-y-1">
         <div className="athena-label flex items-center gap-2" style={{ color: colour }} data-testid={`text-retest-phase-${twinId}`}>
           {view.phase === "running" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -284,6 +343,7 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
             size="sm"
             onClick={() => stop.mutate()}
             data-testid={`button-stop-retest-${twinId}`}
+            data-run-id={runId ?? undefined}
           >
             <Square className="mr-2 h-3.5 w-3.5" />
             {stop.isPending ? "Stopping… (press to resend)" : "Stop"}
@@ -291,6 +351,19 @@ function RetestStatusPanel({ twinId, initial, onVerdict }: {
           <span className="text-[11px] text-muted-foreground" data-testid={`text-retest-killswitch-${twinId}`}>
             or the kill switch on the AI Control page
           </span>
+          {clearable && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => clear.mutate()}
+              disabled={clear.isPending}
+              data-testid={`button-clear-retest-${twinId}`}
+              data-run-id={runId ?? undefined}
+            >
+              Clear this Stop (admin; sends nothing)
+            </Button>
+          )}
         </div>
       )}
     </div>
@@ -310,10 +383,25 @@ export default function RetestPanel({ testId }: { testId: string }) {
   // or from another page: each is shown running, with its Stop, and offers no
   // second Retest.
   const open$ = useQuery<{ retests: RetestStatusView[] }>({ queryKey: [`/api/tests/${testId}/retests`], retry: false });
-  const openByTwin = new Map<number, RetestStatusView>();
+  // Every open run of each finding, each with its own Stop: a finding one
+  // unread answer named two runs for keeps both, never only the last.
+  const openByTwin = new Map<number, RetestStatusView[]>();
   for (const one of open$.data?.retests ?? []) {
-    if (one.answer === "status" && (one.phase === "running" || one.phase === "unwatched")) openByTwin.set(one.twinId, one);
+    if (one.answer === "status" && isOpen(one)) openByTwin.set(one.twinId, [...(openByTwin.get(one.twinId) ?? []), one]);
   }
+  // Every run this page has listed stays shown after it leaves the list, read
+  // by its own id: how it ended -- stopped, already finished, not known to the
+  // engine -- is said where its Stop was, never dropped in silence.
+  const [remembered, setRemembered] = useState<Record<string, RetestStatusView>>({});
+  useEffect(() => {
+    const listed = (open$.data?.retests ?? []).filter((one) => one.answer === "status" && isOpen(one) && one.engineRunId !== null);
+    if (listed.every((one) => (one.engineRunId as string) in remembered)) return;
+    setRemembered((previous) => {
+      const next = { ...previous };
+      for (const one of listed) next[one.engineRunId as string] ??= one;
+      return next;
+    });
+  }, [open$.data, remembered]);
   const data = decisions$.state === "ready" ? decisions$.data : undefined;
 
   const run = useMutation({
@@ -343,9 +431,12 @@ export default function RetestPanel({ testId }: { testId: string }) {
       // taken, or its slot held -- is never titled "did not run": the title
       // says it may be running, and what stops it (its Stop, when it keeps
       // one, is on this panel).
+      // "Stop it here" only when this panel keeps a Stop for it.
       toast(mayStillBeRunning(error)
         ? {
-          title: "The retest may still be running: stop it here, with the kill switch on the AI Control page, or a failsafe pause",
+          title: keptStops(error).length > 0
+            ? "The retest may still be running: stop it here, with the kill switch on the AI Control page, or a failsafe pause"
+            : "The retest may still be running: stop it with the kill switch on the AI Control page, or a failsafe pause",
           description: error.message,
           variant: "destructive",
         }
@@ -401,8 +492,20 @@ export default function RetestPanel({ testId }: { testId: string }) {
 
       <ul className="space-y-3" data-testid="list-decisions">
         {decisions.map((twin) => {
-          const result = results[twin.id] ?? openByTwin.get(twin.id);
-          const running = result !== undefined && isStatus(result) && (result.phase === "running" || result.phase === "unwatched");
+          const result = results[twin.id];
+          // The statuses shown, one per run: this page's own answer first,
+          // then every other open run of this finding, each with its Stop.
+          // A run whose verdict this page has is shown as that verdict only.
+          const verdictRun = result && !isStatus(result) ? result.engineRunId ?? null : null;
+          const open = (openByTwin.get(twin.id) ?? []).filter((one) => verdictRun === null || one.engineRunId !== verdictRun);
+          const statuses: RetestStatusView[] = [
+            ...(result && isStatus(result) ? [result] : []),
+            ...open,
+            ...Object.values(remembered).filter((one) => one.twinId === twin.id && one.engineRunId !== verdictRun),
+          ].filter((one, at, all) =>
+            one.engineRunId === null ? at === all.indexOf(one) : all.findIndex((other) => other.engineRunId === one.engineRunId) === at);
+          // Blocked while this page's own retest is open, or the server lists an open run of this finding.
+          const running = (result !== undefined && isStatus(result) && isOpen(result)) || open.length > 0;
           return (
             <li
               key={twin.id}
@@ -454,17 +557,19 @@ export default function RetestPanel({ testId }: { testId: string }) {
 
               {result && !isStatus(result) && <VerdictView twinId={twin.id} result={result} />}
 
-              {result && isStatus(result) && (
+              {statuses.map((status) => (
                 <RetestStatusPanel
-                  key={result.engineRunId ?? `no-run-${twin.id}`}
+                  key={status.engineRunId ?? `no-run-${twin.id}`}
                   twinId={twin.id}
-                  initial={result}
+                  initial={status}
                   onVerdict={(verdict) => {
                     void invalidateTestsAndFindings();
+                    void open$.refetch();
                     setResults((previous) => ({ ...previous, [twin.id]: { ...verdict, answer: "verdict" } }));
                   }}
+                  onStopAnswered={() => void open$.refetch()}
                 />
-              )}
+              ))}
             </li>
           );
         })}

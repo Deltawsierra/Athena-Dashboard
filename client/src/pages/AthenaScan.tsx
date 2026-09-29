@@ -33,10 +33,7 @@ import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, mayStillBeRunning, queryClient } from "@/lib/queryClient";
-
-/** A start the server could not read, whose run it could not stop: what the operator does next is in the title. */
-const MAY_RUN_TITLE = "The scan may still be running: stop it with the kill switch on the AI Control page, or a failsafe pause";
+import { apiRequest, queryClient, scanStartFailureTitle } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
@@ -187,9 +184,7 @@ export default function AthenaScan() {
       // is the sentence an operator needs, not "scan failed". A start the
       // server says may still be running (an answer it did not read, whose
       // stop did not take) is never titled "did not start".
-      toast(mayStillBeRunning(error)
-        ? { title: MAY_RUN_TITLE, description: error.message, variant: "destructive" }
-        : { title: "The scan did not start", description: error.message, variant: "destructive" }),
+      toast({ title: scanStartFailureTitle(error), description: error.message, variant: "destructive" }),
   });
 
   const stop = useMutation({

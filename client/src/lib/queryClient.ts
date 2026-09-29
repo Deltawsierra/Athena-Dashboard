@@ -43,6 +43,35 @@ export function mayStillBeRunning(error: unknown): boolean {
   return error instanceof ApiError && error.body?.mayStillBeRunning === true;
 }
 
+/**
+ * The runs a refused retest keeps a Stop for on its finding's panel
+ * (`stoppable`): only when there is one does a toast say "stop it here".
+ */
+export function keptStops(error: unknown): string[] {
+  const kept = error instanceof ApiError ? error.body?.stoppable : undefined;
+  return Array.isArray(kept) ? kept.filter((one): one is string => typeof one === "string") : [];
+}
+
+/**
+ * How a failed scan start is titled. One the server says may still be running
+ * names what stops it; an answer it could not read, whose every named run was
+ * then stopped or found ended, is no start that "did not start"; anything
+ * else did not start.
+ */
+export function scanStartFailureTitle(error: unknown): string {
+  if (mayStillBeRunning(error)) {
+    return "The scan may still be running: stop it with the kill switch on the AI Control page, or a failsafe pause";
+  }
+  const body = error instanceof ApiError ? error.body : null;
+  const runIds = Array.isArray(body?.runIds) ? body.runIds : [];
+  if (body?.reason === "unrecognised_engine_answer" && runIds.length > 0) {
+    return runIds.length === 1
+      ? "The scan's answer could not be read: the run it named was stopped, or had ended"
+      : "The scan's answer could not be read: the runs it named were stopped, or had ended";
+  }
+  return "The scan did not start";
+}
+
 type UnauthorizedListener = () => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 

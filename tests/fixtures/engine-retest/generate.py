@@ -26,7 +26,10 @@ engine's requirements.txt pins: see `mythos_core` in each file.
 Usage, from a checkout (or worktree) of athena-engine at one of those commits,
 with its dependencies and mythos-core importable:
 
-    python -B <this script> <engine checkout> <output directory>
+    python -B <this script> <engine checkout> <output directory> [scenario ...]
+
+Named scenarios, when given, are the only ones written (the others are left
+as they are on disk).
 
 The script refuses any other commit, so a fixture directory always says which
 engine produced it. Each file carries the engine sha it was generated from.
@@ -234,8 +237,13 @@ def mythos_core_provenance(checkout):
 
 MYTHOS_CORE: dict = {}
 
+# The scenarios named on the command line; empty, every one.
+ONLY: set = set()
+
 
 def scenario(name, contract, engine_sha, fn, out, **pool):
+    if ONLY and name not in ONLY:
+        return
     E = Engine(**pool)
     try:
         twin = setup_scan_and_twin(E)
@@ -503,6 +511,12 @@ def abort_unrecorded(E, twin):
     release.set()
 
 
+def abort_unknown_run(E, twin):
+    """A Stop by a run id the engine has no record of: it ended and was forgotten, or never ran."""
+    E.record(E.call("POST", "/api/scans/00000000-0000-4000-8000-00000000dead/abort", {}),
+             "Stop, by a run id the engine never registered: 404 No such scan run")
+
+
 def retest_failed_after_registration(E, twin):
     release, started = threading.Event(), threading.Event()
     E.server.engine.run_scan = stand_in(E, "closed", 720, release=release, started=started)
@@ -626,6 +640,7 @@ def main_failed(E, twin):
 def main():
     checkout = Path(sys.argv[1]).resolve()
     out_root = Path(sys.argv[2]).resolve()
+    ONLY.update(sys.argv[3:])
     sha = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"],
@@ -668,6 +683,7 @@ def main():
         scenario("scan-queue-full", contract, sha, scan_queue_full, out, workers=1, queued=0)
         scenario("scan-not-admitted", contract, sha, not_admitted("/api/scan", lambda twin: scan_body()), out)
         scenario("scan-abort-unrecorded", contract, sha, abort_unrecorded, out)
+        scenario("abort-unknown-run", contract, sha, abort_unknown_run, out)
     else:
         contract = "main"
         scenario("verdict-closed", contract, sha, main_verdict("closed", 610), out)

@@ -145,7 +145,7 @@ export class EngineRefused extends EngineUnavailable {
   }
 }
 
-/** No engine is configured: nothing was sent anywhere. */
+/** No engine is configured, or its address could not be read: nothing was sent anywhere. */
 export class EngineNotConfigured extends EngineUnavailable {}
 
 /**
@@ -156,26 +156,67 @@ export class EngineNotConfigured extends EngineUnavailable {}
 export class EngineConnectionRefused extends EngineUnavailable {}
 
 /**
+ * The engine answered a scan start 500 naming the run it registered, recorded
+ * FAILED before its work started (`state: "failed"`): nothing was sent to the
+ * target, and the run is not live. A definite answer.
+ */
+export class EngineStartFailed extends EngineUnavailable {}
+
+/**
+ * Whether a failed start may have left a run live: every failure but one
+ * where nothing reached the engine (no engine configured, its address
+ * unreadable, the connection refused before a byte was sent), the engine
+ * refused the start (a 4xx), or it said the run failed before its work
+ * started. A timeout, a reset after sending, a 5xx, an answer whose body never
+ * came or could not be read: the engine may have started it, and a start it
+ * took may be running.
+ */
+export function mayHaveStarted(cause: EngineUnavailable): boolean {
+  return !(cause instanceof EngineNotConfigured || cause instanceof EngineConnectionRefused
+    || cause instanceof EngineRefused || cause instanceof EngineStartFailed);
+}
+
+/**
+ * The most runs one answer may name and still have each sent a stop from
+ * here. An answer naming more (an X-Run-Id header joined from hundreds) is
+ * refused, and none of them is sent a stop automatically: the kill switch on
+ * the AI Control page, or a failsafe pause, stops what the engine runs.
+ */
+export const MAX_NAMED_RUNS = 8;
+
+/** The runs an unread answer named, capped (MAX_NAMED_RUNS): past the cap, none is taken, and how many were named is kept. */
+function cappedRuns(ids: string[], namedBy: Record<string, RunNamedBy>) {
+  const over = ids.length > MAX_NAMED_RUNS;
+  return { ids: over ? [] : ids, namedBy: over ? {} : namedBy, beyondCap: over ? ids.length : 0 };
+}
+
+/**
  * A scan start the engine answered in a shape this dashboard does not read --
  * a 2xx, or a 500 that names a run -- : nothing is recorded from it, and no
  * state or result is made up for it. `stopId` is the run id it carried, if
  * any (its body's `run_id`, else its `X-Run-Id` header), and `moreStopIds`
  * any other it named (a header that disagrees with the body): the engine may
  * be scanning under each, so the caller stops every one (routes.ts) rather
- * than leave a run going that nothing here recorded.
+ * than leave a run going that nothing here recorded. An answer naming more
+ * than MAX_NAMED_RUNS names none a stop is sent to (`beyondCap`).
  */
 export class UnrecognisedScanAnswer extends EngineUnavailable {
+  readonly stopId: string | null;
+  readonly moreStopIds: string[];
   /**
    * `namedBy`: where the answer named each run -- "body", "X-Run-Id header",
    * or "body and X-Run-Id header" -- so the record of each stop says which.
    */
-  constructor(
-    message: string,
-    readonly stopId: string | null,
-    readonly moreStopIds: string[] = [],
-    readonly namedBy: Record<string, RunNamedBy> = {},
-  ) {
+  readonly namedBy: Record<string, RunNamedBy>;
+  /** How many runs the answer named when that was more than MAX_NAMED_RUNS (none is sent a stop); 0 otherwise. */
+  readonly beyondCap: number;
+  constructor(message: string, stopId: string | null, moreStopIds: string[] = [], namedBy: Record<string, RunNamedBy> = {}) {
     super(message);
+    const capped = cappedRuns(stopId === null ? [...moreStopIds] : [stopId, ...moreStopIds], namedBy);
+    this.stopId = capped.ids[0] ?? null;
+    this.moreStopIds = capped.ids.slice(1);
+    this.namedBy = capped.namedBy;
+    this.beyondCap = capped.beyondCap;
   }
 
   /** Every run the answer named, each to be sent its stop. */
@@ -207,9 +248,21 @@ interface RunsNamed {
 function headerRunIds(response: EngineAnswer): string[] {
   const ids = response.headerValues("x-run-id")
     .flatMap((value) => value.split(","))
-    .map((part) => stopIdFrom(part.replace(/^[ \t]+|[ \t]+$/g, "")))
+    .map((part) => headerId(part.replace(/^[ \t]+|[ \t]+$/g, "")))
     .filter((one): one is string => one !== null);
   return ids.filter((one, at) => ids.indexOf(one) === at);
+}
+
+/**
+ * One X-Run-Id part as a stop can address it. A quoted string (`"abc"`, as a
+ * proxy or a structured-field writer may send it) is the id inside the
+ * quotes; any other part carrying a quote or a backslash names no run -- a
+ * stop is never sent to `"abc"` with its quotes, which names no run.
+ */
+function headerId(part: string): string | null {
+  const quoted = /^"([^"\\]*)"$/.exec(part);
+  const id = quoted ? quoted[1] : part;
+  return id.includes("\"") ? null : stopIdFrom(id);
 }
 
 /**
@@ -255,6 +308,12 @@ function namedByOf(named: { bodyId: string | null; headerIds: string[] }): Recor
 function namedSentence(named: { bodyId: string | null; headerIds: string[] }): string {
   const header = named.headerIds;
   const runs = (ids: string[]) => (ids.length === 1 ? `run ${ids[0]}` : `runs ${ids.join(" and ")}`);
+  const all = [named.bodyId, ...header].filter((one, at, list): one is string => one !== null && list.indexOf(one) === at);
+  if (all.length > MAX_NAMED_RUNS) {
+    return `It names ${all.length} runs, more than the ${MAX_NAMED_RUNS} one answer may name, so none is taken as the run and ` +
+      "none is sent a stop from here: a run it started may be live, and the kill switch on the AI Control page, or a " +
+      "failsafe pause, stops it.";
+  }
   if (named.bodyId !== null && !headerAgrees(named, named.bodyId)) {
     return `Its body names run ${named.bodyId} and its X-Run-Id header names ${runs(header)}: they differ, ` +
       "so none is taken as the run, and each is sent a stop.";
@@ -548,7 +607,8 @@ function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.
   try {
     url = new URL(`${base}${path}`);
   } catch (cause) {
-    return Promise.reject(new EngineUnavailable(
+    // An address that cannot be read: nothing was sent anywhere.
+    return Promise.reject(new EngineNotConfigured(
       `could not reach the engine at ${base}: ${cause instanceof Error ? cause.message : String(cause)}`,
     ));
   }
@@ -897,7 +957,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
       };
     }
     if (named && stopId !== null) {
-      throw new EngineUnavailable(
+      throw new EngineStartFailed(
         `the engine answered 500: run ${stopId} failed before its work started (${quoted(String(named.error ?? "no error given"))}); ` +
         "nothing was sent to the target",
       );
@@ -916,9 +976,18 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     throw new EngineUnavailable(`the engine answered 500: ${raw}`);
   }
   if (!response.ok) {
-    throw new EngineUnavailable(
-      `the engine answered ${response.status}: ${await body(response)}`,
-    );
+    const said = `the engine answered ${response.status}: ${await body(response)}`;
+    // A 4xx is the engine refusing the start: nothing was started. Any other
+    // answer (a 5xx) says nothing about whether it started one: a run its
+    // X-Run-Id header names is sent a stop (routes.ts), and one it names none
+    // of may be live all the same (mayHaveStarted).
+    if (response.status >= 400 && response.status < 500) throw new EngineRefused(said, response.status);
+    const named = { bodyId: null, headerIds: headerRunIds(response) };
+    if (named.headerIds.length > 0) {
+      throw new UnrecognisedScanAnswer(`${said}. ${namedSentence(named)} Nothing was recorded from it.`,
+        named.headerIds[0], named.headerIds.slice(1), namedByOf(named));
+    }
+    throw new EngineUnavailable(said);
   }
 
   // Read as a JSON object, or refused: a body that is not one (`[]`, `null`,
@@ -927,10 +996,17 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
   // X-Run-Id header names is stopped (routes.ts); none is looked for inside it.
   const rawScan = await bodyWithin(response, engineTimeouts.bodyMs);
   if (rawScan === null) {
-    throw new EngineUnavailable(
-      `the engine sent the headers of its answer to the scan (${response.status}) but not the rest within ` +
-      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`,
-    );
+    const stalled = `the engine sent the headers of its answer to the scan (${response.status}) but not the rest within ` +
+      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`;
+    // The engine took the start (its 2xx headers came): a run its X-Run-Id
+    // header names is sent a stop, as any unread answer's is (routes.ts).
+    // Naming none, the run it started may be live all the same.
+    const named = { bodyId: null, headerIds: headerRunIds(response) };
+    if (named.headerIds.length > 0) {
+      throw new UnrecognisedScanAnswer(`${stalled}. ${namedSentence(named)} Nothing was recorded from it.`,
+        named.headerIds[0], named.headerIds.slice(1), namedByOf(named));
+    }
+    throw new EngineUnavailable(stalled);
   }
   let readScan: unknown = undefined;
   let scanIsJson = true;
@@ -1430,7 +1506,16 @@ export interface AbortOutcome {
    * stop was accepted (routes.ts outcomeOf).
    */
   answerUnread?: boolean;
+  /**
+   * The engine answered 404 "No such scan run": it does not know this run --
+   * it has ended and been forgotten, or never ran. Nothing was stopped, and
+   * nothing is running under this id there.
+   */
+  unknownRun?: boolean;
 }
+
+/** What both engines answer a stop to a run id they have no record of (api/server.py: HTTPException(404, "No such scan run")). */
+const NO_SUCH_RUN = "No such scan run";
 
 /** Ask a running scan to stop. */
 export async function abortRun(runId: string): Promise<AbortOutcome> {
@@ -1438,7 +1523,23 @@ export async function abortRun(runId: string): Promise<AbortOutcome> {
     method: "POST",
   });
   if (!response.ok) {
-    void response.body?.cancel().catch(() => undefined);
+    // A 404 is read -- as a 2xx is, for at most engineTimeouts.abortBodyMs
+    // and a few bytes -- for the engine's own "No such scan run". Every other
+    // refusal's answer is let go at once, unread: its connection is closed
+    // (EngineAnswer.release), so nothing of it holds a socket or a read.
+    if (response.status === 404) {
+      const raw = await bodyWithin(response, engineTimeouts.abortBodyMs, 1024);
+      response.release();
+      let detail: unknown = null;
+      try {
+        detail = (JSON.parse(raw ?? "") as { detail?: unknown } | null)?.detail ?? null;
+      } catch {
+        detail = null;
+      }
+      if (detail === NO_SUCH_RUN) return { accepted: false, alreadyFinished: false, state: null, unknownRun: true };
+      return { accepted: false, alreadyFinished: false, state: null };
+    }
+    response.release();
     return { accepted: false, alreadyFinished: false, state: null };
   }
   // Answered from the headers: the body is read only to tell a run that had
@@ -1649,19 +1750,28 @@ export interface RetestRequest {
  * from it, and no id in it is read as a scan record.
  */
 export class UnrecognisedRetestAnswer extends EngineUnavailable {
+  /** Every run the answer named, each to be sent its stop: none when it named more than MAX_NAMED_RUNS (`beyondCap`). */
+  readonly stopIds: string[];
+  /** Where the answer named each run (UnrecognisedScanAnswer.namedBy). */
+  readonly namedBy: Record<string, RunNamedBy>;
+  /** How many runs the answer named when that was more than MAX_NAMED_RUNS; 0 otherwise. */
+  readonly beyondCap: number;
   /**
-   * `answered`: the engine answered 2xx with a body that carries a run id --
-   * a definite answer, if not one this reads: the retest's slot is freed at
-   * once. Without one (a body that is not an object) it is not.
+   * `answered`: the engine answered 2xx with a body that carries a run id.
+   * Said, never decisive: an answer that carries one no stop can address
+   * frees no slot -- the retest it started may be running (routes.ts).
    */
   constructor(
     message: string,
     readonly answered = false,
-    readonly stopIds: string[] = [],
-    /** Where the answer named each run (UnrecognisedScanAnswer.namedBy). */
-    readonly namedBy: Record<string, RunNamedBy> = {},
+    stopIds: string[] = [],
+    namedBy: Record<string, RunNamedBy> = {},
   ) {
     super(message);
+    const capped = cappedRuns(stopIds, namedBy);
+    this.stopIds = capped.ids;
+    this.namedBy = capped.namedBy;
+    this.beyondCap = capped.beyondCap;
   }
 }
 
@@ -1823,10 +1933,16 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   }
   const rawRetest = await bodyWithin(response, engineTimeouts.bodyMs);
   if (rawRetest === null) {
-    throw new EngineUnavailable(
-      `the engine sent the headers of its answer to a retest (${response.status}) but not the rest within ` +
-      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`,
-    );
+    const stalled = `the engine sent the headers of its answer to a retest (${response.status}) but not the rest within ` +
+      `${Math.round(engineTimeouts.bodyMs / 1000)} s, so it could not be read`;
+    // A run its X-Run-Id header names is sent a stop, as any unread answer's
+    // is (routes.ts); naming none, its slot is held (mayHaveStarted).
+    const named = { bodyId: null, headerIds: headerRunIds(response) };
+    if (named.headerIds.length > 0) {
+      throw new UnrecognisedRetestAnswer(`Unrecognised engine answer: ${stalled}. ${namedSentence(named)} Nothing was filed.`,
+        false, named.headerIds, namedByOf(named));
+    }
+    throw new EngineUnavailable(stalled);
   }
   let read: unknown = undefined;
   let retestIsJson = true;
