@@ -71,6 +71,7 @@ import {
   type Severity,
 } from "@/components/mythos/atoms";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { isKeyBug, saysOutcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -7511,22 +7512,39 @@ function ConnectorsPanel({
   const { data, isLoading, isError, error } = useQuery<ConnectorsView>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/connectors`],
   });
+  // One Idempotency-Key per press of Push, sent again only with the same
+  // finding and connector while its outcome is unknown (lib/keyedPress.ts):
+  // the backend answers it from its record of the first, and files no second ticket.
+  const press = useKeyedPress();
   const push = useMutation({
     mutationFn: async ({ connector, finding }: { connector: string; finding: string }) =>
       (
         await apiRequest("POST", `/api/assurance/deployments/${deploymentUuid}/connectors/${connector}/push`, {
           finding,
-        })
+        }, press.headersFor({ deploymentUuid, connector, finding }))
       ).json(),
-    onSuccess: (result: { ok: boolean; detail: string; externalRef: string | null }) => {
+    onSuccess: (result: { ok: boolean; detail: string; externalRef: string | null; replayed?: boolean }) => {
+      press.answered();
+      // The answer your earlier press got: nothing was pushed again.
+      const earlier = result.replayed ? " (your earlier press: nothing was pushed again)" : "";
       toast({
-        title: result.ok ? "Pushed to connector" : "Connector did not accept",
+        title: (result.ok ? "Pushed to connector" : "Connector did not accept") + earlier,
         description: result.ok ? (result.externalRef ? `Reference: ${result.externalRef}` : undefined) : result.detail,
         variant: result.ok ? undefined : "destructive",
       });
     },
-    onError: (e: Error) =>
-      toast({ title: "Could not push to connector", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => {
+      press.failed(e);
+      toast({
+        title: isKeyBug(e)
+          ? "Not pushed: this page sent its key wrongly, which is a bug"
+          : saysOutcomeUnknown(e)
+            ? "We don't know whether this finding was pushed: check the connector's system before pushing it again"
+            : "Could not push to connector",
+        description: e.message,
+        variant: "destructive",
+      });
+    },
   });
   const heading = (
     <div className="mb-2 flex items-center gap-2">

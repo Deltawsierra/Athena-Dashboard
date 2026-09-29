@@ -12,10 +12,12 @@ import * as engine from "./engine";
 import * as retests from "./retests";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
+import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
 import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
@@ -2572,8 +2574,14 @@ export function registerRoutes(app: Express): void {
     res.json(await engine.status());
   }));
 
-  app.post("/api/scans", asyncHandler(async (req, res) => {
+  app.post("/api/scans", asyncHandler(idempotency.releasing(async (req, res) => {
     const data = startScanSchema.parse(req.body);
+    // The press's Idempotency-Key (server/idempotency.ts): one that is not a key
+    // is a bug in the page, refused before anything is read or sent.
+    const pressed = idempotency.keyOf(req);
+    if (pressed !== null && "refused" in pressed) {
+      return void res.status(400).json({ error: pressed.refused, reason: "idempotency_key_invalid" });
+    }
 
     const client = await storage.getClient(data.clientId);
     if (!client) return notFound(res, "Client");
@@ -2721,6 +2729,20 @@ export function registerRoutes(app: Express): void {
       });
     }
 
+    // Every check above ran first, a press sent again included (the engine
+    // judges it the same way). Then its key: the same press still being
+    // answered here sends nothing -- its first send is recording what it
+    // started -- and otherwise goes to the engine with the key, scoped to this
+    // account, which answers a press it has already answered from its record.
+    const forwarded = pressed === null ? undefined : idempotency.forwardedKey(actor(req).userId ?? "", pressed.key);
+    if (forwarded !== undefined && !idempotency.hold(res, forwarded)) {
+      return void res.status(409).json({
+        error: idempotency.stillBeingAnswered("the scans list"),
+        reason: "idempotency_in_flight",
+        idempotency: { state: "in_flight" },
+      });
+    }
+
     let started;
     try {
       started = await engine.startScan({
@@ -2729,8 +2751,25 @@ export function registerRoutes(app: Express): void {
         scope,
         // Forwarded only when the operator enabled authenticated scanning.
         ...(data.auth?.enabled ? { auth: data.auth } : {}),
-      });
+      }, forwarded);
     } catch (cause) {
+      if (cause instanceof engine.EngineOutcomeUnknown) {
+        // The engine has no answer recorded for the first press with this key:
+        // it may have started a run, and nothing is recorded here for it. Said
+        // so -- never "refused", never "did not start" -- and never sent again
+        // with a new key.
+        return void res.status(409).json({
+          error: `We don't know whether this scan started: ${cause.message}. Check the scans list before starting it ` +
+            "again. Nothing was recorded here for it, so no Stop is offered for it here: the kill switch on the AI Control " +
+            "page, or a failsafe pause, stops it.",
+          reason: "scan_outcome_unknown",
+          idempotency: { state: cause.state },
+          mayStillBeRunning: true,
+        });
+      }
+      if (cause instanceof engine.EngineKeyRefused) {
+        return void res.status(500).json({ error: cause.message, reason: "idempotency_bug" });
+      }
       if (cause instanceof engine.UnrecognisedScanAnswer) {
         // The engine took the start (2xx) and answered in a shape this
         // dashboard does not read: nothing is recorded from it, and the run it
@@ -2786,6 +2825,24 @@ export function registerRoutes(app: Express): void {
         error: "the engine refused this scan",
         detail: started.refused ?? "",
       });
+    }
+
+    // The engine answered this press from its record of the first: the same
+    // run. When the first send recorded it here, that record is the answer --
+    // no second row, no second filing, no second log line. When nothing here
+    // recorded it (the first send's answer never arrived, or its row could not
+    // be written), it is recorded now, once, as the first would have been.
+    const replayedRun = started.replayed === true ? started.stopId ?? started.runId : null;
+    if (replayedRun) {
+      // The press's own record: that run, for the client and site it was started for.
+      const recorded = (await storage.getAllTests()).find((one) =>
+        stopIdOf(one) === replayedRun && one.clientId === data.clientId && (one.siteId ?? null) === (data.siteId ?? null));
+      if (recorded) {
+        return void res.status(201).json({
+          test: recorded, runId: started.runId, state: started.state, replayed: true,
+          detail: "the engine answered this press from its record of the first: nothing new was started or recorded",
+        });
+      }
     }
 
     // The kill switch pressed while the engine was being asked: the run it
@@ -2918,6 +2975,7 @@ export function registerRoutes(app: Express): void {
 
     res.status(201).json({
       test, runId: started.runId, state: started.state, filed,
+      ...(started.replayed ? { replayed: true } : {}),
       // A run the engine started without a run id a stop can name breaks the
       // engine's contract: no Stop can reach it, and the screens say what can
       // (the Failsafe console) in place of a Stop that would answer 409.
@@ -2925,7 +2983,7 @@ export function registerRoutes(app: Express): void {
       ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
       ...(started.warning ? { warning: started.warning } : {}),
     });
-  }));
+  })));
 
   /**
    * Stop a scan that is going wrong.
@@ -3160,6 +3218,12 @@ export function registerRoutes(app: Express): void {
 
   app.post("/api/tests/:testId/retest", asyncHandler(async (req, res) => {
     const data = retestSchema.parse(req.body);
+    // The press's Idempotency-Key (server/idempotency.ts): one that is not a key
+    // is a bug in the page, refused before anything is read or sent.
+    const pressed = idempotency.keyOf(req);
+    if (pressed !== null && "refused" in pressed) {
+      return void res.status(400).json({ error: pressed.refused, reason: "idempotency_key_invalid" });
+    }
 
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
@@ -3255,7 +3319,8 @@ export function registerRoutes(app: Express): void {
     const requestedAt = new Date();
     let answered: engine.RetestAnswer;
     try {
-      answered = await engine.retest({ twinId: data.twinId, engagementRef, scope });
+      answered = await engine.retest({ twinId: data.twinId, engagementRef, scope },
+        pressed === null ? undefined : idempotency.forwardedKey(actor(req).userId ?? "", pressed.key));
     } catch (cause) {
       const heldSaid = "It may still be running this retest: this finding cannot be retested again, and its place among the " +
         "retests sent at once stays taken, until the engine lists no live retest on its target or " +
@@ -3350,6 +3415,10 @@ export function registerRoutes(app: Express): void {
         return void res.status(502).json({
           error: cause.message, reason: "unrecognised_engine_answer", ...(definite ? {} : { held: heldSaid, mayStillBeRunning: true }),
         });
+      }
+      // The engine refused the press's key itself: a bug here, and nothing was started.
+      if (cause instanceof engine.EngineKeyRefused) {
+        return void res.status(500).json({ error: cause.message, reason: "idempotency_bug" });
       }
       return void res.status(503).json(definite ? { error: causeOf(cause) } : {
         error: `${causeOf(cause)}. ${heldSaid}`,
@@ -5731,14 +5800,42 @@ export function registerRoutes(app: Express): void {
     requireAdmin,
     asyncHandler(async (req, res) => {
       const data = connectorPushSchema.parse(req.body ?? {});
+      // The press's Idempotency-Key (server/idempotency.ts): one that is not a
+      // key is a bug in the page, refused before anything is sent.
+      const pressed = idempotency.keyOf(req);
+      if (pressed !== null && "refused" in pressed) {
+        return void res.status(400).json({ error: pressed.refused, reason: "idempotency_key_invalid" });
+      }
       let result;
       try {
-        result = await assurance.pushConnector(req.params.uuid, req.params.connector, data.finding);
+        result = await assurance.pushConnector(req.params.uuid, req.params.connector, data.finding,
+          pressed === null ? undefined : idempotency.forwardedKey(actor(req).userId ?? "", pressed.key));
       } catch (cause) {
         if (assuranceUnavailable(res, cause)) return;
         throw cause;
       }
+      if (!result.ok && result.about === "outcome_unknown") {
+        // The backend has no answer recorded for the first push with this key,
+        // or this push was sent and no answer came back: whether a ticket was
+        // filed is unknown. Never pushed again with a new key.
+        return void res.status(result.status === 409 ? 409 : 503).json({
+          error: `We don't know whether this finding was pushed: ${result.detail}. Check the connector's system ` +
+            "(the tracker or the webhook's receiver) before pushing it again.",
+          reason: "push_outcome_unknown",
+          idempotency: { state: result.state ?? null },
+        });
+      }
+      if (!result.ok && result.about === "key") {
+        return void res.status(500).json({
+          error: `the backend refused this push's ${IDEMPOTENCY_HEADER} (${result.status}: ${result.detail}): a bug in ` +
+            "this dashboard, and nothing was pushed by it",
+          reason: "idempotency_bug",
+        });
+      }
       if (!result.ok) return void res.status(result.status).json({ error: result.detail });
+      // The answer the first push with this key got: it is that push's answer,
+      // and nothing was pushed or logged again.
+      if (result.replayed) return void res.json({ ...result.value, replayed: true });
       await storage.createActivityLog({
         action: "connector_pushed",
         entityType: "assurance_deployment",

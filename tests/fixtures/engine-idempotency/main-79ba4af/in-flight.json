@@ -1,0 +1,84 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "in-flight",
+  "exchanges": [
+    {
+      "note": "the same launch, the same key, while the first is still answering (it waits on its scan)",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ],
+          "wait_seconds": 10
+        },
+        "headers": {
+          "Idempotency-Key": "k-in-flight"
+        }
+      },
+      "status": 409,
+      "body": {
+        "detail": "The first request with this Idempotency-Key has no answer recorded: it is still running, or it stopped before it could record one, so its outcome is unknown. Nothing was started by this one. Send the same request with this key later to read its answer; GET /api/scans/active lists every live run.",
+        "idempotency": {
+          "state": "in_flight",
+          "since": "2026-09-29T09:22:02.216094+00:00"
+        }
+      }
+    },
+    {
+      "note": "the first launch's own answer, once its scan ended",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ],
+          "wait_seconds": 10
+        },
+        "headers": {
+          "Idempotency-Key": "k-in-flight"
+        }
+      },
+      "status": 200,
+      "body": {
+        "run_id": "fca844b7-e8dd-4c32-bd7e-dd3d2b36036e",
+        "target": "https://offline.invalid/",
+        "kind": "scan",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-29T09:22:02.241522+00:00",
+        "updated_at": "2026-09-29T09:22:02.360429+00:00",
+        "finished_at": "2026-09-29T09:22:02.360429+00:00",
+        "done": true,
+        "result": {
+          "scan_id": 1,
+          "results": [],
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
+        },
+        "answer": "status",
+        "status_url": "/api/scans/fca844b7-e8dd-4c32-bd7e-dd3d2b36036e"
+      }
+    }
+  ]
+}

@@ -16,7 +16,8 @@
  * a release decision stays a human's to make from them.
  */
 
-import { call, body, baseUrl, isConfigured, ControlPlaneUnavailable } from "./control-plane";
+import { call, body, baseUrl, isConfigured, ControlPlaneUnavailable, ControlPlaneUnanswered } from "./control-plane";
+import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
 
 export { ControlPlaneUnavailable, isConfigured };
 
@@ -5277,16 +5278,64 @@ export async function pushConnector(
   uuid: string,
   connector: string,
   finding: string,
+  key?: string,
 ): Promise<
-  | { ok: true; value: ConnectorPushResult }
-  | { ok: false; status: number; detail: string }
+  | { ok: true; value: ConnectorPushResult; replayed: boolean }
+  | { ok: false; status: number; detail: string; about?: "outcome_unknown" | "key"; state?: string | null }
 > {
-  const response = await call(
-    `/api/assurance/deployments/${encodeURIComponent(uuid)}/connectors/${encodeURIComponent(connector)}/push/`,
-    { method: "POST", body: JSON.stringify({ finding }) },
-  );
+  let response: Response;
+  try {
+    response = await call(
+      `/api/assurance/deployments/${encodeURIComponent(uuid)}/connectors/${encodeURIComponent(connector)}/push/`,
+      {
+        method: "POST",
+        body: JSON.stringify({ finding }),
+        // The press's Idempotency-Key (server/idempotency.ts): the backend
+        // (athena-backend #113) answers the same press sent again from its
+        // record of the first, and files no second ticket.
+        ...(key !== undefined ? { headers: { [IDEMPOTENCY_HEADER]: key } } : {}),
+      },
+    );
+  } catch (cause) {
+    // Sent, and no answer came back: the ticket may have been filed. With a
+    // key, the same press sent again reads what happened; so it is said to be
+    // unknown, never "unavailable", which a page reads as nothing done.
+    if (key !== undefined && cause instanceof ControlPlaneUnanswered) {
+      return { ok: false, status: 503, detail: cause.message, about: "outcome_unknown", state: null };
+    }
+    throw cause;
+  }
+  if (key !== undefined && (response.status === 400 || response.status === 409 || response.status === 422)) {
+    // Read once. An answer about the key is never passed on as the backend's
+    // refusal of the push: a 409 saying the first push has no answer yet means
+    // nobody knows whether it was filed.
+    const detail = await body(response);
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(detail) as unknown;
+    } catch {
+      parsed = null;
+    }
+    const record = keyRecordOf(parsed);
+    if (response.status === 409 && record !== null) {
+      return { ok: false, status: 409, detail, about: "outcome_unknown", state: record.state };
+    }
+    if ((response.status === 422 && record !== null) || refusesTheKey(response.status, parsed)) {
+      return { ok: false, status: response.status, detail, about: "key" };
+    }
+    if (PASSTHROUGH_STATUS.has(response.status)) return { ok: false, status: response.status, detail };
+    throw new ControlPlaneUnavailable(`the Athena control plane answered ${response.status}: ${detail}`);
+  }
   if (PASSTHROUGH_STATUS.has(response.status)) {
     return { ok: false, status: response.status, detail: await body(response) };
+  }
+  if (key !== undefined && response.status >= 500) {
+    // A 5xx says nothing about whether the ticket was filed (the backend
+    // records a push that raised as unknown): the same press, sent again, reads it.
+    return {
+      ok: false, status: response.status, about: "outcome_unknown", state: null,
+      detail: `the Athena control plane answered ${response.status}: ${await body(response)}`,
+    };
   }
   if (!response.ok) {
     throw new ControlPlaneUnavailable(
@@ -5302,5 +5351,7 @@ export async function pushConnector(
       detail: str(payload.detail),
       connector: str(payload.connector),
     },
+    // The answer the first push with this key got: nothing was filed by this one.
+    replayed: key !== undefined && response.headers.get(REPLAYED_HEADER) === "true",
   };
 }

@@ -1,0 +1,40 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "bad-key",
+  "exchanges": [
+    {
+      "note": "a key longer than 255 characters",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      "status": 400,
+      "body": {
+        "detail": "Idempotency-Key must be 1 to 255 printable ASCII characters. Nothing was done."
+      }
+    }
+  ]
+}

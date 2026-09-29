@@ -20,6 +20,7 @@ import https from "https";
 import * as settings from "./settings";
 import * as dnsCache from "./dns-cache";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
+import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
 
 /**
  * Node loads its HTTP client (fetch, undici) the first time it is used, and
@@ -123,6 +124,13 @@ export interface EngineScan {
   final?: boolean;
   /** Set by startScan only: what the engine said went wrong around a run it started all the same. */
   warning?: string;
+  /**
+   * Set by startScan only: the engine answered this start from its record of
+   * the first start sent with the same Idempotency-Key (`Idempotent-Replayed`,
+   * athena-engine #77). It is that first answer, naming that start's run:
+   * nothing was started by this send.
+   */
+  replayed?: boolean;
 }
 
 export class EngineUnavailable extends Error {}
@@ -147,6 +155,26 @@ export class EngineRefused extends EngineUnavailable {
 
 /** No engine is configured, or its address could not be read: nothing was sent anywhere. */
 export class EngineNotConfigured extends EngineUnavailable {}
+
+/**
+ * The engine has no answer recorded for the first start sent with this start's
+ * Idempotency-Key (athena-engine #77: 409 with `idempotency`): that start is
+ * still being answered, or it raised, or its engine process ended first. So
+ * whether it started a run is unknown; this send started nothing. `state` is
+ * the engine's (`in_flight`, `unknown`). Never sent again with a new key.
+ */
+export class EngineOutcomeUnknown extends EngineUnavailable {
+  constructor(message: string, readonly state: string | null) {
+    super(message);
+  }
+}
+
+/**
+ * The engine refused this start's Idempotency-Key itself: the same key with
+ * another request (422), or a key that is not one (400). A bug in this
+ * dashboard; nothing was started by this send.
+ */
+export class EngineKeyRefused extends EngineRefused {}
 
 /**
  * The engine's address refused the connection, or could not be found, before
@@ -582,8 +610,12 @@ function headers(): Record<string, string> {
   return out;
 }
 
-/** What a call sends: its method and its body. */
-type CallInit = { method?: string; body?: string };
+/**
+ * What a call sends: its method, its body, and any header of its own -- an
+ * Idempotency-Key on a start (shared/idempotency.ts), and nothing else. A stop
+ * never carries one.
+ */
+type CallInit = { method?: string; body?: string; headers?: Record<string, string> };
 
 /**
  * Ask the engine. Within `timeoutMs` for the headers of its answer, over the
@@ -620,12 +652,12 @@ function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.
     for (let hops = 0; ; hops += 1) {
       let answer: EngineAnswer;
       try {
-        answer = await send(url, method, payload, deadline, true);
+        answer = await send(url, method, payload, deadline, true, init?.headers);
       } catch (cause) {
         if (cause instanceof StaleConnection && resendable(method, url.pathname)) {
           // Reset on a kept connection before any answer: sent once more, on a new one.
           try {
-            answer = await send(url, method, payload, deadline, false);
+            answer = await send(url, method, payload, deadline, false, init?.headers);
           } catch (again) {
             throw failure(again, base, timedOut);
           }
@@ -684,13 +716,17 @@ const TIMED_OUT = Symbol("timed out");
  * it may go on a kept connection -- a request sent once more never does
  * (a fresh connection, closed after its answer).
  */
-function send(url: URL, method: string, payload: string | undefined, deadline: number, mayReuse: boolean): Promise<EngineAnswer> {
+function send(
+  url: URL, method: string, payload: string | undefined, deadline: number, mayReuse: boolean,
+  extra: Record<string, string> = {},
+): Promise<EngineAnswer> {
   const secure = url.protocol === "https:";
   return new Promise<EngineAnswer>((resolve, reject) => {
     let timedOut = false;
     const req = (secure ? https : http).request(url, {
       method,
       headers: {
+        ...extra,
         ...headers(),
         ...(payload !== undefined ? { "Content-Length": Buffer.byteLength(payload) } : {}),
       },
@@ -887,6 +923,34 @@ export interface ScanRequest {
 }
 
 /**
+ * What a keyed launch's 400, 409 or 422 says about its key (shared/idempotency.ts):
+ * the engine has no answer recorded for the key's first send (409), or refused
+ * the key itself (422 for another request, 400 for a key that is not one) --
+ * or null when the answer is the route's own (a stood-down engine's 409, a
+ * refused scope), read as it always was. `whole`: the answer's body.
+ */
+function keyAnswerOf(status: number, whole: string): EngineOutcomeUnknown | EngineKeyRefused | null {
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(whole) as unknown;
+  } catch {
+    parsed = null;
+  }
+  const record = keyRecordOf(parsed);
+  if (status === 409 && record !== null) {
+    return new EngineOutcomeUnknown(`the engine answered 409: ${quoted(whole)}`, record.state);
+  }
+  if ((status === 422 && record !== null) || refusesTheKey(status, parsed)) {
+    return new EngineKeyRefused(
+      `the engine refused this start's ${IDEMPOTENCY_HEADER} (${status}: ${quoted(whole)}): a bug in this dashboard, ` +
+      "and nothing was started by it",
+      status,
+    );
+  }
+  return null;
+}
+
+/**
  * Ask the engine to scan a target.
  *
  * A refusal is a result, not an exception: the engine refuses a target its
@@ -894,9 +958,12 @@ export interface ScanRequest {
  * exactly what an operator needs to see. Swallowing it into "scan failed"
  * would throw away the only useful sentence.
  */
-export async function startScan(request: ScanRequest): Promise<EngineScan> {
+export async function startScan(request: ScanRequest, key?: string): Promise<EngineScan> {
   const response = await call("/api/scan", {
     method: "POST",
+    // The press's Idempotency-Key, as the route passed it on (server/idempotency.ts):
+    // the same press sent again is answered from the engine's record of the first.
+    ...(key !== undefined ? { headers: { [IDEMPOTENCY_HEADER]: key } } : {}),
     // No tenant is sent. The engine binds a credential to a tenant and
     // resolves it from the key, and Athena's client id is not that tenant --
     // sending it got "this credential is bound to a different tenant", which
@@ -912,6 +979,20 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     }),
   });
 
+  // The first start with this key, answered: its answer again, naming its run.
+  const replayed = key !== undefined && response.header(REPLAYED_HEADER) === "true";
+  if (key !== undefined && (response.status === 400 || response.status === 409 || response.status === 422)) {
+    // Read once: an answer about the key is never read as the route's own
+    // refusal -- a 409 that says the first start has no answer yet is not
+    // "the engine refused this scan".
+    const { whole, shown } = await errorBody(response);
+    const aboutTheKey = keyAnswerOf(response.status, whole);
+    if (aboutTheKey !== null) throw aboutTheKey;
+    if (response.status === 409) {
+      return { runId: null, state: "refused", findings: [], detail: "the engine refused this scan", refused: shown };
+    }
+    throw new EngineRefused(`the engine answered ${response.status}: ${shown}`, response.status);
+  }
   if (response.status === 403 || response.status === 409) {
     return {
       runId: null,
@@ -954,6 +1035,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
         warning: `the engine failed after it registered run ${stopId} (${error}), and its work may be running: ` +
           "it is recorded as running, with its Stop, and read from the engine until it ends",
         final: false,
+        ...(replayed ? { replayed: true } : {}),
       };
     }
     if (named && stopId !== null) {
@@ -1077,6 +1159,7 @@ export async function startScan(request: ScanRequest): Promise<EngineScan> {
     findings: !final ? [] : inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
     final,
+    ...(replayed ? { replayed: true } : {}),
     // A run it may still be running with no id a stop can name: kept as it
     // always was (recorded running, the Failsafe console in place of a Stop),
     // and said why.
@@ -1873,18 +1956,31 @@ function statusOf(payload: Record<string, unknown>, httpStatus: number): RetestS
  * one carrying `scan_record_id`), and an `answer` this cannot read. None is a
  * verdict, and nothing is filed from one.
  */
-export async function retest(request: RetestRequest): Promise<RetestAnswer> {
+export async function retest(request: RetestRequest, key?: string): Promise<RetestAnswer> {
   const fields = { twin_id: request.twinId, engagement_ref: request.engagementRef, scope: request.scope };
   // `wait_seconds: 0` first: athena-engine #71 then answers 202 with the run's
   // id at once, holds no engine thread waiting for the verdict, and the watch
   // collects it. Engine main refuses the field with a 422 before it starts
   // anything, and is asked again without it -- the request it always had.
+  // The press's Idempotency-Key goes with the first ask (server/idempotency.ts).
+  // athena-engine #77 reads it on `POST /api/scan` only, so on this route it
+  // changes nothing yet: this retest's held slot is what keeps a second press
+  // from starting a second retest while this one may be running. The ask
+  // without `wait_seconds` is another request, to an engine that reads no key,
+  // and carries none.
   let response = await call("/api/remediation/retest", {
     method: "POST",
+    ...(key !== undefined ? { headers: { [IDEMPOTENCY_HEADER]: key } } : {}),
     body: JSON.stringify({ ...fields, wait_seconds: 0 }),
   });
-  if (response.status === 422) {
+  if (response.status === 422 || (key !== undefined && (response.status === 400 || response.status === 409))) {
     const { whole, shown } = await errorBody(response);
+    // An answer about the key (should the engine read one here) is never read
+    // as the route's own refusal: a 409 saying the first ask has no answer yet
+    // holds the slot (mayHaveStarted), and a key refused is a bug.
+    const aboutTheKey = key !== undefined ? keyAnswerOf(response.status, whole) : null;
+    if (aboutTheKey !== null) throw aboutTheKey;
+    if (response.status !== 422) throw new EngineRefused(`the engine answered ${response.status}: ${shown}`, response.status);
     if (!refusesWaitSeconds(422, whole)) {
       throw new EngineRefused(`the engine answered 422: ${shown}`, 422);
     }

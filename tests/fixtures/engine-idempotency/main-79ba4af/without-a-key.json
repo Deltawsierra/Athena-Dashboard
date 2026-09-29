@@ -1,0 +1,67 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "without-a-key",
+  "exchanges": [
+    {
+      "note": "a launch with no key",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "dad34205-acf3-48b7-8cea-02add750739c",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/dad34205-acf3-48b7-8cea-02add750739c",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "the same launch again, with no key",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "7184718d-e6b4-4e04-9ae5-a9746b41dde9",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/7184718d-e6b4-4e04-9ae5-a9746b41dde9",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    }
+  ]
+}

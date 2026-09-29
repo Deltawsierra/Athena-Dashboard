@@ -35,6 +35,7 @@ import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient, scanStartFailureTitle } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
+import { outcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import templeStorm from "@assets/mythos/temple-storm.webp";
@@ -165,26 +166,41 @@ export default function AthenaScan() {
     if (testId !== null && stoppedNow) void invalidateTestsAndFindings();
   }, [testId, stoppedNow]);
 
+  // One Idempotency-Key per press of Start scan, sent again only with the
+  // same scan while its outcome is unknown (lib/keyedPress.ts).
+  const press = useKeyedPress();
   const start = useMutation({
     mutationFn: async () => {
-      const response = await apiRequest("POST", "/api/scans", {
-        clientId,
-        siteId: siteId || undefined,
-        target: target.trim(),
-      });
-      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string };
+      const request = { clientId, siteId: siteId || undefined, target: target.trim() };
+      const response = await apiRequest("POST", "/api/scans", request, press.headersFor(request));
+      return (await response.json()) as {
+        test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string; replayed?: boolean;
+      };
     },
     onSuccess: (result) => {
+      press.answered();
       setTestId(result.test.id);
       // A scan the engine finished inline has filed its findings already.
       void invalidateTestsAndFindings();
+      // A press sent again whose first send the engine had answered: this is
+      // that scan, and no new one was started (lib/keyedPress.ts).
+      if (result.replayed) {
+        toast({
+          title: "This is the scan your earlier press started",
+          description: "The engine answered this press from its record of the first: no new scan was started.",
+        });
+      }
     },
-    onError: (error: Error) =>
+    onError: (error: Error) => {
+      press.failed(error);
+      // Whether it started is not known: the scans list is read again, where it is found.
+      if (outcomeUnknown(error)) void invalidateTestsAndFindings();
       // The engine's own refusal, verbatim — "the target is a loopback address"
       // is the sentence an operator needs, not "scan failed". A start the
       // server says may still be running (an answer it did not read, whose
       // stop did not take) is never titled "did not start".
-      toast({ title: scanStartFailureTitle(error), description: error.message, variant: "destructive" }),
+      toast({ title: scanStartFailureTitle(error), description: error.message, variant: "destructive" });
+    },
   });
 
   const stop = useMutation({

@@ -1,0 +1,76 @@
+{
+  "engine": {
+    "repository": "athena-engine",
+    "sha": "79ba4af99bfa22822c0de2e03f27b11a5231b296",
+    "contract": "idempotency-key"
+  },
+  "mythos_core": {
+    "imported_commit": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "compared_files": {
+      "files": 22,
+      "identical_to_pin": 22
+    },
+    "label": "pinned core"
+  },
+  "scenario": "launch-then-repeat",
+  "exchanges": [
+    {
+      "note": "the first launch with its key",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-launch-then-repeat"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "14ca82cf-16ab-4bbc-9b39-2701060a2e85",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/14ca82cf-16ab-4bbc-9b39-2701060a2e85",
+        "detail": "the scan is running; collect it from status_url"
+      }
+    },
+    {
+      "note": "the same launch, the same key, again",
+      "request": {
+        "method": "POST",
+        "path": "/api/scan",
+        "body": {
+          "target": "https://offline.invalid/",
+          "engagement_ref": "client-1:site-1",
+          "scope": [
+            "offline.invalid"
+          ]
+        },
+        "headers": {
+          "Idempotency-Key": "k-launch-then-repeat"
+        }
+      },
+      "status": 202,
+      "body": {
+        "answer": "status",
+        "run_id": "14ca82cf-16ab-4bbc-9b39-2701060a2e85",
+        "state": "queued",
+        "reason": null,
+        "error": null,
+        "status_url": "/api/scans/14ca82cf-16ab-4bbc-9b39-2701060a2e85",
+        "detail": "the scan is running; collect it from status_url"
+      },
+      "headers": {
+        "Idempotent-Replayed": "true"
+      }
+    }
+  ]
+}
