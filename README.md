@@ -153,6 +153,21 @@ written by older builds are verified once and transparently upgraded.
 
 - The Windows icon at `build/icon.ico` is a placeholder and must be replaced
   before shipping an installer.
-- The Pentest Scan, CVE Classifier, AI Chat and AI Health screens
+- The Pentest Scan, CVE Classifier and AI Chat screens
   still display placeholder data. They are not yet connected to the Mythos
   engine; that is the next phase of work.
+- The **AI Health** screen shows detection only as the engine measured it:
+  the engine runs its detection benchmark once each time it starts and reports
+  it on its `/health`. The screen shows the share of attack cases caught
+  (security retained) beside the share of legitimate cases let through
+  (utility retained, 1 − the false-positive rate), for the tuned and the
+  holdout corpus, with the counts, the run, the commit and the time. Each share
+  shows its change since the latest earlier measurement that differs, so a
+  change that raises one and lowers the other is visible. These figures
+  describe the corpora checked in beside the engine's code, not traffic in
+  general, and no Validity Card has been issued for that benchmark. When there
+  is no measurement, the screen shows no number and says why. That covers no
+  engine, an engine older than the report, a run not finished, and a report the
+  dashboard cannot read. Detection accuracy and the false-positive rate are
+  not shown as single figures, and the Achilles and Minotaur measurements are
+  not on this screen.

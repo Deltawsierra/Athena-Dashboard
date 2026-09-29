@@ -420,7 +420,9 @@ function createSchema(handle: DatabaseType): void {
       detection_accuracy INTEGER,
       false_positive_rate INTEGER,
       guards_checked INTEGER,
-      guards_failing INTEGER
+      guards_failing INTEGER,
+      benchmark TEXT,
+      benchmark_unmeasured TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_ai_health_metrics_timestamp ON ai_health_metrics(timestamp);
 
@@ -542,6 +544,8 @@ function addMissingColumns(handle: DatabaseType): void {
     ["documents", "is_sample", "INTEGER NOT NULL DEFAULT 0"],
     ["ai_health_metrics", "guards_checked", "INTEGER"],
     ["ai_health_metrics", "guards_failing", "INTEGER"],
+    ["ai_health_metrics", "benchmark", "TEXT"],
+    ["ai_health_metrics", "benchmark_unmeasured", "TEXT"],
     ["finding_checks", "engine_run_id", "TEXT"],
     ["finding_checks", "filed_via", "TEXT"],
     ["finding_checks", "requested_at", "INTEGER"],
@@ -604,7 +608,9 @@ function relaxHealthMetricColumns(handle: DatabaseType): void {
         detection_accuracy INTEGER,
         false_positive_rate INTEGER,
         guards_checked INTEGER,
-        guards_failing INTEGER
+        guards_failing INTEGER,
+        benchmark TEXT,
+        benchmark_unmeasured TEXT
       );
       INSERT INTO ai_health_metrics_rebuilt (
         id, timestamp, cpu_usage, memory_usage, active_scans, total_scans_today,

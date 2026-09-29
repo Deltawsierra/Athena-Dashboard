@@ -7,7 +7,7 @@ import {
   type FindingSighting, type FindingCheck, type RetestWatch,
   type Document, type InsertDocument,
   type ActivityLog, type InsertActivityLog,
-  type AIHealthMetric, type InsertAIHealthMetric,
+  type AIHealthMetric, type InsertAIHealthMetric, type BenchmarkReading,
   type AIControlSetting, type InsertAIControlSetting,
   type AIChatMessage, type InsertAIChatMessage,
   type Classifier, type InsertClassifier,
@@ -144,6 +144,12 @@ export interface IStorage {
   getLatestAIHealthMetric(): Promise<AIHealthMetric | undefined>;
   getAIHealthMetrics(limit: number): Promise<AIHealthMetric[]>;
   createAIHealthMetric(metric: InsertAIHealthMetric): Promise<AIHealthMetric>;
+  /**
+   * The engine benchmark held by the latest reading that holds one, or null.
+   * The sampler reads it to find the measurement before a new one: readings
+   * taken while the engine was away hold none, and must not lose it.
+   */
+  getLatestBenchmarkReading(): Promise<BenchmarkReading | null>;
 
   // AI control (single row)
   getConnectionSettings(): Promise<ConnectionSetting | undefined>;
@@ -663,12 +669,21 @@ export class MemStorage implements IStorage {
       falsePositiveRate: null,
       guardsChecked: null,
       guardsFailing: null,
+      benchmark: null,
+      benchmarkUnmeasured: null,
       ...insertMetric,
       id: randomUUID(),
       timestamp: new Date(),
     };
     this.aiHealthMetrics.set(metric.id, metric);
     return metric;
+  }
+  async getLatestBenchmarkReading() {
+    const held = Array.from(this.aiHealthMetrics.values())
+      .reverse()
+      .filter((metric) => metric.benchmark)
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+    return held[0]?.benchmark ?? null;
   }
 
   // Where this deployment talks to

@@ -15,10 +15,15 @@
  * Now the server takes a reading every minute and this draws them. Where
  * there is no source, the figure is absent and the page says so in a
  * sentence: a gap invites a reader to assume, and the assumption is always
- * more flattering than the truth. Detection accuracy and the false-positive
- * rate come from a benchmark that runs in the engine's CI and is on no route,
- * so they are not shown at all -- what is shown instead is the engine's boot
- * canary, which is a real statement about whether detection is working.
+ * more flattering than the truth.
+ *
+ * Detection is shown as the engine measured it, from its own run of its
+ * detection benchmark, and never as one number. Every share of attacks caught
+ * (security) sits beside the share of legitimate work let through (utility),
+ * with the counts they are shares of and the run, commit and time they came
+ * from. Beside each is its change since the different measurement before it,
+ * so a remediation that catches more by blocking legitimate work shows as
+ * exactly that. With no measurement, there is no number, only why.
  */
 
 import { useQuery } from "@tanstack/react-query";
@@ -35,7 +40,9 @@ import {
 import GlassCard from "@/components/GlassCard";
 import PageHeader from "@/components/PageHeader";
 import AnimatedContainer from "@/components/AnimatedContainer";
-import type { AIHealthMetric } from "@shared/schema";
+import type {
+  AIHealthMetric, BenchmarkReading, EngineMeasurement, MeasuredPair,
+} from "@shared/schema";
 
 /** A reading that has not been taken. Never rendered as a number. */
 function Absent({ why }: { why: string }) {
@@ -74,6 +81,226 @@ function Reading({
         </div>
         <Icon className="h-4 w-4 shrink-0 text-primary" />
       </div>
+    </GlassCard>
+  );
+}
+
+/** A share as a percentage, to one place. Never rounded up to a perfect score, nor down to none. */
+function percent(rate: number): string {
+  let shown = Math.round(rate * 1000) / 10;
+  if (rate < 1 && shown >= 100) shown = 99.9;
+  if (rate > 0 && shown <= 0) shown = 0.1;
+  return `${shown.toFixed(1)}%`;
+}
+
+/** A share's change since the measurement before, in percentage points. */
+function Change({ now, before, testId }: { now: number; before: number | null; testId: string }) {
+  if (before === null) {
+    return (
+      <p className="mt-1 text-xs text-muted-foreground" data-testid={testId}>
+        no earlier figure to compare
+      </p>
+    );
+  }
+  const change = now - before;
+  if (change === 0) {
+    return <p className="mt-1 text-xs text-muted-foreground" data-testid={testId}>no change</p>;
+  }
+  return (
+    <p
+      className="mt-1 text-xs"
+      data-testid={testId}
+      style={{ color: change > 0 ? "hsl(var(--primary))" : "hsl(var(--sev-critical))" }}
+    >
+      {change > 0 ? "▲" : "▼"} {signedPoints(change)} since the measurement before
+    </p>
+  );
+}
+
+function commitOf(one: EngineMeasurement): string {
+  if (one.commit === null) return `commit not known (${one.commitUnknown})`;
+  const short = `commit ${one.commit.slice(0, 7)}`;
+  if (one.commitModified === true) return `${short}, with uncommitted changes to tracked files`;
+  if (one.commitModified === null) return `${short} (whether it had uncommitted changes could not be read)`;
+  return short;
+}
+
+function provenanceOf(one: EngineMeasurement): string {
+  return `run ${one.run.slice(0, 8)}, ${commitOf(one)}, measured ${new Date(one.measuredAt).toLocaleString()}`;
+}
+
+const CORPORA = [
+  {
+    key: "tuned" as const,
+    label: "Tuned corpus",
+    note: "what the patterns were adjusted against, so it scores high by construction",
+  },
+  {
+    key: "holdout" as const,
+    label: "Holdout corpus",
+    note: "written afterwards and never tuned against: the honest read",
+  },
+];
+
+/** A change in a share, in percentage points, signed: "+3.7 pts", "−1.2 pts", "<0.1". */
+function signedPoints(change: number): string {
+  const points = change * 100;
+  const size = Math.abs(points) < 0.05 ? "<0.1" : Math.abs(points).toFixed(1);
+  return `${points > 0 ? "+" : "−"}${size} pts`;
+}
+
+/**
+ * The two shares moving apart since the measurement before, in words: any
+ * share of attacks caught that rose while any share of legitimate work let
+ * through fell, on either corpus, and the other way round.
+ */
+function tradeOffs(reading: BenchmarkReading): string[] {
+  const { current, previous } = reading;
+  if (previous === null) return [];
+  const moves = CORPORA.flatMap((corpus) => {
+    const now = current[corpus.key];
+    const before = previous[corpus.key];
+    if (now === null || before === null) return [];
+    return [{
+      where: corpus.label.toLowerCase(),
+      security: now.securityRetained - before.securityRetained,
+      utility: now.utilityRetained - before.utilityRetained,
+    }];
+  });
+  const which = (share: "security" | "utility", up: boolean) =>
+    moves.filter((move) => (up ? move[share] > 0 : move[share] < 0));
+  const listed = (found: typeof moves, share: "security" | "utility") =>
+    found.map((move) => `${move.where} ${signedPoints(move[share])}`).join(", ");
+  const said: string[] = [];
+  const securityUp = which("security", true);
+  const utilityDown = which("utility", false);
+  if (securityUp.length > 0 && utilityDown.length > 0) {
+    said.push(
+      `Security rose (${listed(securityUp, "security")}) while utility fell ` +
+      `(${listed(utilityDown, "utility")}): more attacks are caught, and less legitimate work gets through.`,
+    );
+  }
+  const utilityUp = which("utility", true);
+  const securityDown = which("security", false);
+  if (utilityUp.length > 0 && securityDown.length > 0) {
+    said.push(
+      `Utility rose (${listed(utilityUp, "utility")}) while security fell ` +
+      `(${listed(securityDown, "security")}): more legitimate work gets through, and fewer attacks are caught.`,
+    );
+  }
+  return said;
+}
+
+function PairCells({ pair, before, testId }: { pair: MeasuredPair; before: MeasuredPair | null | undefined; testId: string }) {
+  return (
+    <>
+      <td className="py-3 pr-4 align-top">
+        <div className="athena-figure text-2xl" data-testid={`${testId}-security`}>{percent(pair.securityRetained)}</div>
+        <p className="text-xs text-muted-foreground">{pair.caught} of {pair.attacks} attack cases caught</p>
+        {before !== undefined && (
+          <Change now={pair.securityRetained} before={before?.securityRetained ?? null} testId={`${testId}-security-change`} />
+        )}
+      </td>
+      <td className="py-3 align-top">
+        <div className="athena-figure text-2xl" data-testid={`${testId}-utility`}>{percent(pair.utilityRetained)}</div>
+        <p className="text-xs text-muted-foreground">
+          {pair.legitimate - pair.flagged} of {pair.legitimate} legitimate cases let through
+        </p>
+        {before !== undefined && (
+          <Change now={pair.utilityRetained} before={before?.utilityRetained ?? null} testId={`${testId}-utility-change`} />
+        )}
+      </td>
+    </>
+  );
+}
+
+/**
+ * The engine's detection benchmark, as it measured it. Security and utility
+ * are one row each time, never one without the other, and there is no number
+ * at all when the reading holds no measurement.
+ */
+function EngineDetection({ reading, unmeasured }: {
+  /** Absent from a reading written before the engine reported one. */
+  reading: BenchmarkReading | null | undefined;
+  unmeasured: string | null | undefined;
+}) {
+  const said = reading ? tradeOffs(reading) : [];
+  return (
+    <GlassCard data-testid="reading-detection">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="athena-label">Detection, as the engine measured it</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Two numbers, always together: the share of attacks caught (security
+            retained) and the share of legitimate work let through (utility
+            retained, 1 − the false-positive rate).
+          </p>
+        </div>
+        <ShieldCheck className="h-4 w-4 shrink-0 text-primary" />
+      </div>
+      {!reading ? (
+        <div data-testid="text-detection-unmeasured">
+          <Absent why={unmeasured ?? "this reading holds no report of the engine's measurement"} />
+        </div>
+      ) : (
+        <>
+          <table className="mt-4 w-full text-left text-sm">
+            <thead>
+              <tr className="text-xs text-muted-foreground">
+                <th className="pb-2 pr-4 font-normal" scope="col">Corpus</th>
+                <th className="pb-2 pr-4 font-normal" scope="col">Attacks caught (security)</th>
+                <th className="pb-2 font-normal" scope="col">Legitimate work let through (utility)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {CORPORA.map((corpus) => {
+                const pair = reading.current[corpus.key];
+                const testId = `row-detection-${corpus.key}`;
+                return (
+                  <tr key={corpus.key} data-testid={testId} className="border-t" style={{ borderColor: "hsl(var(--border))" }}>
+                    <th className="py-3 pr-4 align-top font-normal" scope="row">
+                      <div>{corpus.label}</div>
+                      <p className="text-xs text-muted-foreground">{corpus.note}</p>
+                    </th>
+                    {pair === null ? (
+                      <td colSpan={2} className="py-3 align-top text-muted-foreground" data-testid={`${testId}-unmeasured`}>
+                        <div className="athena-figure text-2xl">—</div>
+                        <p className="text-xs">
+                          Not measured: {reading.current.holdoutUnmeasured ?? "the engine did not say why"}
+                        </p>
+                      </td>
+                    ) : (
+                      <PairCells
+                        pair={pair}
+                        before={reading.previous === null ? undefined : reading.previous[corpus.key]}
+                        testId={testId}
+                      />
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {said.map((sentence) => (
+            <p key={sentence} className="mt-3 text-sm" style={{ color: "hsl(var(--sev-critical))" }} data-testid="text-detection-trade-off">
+              {sentence}
+            </p>
+          ))}
+          <p className="mt-3 text-xs text-muted-foreground" data-testid="text-detection-provenance">
+            Measured by the engine: {provenanceOf(reading.current)}.
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground" data-testid="text-detection-previous">
+            {reading.previous === null
+              ? "No earlier measurement that differs from this one is on record here, so no change is shown."
+              : `Changes are against the measurement before it that differs: ${provenanceOf(reading.previous)}.`}
+          </p>
+          <p className="mt-3 text-xs text-muted-foreground">
+            The engine runs its detection benchmark once each time it starts, against the
+            corpora checked in beside its code. Neither corpus says anything about traffic
+            unlike it, and no Validity Card has been issued for this benchmark.
+          </p>
+        </>
+      )}
     </GlassCard>
   );
 }
@@ -128,7 +355,7 @@ export default function AIHealth() {
         <PageHeader
           title="Health"
           icon={<Activity className="h-8 w-8 text-primary" />}
-          description="Measured on this machine, once a minute. Anything without a source is shown as absent rather than as a number."
+          description="Measured on this machine once a minute, with detection as the engine measured it. Anything without a source is shown as absent rather than as a number."
         />
 
         {latest$.state === "error" && (
@@ -237,6 +464,10 @@ export default function AIHealth() {
               </AnimatedContainer>
             </div>
 
+            <AnimatedContainer direction="up" delay={0.1}>
+              <EngineDetection reading={latest.benchmark} unmeasured={latest.benchmarkUnmeasured} />
+            </AnimatedContainer>
+
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
               <AnimatedContainer direction="up" delay={0.1}>
                 <GlassCard>
@@ -339,26 +570,6 @@ export default function AIHealth() {
               </GlassCard>
             </AnimatedContainer>
 
-            <AnimatedContainer direction="up" delay={0.25}>
-              <GlassCard ruling>
-                <div className="athena-label athena-gold">
-                  Detection accuracy and false positives
-                </div>
-                <p className="mt-2 text-sm text-muted-foreground" data-testid="text-not-measured">
-                  This page does not show either, because this app has no way to
-                  measure them. They come from a benchmark that runs against the
-                  engine in its CI, with gates on the true- and false-positive
-                  rates, and the engine exposes no route that reports the
-                  result. When it does, the figures will appear here and be its
-                  measurements rather than this app's estimate.
-                </p>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Until then the guard count above is the honest version of the
-                  same question: how many of the engine's detection checks were
-                  answering when it last started.
-                </p>
-              </GlassCard>
-            </AnimatedContainer>
           </>
         )}
       </div>
