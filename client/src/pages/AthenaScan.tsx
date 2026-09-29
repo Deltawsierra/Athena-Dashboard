@@ -33,7 +33,7 @@ import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient, scanStartFailureTitle } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
@@ -172,7 +172,7 @@ export default function AthenaScan() {
         siteId: siteId || undefined,
         target: target.trim(),
       });
-      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe" };
+      return (await response.json()) as { test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string };
     },
     onSuccess: (result) => {
       setTestId(result.test.id);
@@ -181,8 +181,10 @@ export default function AthenaScan() {
     },
     onError: (error: Error) =>
       // The engine's own refusal, verbatim — "the target is a loopback address"
-      // is the sentence an operator needs, not "scan failed".
-      toast({ title: "The scan did not start", description: error.message, variant: "destructive" }),
+      // is the sentence an operator needs, not "scan failed". A start the
+      // server says may still be running (an answer it did not read, whose
+      // stop did not take) is never titled "did not start".
+      toast({ title: scanStartFailureTitle(error), description: error.message, variant: "destructive" }),
   });
 
   const stop = useMutation({
@@ -226,6 +228,9 @@ export default function AthenaScan() {
   // stop can name): NoStopPanel stands in place of the Stop, and says what
   // stops it. Only when the server said so, in the start's answer or a read;
   // where the page does not know, the normal Stop stays.
+  // The start's warning, for the scan it started, while that scan is on this page.
+  const startWarning = start.data !== undefined && start.data.test.id === testId && typeof start.data.warning === "string"
+    ? start.data.warning : null;
   const failsafeOnly = testId !== null
     && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
   const finished = scan !== undefined && FINISHED.has(scan.state);
@@ -470,6 +475,14 @@ export default function AthenaScan() {
             </div>
           )}
           {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
+          {/* What the engine said went wrong around a run it started all the
+              same (a 500 that named a run whose work started, or an answer
+              that named no run id): the server's words, as it said them. */}
+          {startWarning !== null && (
+            <p className="mt-3 text-[12px] athena-gold" data-testid="text-start-warning">
+              {startWarning}
+            </p>
+          )}
         </form>
       </GlassCard>
 

@@ -1,14 +1,15 @@
 {
   "engine": {
     "repository": "athena-engine",
-    "sha": "143279e5e9d680fecf48ddd7a926cd565dfb56a8",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
     "contract": "pr71"
   },
   "mythos_core": {
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
-    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
   },
-  "scenario": "running-then-failed",
+  "scenario": "scan-abort-unrecorded",
   "exchanges": [
     {
       "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
@@ -26,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "91668cbc-9ff1-4f7c-8651-d90474d6190a",
+        "run_id": "b2c48b29-a077-4058-90d5-c0ffb1d7d829",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:59:17.216212+00:00",
-        "updated_at": "2026-09-27T00:59:17.234117+00:00",
-        "finished_at": "2026-09-27T00:59:17.234117+00:00",
+        "started_at": "2026-09-28T20:06:36.872891+00:00",
+        "updated_at": "2026-09-28T20:06:36.879695+00:00",
+        "finished_at": "2026-09-28T20:06:36.879695+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -67,14 +68,16 @@
           },
           "chain_outcome": null,
           "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
-        }
+        },
+        "answer": "status",
+        "status_url": "/api/scans/b2c48b29-a077-4058-90d5-c0ffb1d7d829"
       }
     },
     {
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=91668cbc-9ff1-4f7c-8651-d90474d6190a&limit=101"
+        "path": "/api/decisions?run_id=b2c48b29-a077-4058-90d5-c0ffb1d7d829&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +86,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "91668cbc-9ff1-4f7c-8651-d90474d6190a",
+            "run_id": "b2c48b29-a077-4058-90d5-c0ffb1d7d829",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +107,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-27T00:59:17.280298+00:00",
+            "captured_at": "2026-09-28T20:06:36.932402+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -116,12 +119,12 @@
       }
     },
     {
-      "note": "the retest, still running after the 30 s inline wait (202 status)",
+      "note": "the scan: 202 status at once",
       "request": {
         "method": "POST",
-        "path": "/api/remediation/retest",
+        "path": "/api/scan",
         "body": {
-          "twin_id": 1,
+          "target": "https://offline.invalid/",
           "engagement_ref": "client-1:site-1",
           "scope": [
             "offline.invalid"
@@ -131,75 +134,53 @@
       "status": 202,
       "body": {
         "answer": "status",
-        "run_id": "5e49dbe0-9ed8-48dc-ba77-213c413d5a63",
-        "state": "running",
+        "run_id": "75886ae4-3ad8-4be0-9774-97f7dc9d44b3",
+        "state": "queued",
         "reason": null,
         "error": null,
-        "status_url": "/api/scans/5e49dbe0-9ed8-48dc-ba77-213c413d5a63",
-        "detail": "the retest is running; collect it from status_url"
+        "status_url": "/api/scans/75886ae4-3ad8-4be0-9774-97f7dc9d44b3",
+        "detail": "the scan is running; collect it from status_url"
       }
     },
     {
-      "note": "its status_url while it runs",
+      "note": "Stop, whose registry write failed: 202, recorded false, in effect in this process",
       "request": {
-        "method": "GET",
-        "path": "/api/scans/5e49dbe0-9ed8-48dc-ba77-213c413d5a63"
+        "method": "POST",
+        "path": "/api/scans/75886ae4-3ad8-4be0-9774-97f7dc9d44b3/abort",
+        "body": {}
       },
-      "status": 200,
+      "status": 202,
       "body": {
-        "run_id": "5e49dbe0-9ed8-48dc-ba77-213c413d5a63",
-        "target": "https://offline.invalid/",
-        "kind": "retest",
-        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-        "state": "running",
-        "reason": null,
-        "started_at": "2026-09-27T00:59:17.303494+00:00",
-        "updated_at": "2026-09-27T00:59:17.306014+00:00",
-        "finished_at": null,
-        "done": false
+        "run_id": "75886ae4-3ad8-4be0-9774-97f7dc9d44b3",
+        "state": "aborting",
+        "reason": "stopped by an operator",
+        "recorded": false,
+        "detail": "The stop is in effect in this engine process now. Writing it to the abort registry did not complete -- it failed (OperationalError) -- and it is retried until it can be made; until then another engine process cannot see it."
       }
     },
     {
-      "note": "its status_url once its scan raised: failed, with the runner's inconclusive verdict as the result",
+      "note": "its status_url once the work obeyed the stop",
       "request": {
         "method": "GET",
-        "path": "/api/scans/5e49dbe0-9ed8-48dc-ba77-213c413d5a63"
+        "path": "/api/scans/75886ae4-3ad8-4be0-9774-97f7dc9d44b3"
       },
       "status": 200,
       "body": {
-        "run_id": "5e49dbe0-9ed8-48dc-ba77-213c413d5a63",
+        "run_id": "75886ae4-3ad8-4be0-9774-97f7dc9d44b3",
         "target": "https://offline.invalid/",
-        "kind": "retest",
+        "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-        "state": "failed",
-        "reason": null,
-        "started_at": "2026-09-27T00:59:17.303494+00:00",
-        "updated_at": "2026-09-27T00:59:47.353088+00:00",
-        "finished_at": "2026-09-27T00:59:47.353088+00:00",
+        "state": "aborted",
+        "reason": "stopped by an operator",
+        "started_at": "2026-09-28T20:06:36.964653+00:00",
+        "updated_at": "2026-09-28T20:06:36.997057+00:00",
+        "finished_at": "2026-09-28T20:06:36.997057+00:00",
         "done": true,
         "result": {
-          "twin_id": 1,
-          "verdict": "inconclusive",
-          "detail": "the retest scan raised RuntimeError: scanner exploded",
-          "target": "https://offline.invalid/",
-          "finding_type": "xss",
-          "inventory_digest": null,
-          "run_id": "5e49dbe0-9ed8-48dc-ba77-213c413d5a63",
-          "scan_record_id": null,
-          "check": {
-            "id": 1,
-            "tenant": "default",
-            "twin_id": 1,
-            "target": "https://offline.invalid/",
-            "finding_type": "xss",
-            "verdict": "inconclusive",
-            "detail": "the retest scan raised RuntimeError: scanner exploded",
-            "inventory_digest": null,
-            "run_id": null,
-            "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-27T00:59:47.349685+00:00"
-          },
-          "error": "RuntimeError: scanner exploded"
+          "scan_id": 706,
+          "results": [],
+          "chain_outcome": null,
+          "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
         }
       }
     }

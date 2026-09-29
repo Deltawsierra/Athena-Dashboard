@@ -33,7 +33,7 @@ type Exchange = { request: { method: string; path: string; body?: Record<string,
 type Fixture = { engine: { contract: string }; exchanges: Exchange[] };
 const FIX = path.resolve(__dirname, "fixtures", "engine-retest");
 const load = (dir: string, name: string): Fixture => JSON.parse(fs.readFileSync(path.join(FIX, dir, `${name}.json`), "utf8"));
-const PR71 = "pr71-143279e";
+const PR71 = "pr71-f4610ae";
 const MAIN = "main-5779e99";
 const pick = (fx: Fixture, method: string, t: (p: string) => boolean) =>
   fx.exchanges.filter((e) => e.request.method === method && t(e.request.path));

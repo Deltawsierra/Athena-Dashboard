@@ -1,15 +1,15 @@
 {
   "engine": {
     "repository": "athena-engine",
-    "sha": "5779e99eae1085f96e6c27ce28dbd950d8200aba",
-    "contract": "main"
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
+    "contract": "pr71"
   },
   "mythos_core": {
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
     "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
     "label": "unpinned local core"
   },
-  "scenario": "verdict-closed",
+  "scenario": "verdict-still-open",
   "exchanges": [
     {
       "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
@@ -27,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "10ba7966-4521-4503-a22a-2063432bf24f",
+        "run_id": "81fff955-4a71-49c4-b964-4eac835042ac",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-28T20:06:40.295767+00:00",
-        "updated_at": "2026-09-28T20:06:40.307566+00:00",
-        "finished_at": "2026-09-28T20:06:40.307566+00:00",
+        "started_at": "2026-09-28T20:04:59.084790+00:00",
+        "updated_at": "2026-09-28T20:04:59.095096+00:00",
+        "finished_at": "2026-09-28T20:04:59.095096+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -68,14 +68,16 @@
           },
           "chain_outcome": null,
           "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
-        }
+        },
+        "answer": "status",
+        "status_url": "/api/scans/81fff955-4a71-49c4-b964-4eac835042ac"
       }
     },
     {
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=10ba7966-4521-4503-a22a-2063432bf24f&limit=101"
+        "path": "/api/decisions?run_id=81fff955-4a71-49c4-b964-4eac835042ac&limit=101"
       },
       "status": 200,
       "body": {
@@ -84,7 +86,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "10ba7966-4521-4503-a22a-2063432bf24f",
+            "run_id": "81fff955-4a71-49c4-b964-4eac835042ac",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -105,7 +107,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-28T20:06:40.358339+00:00",
+            "captured_at": "2026-09-28T20:04:59.146741+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -117,7 +119,7 @@
       }
     },
     {
-      "note": "the retest, answered synchronously with a closed verdict (201)",
+      "note": "the retest, answered inline with a still_open verdict (201)",
       "request": {
         "method": "POST",
         "path": "/api/remediation/retest",
@@ -132,24 +134,71 @@
       "status": 201,
       "body": {
         "twin_id": 1,
-        "verdict": "closed",
-        "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
+        "verdict": "still_open",
+        "detail": "xss is still reported against https://offline.invalid/",
         "target": "https://offline.invalid/",
         "finding_type": "xss",
         "inventory_digest": null,
-        "run_id": 610,
+        "run_id": "964821fd-9d15-4c22-a9a4-385d6fbfb35f",
+        "scan_record_id": 501,
         "check": {
           "id": 1,
           "tenant": "default",
           "twin_id": 1,
           "target": "https://offline.invalid/",
           "finding_type": "xss",
-          "verdict": "closed",
-          "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
+          "verdict": "still_open",
+          "detail": "xss is still reported against https://offline.invalid/",
           "inventory_digest": null,
-          "run_id": 610,
+          "run_id": 501,
           "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-          "checked_at": "2026-09-28T20:06:40.403877+00:00"
+          "checked_at": "2026-09-28T20:04:59.182355+00:00"
+        },
+        "answer": "verdict",
+        "state": "completed",
+        "status_url": "/api/scans/964821fd-9d15-4c22-a9a4-385d6fbfb35f"
+      }
+    },
+    {
+      "note": "the same run read from its status_url",
+      "request": {
+        "method": "GET",
+        "path": "/api/scans/964821fd-9d15-4c22-a9a4-385d6fbfb35f"
+      },
+      "status": 200,
+      "body": {
+        "run_id": "964821fd-9d15-4c22-a9a4-385d6fbfb35f",
+        "target": "https://offline.invalid/",
+        "kind": "retest",
+        "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+        "state": "completed",
+        "reason": null,
+        "started_at": "2026-09-28T20:04:59.176288+00:00",
+        "updated_at": "2026-09-28T20:04:59.185330+00:00",
+        "finished_at": "2026-09-28T20:04:59.185330+00:00",
+        "done": true,
+        "result": {
+          "twin_id": 1,
+          "verdict": "still_open",
+          "detail": "xss is still reported against https://offline.invalid/",
+          "target": "https://offline.invalid/",
+          "finding_type": "xss",
+          "inventory_digest": null,
+          "run_id": "964821fd-9d15-4c22-a9a4-385d6fbfb35f",
+          "scan_record_id": 501,
+          "check": {
+            "id": 1,
+            "tenant": "default",
+            "twin_id": 1,
+            "target": "https://offline.invalid/",
+            "finding_type": "xss",
+            "verdict": "still_open",
+            "detail": "xss is still reported against https://offline.invalid/",
+            "inventory_digest": null,
+            "run_id": 501,
+            "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
+            "checked_at": "2026-09-28T20:04:59.182355+00:00"
+          }
         }
       }
     }

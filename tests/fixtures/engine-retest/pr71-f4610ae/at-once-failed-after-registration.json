@@ -1,14 +1,15 @@
 {
   "engine": {
     "repository": "athena-engine",
-    "sha": "143279e5e9d680fecf48ddd7a926cd565dfb56a8",
+    "sha": "f4610ae03b6abacf4108990c953462fbf1880950",
     "contract": "pr71"
   },
   "mythos_core": {
     "imported_commit": "d41687c55d2439884d3204b5e2c383617e30908f",
-    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750"
+    "pinned_by_requirements": "ae8ae30912b62c5d85b6c23321dabdcec5e8f750",
+    "label": "unpinned local core"
   },
-  "scenario": "at-once-then-verdict",
+  "scenario": "at-once-failed-after-registration",
   "exchanges": [
     {
       "note": "setup: the scan that found the finding (wait_seconds so it answers finished)",
@@ -26,15 +27,15 @@
       },
       "status": 200,
       "body": {
-        "run_id": "bde055a6-8d94-4a1c-85e5-bc8a3b43709f",
+        "run_id": "e2b950ff-dc39-4054-b36d-7b3c2985d243",
         "target": "https://offline.invalid/",
         "kind": "scan",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:59:48.208818+00:00",
-        "updated_at": "2026-09-27T00:59:48.214364+00:00",
-        "finished_at": "2026-09-27T00:59:48.214364+00:00",
+        "started_at": "2026-09-28T20:06:32.777128+00:00",
+        "updated_at": "2026-09-28T20:06:32.782107+00:00",
+        "finished_at": "2026-09-28T20:06:32.782107+00:00",
         "done": true,
         "result": {
           "scan_id": 400,
@@ -67,14 +68,16 @@
           },
           "chain_outcome": null,
           "chain_outcome_reason": "the scan named no workflow chain, so it is evidence of none"
-        }
+        },
+        "answer": "status",
+        "status_url": "/api/scans/e2b950ff-dc39-4054-b36d-7b3c2985d243"
       }
     },
     {
       "note": "setup: the decisions that scan kept (a real twin, captured by engine.replay.twin.capture)",
       "request": {
         "method": "GET",
-        "path": "/api/decisions?run_id=bde055a6-8d94-4a1c-85e5-bc8a3b43709f&limit=101"
+        "path": "/api/decisions?run_id=e2b950ff-dc39-4054-b36d-7b3c2985d243&limit=101"
       },
       "status": 200,
       "body": {
@@ -83,7 +86,7 @@
           {
             "id": 1,
             "tenant": "default",
-            "run_id": "bde055a6-8d94-4a1c-85e5-bc8a3b43709f",
+            "run_id": "e2b950ff-dc39-4054-b36d-7b3c2985d243",
             "target": "https://offline.invalid/",
             "finding_type": "xss",
             "inputs": {
@@ -104,7 +107,7 @@
             },
             "twin_digest": "sha256:39ef92b47df489953101ae9f99db17941d383b02af835fc1faadeccb6d193ae1",
             "inventory_digest": null,
-            "captured_at": "2026-09-27T00:59:48.266165+00:00",
+            "captured_at": "2026-09-28T20:06:32.838379+00:00",
             "scan_auth": {
               "authenticated": false,
               "configured": false,
@@ -116,7 +119,7 @@
       }
     },
     {
-      "note": "the retest, asked with wait_seconds: 0 as the dashboard asks: 202 at once",
+      "note": "the retest, asked with wait_seconds: 0, whose route failed after its work was handed over: 500 status, state null, naming the run (its work is running)",
       "request": {
         "method": "POST",
         "path": "/api/remediation/retest",
@@ -129,77 +132,56 @@
           "wait_seconds": 0
         }
       },
-      "status": 202,
+      "status": 500,
       "body": {
         "answer": "status",
-        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
-        "state": "queued",
+        "run_id": "3c35c82b-5a83-4286-9912-fd5a4d660817",
+        "state": null,
         "reason": null,
-        "error": null,
-        "status_url": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843",
-        "detail": "the retest is running; collect it from status_url"
+        "error": "OperationalError: database is locked",
+        "status_url": "/api/scans/3c35c82b-5a83-4286-9912-fd5a4d660817"
+      },
+      "headers": {
+        "x-run-id": "3c35c82b-5a83-4286-9912-fd5a4d660817"
       }
     },
     {
-      "note": "the engine's live list while the retest runs",
+      "note": "its status_url: the run is going",
       "request": {
         "method": "GET",
-        "path": "/api/scans/active"
+        "path": "/api/scans/3c35c82b-5a83-4286-9912-fd5a4d660817"
       },
       "status": 200,
       "body": {
-        "active": [
-          {
-            "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
-            "target": "https://offline.invalid/",
-            "kind": "retest",
-            "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "state": "running",
-            "reason": null,
-            "started_at": "2026-09-27T00:59:48.294898+00:00",
-            "updated_at": "2026-09-27T00:59:48.298071+00:00",
-            "finished_at": null
-          }
-        ]
-      }
-    },
-    {
-      "note": "its status_url while it runs",
-      "request": {
-        "method": "GET",
-        "path": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843"
-      },
-      "status": 200,
-      "body": {
-        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+        "run_id": "3c35c82b-5a83-4286-9912-fd5a4d660817",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "running",
         "reason": null,
-        "started_at": "2026-09-27T00:59:48.294898+00:00",
-        "updated_at": "2026-09-27T00:59:48.298071+00:00",
+        "started_at": "2026-09-28T20:06:32.867924+00:00",
+        "updated_at": "2026-09-28T20:06:32.870868+00:00",
         "finished_at": null,
         "done": false
       }
     },
     {
-      "note": "its status_url once it ended (verdict)",
+      "note": "its status_url once it finished: the verdict is the result",
       "request": {
         "method": "GET",
-        "path": "/api/scans/740f7184-197e-4323-bbe5-0c15c88ac843"
+        "path": "/api/scans/3c35c82b-5a83-4286-9912-fd5a4d660817"
       },
       "status": 200,
       "body": {
-        "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
+        "run_id": "3c35c82b-5a83-4286-9912-fd5a4d660817",
         "target": "https://offline.invalid/",
         "kind": "retest",
         "key_hash": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
         "state": "completed",
         "reason": null,
-        "started_at": "2026-09-27T00:59:48.294898+00:00",
-        "updated_at": "2026-09-27T00:59:48.326202+00:00",
-        "finished_at": "2026-09-27T00:59:48.326202+00:00",
+        "started_at": "2026-09-28T20:06:32.867924+00:00",
+        "updated_at": "2026-09-28T20:06:32.905055+00:00",
+        "finished_at": "2026-09-28T20:06:32.905055+00:00",
         "done": true,
         "result": {
           "twin_id": 1,
@@ -208,8 +190,8 @@
           "target": "https://offline.invalid/",
           "finding_type": "xss",
           "inventory_digest": null,
-          "run_id": "740f7184-197e-4323-bbe5-0c15c88ac843",
-          "scan_record_id": 510,
+          "run_id": "3c35c82b-5a83-4286-9912-fd5a4d660817",
+          "scan_record_id": 720,
           "check": {
             "id": 1,
             "tenant": "default",
@@ -219,9 +201,9 @@
             "verdict": "closed",
             "detail": "xss was not reported against https://offline.invalid/; xss, the check that reports it, is recorded as performed on the retest, the retest was anonymous and the scan that found it anonymous, and the extension set is the one that was approved. An absence on retest, not proof of a fix",
             "inventory_digest": null,
-            "run_id": 510,
+            "run_id": 720,
             "checked_by": "sha256:269dee3e94a999ef7ee458dd2f1621a372725361c1c4a2b24e21b23e8509f442",
-            "checked_at": "2026-09-27T00:59:48.323221+00:00"
+            "checked_at": "2026-09-28T20:06:32.901317+00:00"
           }
         }
       }

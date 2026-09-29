@@ -13,7 +13,7 @@ import type { AddressInfo } from "net";
  * 202 or a deadline, and nothing the engine did not say is read as a verdict.
  *
  * Engine answers are the recorded fixtures (tests/fixtures/engine-retest),
- * from athena-engine 143279e and 5779e99. Where a case needs an answer no
+ * from athena-engine f4610ae and 5779e99. Where a case needs an answer no
  * recording holds -- a 202 whose state already reads `completed`, which #71
  * answers only when a run ends between its wait and its answer -- it is a
  * recorded body with one field changed, and the case says which.
@@ -23,7 +23,7 @@ type Exchange = { request: { method: string; path: string; body?: Record<string,
 type Fixture = { engine: { contract: string }; exchanges: Exchange[] };
 const FIX = path.resolve(__dirname, "fixtures", "engine-retest");
 const load = (dir: string, name: string): Fixture => JSON.parse(fs.readFileSync(path.join(FIX, dir, `${name}.json`), "utf8"));
-const PR71 = "pr71-143279e";
+const PR71 = "pr71-f4610ae";
 const MAIN = "main-5779e99";
 const pick = (fx: Fixture, method: string, t: (p: string) => boolean) =>
   fx.exchanges.filter((e) => e.request.method === method && t(e.request.path));

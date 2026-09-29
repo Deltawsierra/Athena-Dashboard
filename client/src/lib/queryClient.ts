@@ -21,6 +21,57 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * A request the server refused or failed: its sentence as the message, and
+ * its answer as it came (null when it was not JSON), for a caller that has to
+ * read more of it than the sentence -- whether a run may still be going.
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly body: Record<string, unknown> | null) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+/**
+ * Whether the server said a run it could not stop may still be going
+ * (`mayStillBeRunning`): a start refused as an unread answer whose stop did
+ * not take, or a retest whose slot is held. Such a failure is never titled
+ * "did not start" or "did not run".
+ */
+export function mayStillBeRunning(error: unknown): boolean {
+  return error instanceof ApiError && error.body?.mayStillBeRunning === true;
+}
+
+/**
+ * The runs a refused retest keeps a Stop for on its finding's panel
+ * (`stoppable`): only when there is one does a toast say "stop it here".
+ */
+export function keptStops(error: unknown): string[] {
+  const kept = error instanceof ApiError ? error.body?.stoppable : undefined;
+  return Array.isArray(kept) ? kept.filter((one): one is string => typeof one === "string") : [];
+}
+
+/**
+ * How a failed scan start is titled. One the server says may still be running
+ * names what stops it; an answer it could not read, whose every named run was
+ * then stopped or found ended, is no start that "did not start"; anything
+ * else did not start.
+ */
+export function scanStartFailureTitle(error: unknown): string {
+  if (mayStillBeRunning(error)) {
+    return "The scan may still be running: stop it with the kill switch on the AI Control page, or a failsafe pause";
+  }
+  const body = error instanceof ApiError ? error.body : null;
+  const runIds = Array.isArray(body?.runIds) ? body.runIds : [];
+  if (body?.reason === "unrecognised_engine_answer" && runIds.length > 0) {
+    return runIds.length === 1
+      ? "The scan's answer could not be read: the run it named was stopped, or had ended"
+      : "The scan's answer could not be read: the runs it named were stopped, or had ended";
+  }
+  return "The scan did not start";
+}
+
 type UnauthorizedListener = () => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
 
@@ -52,17 +103,18 @@ export async function throwIfResNotOk(res: Response): Promise<void> {
   // failsafe routes answer with `{error}`, and the literal `{"error":"…"}` is
   // not a sentence to show a person); fall back to text, then status.
   const body = await res.clone().json().catch(() => null);
+  const answer = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
   if (body && typeof body.message === "string") {
     const issues = Array.isArray(body.issues)
       ? body.issues.map((i: { path: string; message: string }) => `${i.path}: ${i.message}`).join("; ")
       : "";
-    throw new Error(issues ? `${body.message} (${issues})` : body.message);
+    throw new ApiError(issues ? `${body.message} (${issues})` : body.message, res.status, answer);
   }
   if (body && typeof body.error === "string") {
-    throw new Error(body.error);
+    throw new ApiError(body.error, res.status, answer);
   }
   const text = (await res.text().catch(() => "")) || res.statusText;
-  throw new Error(text || `Request failed with status ${res.status}`);
+  throw new ApiError(text || `Request failed with status ${res.status}`, res.status, answer);
 }
 
 /**

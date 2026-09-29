@@ -7,17 +7,29 @@ the engine sends, not against what somebody expected it to send.
 
 Two engine commits are recorded, one directory each:
 
-  pr71-143279e/  athena-engine PR #71 head 143279e5e9d680fecf48ddd7a926cd565dfb56a8
-                 (the retest answers with `answer: "verdict" | "status"`,
-                 `run_id` is the abort-registry id, `scan_record_id` the record)
+  pr71-f4610ae/  athena-engine PR #71 head f4610ae03b6abacf4108990c953462fbf1880950
+                 (every launch answers with `answer`; the retest's `run_id` is
+                 the abort-registry id and `scan_record_id` the record; a
+                 failure after registration is a 500 status that still names
+                 the run; a stop that lands while the retest's check is filed
+                 is answered with that verdict, `state: "aborted"` and
+                 `stopped_after_recording`)
   main-5779e99/  athena-engine main 5779e99eae1085f96e6c27ce28dbd950d8200aba
                  (the retest answers its verdict synchronously, `run_id` is the
                  scan record id, and there is no `answer` field)
 
+The `scan-*` files are `POST /api/scan` and its status route, the rest the
+retest. They were generated, at both commits, with the mythos-core installed
+on the machine that ran this script ("unpinned local core"), not the one the
+engine's requirements.txt pins: see `mythos_core` in each file.
+
 Usage, from a checkout (or worktree) of athena-engine at one of those commits,
 with its dependencies and mythos-core importable:
 
-    python -B <this script> <engine checkout> <output directory>
+    python -B <this script> <engine checkout> <output directory> [scenario ...]
+
+Named scenarios, when given, are the only ones written (the others are left
+as they are on disk).
 
 The script refuses any other commit, so a fixture directory always says which
 engine produced it. Each file carries the engine sha it was generated from.
@@ -55,6 +67,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -63,7 +76,7 @@ import time
 from pathlib import Path
 
 KNOWN = {
-    "143279e5e9d680fecf48ddd7a926cd565dfb56a8": "pr71-143279e",
+    "f4610ae03b6abacf4108990c953462fbf1880950": "pr71-f4610ae",
     "5779e99eae1085f96e6c27ce28dbd950d8200aba": "main-5779e99",
 }
 
@@ -213,16 +226,24 @@ def mythos_core_provenance(checkout):
     for line in (checkout / "requirements.txt").read_text().splitlines():
         if line.startswith("mythos-core @"):
             pinned = line.rsplit("@", 1)[-1].strip()
+    imported = found.stdout.strip() if found.returncode == 0 else None
     return {
-        "imported_commit": found.stdout.strip() if found.returncode == 0 else None,
+        "imported_commit": imported,
         "pinned_by_requirements": pinned,
+        # Said in words, so nobody reads these as a pinned-core run.
+        "label": "pinned core" if imported is not None and imported == pinned else "unpinned local core",
     }
 
 
 MYTHOS_CORE: dict = {}
 
+# The scenarios named on the command line; empty, every one.
+ONLY: set = set()
+
 
 def scenario(name, contract, engine_sha, fn, out, **pool):
+    if ONLY and name not in ONLY:
+        return
     E = Engine(**pool)
     try:
         twin = setup_scan_and_twin(E)
@@ -356,6 +377,224 @@ def pr71_at_once(outcome, scan_id):
     return fn
 
 
+# ------------------------------------------- PR #71 at f4610ae: new answers -----
+#
+# Each stand-in below is the one athena-engine's own contract test uses for the
+# same answer (tests/test_every_launch_answers_with_a_run_id_it_can_stop.py):
+# the route, the pool and the registry answer; only the failure is arranged.
+
+def locked(*args, **kwargs):
+    raise sqlite3.OperationalError("database is locked")
+
+
+def finishes_before_the_answer(E):
+    """The pool, unchanged, but the launch is answered only once its run has
+    ended: a scan that finishes between the hand-over and the route's status
+    read, which the engine answers 202 with the state it then reads."""
+    real = E.jobs.submit_scan
+
+    def submit(run_id, work, *args, **kwargs):
+        handed = real(run_id, work, *args, **kwargs)
+        wait_until(lambda: E.runs.get(run_id)["state"] in (E.runs.COMPLETED, E.runs.FAILED, E.runs.ABORTED))
+        return handed
+    return real, submit
+
+
+def scan_body(**extra):
+    # What the dashboard sends (server/engine.ts startScan): no wait_seconds.
+    return {"target": TARGET, "engagement_ref": ENGAGEMENT, "scope": SCOPE, **extra}
+
+
+def scan_at_once_then_completed(E, twin):
+    release, started = threading.Event(), threading.Event()
+    E.server.engine.run_scan = stand_in(E, "still_open", 700, release=release, started=started)
+    answer = E.record(E.call("POST", "/api/scan", scan_body()),
+                      "the scan, as the dashboard asks for it (no wait_seconds): 202 status at once")
+    run_id = answer["body"]["run_id"]
+    started.wait(10)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url while it runs")
+    release.set()
+    wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.COMPLETED)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url once it finished: the findings are under result")
+
+
+def scan_finished_before_the_answer(E, twin):
+    E.server.engine.run_scan = stand_in(E, "still_open", 701)
+    real, submit = finishes_before_the_answer(E)
+    E.jobs.submit_scan = submit
+    try:
+        answer = E.record(E.call("POST", "/api/scan", scan_body()),
+                          "the scan, finished before the route read its state: 202, whose state already reads ended, "
+                          "and no result in it")
+    finally:
+        E.jobs.submit_scan = real
+    E.record(E.call("GET", answer["body"]["status_url"]), "its status_url: the findings the 202 did not carry")
+
+
+def scan_failed_after_registration(E, twin):
+    release, started = threading.Event(), threading.Event()
+    E.server.engine.run_scan = stand_in(E, "still_open", 702, release=release, started=started)
+    real = E.jobs.status
+    E.jobs.status = locked
+    try:
+        answer = E.record(E.call("POST", "/api/scan", scan_body(), keep_headers=("x-run-id",)),
+                          "the scan, whose route failed after its work was handed over: 500 status, state null, "
+                          "naming the run (its work is running)")
+    finally:
+        E.jobs.status = real
+    run_id = answer["body"]["run_id"]
+    started.wait(10)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url: the run is going")
+    E.record(E.call("POST", f"/api/scans/{run_id}/abort", {}), "Stop, by the run_id the 500 named")
+    wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.ABORTED)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url once stopped")
+    release.set()
+
+
+def scan_failed_before_start(E, twin):
+    E.server.engine.run_scan = stand_in(E, "still_open", 703)
+    real = E.jobs.submit_scan
+
+    def broken(*args, **kwargs):
+        raise ValueError("the pool is misconfigured")
+
+    E.jobs.submit_scan = broken
+    try:
+        answer = E.record(E.call("POST", "/api/scan", scan_body(), keep_headers=("x-run-id",)),
+                          "the scan, whose hand-over to the pool failed: 500 status, state failed, nothing started")
+    finally:
+        E.jobs.submit_scan = real
+    E.record(E.call("GET", answer["body"]["status_url"]), "its status_url: failed")
+
+
+def scan_queue_full(E, twin):
+    hold = threading.Event()
+    blocker = E.runs.start("https://blocker.invalid/", state=E.runs.QUEUED)
+    E.jobs.submit_scan(blocker, lambda: hold.wait(30) or {"results": []})
+    wait_until(lambda: E.runs.get(blocker)["state"] == E.runs.RUNNING)
+    E.server.engine.run_scan = stand_in(E, "still_open", 704)
+    answer = E.record(E.call("POST", "/api/scan", scan_body(), keep_headers=("retry-after", "x-run-id")),
+                      "the scan, refused by a full worker queue (429 status)")
+    E.record(E.call("GET", answer["body"]["status_url"]), "its status_url: failed, nothing started")
+    hold.set()
+
+
+def not_admitted(path, body_of):
+    def fn(E, twin):
+        E.server.engine.run_scan = stand_in(E, "still_open", 705)
+        real = E.runs.admit
+        E.runs.admit = locked
+        try:
+            E.record(E.call("POST", path, body_of(twin), keep_headers=("retry-after", "x-run-id")),
+                     "the launch, whose admission could not be read from the abort registry: 503, nothing registered")
+        finally:
+            E.runs.admit = real
+        E.record(E.call("GET", "/api/scans/active"), "the engine's live list: nothing was registered")
+    return fn
+
+
+def abort_unrecorded(E, twin):
+    release, started = threading.Event(), threading.Event()
+    E.server.engine.run_scan = stand_in(E, "still_open", 706, release=release, started=started)
+    answer = E.record(E.call("POST", "/api/scan", scan_body()), "the scan: 202 status at once")
+    run_id = answer["body"]["run_id"]
+    started.wait(10)
+    real = E.runs.request_abort
+    E.runs.request_abort = locked
+    try:
+        E.record(E.call("POST", f"/api/scans/{run_id}/abort", {}),
+                 "Stop, whose registry write failed: 202, recorded false, in effect in this process")
+    finally:
+        E.runs.request_abort = real
+    wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.ABORTED)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url once the work obeyed the stop")
+    release.set()
+
+
+def abort_unknown_run(E, twin):
+    """A Stop by a run id the engine has no record of: it ended and was forgotten, or never ran."""
+    E.record(E.call("POST", "/api/scans/00000000-0000-4000-8000-00000000dead/abort", {}),
+             "Stop, by a run id the engine never registered: 404 No such scan run")
+
+
+def retest_failed_after_registration(E, twin):
+    release, started = threading.Event(), threading.Event()
+    E.server.engine.run_scan = stand_in(E, "closed", 720, release=release, started=started)
+    real = E.jobs.status
+    E.jobs.status = locked
+    try:
+        answer = E.record(E.call("POST", "/api/remediation/retest", retest_body(twin["id"], wait_seconds=0),
+                                 keep_headers=("x-run-id",)),
+                          "the retest, asked with wait_seconds: 0, whose route failed after its work was handed "
+                          "over: 500 status, state null, naming the run (its work is running)")
+    finally:
+        E.jobs.status = real
+    run_id = answer["body"]["run_id"]
+    started.wait(10)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url: the run is going")
+    release.set()
+    wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.COMPLETED)
+    E.record(E.call("GET", f"/api/scans/{run_id}"), "its status_url once it finished: the verdict is the result")
+
+
+def retest_failed_before_start(E, twin):
+    E.server.engine.run_scan = stand_in(E, "closed", 721)
+    real = E.jobs.submit_scan
+
+    def broken(*args, **kwargs):
+        raise ValueError("the pool is misconfigured")
+
+    E.jobs.submit_scan = broken
+    try:
+        answer = E.record(E.call("POST", "/api/remediation/retest", retest_body(twin["id"], wait_seconds=0),
+                                 keep_headers=("x-run-id",)),
+                          "the retest, whose hand-over to the pool failed: 500 status, state failed, nothing started")
+    finally:
+        E.jobs.submit_scan = real
+    E.record(E.call("GET", answer["body"]["status_url"]), "its status_url: failed")
+
+
+def stopped_after_recording(wait_seconds):
+    def fn(E, twin):
+        from engine.replay import remediation
+        E.server.engine.run_scan = stand_in(E, "closed", 722 if wait_seconds is None else 723)
+        real = remediation.record
+
+        def record_then_stop(*args, **kwargs):
+            filed = real(*args, **kwargs)
+            live = [one for one in E.runs.active() if one["kind"] == "retest"]
+            E.runs.request_abort(live[0]["run_id"], "customer called")
+            return filed
+
+        remediation.record = record_then_stop
+        try:
+            extra = {} if wait_seconds is None else {"wait_seconds": wait_seconds}
+            answer = E.record(E.call("POST", "/api/remediation/retest", retest_body(twin["id"], **extra)),
+                              "the retest, stopped while its check was being filed"
+                              + (": answered inline with that verdict, state aborted (201)" if wait_seconds is None
+                                 else ", asked with wait_seconds: 0 (202 at once)"))
+            run_id = answer["body"]["run_id"]
+            wait_until(lambda: E.runs.get(run_id)["state"] == E.runs.ABORTED)
+        finally:
+            remediation.record = real
+        E.record(E.call("GET", f"/api/scans/{run_id}"),
+                 "its status_url: state aborted, and the verdict and the check it filed as the result")
+    return fn
+
+
+def retest_finished_before_the_answer(E, twin):
+    E.server.engine.run_scan = stand_in(E, "closed", 724)
+    real, submit = finishes_before_the_answer(E)
+    E.jobs.submit_scan = submit
+    try:
+        answer = E.record(E.call("POST", "/api/remediation/retest", retest_body(twin["id"], wait_seconds=0)),
+                          "the retest, asked with wait_seconds: 0, finished before the route read its state: 202, "
+                          "whose state already reads completed, and no verdict in it")
+    finally:
+        E.jobs.submit_scan = real
+    E.record(E.call("GET", answer["body"]["status_url"]), "its status_url: the verdict the 202 did not carry")
+
+
 # ------------------------------------------------------------------ main -----
 
 def main_verdict(kind, scan_id):
@@ -401,6 +640,7 @@ def main_failed(E, twin):
 def main():
     checkout = Path(sys.argv[1]).resolve()
     out_root = Path(sys.argv[2]).resolve()
+    ONLY.update(sys.argv[3:])
     sha = subprocess.run(["git", "-C", str(checkout), "rev-parse", "HEAD"],
                          capture_output=True, text=True, check=True).stdout.strip()
     dirty = subprocess.run(["git", "-C", str(checkout), "status", "--porcelain"],
@@ -429,6 +669,21 @@ def main():
         scenario("at-once-then-verdict", contract, sha, pr71_at_once("verdict", 510), out)
         scenario("at-once-then-stopped", contract, sha, pr71_at_once("stopped", 511), out)
         scenario("at-once-then-failed", contract, sha, pr71_at_once("failed", 512), out)
+        scenario("at-once-failed-after-registration", contract, sha, retest_failed_after_registration, out)
+        scenario("at-once-failed-before-start", contract, sha, retest_failed_before_start, out)
+        scenario("at-once-finished-before-the-answer", contract, sha, retest_finished_before_the_answer, out)
+        scenario("stopped-after-recording", contract, sha, stopped_after_recording(None), out)
+        scenario("at-once-then-stopped-after-recording", contract, sha, stopped_after_recording(0), out)
+        scenario("not-admitted", contract, sha,
+                 not_admitted("/api/remediation/retest", lambda twin: retest_body(twin["id"], wait_seconds=0)), out)
+        scenario("scan-at-once-then-completed", contract, sha, scan_at_once_then_completed, out)
+        scenario("scan-finished-before-the-answer", contract, sha, scan_finished_before_the_answer, out)
+        scenario("scan-failed-after-registration", contract, sha, scan_failed_after_registration, out)
+        scenario("scan-failed-before-start", contract, sha, scan_failed_before_start, out)
+        scenario("scan-queue-full", contract, sha, scan_queue_full, out, workers=1, queued=0)
+        scenario("scan-not-admitted", contract, sha, not_admitted("/api/scan", lambda twin: scan_body()), out)
+        scenario("scan-abort-unrecorded", contract, sha, abort_unrecorded, out)
+        scenario("abort-unknown-run", contract, sha, abort_unknown_run, out)
     else:
         contract = "main"
         scenario("verdict-closed", contract, sha, main_verdict("closed", 610), out)
@@ -436,6 +691,8 @@ def main():
         scenario("wait-seconds-refused", contract, sha, main_wait_seconds_refused, out)
         scenario("stopped", contract, sha, main_stopped, out)
         scenario("failed", contract, sha, main_failed, out)
+        scenario("scan-at-once-then-completed", contract, sha, scan_at_once_then_completed, out)
+        scenario("scan-finished-before-the-answer", contract, sha, scan_finished_before_the_answer, out)
 
 
 if __name__ == "__main__":

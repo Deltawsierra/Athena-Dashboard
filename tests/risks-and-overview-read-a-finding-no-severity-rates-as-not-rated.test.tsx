@@ -28,7 +28,12 @@ beforeAll(() => {
 afterEach(cleanup);
 
 const CLIENTS = [{ id: "c1", name: "Payments API", status: "active", lastTestDate: null }];
-const iso = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
+// One "now", read once: every finding's timestamps are fixed relative to it.
+// Read per call, findings stamped "3 hours ago" differed by however long the
+// calls between them took -- and ties the Overview breaks by time broke
+// differently on a loaded machine.
+const NOW = Date.now();
+const iso = (hoursAgo: number) => new Date(NOW - hoursAgo * 3_600_000).toISOString();
 
 function client(seed: Array<[unknown[], unknown]>) {
   const qc = new QueryClient({
