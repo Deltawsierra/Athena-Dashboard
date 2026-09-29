@@ -8,6 +8,7 @@ import { createApp, errorHandler } from "./app";
 import { initializeDefaultData } from "./init-data";
 import { startSampling } from "./health";
 import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
+import { loadServiceToken } from "./failsafe-service-token";
 import * as settings from "./settings";
 import { primeNow as primeEngineHost } from "./engine";
 
@@ -29,6 +30,9 @@ function serveStatic(app: express.Application): void {
   // Take a reading now and every minute after, so the health screen draws a
   // real trend rather than reading one row somebody wrote at install time.
   startSampling();
+  // The failsafe service token every stop presents, read from the environment
+  // once, now: a stop sent with it waits on no sign-in.
+  loadServiceToken();
   // The control plane's service token, and the actions of the commands it
   // lists, obtained now: the first signature relay waits on neither.
   warmFailsafe();

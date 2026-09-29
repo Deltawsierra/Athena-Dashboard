@@ -33,6 +33,7 @@
 import http from "node:http";
 import https from "node:https";
 import * as dnsCache from "./dns-cache";
+import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
 
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -66,8 +67,15 @@ interface ControlPlaneResponse {
   readonly body: { cancel(): Promise<void> };
 }
 
-/** What an authenticated call sends: its method, an optional JSON body, and any extra headers. */
-type CallInit = { method?: string; headers?: Record<string, string>; body?: string };
+/**
+ * What an authenticated call sends: its method, an optional JSON body, and any
+ * extra headers. `stop`: the request is a stop, or may be one, by the control
+ * plane's own judgement (athena-backend safety/stops.py STOP_ROUTES, less the
+ * routes safety/service_token.py leaves out of SERVICE_ROUTES) -- so it
+ * presents the failsafe service token, when one is configured, and waits on no
+ * sign-in (call). Never set on anything the control plane does not stop on.
+ */
+type CallInit = { method?: string; headers?: Record<string, string>; body?: string; stop?: boolean };
 
 /** One request to the control plane, answered with its headers. Rejects the way fetch did (a network error), and aborts on `signal`. */
 function send(target: string, init: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<ControlPlaneResponse> {
@@ -151,11 +159,21 @@ export function defaultEngineId(): string {
 // The control plane authenticates operators with SimpleJWT. This server holds a
 // service account -- analyst-role to draft pause/stand-down, admin-role if it
 // is to draft terminate -- and exchanges its credential for a short-lived
-// access token, cached and re-obtained on expiry. It is NOT an operator key:
-// every consequential command still needs out-of-band ed25519 signatures the
-// engine verifies. The credential decides who may draft, nothing more.
+// access token, cached and renewed on expiry: by the refresh token its
+// sign-in issued, and by the password again only when that fails. It is NOT
+// an operator key: every consequential command still needs out-of-band
+// ed25519 signatures the engine verifies. The credential decides who may
+// draft, nothing more. A stop waits on none of this when the failsafe service
+// token is configured (server/failsafe-service-token.ts; call).
 
 let cachedAccess: string | null = null;
+/**
+ * The refresh token the last sign-in or refresh answered with, or null. The
+ * control plane rotates it on every refresh and blacklists the one spent, so
+ * the one each refresh answers with is the one kept and used next. A refresh
+ * that fails is not tried again: the password is.
+ */
+let cachedRefresh: string | null = null;
 
 /**
  * The service token is kept warm, so that a signature relay does not have to
@@ -170,8 +188,9 @@ let cachedAccess: string | null = null;
  *     (a read cut off at its deadline) leaves it running, and it is cached
  *     when it arrives -- the relay that follows uses it rather than asking
  *     again.
- *   - It is obtained again ahead of its expiry (the `exp` its JWT carries):
- *     a fifth of its lifetime early, at most a minute (tokenRefresh). A token
+ *   - It is obtained again ahead of its expiry (the `exp` its JWT carries),
+ *     by the refresh token rather than the password when one is held
+ *     (renewTokens): a fifth of its lifetime early, at most a minute (tokenRefresh). A token
  *     that names no expiry is obtained again every tokenRefresh.unknownMs.
  *     A refresh that fails is tried again tokenRefresh.retryMs later; the
  *     token in hand is kept meanwhile. A token that already reads as expired
@@ -189,13 +208,22 @@ let generation = 0;
 function freshToken(base: string): Promise<string> {
   if (tokenInFlight === null) {
     const mine = generation;
-    const obtained = obtainAccessToken(base).then((access) => {
-      if (mine === generation) {
-        cachedAccess = access;
-        scheduleRefresh(access);
-      }
-      return access;
-    });
+    const refresh = cachedRefresh;
+    const obtained = renewTokens(base, refresh).then(
+      (tokens) => {
+        if (mine === generation) {
+          cachedAccess = tokens.access;
+          cachedRefresh = tokens.refresh;
+          scheduleRefresh(tokens.access);
+        }
+        return tokens.access;
+      },
+      (cause: unknown) => {
+        // The refresh token was refused (and the password after it): it is not tried again.
+        if (mine === generation && refresh !== null && cachedRefresh === refresh) cachedRefresh = null;
+        throw cause;
+      },
+    );
     tokenInFlight = obtained;
     const clear = () => { if (tokenInFlight === obtained) tokenInFlight = null; };
     obtained.then(clear, clear);
@@ -311,7 +339,66 @@ export function primeNow(): Promise<void> {
   }
 }
 
-async function obtainAccessToken(base: string): Promise<string> {
+/** An access token, and the refresh token that renews it (null when the answer carried none). */
+interface Tokens {
+  access: string;
+  refresh: string | null;
+}
+
+/**
+ * A new access token: by the refresh token when one is held, and by the
+ * password only when there is none or the refresh fails. Hourly, this was a
+ * password sign-in every time -- the one call the control plane throttles and
+ * locks.
+ */
+async function renewTokens(base: string, refresh: string | null): Promise<Tokens> {
+  if (refresh !== null) {
+    try {
+      return await refreshTokens(base, refresh);
+    } catch (cause) {
+      console.warn(`[failsafe] the service account's token could not be refreshed (${cause instanceof Error ? cause.message : String(cause)}); ` +
+        "signing in with its password instead");
+    }
+  }
+  return signIn(base);
+}
+
+/**
+ * Renew by the refresh token (SimpleJWT /api/token/refresh/). The control
+ * plane rotates the refresh token and blacklists the one spent, so the
+ * rotated one in the answer is the one returned; an answer without one leaves
+ * the one sent in use.
+ */
+async function refreshTokens(base: string, refresh: string): Promise<Tokens> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
+  let response: ControlPlaneResponse;
+  try {
+    response = await send(`${base}/api/token/refresh/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh }),
+      signal: controller.signal,
+    });
+  } catch (cause) {
+    const why = cause instanceof Error ? cause.message : String(cause);
+    throw new FailsafeUnavailable(`could not reach the failsafe control plane at ${base}: ${why}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  requestOf.set(response, controller);
+  if (!response.ok) {
+    throw new FailsafeUnavailable(`the failsafe control plane answered ${response.status} to the refresh: ${await body(response)}`);
+  }
+  const payload = asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "a refresh").catch(() => null));
+  if (typeof payload.access !== "string" || !payload.access) {
+    throw new FailsafeUnavailable("the failsafe control plane's refresh returned no access token");
+  }
+  return { access: payload.access, refresh: typeof payload.refresh === "string" && payload.refresh ? payload.refresh : refresh };
+}
+
+/** Sign in with the service account's password (SimpleJWT /api/token/). */
+async function signIn(base: string): Promise<Tokens> {
   const username = (process.env[FAILSAFE_USER_ENV] ?? "").trim();
   const password = process.env[FAILSAFE_PASSWORD_ENV] ?? "";
   if (!username || !password) {
@@ -354,7 +441,7 @@ async function obtainAccessToken(base: string): Promise<string> {
   if (!access) {
     throw new FailsafeUnavailable("the failsafe control plane returned no access token");
   }
-  return access;
+  return { access, refresh: typeof payload?.refresh === "string" && payload.refresh ? payload.refresh : null };
 }
 
 /** A controller that is aborted when `outer` is: a call's own, tied to its caller's deadline. */
@@ -405,16 +492,22 @@ async function jsonWithin(response: ControlPlaneResponse, ms: number, what: stri
 }
 
 async function body(response: ControlPlaneResponse): Promise<string> {
-  return ((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
+  return withoutServiceToken((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
 /**
  * Call an operator route, authenticated by the cached service token.
  *
- * A 401 means the token expired (SimpleJWT access tokens are short-lived), so
- * this obtains a fresh one and retries exactly once. Any other non-ok answer is
- * the caller's to interpret -- a 403 from the backend is a real "you may not do
- * this", not something to retry.
+ * A stop (`init.stop`) presents the failsafe service token as well, when one is
+ * configured, and is sent AT ONCE: it waits for no token. A token already in
+ * hand rides along, so a service token the control plane does not take still
+ * leaves the stop the path every other call has.
+ *
+ * A 401 means no credential sent was taken -- the token expired (SimpleJWT
+ * access tokens are short-lived), or a stop's service token was refused with
+ * no token in hand -- so this obtains a fresh one and retries exactly once.
+ * Any other non-ok answer is the caller's to interpret -- a 403 from the
+ * backend is a real "you may not do this", not something to retry.
  */
 async function call(path: string, init: CallInit = {}, retryAuth = true, signal?: AbortSignal): Promise<ControlPlaneResponse> {
   const base = baseUrl();
@@ -423,7 +516,10 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
       `no failsafe control plane is configured; set ${FAILSAFE_URL_ENV} to the backend's address`,
     );
   }
-  const access = await accessToken(base, signal);
+  // SAFETY: a stop with the service token waits on no sign-in and no refresh --
+  // failing, throttled, locked or hung -- so none of them holds it back or drops it.
+  const presented = init.stop ? serviceToken() : null;
+  const access = presented !== null ? cachedAccess : await accessToken(base, signal);
   const controller = linked(signal);
   const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
   let response: ControlPlaneResponse;
@@ -433,8 +529,9 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
       body: init.body,
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${access}`,
+        ...(access !== null ? { Authorization: `Bearer ${access}` } : {}),
         ...(init.headers ?? {}),
+        ...(presented !== null ? { [SERVICE_TOKEN_HEADER]: presented } : {}),
       },
       signal: controller.signal,
     });
@@ -446,9 +543,9 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
   }
   requestOf.set(response, controller);
   if (response.status === 401 && retryAuth) {
-    // Token expired mid-session; get a new one and try once more.
+    // No credential taken; get a new token and try once more.
     void response.body?.cancel().catch(() => undefined);
-    if (cachedAccess === access) cachedAccess = null;
+    if (access !== null && cachedAccess === access) cachedAccess = null;
     await accessToken(base, signal);
     return call(path, init, false, signal);
   }
@@ -464,6 +561,27 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
 
 /** The failsafe actions that stop an engine. */
 const STOP_ACTIONS = new Set(["pause", "stand_down", "terminate"]);
+/** The failsafe actions that put an engine back to work. */
+const START_ACTIONS = new Set(["resume", "release"]);
+
+/**
+ * Whether a signature, or a withdrawal, of this command is a stop, as the
+ * control plane judges it (athena-backend safety/stops.py `_signature`,
+ * `_cancel`): a signature on a pause, stand-down or terminate; the withdrawal
+ * of a resume or a release, which keeps an engine stopped. Its action comes
+ * from memory. When it is not known here, the request may be a stop: it
+ * presents the service token, and the control plane -- which reads the
+ * command's action itself, and ignores the token on anything that is not a
+ * stop -- decides. A stop is never held back on what this server has not read.
+ */
+function signatureStops(uuid: string): boolean {
+  const known = knownActions.get(uuid);
+  return known === undefined || STOP_ACTIONS.has(known);
+}
+function withdrawalStops(uuid: string): boolean {
+  const known = knownActions.get(uuid);
+  return known === undefined || START_ACTIONS.has(known);
+}
 /** At most this many commands are remembered; the oldest is forgotten first. */
 const KNOWN_ACTIONS_MAX = 10_000;
 const knownActions = new Map<string, string>();
@@ -663,8 +781,10 @@ export async function status(): Promise<FailsafeStatus> {
   }
   try {
     // /state authenticates and is cheap; reaching it 200 proves both reachable
-    // and authorized in one call.
-    const response = await call("/api/failsafe/state/");
+    // and authorized in one call. It is the stop lane's read (failsafe:state),
+    // so it presents the service token: the console reads the commands a second
+    // operator signs only after this answers authorized.
+    const response = await call("/api/failsafe/state/", { stop: true });
     if (response.status === 401 || response.status === 403) {
       return {
         configured: true,
@@ -700,7 +820,8 @@ export async function status(): Promise<FailsafeStatus> {
 
 export async function state(engineId?: string): Promise<FailsafeStateView> {
   const query = engineId ? `?engine_id=${encodeURIComponent(engineId)}` : "";
-  const response = await call(`/api/failsafe/state/${query}`);
+  // The stop lane's read (failsafe:state): where a second operator finds the stop awaiting their signature.
+  const response = await call(`/api/failsafe/state/${query}`, { stop: true });
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
@@ -724,7 +845,8 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   if (opts.engineId) params.set("engine_id", opts.engineId);
   if (opts.status) params.set("status", opts.status);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const response = await call(`/api/failsafe/commands/${query}`);
+  // The stop lane's read (failsafe:commands, GET).
+  const response = await call(`/api/failsafe/commands/${query}`, { stop: true });
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
@@ -747,6 +869,8 @@ export async function draftCommand(input: {
   const response = await call("/api/failsafe/commands/", {
     method: "POST",
     body: JSON.stringify({ action: input.action, engine_id: input.engineId, reason: input.reason }),
+    // A pause, stand-down or terminate is a stop (safety/stops.py `_stop_draft`); a resume or a release is not.
+    stop: STOP_ACTIONS.has(input.action),
   });
   if (response.status === 403 || response.status === 400) {
     return { ok: false, status: response.status, detail: await body(response) };
@@ -770,7 +894,8 @@ export async function draftCommand(input: {
 }
 
 export async function getCommand(uuid: string, signal?: AbortSignal): Promise<DraftedCommand | null> {
-  const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/`, {}, true, signal);
+  // The stop lane's read (failsafe:command-detail): the bytes a stop's signers sign.
+  const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/`, { stop: true }, true, signal);
   if (response.status === 404) {
     void response.body?.cancel().catch(() => undefined);
     return null;
@@ -800,6 +925,7 @@ export async function submitSignature(
   const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/signatures/`, {
     method: "POST",
     body: JSON.stringify({ key_id: signature.keyId, sig: signature.sig }),
+    stop: signatureStops(uuid),
   });
   if (response.status === 400 || response.status === 409) {
     return { ok: false, status: response.status, detail: await body(response) };
@@ -827,6 +953,7 @@ export async function cancelCommand(
 ): Promise<{ ok: true; command: FailsafeCommand } | { ok: false; status: number; detail: string }> {
   const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/cancel/`, {
     method: "POST",
+    stop: withdrawalStops(uuid),
   });
   if (response.status === 403 || response.status === 409) {
     return { ok: false, status: response.status, detail: await body(response) };
@@ -854,6 +981,7 @@ export async function audit(opts: { command?: string } = {}): Promise<FailsafeAu
 /** Test seam: forget any cached access token, and every command action known here. */
 export function _resetForTests(): void {
   cachedAccess = null;
+  cachedRefresh = null;
   tokenInFlight = null;
   generation += 1;
   if (refreshTimer !== null) clearTimeout(refreshTimer);
