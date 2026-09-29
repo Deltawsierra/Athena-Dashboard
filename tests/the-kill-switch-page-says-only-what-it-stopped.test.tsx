@@ -208,6 +208,40 @@ describe("the AI Control page says what the kill switch stopped, and nothing mor
       expect(await engineSaid()).not.toMatch(/listed no other live run/);
     });
 
+    // Round 4 #6: the engine's "No such scan run" is said in the server's own
+    // words, never as a run that "could not be stopped"; for an id only an
+    // unread answer named (namedOnly), as the no-end it is.
+    const UNKNOWN_RUN = "the engine does not know this run -- it has ended or never ran -- so there was nothing to stop";
+    const UNKNOWN_NAMED = "the engine does not know the run this answer named; a run it started may still be running under " +
+      "another id -- the kill switch or a failsafe pause stops it";
+
+    it("a listed run the engine answered \"No such scan run\" is said in the server's words, not as one that could not be stopped", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, {
+        listed: true, runs: [run("r1", null, true), { ...run("r2", null, false, UNKNOWN_RUN), unknownRun: true }],
+      });
+      await engage();
+      const said = await engineSaid();
+      expect(said).toBe(
+        "The engine also listed 2 live runs that no running scan here recorded (2 with no record here at all); each was " +
+        `sent a stop, and the engine accepted 1; the engine did not know 1 (${UNKNOWN_RUN}).`,
+      );
+      expect(said).not.toMatch(/could not be stopped/);
+    });
+
+    it("a kept Stop's run the engine did not know, its list unread (namedOnly), is said as possibly running, in the server's words", async () => {
+      mount(SETTINGS);
+      engageAnswers({ listed: true, scans: [] }, {
+        listed: false, detail: "the engine answered 503",
+        retests: [{ ...run("r3", "t3", false, UNKNOWN_NAMED), unknownRun: true, namedOnly: true }],
+      });
+      await engage();
+      const said = await engineSaid();
+      expect(said).toContain(`the engine did not know it (${UNKNOWN_NAMED})`);
+      expect(said).not.toMatch(/could not be stopped/);
+      expect(said).not.toMatch(/ended or never ran/);
+    });
+
     it("says both what came of the named runs' stops and that the unnamed ones got none", async () => {
       mount(SETTINGS);
       engageAnswers({ listed: true, scans: [] }, { listed: true, runs: [run("r1", null, true)], unnamed: 2 });

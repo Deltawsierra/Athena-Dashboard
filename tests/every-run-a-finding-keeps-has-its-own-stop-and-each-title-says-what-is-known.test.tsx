@@ -153,22 +153,22 @@ afterEach(() => {
   state.abortFor = () => refused;
 });
 
-function realRoutes() {
+function realRoutes(cookie = session) {
   const outbound = globalThis.fetch;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     if (!String(url).startsWith("/")) return outbound(url, init);
     return outbound(`${base}${url}`, {
       ...init,
-      headers: { ...(init?.headers as Record<string, string> | undefined), Cookie: session },
+      headers: { ...(init?.headers as Record<string, string> | undefined), Cookie: cookie },
     });
   });
 }
 
-/** A fresh test (its scan answered by the recorded setup scan), its panel rendered, and Retest pressed. */
-async function retestOnPanel() {
+/** A fresh test (its scan answered by the recorded setup scan), its panel rendered -- signed in as `cookie`'s account -- and Retest pressed. */
+async function retestOnPanel(cookie = session) {
   const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
   expect(started.status).toBe(201);
-  realRoutes();
+  realRoutes(cookie);
   render(<QueryClientProvider client={queryClient}><RetestPanel testId={started.body.test.id} /></QueryClientProvider>);
   fireEvent.click(await screen.findByTestId(`button-retest-${twinId}`));
   await waitFor(() => expect(toasts.length).toBe(1));
@@ -216,17 +216,28 @@ describe("#5 and #4: a kept Stop says how its run ended", () => {
     expect(document.body.textContent).not.toMatch(/\bStopped\b/);
   });
 
-  it("the recorded 404 \"No such scan run\": not known to the engine, nothing stopped, and Retest is offered again", async () => {
+  // Round 4 #1: the kept Stop's id was named by an answer this dashboard did
+  // not read, so the engine's 404 is no end: the run that retest began may be
+  // live under another id. At da5af32 it read "Not known to the engine" and
+  // offered Retest again.
+  it("the recorded 404 \"No such scan run\" to a kept Stop: may still be running, the Stop kept, and Retest not offered", async () => {
     await retestOnPanel();
     await waitFor(() => expect(stopsShown()).toEqual([A]));
     state.abortFor = () => unknownRun;
+    const sent = calls.filter((one) => one === `POST /api/scans/${A}/abort`).length;
     fireEvent.click(screen.getByTestId(`button-stop-retest-${twinId}`));
     await waitFor(() => expect(toasts.length).toBe(2));
-    expect(String(toasts[1].title)).toBe("Not known to the engine");
-    expect(String(toasts[1].description)).toContain("has ended or never ran");
-    await waitFor(() => expect(phaseOf(A)).toBe("Not known to the engine"));
-    await waitFor(() => expect((screen.getByTestId(`button-retest-${twinId}`) as HTMLButtonElement).disabled).toBe(false));
-    expect(phaseOf(A)).toBe("Not known to the engine");
+    expect(calls.filter((one) => one === `POST /api/scans/${A}/abort`).length).toBe(sent + 1);
+    expect(String(toasts[1].title)).toBe("May still be running");
+    expect(String(toasts[1].description)).toContain(
+      "the engine does not know the run this answer named; a run it started may still be running under another id -- " +
+      "the kill switch or a failsafe pause stops it",
+    );
+    expect(String(toasts[1].description)).not.toMatch(/ended or never ran/);
+    await waitFor(() => expect(document.body.textContent).toContain("under another id"));
+    expect(phaseOf(A)).toBe("Running");
+    expect(stopsShown()).toEqual([A]);
+    expect((screen.getByTestId(`button-retest-${twinId}`) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 
@@ -242,6 +253,34 @@ describe("#4: an admin can clear a kept Stop from the panel", () => {
     await waitFor(() => expect(phaseOf(A)).toBe("Cleared by an admin"));
     expect(stopsShown()).toEqual([]);
     await waitFor(() => expect((screen.getByTestId(`button-retest-${twinId}`) as HTMLButtonElement).disabled).toBe(false));
+  });
+});
+
+describe("round 4 #7 (pins K9): only an admin is offered Clear", () => {
+  it("(derived: the recorded 202, answer \"Status\"; its stop refused) the requester, not an admin, keeps the Stop and is offered no Clear", async () => {
+    const name = `r4-panel-${Date.now()}`;
+    const made = await agent.post("/api/users").send({ username: name, password: "a-long-enough-password", role: "user", email: `${name}@r4.test` });
+    expect(made.status, JSON.stringify(made.body)).toBe(201);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: name, password: "a-long-enough-password" }),
+    });
+    expect(login.status).toBe(200);
+    const theirs = (login.headers.get("set-cookie") ?? "").split(";")[0];
+    await retestOnPanel(theirs);
+    await waitFor(() => expect(stopsShown()).toEqual([A]));
+    // Its own view read (GET /api/retests/:runId, the requester's to read) has come back, still with no Clear.
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(screen.queryByTestId(`button-clear-retest-${twinId}`)).toBeNull();
+    expect(phaseOf(A)).toBe("Running");
+  });
+
+  it("an admin is offered Clear on the same kept Stop", async () => {
+    await retestOnPanel();
+    await waitFor(() => expect(stopsShown()).toEqual([A]));
+    expect(await screen.findByTestId(`button-clear-retest-${twinId}`)).toBeTruthy();
   });
 });
 

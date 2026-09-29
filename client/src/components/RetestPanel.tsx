@@ -115,6 +115,15 @@ interface StopAnswer {
   alreadyFinished?: boolean;
   /** The engine does not know the run: it has ended or never ran. Nothing was stopped. */
   unknownRun?: boolean;
+  /**
+   * With `unknownRun`: the id only an answer this dashboard did not read had
+   * named, so that is no end -- a run the engine started may still be running
+   * under another id (`mayStillBeRunning`). The Stop is kept; `detail` is the
+   * server's words for it.
+   */
+  namedOnly?: boolean;
+  mayStillBeRunning?: boolean;
+  detail?: string;
 }
 
 /** Read `answer` before `verdict`: a status is never a verdict. */
@@ -271,6 +280,13 @@ function RetestStatusPanel({ twinId, initial, onVerdict, onStopAnswered }: {
       onStopAnswered();
       toast(result.alreadyFinished
         ? { title: "Already finished", description: `Retest run ${result.runId} had already ended; nothing was stopped.` }
+        : result.unknownRun && result.namedOnly
+          ? {
+            title: "May still be running",
+            description: `Retest run ${result.runId}: ${result.detail ?? "the engine does not know the run this answer named; " +
+              "a run it started may still be running under another id -- the kill switch or a failsafe pause stops it"}.`,
+            variant: "destructive",
+          }
         : result.unknownRun
           ? {
             title: "Not known to the engine",

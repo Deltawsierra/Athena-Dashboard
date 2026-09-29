@@ -1507,9 +1507,13 @@ export interface AbortOutcome {
    */
   answerUnread?: boolean;
   /**
-   * The engine answered 404 "No such scan run": it does not know this run --
+   * The engine answered 404 "No such scan run": it has no run under this id --
    * it has ended and been forgotten, or never ran. Nothing was stopped, and
-   * nothing is running under this id there.
+   * nothing is running under this id there. Definite about the run only when
+   * the engine itself issued the id in an answer that was read (or listed it
+   * live): an id an unread answer named proves only that it is not the
+   * engine's run -- the run that start began may be live under another id
+   * (routes.ts namedByUnreadAnswer).
    */
   unknownRun?: boolean;
 }
@@ -1927,8 +1931,15 @@ export async function retest(request: RetestRequest): Promise<RetestAnswer> {
   if (!response.ok) {
     const said = `the engine answered ${response.status}: ${await body(response)}`;
     // A 4xx is the engine refusing the retest; a 5xx says nothing about
-    // whether it started one.
+    // whether it started one: a run its X-Run-Id header names is sent a stop
+    // and keeps a Stop while that stop has not taken (routes.ts), as a scan
+    // start's is; one it names none of holds its slot (mayHaveStarted).
     if (response.status >= 400 && response.status < 500) throw new EngineRefused(said, response.status);
+    const named = { bodyId: null, headerIds: headerRunIds(response) };
+    if (named.headerIds.length > 0) {
+      throw new UnrecognisedRetestAnswer(`Unrecognised engine answer: ${said}. ${namedSentence(named)} Nothing was filed.`,
+        false, named.headerIds, namedByOf(named));
+    }
     throw new EngineUnavailable(said);
   }
   const rawRetest = await bodyWithin(response, engineTimeouts.bodyMs);
