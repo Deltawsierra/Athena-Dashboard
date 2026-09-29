@@ -82,7 +82,8 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_MAX_INFLIGHT_RETESTS` | `4`                        | The most retests this dashboard asks of the engine at once. |
 | `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console. |
 | `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
-| `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. |
+| `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. Its token is renewed with the refresh token; the password is used again only when a refresh is refused. |
+| `ATHENA_FAILSAFE_SERVICE_TOKEN` | unset                    | The control plane's failsafe service token (its `FAILSAFE_SERVICE_TOKEN`). Every stop this server relays presents it and waits on no sign-in; see [Stops and the failsafe service token](#stops-and-the-failsafe-service-token). Read once at start-up; never logged or sent to the browser. |
 | `ATHENA_FAILSAFE_ENGINE_ID` | unset                        | Default engine id a fresh failsafe draft targets. |
 | `VITE_MYTHOS_SAMPLE_MODE` | unset (off)                    | Build time. `1` turns on sample mode for prospect demos; see below. Never set it for a customer build. |
 
@@ -152,6 +153,60 @@ written by older builds are verified once and transparently upgraded.
   require two distinct operators, terminate also requires typing the engine id,
   and the engine verifies every signature itself before acting. So neither a
   compromised server nor the engine itself can trigger a failsafe.
+
+## Stops and the failsafe service token
+
+A stop must not depend on a password sign-in. Every stop this server relays to
+the control plane goes as its service account, whose token came from signing in
+with `ATHENA_FAILSAFE_PASSWORD`: on first use, after every restart, and every
+hour when it expired. The backend throttles that sign-in, guesses at the
+username lock it, a changed password or a fault in the account table refuses
+it, and it can hang. Each of those held back, or dropped, the stop behind it.
+
+Set `ATHENA_FAILSAFE_SERVICE_TOKEN` to the backend's `FAILSAFE_SERVICE_TOKEN`.
+The backend side is athena-backend's `safety/service_token.py`, with
+`FAILSAFE_SERVICE_USER` naming the account the token acts as. This server then
+presents the token in the `X-Failsafe-Service-Token` header on every stop it
+relays, and sends the stop at once without waiting for a sign-in:
+
+| Stop this server relays | Backend route (athena-backend `safety/stops.py`) |
+|---|---|
+| A failsafe pause, stand-down or terminate drafted | `failsafe:commands` POST |
+| A signature on a pause, stand-down or terminate | `failsafe:submit-signature` |
+| The withdrawal of a resume or a release (it keeps an engine stopped) | `failsafe:cancel-command` |
+| The stop lane's reads: the failsafe state (and the console's status read of it), the command list, one command | `failsafe:state`, `failsafe:commands` GET, `failsafe:command-detail` |
+| A deployment paused (Recompute with `paused: true`) | `deployment-recompute` |
+| A claim revoked or contradicted | `claim-transition` |
+
+The header goes on nothing else: not on a resume or a release or a signature on
+one, the withdrawal of a stop, a lift or a routine recompute, any other claim
+move, the audit trail, any other read or write, or a sign-in or refresh. The
+backend accepts the token only on a stop and ignores it anywhere else, so a
+stolen one can stop things but cannot start anything. Where this server does
+not know a command's action (a signature or a withdrawal whose command it could
+not read), the request carries the header and the backend decides. If the
+backend does not accept the token, the stop falls back to the service account:
+a token already in hand rides along, and a 401 gets a fresh one and retries
+once. This server does not relay the backend's dispatch kill switch or an
+engagement's withdrawal, so neither is in the table.
+
+The token is never logged and never put in an answer. A control plane error
+that quotes the request back has it taken out. It never reaches the browser,
+because Vite passes only `VITE_` variables to the client. A value shorter than
+the 32 characters the backend requires, or one no HTTP header can carry, is not
+sent; start-up says why, without printing it. Unset, nothing changes: stops
+sign in with the service account as before.
+
+The service account's own token is renewed with the refresh token its sign-in
+issued (`/api/token/refresh/`). The backend rotates the refresh token on every
+refresh, so the rotated one is kept for the next. The password is used again
+only when a refresh is refused.
+
+Tests: `tests/a-stop-presents-the-service-token-and-waits-on-no-sign-in.test.ts`
+(a pause, a stand-down, a pause's signature and a deployment pause each reach
+the stop route within 300 ms while the sign-in answers 429, 500 or 401, or
+hangs) and `tests/the-service-token-rides-on-every-stop-and-on-nothing-else.test.ts`
+(the whole route list, no leaks, the unset case, the refresh).
 
 ## Retries and duplicates
 

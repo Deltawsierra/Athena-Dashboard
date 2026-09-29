@@ -3647,6 +3647,8 @@ export async function recomputeDecision(
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/recompute/`, {
     method: "POST",
     body: JSON.stringify(paused === undefined ? {} : { paused }),
+    // Pausing is a stop (athena-backend safety/stops.py `_pause`); a lift, or a routine recompute, is not.
+    stop: paused === true,
   });
   // A backend refusal (e.g. the deployment is gone, or the credential may not
   // recompute it) is the operator's to see with its reason -- not a 503 that
@@ -3713,8 +3715,9 @@ async function writeJson<T>(
   method: "POST" | "PATCH",
   wire: Record<string, unknown>,
   map: (raw: Record<string, unknown>) => T,
+  { stop = false }: { stop?: boolean } = {},
 ): Promise<{ ok: true; value: T } | { ok: false; status: number; detail: string }> {
-  const response = await call(path, { method, body: JSON.stringify(wire) });
+  const response = await call(path, { method, body: JSON.stringify(wire), stop });
   if (PASSTHROUGH_STATUS.has(response.status)) {
     return { ok: false, status: response.status, detail: await body(response) };
   }
@@ -4108,6 +4111,9 @@ export async function claimEvents(uuid: string): Promise<ClaimEvent[]> {
   return rows(payload).map(claimEvent);
 }
 
+/** The claim moves that take a claim down: the backend's stops (safety/stops.py `_TAKE_DOWN`). */
+const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
+
 /**
  * Move a claim along its lifecycle (SPINE). Admin-only on the control plane; the
  * BFF route gates it too. The backend refuses an unknown status, an illegal jump,
@@ -4126,6 +4132,8 @@ export async function transitionClaim(uuid: string, toStatus: string, note?: str
       statusLabel: str(raw.status_label),
       event: claimEvent(objOf(raw.event)),
     }),
+    // Taking a claim down is a stop (athena-backend safety/stops.py `_revoke_or_contradict`); any other move is not.
+    { stop: CLAIM_TAKE_DOWN.has(toStatus) },
   );
 }
 
