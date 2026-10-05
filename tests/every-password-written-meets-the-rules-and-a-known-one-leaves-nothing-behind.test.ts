@@ -54,7 +54,7 @@ describe("a forced password change revokes the account's API keys", () => {
     const minted = await admin.post("/api/api-keys").send({ name: "left behind" });
     expect(minted.status).toBe(201);
     const secret = minted.body.secret as string;
-    const other = await storage.createUser({ username: "second-admin", password: "second-admin-password", role: "admin", isActive: true });
+    const other = await storage.createUser({ username: "second-admin", password: "second-admin-password", role: "admin", isActive: true }); // pragma: allowlist secret
     const { secret: othersSecret } = await storage.createApiKey({ name: "the other admin's", createdBy: other.id });
     // The account is found on a password others could know (flagLegacyDefaultPasswords, or a sign-in with one).
     const me = (await storage.getUserByUsername("admin"))!;
@@ -150,7 +150,7 @@ describe("a password an admin sets", () => {
     const admin = await signedInAdmin(app);
     const me = (await storage.getUserByUsername("admin"))!;
 
-    const refused = await admin.patch(`/api/users/${me.id}`).send({ password: "a-perfectly-good-new-password" });
+    const refused = await admin.patch(`/api/users/${me.id}`).send({ password: "a-perfectly-good-new-password" }); // pragma: allowlist secret
 
     expect(refused.status).toBe(400);
     expect(refused.body.message).toMatch(/change-password/);
@@ -167,23 +167,23 @@ describe("a password an admin sets", () => {
     const { app, storage } = await fresh();
     await adminHasSetPassword();
     const admin = await signedInAdmin(app);
-    const target = await storage.createUser({ username: "analyst-of-record", password: "the-analyst-password", role: "user", isActive: true });
+    const target = await storage.createUser({ username: "analyst-of-record", password: "the-analyst-password", role: "user", isActive: true }); // pragma: allowlist secret
 
     const refused = await admin.patch(`/api/users/${target.id}`).send({ password });
 
     expect(refused.status).toBe(400);
-    expect((await request(app).post("/api/auth/login").send({ username: "analyst-of-record", password: "the-analyst-password" })).status).toBe(200);
+    expect((await request(app).post("/api/auth/login").send({ username: "analyst-of-record", password: "the-analyst-password" })).status).toBe(200); // pragma: allowlist secret
   });
 
   it("for another account is a reset: that account must set its own at its next sign-in", async () => {
     const { app, storage } = await fresh();
     await adminHasSetPassword();
     const admin = await signedInAdmin(app);
-    const target = await storage.createUser({ username: "analyst", password: "the-analyst-password", role: "user", isActive: true });
+    const target = await storage.createUser({ username: "analyst", password: "the-analyst-password", role: "user", isActive: true }); // pragma: allowlist secret
 
-    expect((await admin.patch(`/api/users/${target.id}`).send({ password: "a-reset-by-the-admin" })).status).toBe(200);
+    expect((await admin.patch(`/api/users/${target.id}`).send({ password: "a-reset-by-the-admin" })).status).toBe(200); // pragma: allowlist secret
 
-    const login = await request(app).post("/api/auth/login").send({ username: "analyst", password: "a-reset-by-the-admin" });
+    const login = await request(app).post("/api/auth/login").send({ username: "analyst", password: "a-reset-by-the-admin" }); // pragma: allowlist secret
     expect(login.status).toBe(200);
     expect(login.body.user.mustChangePassword).toBe(true);
   });
@@ -196,9 +196,9 @@ describe("a password an admin sets", () => {
     for (const weak of ["x".repeat(12), "short-pw-11", " padded-password ", "new-member"]) {
       expect((await admin.post("/api/users").send({ username: "new-member", password: weak, role: "user" })).status).toBe(400);
     }
-    const made = await admin.post("/api/users").send({ username: "new-member", password: "a-first-password", role: "user" });
+    const made = await admin.post("/api/users").send({ username: "new-member", password: "a-first-password", role: "user" }); // pragma: allowlist secret
     expect(made.status).toBe(201);
-    expect((await request(app).post("/api/auth/login").send({ username: "new-member", password: "a-first-password" })).status).toBe(200);
+    expect((await request(app).post("/api/auth/login").send({ username: "new-member", password: "a-first-password" })).status).toBe(200); // pragma: allowlist secret
   });
 });
 

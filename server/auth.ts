@@ -281,7 +281,7 @@ function isSignatureRelay(req: Request): boolean {
 }
 
 /** What every route but the few allowedBeforePasswordChange names answers an account that must change its password. */
-export const PASSWORD_CHANGE_REQUIRED = "password change required";
+export const PASSWORD_CHANGE_REQUIRED = "password change required"; // pragma: allowlist secret
 
 /** The answer, exactly: `{"error":"password change required"}`, with 403. */
 export function refusePasswordChangeRequired(res: import("express").Response): void {

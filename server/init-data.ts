@@ -92,7 +92,7 @@ export async function migrateLegacyActiveSystems(): Promise<void> {
 const INITIAL_ADMIN_USERNAME = "admin";
 
 /** The file the first-run admin's generated password is written to, in the data directory. */
-export const INITIAL_ADMIN_PASSWORD_FILE = "initial-admin-password.txt";
+export const INITIAL_ADMIN_PASSWORD_FILE = "initial-admin-password.txt"; // pragma: allowlist secret
 
 /**
  * Where this install keeps its data: the directory of the SQLite database.

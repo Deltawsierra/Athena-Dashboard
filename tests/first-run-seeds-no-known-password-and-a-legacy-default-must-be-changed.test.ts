@@ -193,7 +193,7 @@ describe("an install that kept a legacy default", () => {
   it("is not flagged when its password was changed: exactly two key derivations, and nothing logged as legacy", async () => {
     const scrypt = countScrypt();
     const { flagLegacyDefaultPasswords, storage } = await fresh();
-    await storage.createUser({ username: "admin", password: "a-password-changed-long-ago", role: "admin", email: null, isActive: true });
+    await storage.createUser({ username: "admin", password: "a-password-changed-long-ago", role: "admin", email: null, isActive: true }); // pragma: allowlist secret
 
     scrypt.calls = 0;
     expect(await flagLegacyDefaultPasswords()).toEqual([]);

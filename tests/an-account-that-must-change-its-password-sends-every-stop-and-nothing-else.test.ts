@@ -61,7 +61,7 @@ async function engineStandIn(): Promise<{ url: string; calls: string[] }> {
 async function boot(p: ControlPlaneStandIn, engineUrl: string, passwordSet: boolean) {
   process.env.ATHENA_FAILSAFE_URL = p.url;
   process.env.ATHENA_FAILSAFE_USER = "svc-failsafe";
-  process.env.ATHENA_FAILSAFE_PASSWORD = "svc-password";
+  process.env.ATHENA_FAILSAFE_PASSWORD = "svc-password"; // pragma: allowlist secret
   process.env.ATHENA_ENGINE_URL = engineUrl;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
   vi.resetModules();
@@ -279,7 +279,7 @@ describe("a withdrawal whose command's action was not read", () => {
     plane = await controlPlaneStandIn();
     process.env.ATHENA_FAILSAFE_URL = plane.url;
     process.env.ATHENA_FAILSAFE_USER = "svc-failsafe";
-    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-password";
+    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-password"; // pragma: allowlist secret
     vi.resetModules();
     const { createApp } = await import("../server/app");
     const { initializeDefaultData } = await import("../server/init-data");
@@ -390,7 +390,7 @@ describe("POST /api/auth/change-password", () => {
     const { admin } = await flaggedAdmin();
     expect((await admin.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
     const changed = await admin.post("/api/auth/change-password")
-      .send({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: "a-new-and-long-admin-password" });
+      .send({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: "a-new-and-long-admin-password" }); // pragma: allowlist secret
     expect(changed.status).toBe(200);
   });
 });

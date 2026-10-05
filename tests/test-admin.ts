@@ -8,7 +8,7 @@
  * adminHasSetPassword clears the flag, as the change-password route would.
  * This value exists only in tests/; no install is seeded with it.
  */
-export const TEST_ADMIN_PASSWORD = "tests-only-admin-password-4c1e";
+export const TEST_ADMIN_PASSWORD = "tests-only-admin-password-4c1e"; // pragma: allowlist secret
 
 /** The seeded admin's must-change flag cleared: an install whose admin has set a password. */
 export async function adminHasSetPassword(): Promise<void> {

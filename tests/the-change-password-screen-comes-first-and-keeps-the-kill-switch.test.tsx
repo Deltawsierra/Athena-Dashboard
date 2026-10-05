@@ -84,7 +84,7 @@ describe("the change-password screen comes first and keeps the kill switch", () 
     await act(async () => { fireEvent.click(screen.getByTestId("button-change-password")); });
     await waitFor(() => expect(screen.queryByTestId("input-new-password")).toBeNull());
     expect(sent.find((one) => one.url === "/api/auth/change-password")?.body)
-      .toEqual({ currentPassword: "the-initial-password", newPassword: "a-new-and-long-password" });
+      .toEqual({ currentPassword: "the-initial-password", newPassword: "a-new-and-long-password" }); // pragma: allowlist secret
   });
 
   it("a request refused with \"password change required\" while the app is open brings the change-password screen", async () => {

@@ -102,7 +102,7 @@ function notifyUnauthorized(): void {
 }
 
 /** The server's answer to an account that must change its password (server/auth.ts). */
-export const PASSWORD_CHANGE_REQUIRED = "password change required";
+export const PASSWORD_CHANGE_REQUIRED = "password change required"; // pragma: allowlist secret
 
 const passwordChangeListeners = new Set<UnauthorizedListener>();
 
