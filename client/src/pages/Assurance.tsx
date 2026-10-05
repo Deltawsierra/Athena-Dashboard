@@ -121,6 +121,27 @@ interface Finding {
   // security disposition (see `status`).
   assignee: string | null;
   remediationState: string;
+  // What a closure of this finding stands on: the backend closure gate's own
+  // verdict (server/assurance.ts AssuranceClosure). Null when it was not served.
+  closure?: FindingClosure | null;
+}
+interface ClosureRunView { ran: boolean | null; outcome: string | null }
+interface FindingClosure {
+  standing: string;
+  retestRequired: boolean;
+  reasons: string[];
+  evidence: {
+    uuid: string;
+    origin: string;
+    contentDigest: string;
+    recordedAt: string | null;
+    fixtures: {
+      vulnerable: ClosureRunView;
+      repaired: ClosureRunView;
+      benign: ClosureRunView;
+      incompleteRepair: Record<string, ClosureRunView>;
+    };
+  } | null;
 }
 // The full remediation workflow for one finding, read from
 // `/api/assurance/findings/:uuid/remediation` (Phase 2.3). The `events` are the
@@ -1611,6 +1632,90 @@ function DispositionChip({
 }
 
 /**
+ * What a closure of the finding stands on (Phase 6 item 3): the backend closure
+ * gate's own verdict, never one this console computes. "Verified closed" is shown
+ * ONLY for the backend's "verified_closed" -- every fixture class and pattern ran
+ * with the outcome a closure needs, an independent observer's, after the finding
+ * was last seen. A closed finding that asked for no retest is a disposition and
+ * says so; one whose closure the gate would refuse names every reason; and a
+ * standing that was not served, or that this console does not know, says that --
+ * never "verified". An open finding with no retest asked shows nothing.
+ */
+export function ClosureStanding({ closure, closed }: { closure: FindingClosure | null; closed: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!closure) {
+    if (!closed) return null;
+    return (
+      <p className="mt-1.5 text-[11px] text-muted-foreground" data-testid="closure-standing" data-standing="not-served">
+        Closure not verified: the backend did not say what it stands on.
+      </p>
+    );
+  }
+  const e = closure.evidence;
+  const evidenceLine = e
+    ? `Latest retest evidence: ${e.origin} observer${e.recordedAt ? `, ${e.recordedAt}` : ""}${
+        e.contentDigest ? `, ${e.contentDigest}` : ""}.`
+    : "No retest evidence recorded.";
+  const view: Record<string, { text: string; tone: string } | null> = {
+    verified_closed: {
+      text: "Verified closed: the replayed effect is gone, and the check was proven on planted repairs",
+      tone: "border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-300",
+    },
+    closable: {
+      text: "Closable: its latest retest evidence would carry a closure",
+      tone: "border-sky-500/30 bg-sky-500/[0.08] text-sky-300",
+    },
+    not_closable: {
+      text: closed
+        ? "Closed, but its retest evidence does not carry the closure now"
+        : "A closure would be refused",
+      tone: "border-amber-500/30 bg-amber-500/[0.08] text-amber-300",
+    },
+    closed_without_retest: {
+      text: "Closed without a retest: a disposition, not an effect-verified closure",
+      tone: "border-border/60 bg-surface-1/50 text-muted-foreground",
+    },
+    not_retest_gated: null,
+    unknown: {
+      text: "Closure standing unknown: not one this console knows; not verified",
+      tone: "border-border/60 bg-surface-1/50 text-muted-foreground",
+    },
+  };
+  const shown = closure.standing in view ? view[closure.standing] : view.unknown;
+  if (!shown) return null;
+  return (
+    <div className="mt-1.5" data-testid="closure-standing" data-standing={closure.standing}>
+      <span
+        className={cn("inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-medium", shown.tone)}
+        title={evidenceLine}
+      >
+        {shown.text}
+      </span>
+      {(closure.reasons.length > 0 || e) && (
+        <button
+          className="ml-2 text-[11px] text-muted-foreground hover:text-primary"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          data-testid="closure-standing-toggle"
+        >
+          {open ? "Hide" : closure.reasons.length > 0 ? `Why (${closure.reasons.length})` : "Evidence"}
+        </button>
+      )}
+      {open && (
+        <div className="mt-1 space-y-1 text-[11px] text-muted-foreground" data-testid="closure-standing-detail">
+          <p>{evidenceLine}</p>
+          {closure.reasons.length > 0 && (
+            <ul className="list-disc pl-4">
+              {closure.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * The caveat the backend attaches to a disposition with a wrong reading worth
  * naming. Rendered as its own line, not only as a tooltip: a caveat that needs a
  * hover to find is a caveat a report screenshot does not carry.
@@ -1735,6 +1840,7 @@ function FindingRow({
         {f.receipt?.digest && <FindingReceiptMark receipt={f.receipt} />}
       </div>
       <DispositionCaveat text={f.statusMustNotImply} />
+      <ClosureStanding closure={f.closure ?? null} closed={f.status === "closed" || f.remediationState === "resolved"} />
       {/* Remediation workflow (Phase 2.3): the state chip and assignee for
           everyone; the move/assign controls for an admin. Kept on its own row,
           and labelled as workflow, so it never reads as the security verdict. */}
