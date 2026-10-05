@@ -53,6 +53,31 @@ export async function login(username: string, password: string): Promise<PublicU
   return data.user;
 }
 
+/**
+ * Set a new password (POST /api/auth/change-password). The server's sentence
+ * is the error when it refuses: wrong current password, or a new one that is
+ * too short, unchanged, a legacy default or the username.
+ */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<PublicUser> {
+  const res = await fetch(apiUrl("/api/auth/change-password"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  const body = (await res.json().catch(() => null)) as { user?: PublicUser; message?: unknown; error?: unknown } | null;
+  if (!res.ok || !body?.user) {
+    const said = typeof body?.message === "string" ? body.message : typeof body?.error === "string" ? body.error : null;
+    throw new Error(said ?? `The password was not changed (status ${res.status}).`);
+  }
+  return body.user;
+}
+
+/** Whether the account must set a new password before anything else. */
+export function mustChangePassword(user: PublicUser | null): boolean {
+  return user?.mustChangePassword === true;
+}
+
 export async function logout(): Promise<void> {
   // Clearing local state matters more than the network result, so failures here
   // are deliberately ignored.

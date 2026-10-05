@@ -1,3 +1,5 @@
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
+
 /**
  * Test environment, set before any module is imported.
  *
@@ -11,3 +13,6 @@
 process.env.ATHENA_STORAGE = "memory";
 process.env.SESSION_SECRET ||= "test-secret-that-is-at-least-32-characters";
 process.env.NODE_ENV = "test";
+// The first-run admin's password (server/init-data.ts): from the environment,
+// so first run writes no password file into the working tree.
+process.env.ATHENA_INITIAL_ADMIN_PASSWORD = TEST_ADMIN_PASSWORD;

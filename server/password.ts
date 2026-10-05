@@ -102,3 +102,38 @@ export async function dummyVerify(password: string): Promise<void> {
     // A pathological password length is not worth failing a login attempt over.
   }
 }
+
+/**
+ * The two passwords earlier releases seeded on first run, for the two
+ * accounts they created (LEGACY_DEFAULT_USERNAMES). The repository is public,
+ * so any install still holding one of them can be taken over by anyone who
+ * has read it. They are kept here -- and only here -- for two jobs: finding an
+ * install that still has one (init-data.ts flagLegacyDefaultPasswords, and a
+ * sign-in made with one), so its account is made to change it; and refusing
+ * either as a new password. Never logged, never sent, never seeded.
+ */
+export const LEGACY_DEFAULT_PASSWORDS: readonly string[] = Object.freeze(["admin123", "testpass123"]);
+
+/** The accounts earlier releases seeded with LEGACY_DEFAULT_PASSWORDS. */
+export const LEGACY_DEFAULT_USERNAMES: readonly string[] = Object.freeze(["admin", "testadmin"]);
+
+/** The shortest password a person may set, and the shortest ATHENA_INITIAL_ADMIN_PASSWORD taken. */
+export const MIN_PASSWORD_LENGTH = 12;
+
+/** Whether a password is one of the legacy defaults. */
+export function isLegacyDefaultPassword(password: string): boolean {
+  return LEGACY_DEFAULT_PASSWORDS.includes(password);
+}
+
+/**
+ * Why a new password is refused, or null when it may be set: shorter than
+ * MIN_PASSWORD_LENGTH, the same as the current one, a legacy default, or the
+ * account's own username (in any case).
+ */
+export function newPasswordRefusal(next: string, current: string, username: string): string | null {
+  if (next.length < MIN_PASSWORD_LENGTH) return `the new password must be at least ${MIN_PASSWORD_LENGTH} characters`;
+  if (next === current) return "the new password must differ from the current one";
+  if (isLegacyDefaultPassword(next)) return "the new password is a default an earlier release shipped with, which anyone can look up";
+  if (next.toLowerCase() === username.toLowerCase()) return "the new password must not be the username";
+  return null;
+}

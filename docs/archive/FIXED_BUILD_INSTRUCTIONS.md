@@ -52,9 +52,8 @@ Place icon files in the `build/` directory:
 ✅ Electron-builder can create installers
 ✅ App runs in production mode
 
-## Login Credentials
-- Username: **admin**
-- Password: **admin123**
+## First sign-in
+The first sign-in is described under "First sign-in" in the top-level README.md. This archived page once listed fixed default passwords; no release seeds them any more, and an install that still has one is made to change it.
 
 ## Notes
 - The original `npm run dist` command won't work until the package.json scripts are fixed

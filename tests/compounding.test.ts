@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import request from "supertest";
 import { makeApp } from "./helpers";
 import { resetLoginThrottle } from "../server/routes";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /**
  * A real listening socket, not supertest's per-request ephemeral one.
@@ -20,7 +21,7 @@ async function listen(): Promise<Server> {
 
 async function signInTo(server: Server) {
   const agent = request.agent(server);
-  const res = await agent.post("/api/auth/login").send({ username: "admin", password: "admin123" });
+  const res = await agent.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
   if (res.status !== 200) {
     throw new Error(`sign-in failed: ${res.status} ${JSON.stringify(res.body)}`);
   }

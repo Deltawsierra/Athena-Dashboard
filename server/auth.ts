@@ -180,6 +180,29 @@ export function reviseLiveSessions(
 }
 
 /**
+ * End every live session of one account but the one named (the session that
+ * just changed its password), in the session store (memory). Best-effort and
+ * in the background, as reviseLiveSessions is.
+ */
+export function endOtherSessions(
+  store: import("express-session").Store | undefined,
+  id: string,
+  keep: string,
+): void {
+  if (!store || typeof store.all !== "function") return;
+  try {
+    store.all((error, sessions) => {
+      if (error || !sessions || Array.isArray(sessions)) return;
+      for (const [sid, data] of Object.entries(sessions as Record<string, import("express-session").SessionData>)) {
+        if (sid !== keep && data?.userId === id) store.destroy(sid, () => undefined);
+      }
+    });
+  } catch {
+    // Nothing to hold up: the password has changed either way.
+  }
+}
+
+/**
  * Whether a request is a stop, authorised from the signed-in session alone --
  * held in memory -- and never waiting on the database: an account lookup that
  * is slow, or a database that is locked or failing, must not stand between a
@@ -256,6 +279,82 @@ function isSignatureRelay(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
   return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path);
 }
+
+/** What every route but the few allowedBeforePasswordChange names answers an account that must change its password. */
+export const PASSWORD_CHANGE_REQUIRED = "password change required";
+
+/** The answer, exactly: `{"error":"password change required"}`, with 403. */
+export function refusePasswordChangeRequired(res: import("express").Response): void {
+  res.status(403).json({ error: PASSWORD_CHANGE_REQUIRED });
+}
+
+/**
+ * What an account that must change its password may call besides a stop:
+ * changing it, signing out, and reading itself. (Sign-out and reading itself
+ * are mounted before requireAuth, so they never reach the guard; they are
+ * named here so the list is the whole of it.)
+ */
+function allowedBeforePasswordChange(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  if (req.method === "POST" && /^\/api\/auth\/(change-password|logout)$/i.test(path)) return true;
+  if (req.method === "GET" && /^\/api\/auth\/check$/i.test(path)) return true;
+  return false;
+}
+
+/** A claim transition that takes a claim down: a stop (server/assurance.ts CLAIM_TAKE_DOWN). */
+const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
+
+/**
+ * Every stop this server takes, from the request alone (method, path, body),
+ * for the guard below. Each is one the code treats as a stop elsewhere:
+ *
+ *   - isStopRequest: a scan's or a retest's Stop; engaging the kill switch;
+ *     drafting a failsafe pause, stand-down or terminate; revoking an API key;
+ *   - the stops relayed to the control plane with the failsafe service token
+ *     (`stop:` in server/failsafe.ts and server/assurance.ts): pausing a
+ *     deployment (recompute with `paused: true`); revoking or contradicting
+ *     a claim; and the reads a second operator stops from -- the failsafe
+ *     state, its commands, and one command;
+ *   - a signature relay and a command's withdrawal, which are stops or not by
+ *     the command's action, which only the control plane knows: they pass
+ *     here, and their own handlers refuse this account once the action is
+ *     known not to be a stop's (requireAdminUnlessStop; the cancel route,
+ *     where withdrawing a resume or a release is the stop).
+ */
+export function isStopForPasswordGuard(req: Request): boolean {
+  if (isStopRequest(req) || isSignatureRelay(req)) return true;
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  if (req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/cancel$/i.test(path)) return true;
+  if (req.method === "GET" && /^\/api\/failsafe\/(state|commands|commands\/[^/]+)$/i.test(path)) return true;
+  if (req.method === "POST" && /^\/api\/assurance\/deployments\/[^/]+\/recompute$/i.test(path)) return body.paused === true;
+  if (req.method === "POST" && /^\/api\/assurance\/claims\/[^/]+\/transition$/i.test(path)) {
+    return typeof body.toStatus === "string" && CLAIM_TAKE_DOWN.has(body.toStatus.trim());
+  }
+  return false;
+}
+
+/**
+ * Refuses every request from an account that must change its password
+ * (users.mustChangePassword) with 403 `{"error":"password change required"}`,
+ * except: changing the password, signing out, reading itself -- and EVERY
+ * stop (isStopForPasswordGuard), decided before anything else and from the
+ * request alone, so a stop waits on nothing here and is never refused by it.
+ *
+ * Mounted after requireAuth, which has read the account (req.currentUser)
+ * for every request that is not a stop; this reads nothing.
+ */
+export const requirePasswordChanged: RequestHandler = (req, res, next) => {
+  if (isStopForPasswordGuard(req) || allowedBeforePasswordChange(req)) {
+    next();
+    return;
+  }
+  if (req.currentUser?.mustChangePassword === true) {
+    refusePasswordChangeRequired(res);
+    return;
+  }
+  next();
+};
 
 /** Rejects the request with 401 unless a live, active account is behind it. */
 export const requireAuth: RequestHandler = (req, res, next) => {
@@ -364,6 +463,11 @@ export function requireAdminUnlessStop(kindOf: (req: Request) => Promise<StopKin
       }
       if (user.role !== "admin") {
         res.status(403).json({ message: "Admin role required" });
+        return;
+      }
+      // Known not to be a stop's: an account that must change its password is refused it.
+      if (kind === "not_stop" && user.mustChangePassword === true) {
+        refusePasswordChangeRequired(res);
         return;
       }
       if (kind === "possible_stop") req.relayedAsPossibleStop = true;

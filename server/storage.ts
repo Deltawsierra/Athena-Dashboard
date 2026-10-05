@@ -289,6 +289,7 @@ export class MemStorage implements IStorage {
     const user: User = {
       email: null,
       isActive: true,
+      mustChangePassword: false,
       ...insertUser,
       password: await hashPassword(insertUser.password),
       id: randomUUID(),

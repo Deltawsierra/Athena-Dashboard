@@ -89,13 +89,8 @@ Make sure the server bundle exists:
 - Check if `dist/server-electron.mjs` exists
 - If not, run: `node build-electron-server.cjs`
 
-## Default Login Credentials
-- Username: `admin`
-- Password: `admin123`
-
-Alternative:
-- Username: `testadmin`  
-- Password: `testpass123`
+## First sign-in
+The first sign-in is described under "First sign-in" in the top-level README.md. This archived page once listed fixed default passwords; no release seeds them any more, and an install that still has one is made to change it.
 
 ## Creating an Installer (Optional)
 

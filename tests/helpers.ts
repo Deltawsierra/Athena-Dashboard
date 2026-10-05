@@ -1,5 +1,8 @@
 import type { Express } from "express";
 import request from "supertest";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+
+export { TEST_ADMIN_PASSWORD };
 
 /** Boots an app with in-memory storage and a known session secret. */
 export async function makeApp(): Promise<Express> {
@@ -12,6 +15,7 @@ export async function makeApp(): Promise<Express> {
 
   const app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   return app;
 }
 
@@ -19,7 +23,7 @@ export async function makeApp(): Promise<Express> {
 export async function signIn(
   app: Express,
   username = "admin",
-  password = "admin123",
+  password = TEST_ADMIN_PASSWORD,
 ): Promise<ReturnType<typeof request.agent>> {
   const agent = request.agent(app);
   const res = await agent.post("/api/auth/login").send({ username, password });

@@ -5,7 +5,9 @@ import { openReport } from "./db-sqlite";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
   requireAuth, requireAdmin, requireAdminUnlessStop, type StopKind, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
+  requirePasswordChanged, refusePasswordChangeRequired, PASSWORD_CHANGE_REQUIRED, endOtherSessions,
 } from "./auth";
+import { verifyPassword, isLegacyDefaultPassword, newPasswordRefusal } from "./password";
 import * as assistant from "./assistant";
 import * as settings from "./settings";
 import * as engine from "./engine";
@@ -1289,6 +1291,12 @@ const loginSchema = z.object({
   password: z.string().min(1).max(256),
 });
 
+/** POST /api/auth/change-password. The rules a new password must meet are password.ts newPasswordRefusal. */
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(1).max(256),
+}).strict();
+
 // The renderer is same-origin now, so no cross-origin browser client is
 // expected. The set is kept empty rather than removed so that adding one
 // later is a one-line change rather than a rediscovery.
@@ -1323,7 +1331,11 @@ async function parentMissing(res: Response, clientId?: string | null, siteId?: s
  * The AI control route itself is exempt, or the switch could never be turned
  * back off.
  */
-const killSwitchExempt = new Set(["/api/ai-control", "/api/auth/login", "/api/auth/logout"]);
+// Changing a password writes nothing an AI system or a scan acts on, and an
+// account made to change one (a legacy default, a first-run password) must be
+// able to secure itself while the switch is engaged -- an emergency may be
+// the very takeover that password invited.
+const killSwitchExempt = new Set(["/api/ai-control", "/api/auth/login", "/api/auth/logout", "/api/auth/change-password"]);
 
 /**
  * The failsafe actions that stop an engine, and the two that put one back to
@@ -2273,10 +2285,25 @@ export function registerRoutes(app: Express): void {
       recordLoginFailure(key, now);
       recordLoginFailure(byAddress, now);
 
-      const user = await storage.validateUser(parsed.data.username, parsed.data.password);
+      let user = await storage.validateUser(parsed.data.username, parsed.data.password);
       if (!user || !user.isActive) {
         res.status(401).json({ message: "Invalid username or password" });
         return;
+      }
+
+      // Signed in with a default an earlier release shipped with, which anyone
+      // who has read the public repository knows: the account must set a new
+      // password before it does anything but sign out and send stops. The
+      // startup check (init-data.ts flagLegacyDefaultPasswords) finds the same
+      // accounts; this also catches one signed in before that check ran.
+      if (!user.mustChangePassword && isLegacyDefaultPassword(parsed.data.password)) {
+        try {
+          user = (await storage.updateUser(user.id, { mustChangePassword: true })) ?? user;
+          console.warn(`[auth] The account "${user.username}" signed in with a legacy default password: it must set a new one.`);
+        } catch (cause) {
+          console.error(`[auth] The account "${user.username}" signed in with a legacy default password, ` +
+            `and could not be marked to change it: ${cause instanceof Error ? cause.message : String(cause)}`);
+        }
       }
 
       loginFailures.delete(key);
@@ -2352,8 +2379,64 @@ export function registerRoutes(app: Express): void {
 
   app.use("/api", requireAuth);
 
+  // An account that must change its password may do that, sign out, read
+  // itself and send every stop; everything else answers 403 (auth.ts).
+  app.use("/api", requirePasswordChanged);
+
   // ...and, for writes, that the kill switch is not engaged.
   app.use("/api", enforceKillSwitch);
+
+  // ==== CHANGING ONE'S OWN PASSWORD ====
+  // The one write an account that must change its password may make. The
+  // current password is verified (and failures counted, as a sign-in's are);
+  // the new one must meet newPasswordRefusal. Setting it clears
+  // mustChangePassword, and ends the account's other sessions: one signed in
+  // with the old password -- by whoever else knew it -- holds nothing after.
+  app.post(
+    "/api/auth/change-password",
+    asyncHandler(async (req, res) => {
+      const parsed = changePasswordSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ message: "currentPassword and newPassword are required" });
+        return;
+      }
+      const user = req.currentUser;
+      if (!user || !req.session?.userId || req.session.userId !== user.id) {
+        res.status(403).json({ message: "A password is changed from a signed-in session, not with an API key" });
+        return;
+      }
+      const now = Date.now();
+      const key = loginKey(req, user.username);
+      if (loginBlocked(key, now)) {
+        res.status(429).json({ message: "Too many failed attempts. Try again later." });
+        return;
+      }
+      recordLoginFailure(key, now);
+      const { currentPassword, newPassword } = parsed.data;
+      if (!(await verifyPassword(currentPassword, user.password)).ok) {
+        res.status(400).json({ message: "The password was not changed: the current password is incorrect." });
+        return;
+      }
+      loginFailures.delete(key);
+      const refusal = newPasswordRefusal(newPassword, currentPassword, user.username);
+      if (refusal !== null) {
+        res.status(400).json({ message: `The password was not changed: ${refusal}.` });
+        return;
+      }
+      const updated = await storage.updateUser(user.id, { password: newPassword, mustChangePassword: false });
+      if (!updated) {
+        notFound(res, "User");
+        return;
+      }
+      noteAccount(updated);
+      endOtherSessions(req.sessionStore, user.id, req.sessionID);
+      await storage.createActivityLog({
+        action: "password_changed", entityType: "user", entityId: user.id,
+        details: { required: user.mustChangePassword === true }, ...actor(req),
+      });
+      res.json({ user: publicUser(updated) });
+    }),
+  );
 
   // ==== CLIENTS ====
   app.get("/api/clients", asyncHandler(async (_req, res) => {
@@ -4039,6 +4122,7 @@ export function registerRoutes(app: Express): void {
       if (unread !== null) refused = { status: 503, why: `the account behind this session could not be read (${unread})` };
       else if (!account) refused = { status: 401, why: "the account behind this session is no longer active" };
       else if (account.role !== "admin") refused = { status: 403, why: "the account behind this session is no longer an admin" };
+      else if (account.mustChangePassword === true) refused = { status: 403, why: PASSWORD_CHANGE_REQUIRED };
       else if (notStored !== null) refused = { status: 500, why: "the kill switch itself could not be stored" };
       else if (overtaken) refused = { status: 409, why: SUPERSEDED };
       else {
@@ -4507,6 +4591,7 @@ export function registerRoutes(app: Express): void {
     }
     if (!account) return { why: "the account behind this session is not an active account now", status: 401 };
     if (account.role !== "admin") return { why: "the account behind this session is not an admin's now", status: 403 };
+    if (account.mustChangePassword === true) return { why: PASSWORD_CHANGE_REQUIRED, status: 403 };
     return null;
   }
 
@@ -4624,7 +4709,16 @@ export function registerRoutes(app: Express): void {
   }));
 
   app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
-    if (await killSwitchRefusesCommand(res, "cancel", await actionOfRequest(req))) return;
+    const read = await actionOfRequest(req);
+    if (await killSwitchRefusesCommand(res, "cancel", read)) return;
+    // Withdrawing a resume or a release keeps an engine stopped: a stop, which
+    // an account that must change its password may send -- as may one whose
+    // action was not learnt in time, which may be a recovery's. Withdrawing a
+    // pause, a stand-down or a terminate is not a stop.
+    if (req.currentUser?.mustChangePassword === true && read.action !== null && !FAILSAFE_RECOVER_ACTIONS.has(read.action)) {
+      refusePasswordChangeRequired(res);
+      return;
+    }
     let result;
     try {
       result = await failsafe.cancelCommand(req.params.uuid);

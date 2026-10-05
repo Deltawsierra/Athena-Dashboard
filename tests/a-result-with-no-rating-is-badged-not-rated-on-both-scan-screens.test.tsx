@@ -31,6 +31,7 @@ import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 const UNRATED = { type: "banner", message: "Server header" };
 const PADDED_HIGH = { type: "sqli", severity: " high", message: "Injectable id" };
@@ -82,7 +83,7 @@ beforeAll(async () => {
   const login = await fetch(`${base}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "admin", password: "admin123" }),
+    body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
   });
   expect(login.status).toBe(200);
   session = (login.headers.get("set-cookie") ?? "").split(";")[0];

@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -95,8 +96,9 @@ async function boot(runId: string) {
   const { initializeDefaultData } = await import("../server/init-data");
   const app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   const agent = request.agent(app);
-  expect((await agent.post("/api/auth/login").send({ username: "admin", password: "admin123" })).status).toBe(200);
+  expect((await agent.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD })).status).toBe(200);
   const storage = (await import("../server/storage-unified")).storage;
   const auth = await import("../server/auth");
   const client = await storage.createClient({ name: "Locked", company: "Locked", email: "l@l.test" });

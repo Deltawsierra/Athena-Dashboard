@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * SAFETY: `GET /api/tests` reads the whole table with one unbounded,
@@ -85,8 +86,9 @@ describe("a tests table at estate scale", () => {
     const { initializeDefaultData } = await import("../server/init-data");
     const app = createApp();
     await initializeDefaultData();
+    await adminHasSetPassword();
     const agent = request.agent(app);
-    expect((await agent.post("/api/auth/login").send({ username: "admin", password: "admin123" })).status).toBe(200);
+    expect((await agent.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD })).status).toBe(200);
     const storage = (await import("../server/storage-unified")).storage;
 
     const client = await storage.createClient({ name: "Estate", company: "Estate", email: "e@e.test" });

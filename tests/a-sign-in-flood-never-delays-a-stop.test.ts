@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "child_process";
 import http from "http";
 import type { AddressInfo } from "net";
 import path from "path";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * SAFETY: password verification (server/password.ts) derives a key with
@@ -131,13 +132,14 @@ async function bootApp(engineUrl: string): Promise<{ client: { id: string } }> {
   const { resetLoginThrottle } = await import("../server/routes");
   const app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   resetLoginThrottle();
 
   server = http.createServer(app);
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
   appPort = (server.address() as AddressInfo).port;
 
-  const login = await call("POST", "/api/auth/login", { username: "admin", password: "admin123" });
+  const login = await call("POST", "/api/auth/login", { username: "admin", password: TEST_ADMIN_PASSWORD });
   expect(login.status).toBe(200);
   sessionCookie = login.setCookie!.split(";")[0];
 

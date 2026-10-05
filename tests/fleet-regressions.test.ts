@@ -4,6 +4,7 @@ import request from "supertest";
 import { makeApp, signIn } from "./helpers";
 import { verifyPassword } from "../server/password";
 import { resetLoginThrottle } from "../server/routes";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 // The throttle counts per address, and supertest presents one address for the
 // whole file, so a test that deliberately trips it would block the sign-ins of
@@ -124,7 +125,7 @@ describe("login throttling", () => {
 
     const real = await request(app)
       .post("/api/auth/login")
-      .send({ username: "admin", password: "admin123" });
+      .send({ username: "admin", password: TEST_ADMIN_PASSWORD });
     expect(real.status).toBe(200);
   });
 

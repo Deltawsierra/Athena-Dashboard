@@ -6,6 +6,7 @@ import request from "supertest";
 import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * Round two of athena-engine PR 71's dashboard half: every Stop goes to the
@@ -105,8 +106,9 @@ beforeAll(async () => {
   const { initializeDefaultData } = await import("../server/init-data");
   app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   admin = request.agent(app);
-  const login = await admin.post("/api/auth/login").send({ username: "admin", password: "admin123" });
+  const login = await admin.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
   expect(login.status).toBe(200);
   adminId = (await admin.get("/api/auth/check")).body.user.id;
   expect((await admin.post("/api/users").send({ username: "analyst2", password: "analyst-password", role: "user", email: "a2@a.test" })).status).toBe(201);

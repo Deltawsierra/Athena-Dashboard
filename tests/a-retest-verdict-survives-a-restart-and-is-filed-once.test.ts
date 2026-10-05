@@ -7,6 +7,7 @@ import request from "supertest";
 import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -121,8 +122,9 @@ async function boot(fresh: boolean): Promise<Instance> {
   const { initializeDefaultData } = await import("../server/init-data");
   const app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   const agent = request.agent(app);
-  const login = await agent.post("/api/auth/login").send({ username: "admin", password: "admin123" });
+  const login = await agent.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
   expect(login.status).toBe(200);
   const retests = await import("../server/retests");
   retests.retestWatch.intervalMs = 25;

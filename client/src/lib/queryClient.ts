@@ -101,11 +101,31 @@ function notifyUnauthorized(): void {
   unauthorizedListeners.forEach((listener) => listener());
 }
 
+/** The server's answer to an account that must change its password (server/auth.ts). */
+export const PASSWORD_CHANGE_REQUIRED = "password change required";
+
+const passwordChangeListeners = new Set<UnauthorizedListener>();
+
+/**
+ * Be told when a request comes back 403 `{"error":"password change required"}`:
+ * the account was marked to change its password while the app was open (an
+ * install found still on a legacy default), and the app shows the
+ * change-password screen.
+ */
+export function onPasswordChangeRequired(listener: UnauthorizedListener): () => void {
+  passwordChangeListeners.add(listener);
+  return () => passwordChangeListeners.delete(listener);
+}
+
 export async function throwIfResNotOk(res: Response): Promise<void> {
   if (res.ok) return;
   if (res.status === 401) {
     notifyUnauthorized();
     throw new UnauthorizedError();
+  }
+  if (res.status === 403) {
+    const refusal = (await res.clone().json().catch(() => null)) as { error?: unknown } | null;
+    if (refusal && refusal.error === PASSWORD_CHANGE_REQUIRED) passwordChangeListeners.forEach((listener) => listener());
   }
 
   // Prefer the server's JSON `message`; then its `error` (the assurance and

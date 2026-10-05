@@ -92,6 +92,7 @@ export class SqliteStorage implements IStorage {
     const row: User = {
       email: null,
       isActive: true,
+      mustChangePassword: false,
       ...user,
       password: await hashPassword(user.password),
       id: crypto.randomUUID(),

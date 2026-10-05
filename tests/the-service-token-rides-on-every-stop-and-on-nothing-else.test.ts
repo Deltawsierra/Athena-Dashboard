@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { makeApp, signIn } from "./helpers";
 import { controlPlaneStandIn, newServiceToken, type ControlPlaneStandIn, type Seen } from "./helpers/control-plane-stand-in";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /**
  * The failsafe service token (#337): on every stop this server relays to the
@@ -187,7 +188,7 @@ async function walkEveryRoute(app: Express, admin: ReturnType<typeof request.age
 
   // The admin's session, for a method the agent has no function for: its `query` sets a query string,
   // so an HTTP QUERY (which Express routes, on a Node that knows it) goes as a bare request with the cookie.
-  const login = await request(app).post("/api/auth/login").send({ username: "admin", password: "admin123" });
+  const login = await request(app).post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
   const cookie = login.headers["set-cookie"] as unknown as string[];
   const answers: Walked["answers"] = [];
   const send = async (agent: ReturnType<typeof request.agent>, route: string, url: string, body: unknown) => {
