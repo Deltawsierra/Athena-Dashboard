@@ -123,6 +123,8 @@ describe("the change-password screen comes first and keeps the kill switch", () 
     await waitFor(() => expect(screen.getByTestId("button-draft-stand_down")).toBeTruthy());
     expect(screen.getByTestId("input-new-password")).toBeTruthy();
     expect(sent.some((one) => one.url.startsWith("/api/failsafe/status"))).toBe(true);
+    // The activity history is not a stop, and is refused to this account: it is not asked for.
+    expect(sent.some((one) => one.url.startsWith("/api/failsafe/audit"))).toBe(false);
   });
 
   it("an account that is not an admin is offered neither the kill switch nor the console", async () => {

@@ -631,7 +631,22 @@ function CommandConsole({
 
 /* ---- the page --------------------------------------------------------- */
 
+interface FailsafeProps {
+  /**
+   * False on the change-password screen: an account that must change its
+   * password may send every stop from this console, and is refused the activity
+   * history (not a stop), so it is not read there.
+   */
+  showActivity?: boolean;
+}
+
+/** The failsafe console page, as the app's route mounts it. */
 export default function Failsafe() {
+  return <FailsafeConsole />;
+}
+
+/** The console itself, as the page and the change-password screen mount it. */
+export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
   const { toast } = useToast();
   // The client the page is mounted on and reads through: what it seeds and
   // invalidates reaches the queries it draws.
@@ -711,11 +726,11 @@ export default function Failsafe() {
 
   const audit$ = loaded(useQuery<FailsafeAuditEvent[]>({
     queryKey: ["/api/failsafe/audit"],
-    enabled: canOperate,
+    enabled: canOperate && showActivity,
     refetchInterval: 15_000,
   }));
-  const audit = canOperate && audit$.state === "ready" ? audit$.data : undefined;
-  const auditFailed = canOperate && audit$.state === "error";
+  const audit = canOperate && showActivity && audit$.state === "ready" ? audit$.data : undefined;
+  const auditFailed = canOperate && showActivity && audit$.state === "error";
 
   // The command counts and the governor state come from the engine's state
   // read. Until it has answered -- the control plane not ready, no engine
@@ -993,7 +1008,9 @@ export default function Failsafe() {
                 empty -- not one that failed, has not run, or cannot run. */}
             {!audit ? (
               <div className="py-8 text-center text-sm text-muted-foreground">
-                {auditFailed
+                {!showActivity
+                  ? "Failsafe activity is shown once the password is changed. Every stop works from here now."
+                  : auditFailed
                   ? `Could not load failsafe activity: ${audit$.state === "error" ? audit$.message : ""}`
                   : !canOperate
                     ? "Failsafe activity is not readable until the control plane is ready."

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import GlassCard from "@/components/GlassCard";
-import Failsafe from "@/pages/Failsafe";
+import { FailsafeConsole } from "@/pages/Failsafe";
 import { changePassword } from "@/utils/auth";
 import { apiFetch } from "@/lib/queryClient";
 import type { PublicUser } from "@shared/schema";
@@ -143,7 +143,7 @@ export default function ChangePassword({ user, admin, onChanged, onLogout }: Cha
       </div>
       {admin && consoleOpen && (
         <div className="w-full max-w-6xl relative z-10 mt-4" data-testid="change-password-failsafe-console">
-          <Failsafe />
+          <FailsafeConsole showActivity={false} />
         </div>
       )}
     </div>

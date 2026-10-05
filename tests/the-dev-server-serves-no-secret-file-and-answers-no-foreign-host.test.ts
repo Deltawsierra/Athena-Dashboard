@@ -49,8 +49,17 @@ const SECRET_FILES = [
   "initial-admin-password.txt",
   "athena.db",
   "athena.db-wal",
+  "athena.db.bak",
   "session-secret",
   ".env",
+  ".npmrc",
+  ".secrets.baseline",
+  "server.key",
+  "tls.cert",
+  "dev.sqlite-wal",
+  "dev.sqlite-journal",
+  "dev.sqlite3-journal",
+  "app.log",
 ];
 
 beforeAll(async () => {
@@ -96,6 +105,16 @@ describe("the dev server", () => {
     expect(exits).not.toHaveBeenCalled();
     expect((await get(`/@fs${path.join(dir, "harmless.txt")}?raw`)).status).toBe(200);
   });
+
+  it("still serves the app it exists for: the page, its entry module, and the dependencies Vite prebundled", async () => {
+    const page = await get("/");
+    expect(page.status).toBe(200);
+    const entry = await get("/src/main.tsx");
+    expect(entry.status).toBe(200);
+    const dep = /["']((?:\/@fs[^"']*)?\/node_modules\/\.vite\/deps\/[^"']+)["']/.exec(entry.body)?.[1];
+    expect(dep, "the entry imports a prebundled dependency").toBeTruthy();
+    expect((await get(dep!)).status).toBe(200);
+  }, 60_000);
 
   it("answers no Host it does not know: a page on another site cannot reach it by rebinding a name", async () => {
     expect((await get("/", "attacker.example")).status).toBe(403);

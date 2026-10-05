@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import type { Request, RequestHandler } from "express";
 import "express-session";
 import { storage } from "./storage-unified";
@@ -9,6 +10,10 @@ declare module "express-session" {
     userId?: string;
     username?: string;
     role?: string;
+    /** The password this session signed in under (passwordStamp): it holds nothing once that changes. */
+    passwordStamp?: string;
+    /** Marked at sign-in to change its password when the mark could not be written to the account. */
+    mustChangePassword?: boolean;
   }
 }
 
@@ -44,9 +49,43 @@ async function loadSessionUser(req: Request): Promise<User | undefined> {
   if (user) noteAccount(user);
   else noteAccountDeleted(id);
   if (!user || !user.isActive) return undefined;
+  const account = asTheSessionHoldsIt(req, user);
+  if (!account) return undefined;
+  req.currentUser = account;
+  return account;
+}
 
-  req.currentUser = user;
-  return user;
+/**
+ * The account ``user`` as the request's session may act for it, or undefined
+ * when the session holds nothing for it:
+ *
+ *   - signed in under a password the account no longer has -- a sign-in that
+ *     verified the old password while it was being changed, or a session an
+ *     admin's reset left behind -- it holds nothing but its stops, which are
+ *     authorised from memory (sessionUser), never here. Ending the other
+ *     sessions at a change is a sweep, and a sign-in still in flight was saved
+ *     after it (#65 review round 2, N1);
+ *   - a mark its sign-in could not write to the account is held in the session,
+ *     and read as the account's own (N4).
+ *
+ * Every reader of the session's account goes through this: the guards, and
+ * GET /api/auth/check.
+ */
+export function asTheSessionHoldsIt(req: Request, user: User): User | undefined {
+  if (req.session?.passwordStamp !== passwordStamp(user.password)) return undefined;
+  return req.session.mustChangePassword === true && !user.mustChangePassword
+    ? { ...user, mustChangePassword: true }
+    : user;
+}
+
+/**
+ * A short digest of a stored password hash, kept in the session at sign-in. A
+ * session whose stamp is not the account's current one signed in under a password
+ * the account no longer has. Never the hash itself: the session store holds only
+ * this.
+ */
+export function passwordStamp(hash: string): string {
+  return crypto.createHash("sha256").update(`athena-session-password:${hash}`).digest("hex").slice(0, 32);
 }
 
 /**

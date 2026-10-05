@@ -5,7 +5,8 @@ import { openReport } from "./db-sqlite";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
   requireAuth, requireAdmin, requireAdminUnlessStop, type StopKind, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
-  requirePasswordChanged, refusePasswordChangeRequired, PASSWORD_CHANGE_REQUIRED, endOtherSessions,
+  requirePasswordChanged, refusePasswordChangeRequired, PASSWORD_CHANGE_REQUIRED, endOtherSessions, passwordStamp,
+  asTheSessionHoldsIt,
 } from "./auth";
 import { verifyPassword, isLegacyDefaultPassword, newPasswordRefusal } from "./password";
 import * as assistant from "./assistant";
@@ -1297,6 +1298,22 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(1).max(256),
 }).strict();
 
+/** The change of one account's password in flight, by account: the next waits for it (N2). */
+const passwordChanges = new Map<string, Promise<void>>();
+
+/** Runs ``change`` once every earlier change of this account's password has finished. */
+async function changingPasswordOf(userId: string, change: () => Promise<void>): Promise<void> {
+  const before = passwordChanges.get(userId) ?? Promise.resolve();
+  const mine = before.catch(() => undefined).then(change);
+  const settled = mine.catch(() => undefined);
+  passwordChanges.set(userId, settled);
+  try {
+    await mine;
+  } finally {
+    if (passwordChanges.get(userId) === settled) passwordChanges.delete(userId);
+  }
+}
+
 /**
  * Revokes every live API key the account minted, and names each revoked
  * (its name and prefix: never the secret, which is not stored). A key
@@ -2314,27 +2331,32 @@ export function registerRoutes(app: Express): void {
       // password before it does anything but sign out and send stops. The
       // startup check (init-data.ts flagLegacyDefaultPasswords) finds the same
       // accounts; this also catches one signed in before that check ran.
-      // When the mark cannot be written the sign-in is refused: let in
-      // unmarked, the account would have everything the default's publisher
-      // could take. (For an account renamed from "admin", this check is the
-      // only one that finds it.) A stop needs no sign-in: it carries the
-      // failsafe service token.
+      // When the mark cannot be written to the account it is held in the
+      // session instead (auth.ts loadSessionUser reads it as the account's):
+      // let in unmarked, the account would have everything the default's
+      // publisher could take; refused, an admin on a legacy default could not
+      // reach the kill switch or a scan's Stop while the database was failing.
+      // (For an account renamed from "admin", this check is the only one that
+      // finds it.)
+      // The password this sign-in verified: the session holds nothing once the
+      // account's password is another (auth.ts passwordStamp).
+      const verifiedHash = user.password;
+      let markedInSession = false;
       if (!user.mustChangePassword && isLegacyDefaultPassword(parsed.data.password)) {
         let marked: User | undefined;
         try {
           marked = await storage.updateUser(user.id, { mustChangePassword: true });
         } catch (cause) {
           console.error(`[auth] The account "${user.username}" signed in with a legacy default password, ` +
-            `and could not be marked to change it: ${cause instanceof Error ? cause.message : String(cause)}`);
+            `and could not be marked to change it (the mark is held in its session): ${
+              cause instanceof Error ? cause.message : String(cause)}`);
         }
-        if (marked?.mustChangePassword !== true) {
-          res.status(503).json({
-            message: "This account's password is a default an earlier release shipped with, and the account could not " +
-              "be marked to change it. You were not signed in; try again.",
-          });
-          return;
+        if (marked?.mustChangePassword === true) {
+          user = marked;
+        } else {
+          user = { ...user, mustChangePassword: true };
+          markedInSession = true;
         }
-        user = marked;
         console.warn(`[auth] The account "${user.username}" signed in with a legacy default password: it must set a new one.`);
       }
 
@@ -2344,6 +2366,8 @@ export function registerRoutes(app: Express): void {
       req.session.userId = user.id;
       req.session.username = user.username;
       req.session.role = user.role;
+      req.session.passwordStamp = passwordStamp(verifiedHash);
+      if (markedInSession) req.session.mustChangePassword = true;
       // The account as it is now: what this session's stops are authorised by (auth.ts).
       noteAccount(user);
 
@@ -2381,8 +2405,9 @@ export function registerRoutes(app: Express): void {
     "/api/auth/check",
     asyncHandler(async (req, res) => {
       if (req.session?.userId) {
-        const user = await storage.getUser(req.session.userId);
-        if (user && user.isActive) {
+        const stored = await storage.getUser(req.session.userId);
+        const user = stored && stored.isActive ? asTheSessionHoldsIt(req, stored) : undefined;
+        if (user) {
           res.json({ authenticated: true, user: publicUser(user) });
           return;
         }
@@ -2445,44 +2470,61 @@ export function registerRoutes(app: Express): void {
       }
       recordLoginFailure(key, now);
       const { currentPassword, newPassword } = parsed.data;
-      if (!(await verifyPassword(currentPassword, user.password)).ok) {
-        res.status(400).json({ message: "The password was not changed: the current password is incorrect." });
-        return;
-      }
-      loginFailures.delete(key);
-      const refusal = newPasswordRefusal(newPassword, currentPassword, user.username);
-      if (refusal !== null) {
-        res.status(400).json({ message: `The password was not changed: ${refusal}.` });
-        return;
-      }
-      // A change the account was made to make: its password was one others
-      // could know, so an API key minted under it is a standing grant of the
-      // same takeover. Its keys are revoked before the password is written;
-      // when that fails, nothing is changed and the account stays marked.
-      const required = user.mustChangePassword === true;
-      let revokedKeys: string[] = [];
-      if (required) {
-        try {
-          revokedKeys = await revokeApiKeysOf(user.id);
-        } catch (cause) {
-          res.status(503).json({
-            message: `The password was not changed: this account's API keys could not be revoked (${causeOf(cause)}). Try again.`,
-          });
+      // One change at a time per account, verified against the password as it is
+      // when this change takes its turn: two changes sent together with the same
+      // current password both verified it and both wrote, and the one written last
+      // stood while the other was told it had changed (#65 review round 2, N2).
+      // (In this process: dashboards sharing a database each serialise their own.)
+      await changingPasswordOf(user.id, async () => {
+        const account = await storage.getUser(user.id);
+        if (!account || !account.isActive) {
+          res.status(401).json({ message: "Authentication required" });
           return;
         }
-      }
-      const updated = await storage.updateUser(user.id, { password: newPassword, mustChangePassword: false });
-      if (!updated) {
-        notFound(res, "User");
-        return;
-      }
-      noteAccount(updated);
-      endOtherSessions(req.sessionStore, user.id, req.sessionID);
-      await storage.createActivityLog({
-        action: "password_changed", entityType: "user", entityId: user.id,
-        details: { required, ...(required ? { apiKeysRevoked: revokedKeys } : {}) }, ...actor(req),
+        if (!(await verifyPassword(currentPassword, account.password)).ok) {
+          res.status(400).json({ message: "The password was not changed: the current password is incorrect." });
+          return;
+        }
+        loginFailures.delete(key);
+        const refusal = newPasswordRefusal(newPassword, currentPassword, account.username);
+        if (refusal !== null) {
+          res.status(400).json({ message: `The password was not changed: ${refusal}.` });
+          return;
+        }
+        // A change the account was made to make -- marked on the account, or in this
+        // session when the mark could not be written: its password was one others
+        // could know, so an API key minted under it is a standing grant of the same
+        // takeover. Its keys are revoked before the password is written; when that
+        // fails, nothing is changed and the account stays marked.
+        const required = account.mustChangePassword === true || req.session.mustChangePassword === true;
+        let revokedKeys: string[] = [];
+        if (required) {
+          try {
+            revokedKeys = await revokeApiKeysOf(account.id);
+          } catch (cause) {
+            res.status(503).json({
+              message: `The password was not changed: this account's API keys could not be revoked (${causeOf(cause)}). Try again.`,
+            });
+            return;
+          }
+        }
+        const updated = await storage.updateUser(account.id, { password: newPassword, mustChangePassword: false });
+        if (!updated) {
+          notFound(res, "User");
+          return;
+        }
+        // This session goes on under the new password; every other one holds nothing
+        // but its stops (auth.ts passwordStamp), whenever it was saved.
+        req.session.passwordStamp = passwordStamp(updated.password);
+        delete req.session.mustChangePassword;
+        noteAccount(updated);
+        endOtherSessions(req.sessionStore, account.id, req.sessionID);
+        await storage.createActivityLog({
+          action: "password_changed", entityType: "user", entityId: account.id,
+          details: { required, ...(required ? { apiKeysRevoked: revokedKeys } : {}) }, ...actor(req),
+        });
+        res.json({ user: publicUser(updated) });
       });
-      res.json({ user: publicUser(updated) });
     }),
   );
 

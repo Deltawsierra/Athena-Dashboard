@@ -28,7 +28,13 @@ export function log(message: string, source = "express") {
  */
 export const DEV_SERVER_DENY: readonly string[] = Object.freeze([
   ".env", ".env.*", "*.{crt,pem}", "**/.git/**",
-  "**/*.db", "**/*.db-*", "**/*.sqlite", "**/*.sqlite3",
+  // Every dotfile and dot-directory (.npmrc, .secrets.baseline, .config/): the
+  // config's own rule, which this replaced and dropped (#65 review round 2, N3).
+  "**/.*",
+  "**/*.{key,cert,crt,pem,p12,pfx}",
+  "**/*.db", "**/*.db-*", "**/*.db.*",
+  "**/*.sqlite", "**/*.sqlite3", "**/*.sqlite-*", "**/*.sqlite3-*",
+  "**/*.log",
   "**/initial-admin-password.txt",
   "**/session-secret",
 ]);

@@ -115,10 +115,10 @@ describe("a sign-in with a legacy default", () => {
     return { app, storage };
   }
 
-  it("is refused when the account cannot be marked to change it: never let in unmarked", async () => {
+  it("is let in marked in its session when the mark cannot be written: refused all but its stops, never let in unmarked", async () => {
     const { app, storage } = await renamedAdminOnALegacyDefault();
     const real = storage.updateUser.bind(storage);
-    vi.spyOn(storage, "updateUser").mockImplementation(async (id, patch) => {
+    const failing = vi.spyOn(storage, "updateUser").mockImplementation(async (id, patch) => {
       if ((patch as { mustChangePassword?: boolean }).mustChangePassword === true) throw new Error("SQLITE_BUSY: database is locked");
       return real(id, patch);
     });
@@ -126,9 +126,32 @@ describe("a sign-in with a legacy default", () => {
 
     const login = await agent.post("/api/auth/login").send({ username: "root", password: "admin123" }); // pragma: allowlist secret
 
-    expect(login.status).toBe(503);
-    expect(login.body.message).toMatch(/could not be marked.*not signed in/);
-    expect((await agent.get("/api/users")).status).toBe(401);
+    expect(login.status).toBe(200);
+    expect(login.body.user.mustChangePassword).toBe(true);
+    expect((await agent.get("/api/users")).body).toEqual({ error: "password change required" });
+    expect((await agent.get("/api/auth/check")).body.user.mustChangePassword).toBe(true);
+    // A stop goes, the database failing or not: the kill switch.
+    expect((await agent.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
+    // The database recovers: the mark held in the session still stands until the password changes.
+    failing.mockRestore();
+    expect((await agent.get("/api/users")).body).toEqual({ error: "password change required" });
+    const changed = await agent.post("/api/auth/change-password")
+      .send({ currentPassword: "admin123", newPassword: "a-new-and-long-root-password" }); // pragma: allowlist secret
+    expect(changed.status).toBe(200);
+    expect((await agent.get("/api/users")).status).toBe(200);
+  });
+
+  it("whose mark could not be written is not counted as a failed sign-in", async () => {
+    const { app, storage } = await renamedAdminOnALegacyDefault();
+    const real = storage.updateUser.bind(storage);
+    vi.spyOn(storage, "updateUser").mockImplementation(async (id, patch) => {
+      if ((patch as { mustChangePassword?: boolean }).mustChangePassword === true) throw new Error("SQLITE_BUSY: database is locked");
+      return real(id, patch);
+    });
+    for (let i = 0; i < 12; i += 1) {
+      const login = await request(app).post("/api/auth/login").send({ username: "root", password: "admin123" }); // pragma: allowlist secret
+      expect(login.status).toBe(200);
+    }
   });
 
   it("is let in marked when the mark is written (the control)", async () => {
@@ -140,6 +163,73 @@ describe("a sign-in with a legacy default", () => {
     expect(login.status).toBe(200);
     expect(login.body.user.mustChangePassword).toBe(true);
     expect((await agent.get("/api/users")).body).toEqual({ error: "password change required" });
+  });
+});
+
+describe("a session signed in under a password the account no longer has", () => {
+  it("holds nothing but its stops: a sign-in that verified the old password while it was being changed", async () => {
+    const { app, storage } = await fresh();
+    await adminHasSetPassword();
+    const owner = await signedInAdmin(app);
+    // The attacker's sign-in verifies the old password, then waits -- the change lands -- then is saved.
+    const realValidate = storage.validateUser.bind(storage);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let verified!: () => void;
+    const hasVerified = new Promise<void>((resolve) => { verified = resolve; });
+    vi.spyOn(storage, "validateUser").mockImplementation(async (username, password) => {
+      const user = await realValidate(username, password);
+      verified();
+      await held;
+      return user;
+    });
+    const attacker = request.agent(app);
+    const signingIn = attacker.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD }).then((r) => r);
+    await hasVerified;
+    expect((await owner.post("/api/auth/change-password").send({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: NEXT })).status).toBe(200);
+    release();
+    expect((await signingIn).status).toBe(200);
+
+    expect((await attacker.get("/api/clients")).status).toBe(401);
+    expect((await attacker.post("/api/api-keys").send({ name: "after the change" })).status).toBe(401);
+    // Its stops still go: they are authorised from memory, and a stop never waits on this.
+    expect((await attacker.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
+    // The session that made the change goes on under the new password.
+    expect((await owner.get("/api/clients")).status).toBe(200);
+  });
+
+  it("holds nothing after an admin resets that account's password", async () => {
+    const { app, storage } = await fresh();
+    await adminHasSetPassword();
+    const admin = await signedInAdmin(app);
+    const target = await storage.createUser({ username: "analyst", password: "the-analyst-password", role: "user", isActive: true }); // pragma: allowlist secret
+    const analyst = request.agent(app);
+    expect((await analyst.post("/api/auth/login").send({ username: "analyst", password: "the-analyst-password" })).status).toBe(200); // pragma: allowlist secret
+    expect((await analyst.get("/api/clients")).status).toBe(200);
+
+    expect((await admin.patch(`/api/users/${target.id}`).send({ password: "a-reset-by-the-admin" })).status).toBe(200); // pragma: allowlist secret
+
+    expect((await analyst.get("/api/clients")).status).toBe(401);
+  });
+});
+
+describe("two changes of one password sent together", () => {
+  it("one changes it; the other is refused, its current password no longer the account's", async () => {
+    const { app } = await fresh();
+    await adminHasSetPassword();
+    const first = await signedInAdmin(app);
+    const second = await signedInAdmin(app);
+
+    const [a, b] = await Promise.all([
+      first.post("/api/auth/change-password").send({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: "the-first-new-password" }), // pragma: allowlist secret
+      second.post("/api/auth/change-password").send({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: "the-second-new-password" }), // pragma: allowlist secret
+    ]);
+
+    expect([a.status, b.status].sort()).toEqual([200, 400]);
+    const lost = a.status === 400 ? a : b;
+    expect(lost.body.message).toMatch(/current password is incorrect/);
+    const kept = a.status === 200 ? "the-first-new-password" : "the-second-new-password"; // pragma: allowlist secret
+    expect((await request(app).post("/api/auth/login").send({ username: "admin", password: kept })).status).toBe(200);
   });
 });
 
