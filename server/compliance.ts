@@ -2,10 +2,10 @@
  * Where an engagement stands against OWASP ASVS 4.0.3.
  *
  * The whole risk in a compliance screen is that it makes an untested control
- * look like a passing one. A product whose scanners bear on 34 of the
- * standard's 286 requirements, rendering 286 rows with 252 of them green, has
- * told a customer something false about the other 252 -- and it is the most
- * convincing kind of false, because the 34 are real.
+ * look like a passing one. A product whose scanners bear on 35 of the
+ * standard's 286 requirements, rendering 286 rows with 251 of them green, has
+ * told a customer something false about the other 251 -- and it is the most
+ * convincing kind of false, because the 35 are real.
  *
  * So a requirement is in one of four states and never fewer:
  *

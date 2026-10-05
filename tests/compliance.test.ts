@@ -10,9 +10,9 @@ import {
  * The compliance map, whose entire risk is making an untested control look
  * like a passing one.
  *
- * The engine's scanners bear on 34 of ASVS 4.0.3's 286 requirements. A screen
- * that rendered the other 252 as satisfied would be false about the great
- * majority of the standard, and convincing, because the 34 are real. These
+ * The engine's scanners bear on 35 of ASVS 4.0.3's 286 requirements. A screen
+ * that rendered the other 251 as satisfied would be false about the great
+ * majority of the standard, and convincing, because the 35 are real. These
  * tests hold the four states apart.
  */
 
@@ -80,7 +80,7 @@ describe("mapping findings to ASVS requirements", () => {
   });
 
   it("reports the tested count as the small number it is", () => {
-    // 34 of 286. If this number ever grows without the mapping growing, the
+    // 35 of 286. If this number ever grows without the mapping growing, the
     // map has started claiming coverage it does not have.
     const { summary } = controlMap([], ALL_SCANNERS);
     const reachable = new Set([
@@ -125,12 +125,21 @@ describe("mapping findings to ASVS requirements", () => {
     expect(rows.find((one) => one.requirement.id === "V14.4.6")?.state).toBe("tested");
   });
 
-  it("marks the HSTS pairing approximate, because the standard names no HSTS requirement", () => {
-    const { rows } = controlMap([], ALL_SCANNERS);
-    const row = rows.find((one) => one.requirement.id === "V9.1.1");
-    // V9.1.1 is also reached exactly by ssl_error, so it is not approximate.
-    expect(row?.approximate).toBe(false);
-    expect(HEADER_MAPPING["Strict-Transport-Security"].approximate).toBe(true);
+  it("pairs HSTS with the requirement that names it, exactly", () => {
+    // V14.4.5 names the Strict-Transport-Security header. This pairing once
+    // read "ASVS 4.0.3 names no HSTS requirement" and pointed at V9.1.1 as
+    // approximate -- a hedge about a requirement that was in the standard.
+    expect(HEADER_MAPPING["Strict-Transport-Security"].requirements).toEqual(["V14.4.5"]);
+    expect(HEADER_MAPPING["Strict-Transport-Security"].approximate).toBeFalsy();
+    const { rows } = controlMap(
+      [finding({ type: "missing_security_header", header: "Strict-Transport-Security" })],
+      ALL_SCANNERS,
+    );
+    const hsts = rows.find((one) => one.requirement.id === "V14.4.5");
+    expect(hsts?.state).toBe("failing");
+    expect(hsts?.approximate).toBe(false);
+    // A missing HSTS header is not a TLS failure; V9.1.1 stays with ssl_error.
+    expect(rows.find((one) => one.requirement.id === "V9.1.1")?.state).toBe("tested");
   });
 
   it("counts findings that map to nothing, with the reason, rather than dropping them", () => {
