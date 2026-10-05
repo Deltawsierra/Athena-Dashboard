@@ -179,12 +179,13 @@ const HEADER_MAPPING = {
     why: "the requirement naming a suitable Referrer-Policy header",
   },
   "Strict-Transport-Security": {
-    // ASVS 4.0.3 has no requirement that names HSTS. V9.1.1 is the mechanism's
-    // purpose -- no fallback to unencrypted communication -- and the nearest
-    // thing the standard has. Recorded as approximate rather than exact.
-    requirements: ["V9.1.1"],
-    why: "ASVS 4.0.3 names no HSTS requirement; V9.1.1 requires TLS with no fallback to unencrypted, which is what HSTS enforces",
-    approximate: true,
+    // V14.4.5 names the header itself: a Strict-Transport-Security header on all
+    // responses and all subdomains. Found by searching the 4.0.3 release text
+    // for "Strict-Transport-Security". This used to say ASVS 4.0.3 names no HSTS
+    // requirement and pair it with V9.1.1 as approximate; the requirement was
+    // there all along.
+    requirements: ["V14.4.5"],
+    why: "the requirement naming a Strict-Transport-Security header on all responses and subdomains",
   },
 };
 
@@ -268,15 +269,31 @@ function chapterFiles() {
 
 const raw = JSON.parse(readFileSync(FLAT, "utf8")).requirements;
 
-const catalogue = raw.map((r) => ({
-  id: r.req_id,
-  chapter: r.chapter_id,
-  section: r.section_id,
-  cwe: r.cwe ? Number(r.cwe) : null,
-  l1: r.level1 !== "",
-  l2: r.level2 !== "",
-  l3: r.level3 !== "",
-}));
+// The flat JSON comes in two shapes. The file committed at the release tag has
+// Item/Section/CWE/L1-L3; the export tool's other flattening has req_id,
+// chapter_id, section_id, cwe and level1-3. Read either, so the documented
+// source -- a checkout of the release tag -- regenerates this file as it is.
+const field = (r, name, other) => (r[name] !== undefined ? r[name] : r[other]);
+const catalogue = raw
+  .map((r) => {
+    const id = field(r, "req_id", "Item");
+    const cwe = field(r, "cwe", "CWE");
+    return {
+      id,
+      chapter: field(r, "chapter_id", "Section"),
+      section: r.section_id !== undefined ? r.section_id : id.split(".").slice(0, 2).join("."),
+      cwe: cwe ? Number(cwe) : null,
+      l1: field(r, "level1", "L1") !== "",
+      l2: field(r, "level2", "L2") !== "",
+      l3: field(r, "level3", "L3") !== "",
+    };
+  })
+  // Requirement order, numerically, whatever order the source lists them in.
+  .sort((a, b) => {
+    const x = a.id.slice(1).split(".").map(Number);
+    const y = b.id.slice(1).split(".").map(Number);
+    return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+  });
 
 const known = new Set(catalogue.map((r) => r.id));
 

@@ -10,7 +10,7 @@
  * OWASP Application Security Verification Standard 4.0.3, CC BY-SA 4.0.
  * https://owasp.org/www-project-application-security-verification-standard/
  *
- * 286 requirements. 34 of them can be reached by
+ * 286 requirements. 35 of them can be reached by
  * something this engine tests for -- which is the number that matters, and the
  * reason the product says how many it did not test rather than reporting a
  * percentage over the ones it did.
@@ -1065,7 +1065,7 @@ export const ASVS_CATALOGUE: AsvsRequirement[] = [
     "id": "V3.4.3",
     "chapter": "V3",
     "section": "V3.4",
-    "cwe": 1275,
+    "cwe": 16,
     "l1": true,
     "l2": true,
     "l3": true
@@ -2820,10 +2820,9 @@ export const HEADER_MAPPING: Record<string, FindingMapping> = {
   },
   "Strict-Transport-Security": {
     "requirements": [
-      "V9.1.1"
+      "V14.4.5"
     ],
-    "why": "ASVS 4.0.3 names no HSTS requirement; V9.1.1 requires TLS with no fallback to unencrypted, which is what HSTS enforces",
-    "approximate": true
+    "why": "the requirement naming a Strict-Transport-Security header on all responses and subdomains"
   }
 };
 
