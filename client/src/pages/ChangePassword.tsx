@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import GlassCard from "@/components/GlassCard";
+import Failsafe from "@/pages/Failsafe";
 import { changePassword } from "@/utils/auth";
 import { apiFetch } from "@/lib/queryClient";
 import type { PublicUser } from "@shared/schema";
@@ -23,7 +24,9 @@ interface ChangePasswordProps {
  * refuses such an account everything but this, signing out, reading itself
  * and every stop -- so the kill switch is on this screen too, for an admin:
  * engaging it sends a stop to every running scan and retest, and nothing here
- * waits on the password being changed first.
+ * waits on the password being changed first. So is the failsafe console: an
+ * admin may be the second operator a pause, stand-down or terminate waits on,
+ * and signs it here without changing the password first.
  */
 export default function ChangePassword({ user, admin, onChanged, onLogout }: ChangePasswordProps) {
   const [current, setCurrent] = useState("");
@@ -31,6 +34,7 @@ export default function ChangePassword({ user, admin, onChanged, onLogout }: Cha
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,7 +57,7 @@ export default function ChangePassword({ user, admin, onChanged, onLogout }: Cha
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden athena-horizon">
+    <div className="min-h-screen flex flex-col items-center justify-center p-4 relative overflow-hidden athena-horizon">
       <div className="w-full max-w-md relative z-10 space-y-4">
         <GlassCard>
           <h1 className="text-2xl font-bold mb-2">Set a new password</h1>
@@ -119,7 +123,29 @@ export default function ChangePassword({ user, admin, onChanged, onLogout }: Cha
           </form>
         </GlassCard>
         {admin && <KillSwitch />}
+        {admin && (
+          <GlassCard>
+            <h2 className="text-lg font-semibold mb-2">Failsafe console</h2>
+            <p className="text-sm text-muted-foreground mb-4">
+              Draft or sign a pause, stand-down or terminate, or withdraw a resume or release. It works now, before
+              the password is changed; the rest of the console waits for it.
+            </p>
+            <Button
+              variant="outline"
+              className="w-full"
+              onClick={() => setConsoleOpen((open) => !open)}
+              data-testid="button-change-password-failsafe"
+            >
+              {consoleOpen ? "Close the failsafe console" : "Open the failsafe console"}
+            </Button>
+          </GlassCard>
+        )}
       </div>
+      {admin && consoleOpen && (
+        <div className="w-full max-w-6xl relative z-10 mt-4" data-testid="change-password-failsafe-console">
+          <Failsafe />
+        </div>
+      )}
     </div>
   );
 }

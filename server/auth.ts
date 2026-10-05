@@ -314,7 +314,9 @@ const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
  *     (`stop:` in server/failsafe.ts and server/assurance.ts): pausing a
  *     deployment (recompute with `paused: true`); revoking or contradicting
  *     a claim; and the reads a second operator stops from -- the failsafe
- *     state, its commands, and one command;
+ *     state, its commands, one command, and the console's status (a read of
+ *     the state with the service token, which the console reads before it
+ *     lists the commands a second operator signs);
  *   - a signature relay and a command's withdrawal, which are stops or not by
  *     the command's action, which only the control plane knows: they pass
  *     here, and their own handlers refuse this account once the action is
@@ -326,7 +328,7 @@ export function isStopForPasswordGuard(req: Request): boolean {
   const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
   const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
   if (req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/cancel$/i.test(path)) return true;
-  if (req.method === "GET" && /^\/api\/failsafe\/(state|commands|commands\/[^/]+)$/i.test(path)) return true;
+  if (req.method === "GET" && /^\/api\/failsafe\/(status|state|commands|commands\/[^/]+)$/i.test(path)) return true;
   if (req.method === "POST" && /^\/api\/assurance\/deployments\/[^/]+\/recompute$/i.test(path)) return body.paused === true;
   if (req.method === "POST" && /^\/api\/assurance\/claims\/[^/]+\/transition$/i.test(path)) {
     return typeof body.toStatus === "string" && CLAIM_TAKE_DOWN.has(body.toStatus.trim());

@@ -122,6 +122,26 @@ describe("first run", () => {
     expect(logs.some((line) => line.includes(file))).toBe(true);
   });
 
+  it.each([
+    ["twelve spaces", " ".repeat(12), /whitespace/],
+    ["a value carried in with its file's newline", "a-good-long-admin-password\n", /whitespace/],
+    ["one character twelve times", "a".repeat(12), /different characters/],
+    ["two characters, alternating", "ab".repeat(6), /different characters/],
+  ])("does not take ATHENA_INITIAL_ADMIN_PASSWORD when it is %s: it generates one, and says why, never the value", async (_name, value, why) => {
+    process.env.ATHENA_INITIAL_ADMIN_PASSWORD = value;
+    const { initializeDefaultData, storage, verifyPassword, INITIAL_ADMIN_PASSWORD_FILE } = await fresh();
+    await initializeDefaultData();
+
+    const [admin] = await storage.getAllUsers();
+    expect(admin.mustChangePassword).toBe(true);
+    expect((await verifyPassword(value, admin.password)).ok).toBe(false);
+    const generated = fs.readFileSync(path.join(dir, INITIAL_ADMIN_PASSWORD_FILE), "utf8").trim();
+    expect((await verifyPassword(generated, admin.password)).ok).toBe(true);
+    const warning = logs.find((line) => line.includes("ATHENA_INITIAL_ADMIN_PASSWORD was not used"));
+    expect(warning).toMatch(why);
+    expect(logs.filter((line) => line.includes(value.trim() || value) || line.includes(generated))).toEqual([]);
+  });
+
   it("never throws when the password file cannot be written: no admin is created, the reason is logged, and the next start tries again", async () => {
     const blocker = path.join(dir, "not-a-directory");
     fs.writeFileSync(blocker, "");

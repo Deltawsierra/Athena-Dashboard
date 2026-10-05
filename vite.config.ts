@@ -20,10 +20,13 @@ export default defineConfig({
     outDir: path.resolve(rootDir, "dist/public"),
     emptyOutDir: true,
   },
+  // `vite` run on its own. The dev server this app starts (server/vite.ts
+  // setupVite) sets its own, with the files it never serves.
   server: {
     fs: {
       strict: true,
-      deny: ["**/.*"],
+      deny: [".env", ".env.*", "*.{crt,pem}", "**/.git/**", "**/.*", "**/*.db", "**/*.db-*",
+        "**/initial-admin-password.txt", "**/session-secret"],
     },
   },
 });

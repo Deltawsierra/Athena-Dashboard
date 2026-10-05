@@ -3,7 +3,9 @@ import fs from "fs";
 import path from "path";
 import { storage } from "./storage-unified";
 import { resolveDbPath } from "./db-sqlite";
-import { verifyPassword, LEGACY_DEFAULT_PASSWORDS, LEGACY_DEFAULT_USERNAMES, MIN_PASSWORD_LENGTH } from "./password";
+import {
+  verifyPassword, newPasswordRefusal, LEGACY_DEFAULT_PASSWORDS, LEGACY_DEFAULT_USERNAMES, MIN_PASSWORD_LENGTH,
+} from "./password";
 import type { User, InsertClient, InsertTest, InsertDocument, InsertSite } from "@shared/schema";
 import { DEFAULT_ACTIVE_SYSTEMS, LEGACY_SEEDED_SYSTEMS } from "@shared/ai-systems";
 
@@ -11,8 +13,9 @@ import { DEFAULT_ACTIVE_SYSTEMS, LEGACY_SEEDED_SYSTEMS } from "@shared/ai-system
  * First-run seeding. Runs only when the users table is empty.
  *
  * It creates ONE account, `admin`, and no password is written in this code:
- * the password is ATHENA_INITIAL_ADMIN_PASSWORD when that is set and at least
- * MIN_PASSWORD_LENGTH characters, and otherwise a random one, written once to
+ * the password is ATHENA_INITIAL_ADMIN_PASSWORD when that is set and meets
+ * the rules every password meets (password.ts newPasswordRefusal), and
+ * otherwise a random one, written once to
  * INITIAL_ADMIN_PASSWORD_FILE in the data directory (beside the database),
  * readable only by the user the server runs as. The log names that file,
  * never the password. Either way the account must set a new password at its
@@ -85,6 +88,9 @@ export async function migrateLegacyActiveSystems(): Promise<void> {
   }
 }
 
+/** The account first run creates. */
+const INITIAL_ADMIN_USERNAME = "admin";
+
 /** The file the first-run admin's generated password is written to, in the data directory. */
 export const INITIAL_ADMIN_PASSWORD_FILE = "initial-admin-password.txt";
 
@@ -102,16 +108,21 @@ export function dataDirectory(env: NodeJS.ProcessEnv = process.env): string {
 
 /**
  * The first-run admin's password, and where it can be read: from
- * ATHENA_INITIAL_ADMIN_PASSWORD when that is long enough, otherwise generated
+ * ATHENA_INITIAL_ADMIN_PASSWORD when it meets the rules every password meets
+ * (password.ts newPasswordRefusal -- twelve spaces, or a value carried in
+ * with a file's newline, is not taken), otherwise generated
  * (crypto.randomBytes, 32 url-safe characters) and written to the password
  * file, created anew with mode 0600 -- a file a previous install left behind
  * names a password no account has, so it is replaced. Throws when the file
  * cannot be written: an admin whose password nobody can read is not created.
  */
-function initialAdminPassword(env: NodeJS.ProcessEnv): { password: string; file: string | null; tooShort: boolean } {
+function initialAdminPassword(env: NodeJS.ProcessEnv): { password: string; file: string | null; refused: string | null } {
   const fromEnv = env.ATHENA_INITIAL_ADMIN_PASSWORD;
-  if (typeof fromEnv === "string" && fromEnv.length >= MIN_PASSWORD_LENGTH) {
-    return { password: fromEnv, file: null, tooShort: false };
+  const refused = typeof fromEnv === "string" && fromEnv.length > 0
+    ? newPasswordRefusal(fromEnv, null, INITIAL_ADMIN_USERNAME)
+    : null;
+  if (typeof fromEnv === "string" && fromEnv.length > 0 && refused === null) {
+    return { password: fromEnv, file: null, refused: null };
   }
   const password = crypto.randomBytes(24).toString("base64url");
   const dir = dataDirectory(env);
@@ -122,7 +133,7 @@ function initialAdminPassword(env: NodeJS.ProcessEnv): { password: string; file:
   // The mode given at creation is narrowed by the umask, never widened; this
   // makes it exactly 0600 whatever the umask was.
   fs.chmodSync(file, 0o600);
-  return { password, file, tooShort: typeof fromEnv === "string" && fromEnv.length > 0 };
+  return { password, file, refused };
 }
 
 export async function initializeDefaultData(): Promise<void> {
@@ -157,13 +168,14 @@ async function seedFirstRun(): Promise<void> {
       "[init] First run: the admin account was not created, because its generated password could not be " +
         `written to ${path.join(dataDirectory(), INITIAL_ADMIN_PASSWORD_FILE)}: ` +
         `${cause instanceof Error ? cause.message : String(cause)}. ` +
-        `Set ATHENA_INITIAL_ADMIN_PASSWORD (at least ${MIN_PASSWORD_LENGTH} characters), or make the directory writable, and restart.`,
+        `Set ATHENA_INITIAL_ADMIN_PASSWORD (at least ${MIN_PASSWORD_LENGTH} characters, no whitespace at either end), ` +
+        "or make the directory writable, and restart.",
     );
     return;
   }
 
   const admin = await storage.createUser({
-    username: "admin",
+    username: INITIAL_ADMIN_USERNAME,
     password: initial.password,
     email: null,
     role: "admin",
@@ -177,10 +189,9 @@ async function seedFirstRun(): Promise<void> {
         "It must be changed at the first sign-in.",
     );
   } else {
-    if (initial.tooShort) {
-      console.warn(
-        `[init] ATHENA_INITIAL_ADMIN_PASSWORD is shorter than ${MIN_PASSWORD_LENGTH} characters and was not used.`,
-      );
+    if (initial.refused !== null) {
+      // Why, never the value.
+      console.warn(`[init] ATHENA_INITIAL_ADMIN_PASSWORD was not used: ${initial.refused}.`);
     }
     console.log(
       `[init] First run: created the admin account "admin". Its generated password is in ${initial.file} ` +

@@ -114,6 +114,9 @@ function approvalWorkflow(
   return [identify, review, approve];
 }
 
+/** The shortest password the server takes (server/password.ts MIN_PASSWORD_LENGTH). */
+const MIN_PASSWORD_LENGTH = 12;
+
 const memberInput =
   "rounded-lg border border-border/60 bg-surface-1/60 px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-primary/40";
 
@@ -121,9 +124,10 @@ const memberInput =
  * The real Add-Member form. It creates an account through the same admin-gated
  * `POST /api/users` the server already enforces — the dashboard owns its own
  * user store, so a new member is a new row there. The password is set now; the
- * server hashes it and never echoes it back. Validation mirrors the server
- * (username and an 8+ character password), so the obvious mistakes are caught
- * before the request, and any refusal (a duplicate name) is surfaced as a toast.
+ * server hashes it and never echoes it back. Validation mirrors the server's length rule (a
+ * username and a 12+ character password), so the obvious mistake is caught
+ * before the request; any refusal (a duplicate name, a password the server's
+ * other rules refuse) is surfaced as a toast.
  */
 function AddMemberForm({
   pending,
@@ -138,7 +142,7 @@ function AddMemberForm({
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("user");
   const [email, setEmail] = useState("");
-  const canSubmit = username.trim().length > 0 && password.length >= 8;
+  const canSubmit = username.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH;
   return (
     <div className="border-b border-border/50 bg-surface-1/30 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -153,7 +157,7 @@ function AddMemberForm({
           className={cn(memberInput, "min-w-[10rem] flex-1")}
           type="password"
           value={password}
-          placeholder="Temporary password (8+ characters)"
+          placeholder={`Temporary password (${MIN_PASSWORD_LENGTH}+ characters)`}
           autoComplete="new-password"
           onChange={(e) => setPassword(e.target.value)}
         />
@@ -192,8 +196,8 @@ function AddMemberForm({
         >
           Cancel
         </button>
-        {password.length > 0 && password.length < 8 && (
-          <span className="text-[11px] text-sev-medium">Password needs at least 8 characters.</span>
+        {password.length > 0 && password.length < MIN_PASSWORD_LENGTH && (
+          <span className="text-[11px] text-sev-medium">Password needs at least {MIN_PASSWORD_LENGTH} characters.</span>
         )}
       </div>
     </div>

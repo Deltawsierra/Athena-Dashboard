@@ -125,14 +125,26 @@ export function isLegacyDefaultPassword(password: string): boolean {
   return LEGACY_DEFAULT_PASSWORDS.includes(password);
 }
 
+/** The fewest different characters a password may have: `aaaaaaaaaaaa` or `abababababab` is not one. */
+export const MIN_DISTINCT_CHARACTERS = 5;
+
 /**
- * Why a new password is refused, or null when it may be set: shorter than
- * MIN_PASSWORD_LENGTH, the same as the current one, a legacy default, or the
- * account's own username (in any case).
+ * Why a password is refused, or null when it may be set. Every password
+ * written -- changed by its account, set by an admin, or read from
+ * ATHENA_INITIAL_ADMIN_PASSWORD -- meets these: at least
+ * MIN_PASSWORD_LENGTH characters; neither blank nor beginning or ending in
+ * whitespace (a value pasted from a file with its newline is not the one the
+ * person will type); at least MIN_DISTINCT_CHARACTERS different characters;
+ * not a legacy default; not the account's username (in any case); and, when
+ * the current password is known, not that.
  */
-export function newPasswordRefusal(next: string, current: string, username: string): string | null {
+export function newPasswordRefusal(next: string, current: string | null, username: string): string | null {
   if (next.length < MIN_PASSWORD_LENGTH) return `the new password must be at least ${MIN_PASSWORD_LENGTH} characters`;
-  if (next === current) return "the new password must differ from the current one";
+  if (next.trim() !== next) return "the new password must not begin or end with whitespace";
+  if (new Set(next).size < MIN_DISTINCT_CHARACTERS) {
+    return `the new password must have at least ${MIN_DISTINCT_CHARACTERS} different characters`;
+  }
+  if (current !== null && next === current) return "the new password must differ from the current one";
   if (isLegacyDefaultPassword(next)) return "the new password is a default an earlier release shipped with, which anyone can look up";
   if (next.toLowerCase() === username.toLowerCase()) return "the new password must not be the username";
   return null;

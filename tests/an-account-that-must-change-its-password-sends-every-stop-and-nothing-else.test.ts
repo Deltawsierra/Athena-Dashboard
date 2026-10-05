@@ -99,7 +99,8 @@ function what(one: Seen, actionOf: (uuid: string) => string | undefined): string
   return `${one.method} ${one.path}`;
 }
 
-interface Answer { request: string; route: string; status: number; body: unknown }
+/** One request of the walk, its answer, and the stops it relayed to the control plane (what()). */
+interface Answer { request: string; route: string; status: number; body: unknown; relayed: string[] }
 
 /** Every route and method in Express's table, as `admin`; a stop route in its stop and its non-stop forms. */
 async function walk(app: Express, admin: ReturnType<typeof request.agent>, p: ControlPlaneStandIn, runningTestId: string): Promise<Answer[]> {
@@ -138,11 +139,15 @@ async function walk(app: Express, admin: ReturnType<typeof request.agent>, p: Co
     let req = (admin as unknown as Record<string, (u: string) => request.Test>)[method.toLowerCase()](url);
     if (body !== undefined) req = req.send(body as object);
     const label = `${route}${name ? ` [${name}]` : ""}${body !== undefined ? ` ${JSON.stringify(body)}` : ""}`;
+    const before = p.seen.length;
+    const relayed = () => p.seen.slice(before)
+      .filter((one) => one.stop && !one.path.startsWith("/api/token/"))
+      .map((one) => what(one, p.actionOf));
     try {
       const res = await req.timeout({ response: 20_000, deadline: 30_000 });
-      answers.push({ request: label, route, status: res.status, body: res.body });
+      answers.push({ request: label, route, status: res.status, body: res.body, relayed: relayed() });
     } catch (cause) {
-      answers.push({ request: label, route, status: -1, body: String(cause) });
+      answers.push({ request: label, route, status: -1, body: String(cause), relayed: relayed() });
     }
   };
   for (const route of routes) {
@@ -174,7 +179,7 @@ function isStop(a: Answer): boolean {
   if (/^POST \/api\/failsafe\/commands \{"action":"(pause|stand_down|terminate)"/.test(label)) return true;
   if (/^POST \/api\/failsafe\/commands\/:uuid\/signatures \[(pause|stand_down|terminate)\]/.test(label)) return true;
   if (/^POST \/api\/failsafe\/commands\/:uuid\/cancel \[(resume|release)\]/.test(label)) return true;
-  if (/^GET \/api\/failsafe\/(state|commands|commands\/:uuid)( |$)/.test(label)) return true;
+  if (/^GET \/api\/failsafe\/(status|state|commands|commands\/:uuid)( |$)/.test(label)) return true;
   if (label === `POST /api/assurance/deployments/:uuid/recompute ${JSON.stringify({ paused: true })}`) return true;
   if (/^POST \/api\/assurance\/claims\/:uuid\/transition \{"toStatus":"(revoked|contradicted)"/.test(label)) return true;
   return false;
@@ -220,7 +225,17 @@ describe("an account that must change its password sends every stop, and nothing
       .map((a) => `${a.request}: ${a.status} ${JSON.stringify(a.body).slice(0, 160)}`);
     expect(notRefused, "requests that were not stops and were not refused").toEqual([]);
 
-    // The control plane: every stop the first walk relayed, the second relayed too -- and nothing but stops.
+    // The control plane, request by request: every stop a request of the
+    // first walk relayed, the same request (route and form) of the second
+    // relayed too. Not by kind alone: a route that relays a stop for one
+    // account and is refused to the other would hide behind another route
+    // sending the same kind.
+    const unrelayed = set.answers
+      .map((a) => ({ a, b: required.answers.find((one) => one.request === a.request)! }))
+      .filter(({ a, b }) => JSON.stringify(a.relayed) !== JSON.stringify(b.relayed))
+      .map(({ a, b }) => `${a.request}: relayed ${JSON.stringify(a.relayed)} with a password set, ${JSON.stringify(b.relayed)} without`);
+    expect(unrelayed, "requests whose relayed stops differ").toEqual([]);
+    // ...and, by kind, the whole of them -- and nothing but stops.
     const stopKinds = (run: typeof set) => [...new Set(run.plane.filter((one) => one.stop).map((one) => what(one, run.actionOf)))].sort();
     expect(stopKinds(set).length).toBeGreaterThanOrEqual(14);
     expect(stopKinds(required)).toEqual(stopKinds(set));
@@ -256,6 +271,60 @@ describe("an account that must change its password sends every stop, and nothing
     expect((await admin.post("/api/auth/logout")).status).toBe(200);
     expect((await admin.get("/api/clients")).status).toBe(401);
   });
+});
+
+describe("a withdrawal whose command's action was not read", () => {
+  /** The flagged first-run admin, and a command `action` drafted by a second operator. */
+  async function flagged() {
+    plane = await controlPlaneStandIn();
+    process.env.ATHENA_FAILSAFE_URL = plane.url;
+    process.env.ATHENA_FAILSAFE_USER = "svc-failsafe";
+    process.env.ATHENA_FAILSAFE_PASSWORD = "svc-password";
+    vi.resetModules();
+    const { createApp } = await import("../server/app");
+    const { initializeDefaultData } = await import("../server/init-data");
+    const failsafe = await import("../server/failsafe");
+    const app = createApp();
+    await initializeDefaultData();
+    const admin = request.agent(app);
+    const login = await admin.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
+    expect(login.body.user.mustChangePassword).toBe(true);
+    failsafe.failsafeTimeouts.commandReadMs = 100;
+    return { admin, p: plane };
+  }
+
+  const ways: Array<[string, (p: ControlPlaneStandIn, action: string) => string]> = [
+    // In life: a slow control plane. The read is held unanswered past the bound.
+    ["read stalls", (p, action) => { const uuid = p.command(action); p.stallReadsOf(uuid); return uuid; }],
+    // The read answers, and names no command this control plane holds.
+    ["command is not found", () => randomUUID()],
+  ];
+
+  it.each(ACTIONS.filter((one) => one !== "resume" && one !== "release").flatMap((action) => ways.map(([how, make]) => [action, how, make] as const)))(
+    "is refused to an account that must change its password: a %s whose %s is never withdrawn by it",
+    async (action, _how, make) => {
+      const { admin, p } = await flagged();
+      const uuid = make(p, action);
+
+      const res = await admin.post(`/api/failsafe/commands/${uuid}/cancel`).send({});
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toBe("password change required");
+      expect(res.body.detail).toMatch(/could not be read in time.*Nothing was withdrawn/);
+      expect(p.seen.filter((one) => one.path === `/api/failsafe/commands/${uuid}/cancel/` && one.method === "POST")).toEqual([]);
+    },
+    30_000,
+  );
+
+  it("refuses it no stop: the account's own pause still goes while a command's read stalls", async () => {
+    const { admin, p } = await flagged();
+    p.stallReadsOf(p.command("resume"));
+
+    const paused = await admin.post("/api/failsafe/commands").send({ action: "pause", engineId: "engine-1", reason: "flagged and stopping" });
+
+    expect(paused.status).toBeLessThan(300);
+    expect(p.seen.some((one) => one.path === "/api/failsafe/commands/" && one.method === "POST" && one.stop)).toBe(true);
+  }, 30_000);
 });
 
 describe("POST /api/auth/change-password", () => {

@@ -19,13 +19,44 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+/**
+ * What the dev server never serves, wherever it lies under the files it may
+ * serve (the repository, by default): a dev start keeps the database, the
+ * first-run admin's password file and the session secret in the working
+ * directory, and Vite serves any file there at /@fs/<its path>. Vite's own
+ * defaults are kept: a `deny` given replaces them.
+ */
+export const DEV_SERVER_DENY: readonly string[] = Object.freeze([
+  ".env", ".env.*", "*.{crt,pem}", "**/.git/**",
+  "**/*.db", "**/*.db-*", "**/*.sqlite", "**/*.sqlite3",
+  "**/initial-admin-password.txt",
+  "**/session-secret",
+]);
+
+/**
+ * The hosts the dev server answers besides localhost and IP addresses:
+ * ATHENA_DEV_ALLOWED_HOSTS, comma-separated. Answering every Host let a page
+ * on any site reach it through DNS rebinding.
+ */
+export function devAllowedHosts(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.ATHENA_DEV_ALLOWED_HOSTS ?? "").split(",").map((host) => host.trim()).filter(Boolean);
+}
+
 export async function setupVite(app: Express, server: Server) {
+  // The config's own `server` block is replaced here, not merged: so its file
+  // rules are restated, and every dev start has them.
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
-    allowedHosts: true as const,
+    allowedHosts: devAllowedHosts(),
+    fs: { strict: true, deny: [...DEV_SERVER_DENY] },
   };
 
+  // An error while the dev server starts ends the process (a broken config
+  // fails fast). One after it has started is a request's -- a file it refuses
+  // to serve is logged as an error -- and is logged only: a request never
+  // takes the server, and the kill switch and every Stop it serves, down.
+  let started = false;
   const vite = await createViteServer({
     ...viteConfig,
     configFile: false,
@@ -33,12 +64,14 @@ export async function setupVite(app: Express, server: Server) {
       ...viteLogger,
       error: (msg, options) => {
         viteLogger.error(msg, options);
-        process.exit(1);
+        if (!started) process.exit(1);
       },
     },
     server: serverOptions,
     appType: "custom",
   });
+
+  started = true;
 
   app.use(vite.middlewares);
   app.use("*", async (req, res, next) => {

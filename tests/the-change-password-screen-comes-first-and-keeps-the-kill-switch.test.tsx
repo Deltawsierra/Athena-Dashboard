@@ -101,6 +101,40 @@ describe("the change-password screen comes first and keeps the kill switch", () 
     expect(checks).toBeGreaterThan(1);
   });
 
+  it("an admin opens the failsafe console from it, and drafts a stand-down without changing the password", async () => {
+    const sent = serve((one) => {
+      if (one.url === "/api/auth/check") return { status: 200, body: { authenticated: true, user: USER } };
+      if (one.url.startsWith("/api/failsafe/status")) {
+        return { status: 200, body: { configured: true, reachable: true, authorized: true, url: "https://cp.test", detail: "", defaultEngineId: "engine-1" } };
+      }
+      if (one.url.startsWith("/api/failsafe/state")) return {
+        status: 200,
+        body: { engineId: "engine-1", engineState: "running", engineStateAvailable: true, awaitingSignatures: [], ready: [], recent: [] },
+      };
+      if (one.url.startsWith("/api/failsafe/audit")) return { status: 403, body: { error: "password change required" } };
+      return undefined;
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("button-change-password-failsafe")).toBeTruthy());
+    expect(screen.queryByTestId("change-password-failsafe-console")).toBeNull();
+
+    await act(async () => { fireEvent.click(screen.getByTestId("button-change-password-failsafe")); });
+
+    await waitFor(() => expect(screen.getByTestId("button-draft-stand_down")).toBeTruthy());
+    expect(screen.getByTestId("input-new-password")).toBeTruthy();
+    expect(sent.some((one) => one.url.startsWith("/api/failsafe/status"))).toBe(true);
+  });
+
+  it("an account that is not an admin is offered neither the kill switch nor the console", async () => {
+    serve((one) => (one.url === "/api/auth/check"
+      ? { status: 200, body: { authenticated: true, user: { ...USER, role: "user" } } }
+      : undefined));
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("input-new-password")).toBeTruthy());
+    expect(screen.queryByTestId("button-change-password-failsafe")).toBeNull();
+    expect(screen.queryByTestId("button-change-password-kill-switch")).toBeNull();
+  });
+
   it("refuses a short new password before sending it", async () => {
     const sent = serve((one) => (one.url === "/api/auth/check" ? { status: 200, body: { authenticated: true, user: USER } } : undefined));
     render(<App />);

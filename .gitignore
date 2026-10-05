@@ -81,3 +81,7 @@ session-secret
 
 # Benchmark transcripts. Local measurements, not source.
 tools/assistant-bench/results/
+
+# The first-run admin password a dev start writes beside the database (server/init-data.ts)
+initial-admin-password.txt
+tests/dev-server-fixture-*/
