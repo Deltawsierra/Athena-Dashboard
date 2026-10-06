@@ -82,6 +82,7 @@ describe("a finding's closure standing survives the BFF as the backend said it",
               },
             }),
             findingRow({ uuid: "f-future", closure: { standing: "super_closed", retest_required: true, reasons: [], evidence: null } }),
+            findingRow({ uuid: "f-accepted", status: "accepted", closure: { standing: "not_a_closure", retest_required: true, reasons: [], evidence: null } }),
             findingRow({ uuid: "f-garbled", closure: "verified_closed" }),
             findingRow({ uuid: "f-absent" }),
           ]);
@@ -130,6 +131,12 @@ describe("a finding's closure standing survives the BFF as the backend said it",
     expect(closure.standing).toBe("not_closable");
     expect(closure.reasons[0]).toMatch(/displaced_effects: passed/);
     expect(closure.evidence.fixtures.benign).toEqual({ ran: null, outcome: "unreadable" });
+  });
+
+  it("carries an accepted risk or a false positive as not a closure", async () => {
+    const closure = (await findings())["f-accepted"].closure as Record<string, unknown>;
+    expect(closure.standing).toBe("not_a_closure");
+    expect(closure.reasons).toEqual([]);
   });
 
   it("reads a standing it does not know as unknown, never as verified", async () => {

@@ -1676,6 +1676,10 @@ export function ClosureStanding({ closure, closed }: { closure: FindingClosure |
       tone: "border-border/60 bg-surface-1/50 text-muted-foreground",
     },
     not_retest_gated: null,
+    not_a_closure: {
+      text: "Not a closure: accepted risk or a false positive is a decision, and no closure is claimed",
+      tone: "border-border/60 bg-surface-1/50 text-muted-foreground",
+    },
     unknown: {
       text: "Closure standing unknown: not one this console knows; not verified",
       tone: "border-border/60 bg-surface-1/50 text-muted-foreground",
@@ -1840,7 +1844,10 @@ function FindingRow({
         {f.receipt?.digest && <FindingReceiptMark receipt={f.receipt} />}
       </div>
       <DispositionCaveat text={f.statusMustNotImply} />
-      <ClosureStanding closure={f.closure ?? null} closed={f.status === "closed" || f.remediationState === "resolved"} />
+      {/* Closed is the finding's status, as the backend's gate reads it: a
+          remediation "resolved" says someone called the work done, not that the
+          finding is closed (Athena-Backend #125 review round 1, F3). */}
+      <ClosureStanding closure={f.closure ?? null} closed={f.status === "closed"} />
       {/* Remediation workflow (Phase 2.3): the state chip and assignee for
           everyone; the move/assign controls for an admin. Kept on its own row,
           and labelled as workflow, so it never reads as the security verdict. */}

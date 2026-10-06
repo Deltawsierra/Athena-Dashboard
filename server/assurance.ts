@@ -111,6 +111,9 @@ export const CLOSURE_STANDINGS = [
   "not_closable",
   "closed_without_retest",
   "not_retest_gated",
+  // Accepted as residual risk, or a false positive: a human decision, not a
+  // closure, so the backend claims no closure standing for it.
+  "not_a_closure",
 ] as const;
 export type ClosureStanding = (typeof CLOSURE_STANDINGS)[number] | "unknown";
 
@@ -124,7 +127,8 @@ export interface ClosureRun {
 export interface AssuranceClosure {
   /**
    * "verified_closed" is the only standing that says a closure is effect-backed.
-   * "closed_without_retest" is a disposition, never a verified closure; and
+   * "closed_without_retest" is a disposition, never a verified closure;
+   * "not_a_closure" is an accepted risk or a false positive; and
    * "unknown" is a standing this server does not know, never read as either.
    */
   standing: ClosureStanding;

@@ -36,7 +36,7 @@ describe("the closure standing on a finding", () => {
     expect(shown()).toMatch(/^Verified closed/);
   });
 
-  it.each(["closable", "not_closable", "closed_without_retest", "unknown", "super_closed"])(
+  it.each(["closable", "not_closable", "closed_without_retest", "not_a_closure", "unknown", "super_closed"])(
     "never says verified closed for %s",
     (standing) => {
       render(<ClosureStanding closure={closure(standing)} closed />);
@@ -47,6 +47,11 @@ describe("the closure standing on a finding", () => {
   it("calls a closure without a retest a disposition, not a verified closure", () => {
     render(<ClosureStanding closure={closure("closed_without_retest", [], null)} closed />);
     expect(shown()).toMatch(/Closed without a retest: a disposition, not an effect-verified closure/);
+  });
+
+  it("says an accepted risk or a false positive is not a closure", () => {
+    render(<ClosureStanding closure={closure("not_a_closure", [], EVIDENCE)} closed={false} />);
+    expect(shown()).toMatch(/^Not a closure: accepted risk or a false positive is a decision, and no closure is claimed/);
   });
 
   it("names every reason a closure would be refused, and says a closed one no longer carries it", () => {
