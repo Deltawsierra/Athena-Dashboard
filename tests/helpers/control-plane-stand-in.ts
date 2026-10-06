@@ -164,6 +164,8 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
   let issued = 0;
   let waiters: Array<{ match: (one: Seen) => boolean; resolve: (one: Seen) => void }> = [];
   const settings = { signIn: opts.signIn ?? null, refresh: opts.refresh ?? null };
+  /** Commands whose read (GET of the command) is held unanswered. */
+  const stalledReads = new Set<string>();
 
   const issue = () => {
     issued += 1;
@@ -253,6 +255,7 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
       }
       const command = /^\/api\/failsafe\/commands\/([^/]+)\/(signatures\/|cancel\/)?$/.exec(path);
       if (command) {
+        if (!command[2] && method === "GET" && stalledReads.has(command[1])) { held.push(res); return; }
         const known = commands.get(command[1]);
         if (!known) return json(404, { detail: "Not found." });
         if (command[2] === "signatures/" && method === "POST") { known.status = "ready"; known.signers.push("k1"); }
@@ -279,6 +282,8 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
       commands.set(uuid, { uuid, action, status: "pending", signers: [] });
       return uuid;
     },
+    /** Every read of this command from now on is held unanswered (a stalled control plane). */
+    stallReadsOf(uuid: string): void { stalledReads.add(uuid); },
     /** The action of a command this control plane holds. */
     actionOf: (uuid: string): string | undefined => commands.get(uuid)?.action,
     /** Every access token issued so far is expired from now on. */

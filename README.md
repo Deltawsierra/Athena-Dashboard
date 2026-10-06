@@ -21,15 +21,29 @@ To run the desktop shell against the dev server:
 npm run electron
 ```
 
-On first start the database is created and seeded with two admin accounts:
+### First sign-in
 
-| Username    | Password       |
-| ----------- | -------------- |
-| `admin`     | `admin123`     |
-| `testadmin` | `testpass123`  |
+On first start the database is created with ONE account, `admin`, and no
+password is written anywhere in this repository:
 
-**Change both passwords after your first sign-in.** They exist so a fresh
-checkout can be opened; they are not meant to survive into any real use.
+- Set `ATHENA_INITIAL_ADMIN_PASSWORD` (at least 12 characters) before the
+  first start to choose the admin's first password; or
+- leave it unset (or shorter), and a random password is generated and
+  written once to `initial-admin-password.txt` in the data directory, beside
+  the database (`ATHENA_USER_DATA`, the directory of `ATHENA_DB_PATH`, or the
+  working directory), readable only by the user the server runs as. The log
+  says where the file is; it never prints the password.
+
+Sign in as `admin` with that password. Before anything else the app asks for
+a new one (at least 12 characters, not the current one, not the username);
+until it is set, the account can only change its password, sign out, read
+itself, and send stops -- every scan and retest Stop, the kill switch, and a
+failsafe pause, stand-down or terminate, which are never held back. Delete the
+password file once you have signed in.
+
+Earlier releases seeded two accounts with fixed passwords, published in this
+repository. An install that still has either is found when the server starts,
+and that account must set a new password at its next sign-in.
 
 Nothing else is written. A default install starts with no clients, tests or
 documents, so every figure on every screen comes from something you recorded.

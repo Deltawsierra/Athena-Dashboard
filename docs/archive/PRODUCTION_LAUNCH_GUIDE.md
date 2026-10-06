@@ -37,10 +37,9 @@ Your application is now built and ready for stakeholder demonstrations. I've cre
 2. Double-click the shortcut
 3. App runs with console window (can minimize it)
 
-## 🔐 Login Credentials
+## 🔐 First sign-in
 
-- **Username**: admin
-- **Password**: admin123
+The first sign-in is described under "First sign-in" in the top-level README.md. This archived page once listed fixed default passwords; no release seeds them any more, and an install that still has one is made to change it.
 
 ## 📊 What Your Stakeholders Will See
 

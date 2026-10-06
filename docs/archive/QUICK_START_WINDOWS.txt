@@ -15,10 +15,11 @@ STEP 3: Run the app
 -------------------
 npm run electron
 
-LOGIN CREDENTIALS:
------------------
-Username: admin
-Password: admin123
+FIRST SIGN-IN:
+-------------
+See "First sign-in" in README.md. This archived page once listed
+fixed default passwords; no release seeds them any more, and an install
+that still has one is made to change it.
 
 That's it! The app should now be running.
 

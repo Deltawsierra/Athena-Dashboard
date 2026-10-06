@@ -23,6 +23,7 @@ import RetestPanel from "@/components/RetestPanel";
 import RunningScans from "@/components/RunningScans";
 import { queryClient } from "@/lib/queryClient";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 type Exchange = { request: { method: string; path: string }; status: number; body: any; headers?: Record<string, string> };
 type Fixture = { exchanges: Exchange[] };
@@ -103,7 +104,7 @@ beforeAll(async () => {
   const login = await fetch(`${base}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "admin", password: "admin123" }),
+    body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
   });
   expect(login.status).toBe(200);
   session = (login.headers.get("set-cookie") ?? "").split(";")[0];

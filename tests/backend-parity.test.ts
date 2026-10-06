@@ -4,6 +4,7 @@ import request from "supertest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * The suite ran almost entirely against the in-memory backend while production
@@ -25,6 +26,7 @@ async function makeSqliteApp(): Promise<Express> {
 
   const app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   return app;
 }
 
@@ -35,7 +37,7 @@ describe("the SQLite backend over HTTP", () => {
   beforeAll(async () => {
     app = await makeSqliteApp();
     agent = request.agent(app);
-    const res = await agent.post("/api/auth/login").send({ username: "admin", password: "admin123" });
+    const res = await agent.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
     expect(res.status).toBe(200);
   });
 

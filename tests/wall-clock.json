@@ -14,5 +14,6 @@
   "tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts",
   "tests/a-tests-table-at-estate-scale-never-delays-a-stop.test.ts",
   "tests/a-sign-in-flood-never-delays-a-stop.test.ts",
-  "tests/a-stop-presents-the-service-token-and-waits-on-no-sign-in.test.ts"
+  "tests/a-stop-presents-the-service-token-and-waits-on-no-sign-in.test.ts",
+  "tests/a-stop-from-an-account-that-must-change-its-password-waits-on-nothing.test.ts"
 ]

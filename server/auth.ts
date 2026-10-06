@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import type { Request, RequestHandler } from "express";
 import "express-session";
 import { storage } from "./storage-unified";
@@ -9,6 +10,10 @@ declare module "express-session" {
     userId?: string;
     username?: string;
     role?: string;
+    /** The password this session signed in under (passwordStamp): it holds nothing once that changes. */
+    passwordStamp?: string;
+    /** Marked at sign-in to change its password when the mark could not be written to the account. */
+    mustChangePassword?: boolean;
   }
 }
 
@@ -44,9 +49,43 @@ async function loadSessionUser(req: Request): Promise<User | undefined> {
   if (user) noteAccount(user);
   else noteAccountDeleted(id);
   if (!user || !user.isActive) return undefined;
+  const account = asTheSessionHoldsIt(req, user);
+  if (!account) return undefined;
+  req.currentUser = account;
+  return account;
+}
 
-  req.currentUser = user;
-  return user;
+/**
+ * The account ``user`` as the request's session may act for it, or undefined
+ * when the session holds nothing for it:
+ *
+ *   - signed in under a password the account no longer has -- a sign-in that
+ *     verified the old password while it was being changed, or a session an
+ *     admin's reset left behind -- it holds nothing but its stops, which are
+ *     authorised from memory (sessionUser), never here. Ending the other
+ *     sessions at a change is a sweep, and a sign-in still in flight was saved
+ *     after it (#65 review round 2, N1);
+ *   - a mark its sign-in could not write to the account is held in the session,
+ *     and read as the account's own (N4).
+ *
+ * Every reader of the session's account goes through this: the guards, and
+ * GET /api/auth/check.
+ */
+export function asTheSessionHoldsIt(req: Request, user: User): User | undefined {
+  if (req.session?.passwordStamp !== passwordStamp(user.password)) return undefined;
+  return req.session.mustChangePassword === true && !user.mustChangePassword
+    ? { ...user, mustChangePassword: true }
+    : user;
+}
+
+/**
+ * A short digest of a stored password hash, kept in the session at sign-in. A
+ * session whose stamp is not the account's current one signed in under a password
+ * the account no longer has. Never the hash itself: the session store holds only
+ * this.
+ */
+export function passwordStamp(hash: string): string {
+  return crypto.createHash("sha256").update(`athena-session-password:${hash}`).digest("hex").slice(0, 32);
 }
 
 /**
@@ -149,6 +188,42 @@ export function noteAccountDeleted(id: string): void {
   accounts.set(id, null);
 }
 
+/** How long a guard waits on a fresh read of the account before it decides from memory (refreshAccount). */
+export const ACCOUNT_REFRESH_MS = 250;
+
+/**
+ * Read the session's account now, into the directory above (noteAccount /
+ * noteAccountDeleted), waiting for it at most `waitMs`; a read still running
+ * then finishes in the background. Never throws: a read that fails or runs out
+ * of time leaves the directory as it was, and the caller decides from it.
+ *
+ * Memory only learns of a change made on another dashboard on the same
+ * database when something reads the account. A guard about to refuse a stop
+ * from memory, or to serve a failsafe read, asks first, for a bounded time
+ * (#65 review round 4, F1 and F2). A stop memory authorises never reads the
+ * account, here or in the background: a session whose account was deleted
+ * elsewhere keeps its stops, and a read that taught memory the deletion would
+ * refuse its next one.
+ */
+export function refreshAccount(req: Request, waitMs: number): Promise<void> {
+  const id = req.session?.userId;
+  if (!id) return Promise.resolve();
+  const read = Promise.resolve()
+    .then(() => storage.getUser(id))
+    .then(
+      (user) => {
+        if (user) noteAccount(user);
+        else noteAccountDeleted(id);
+      },
+      () => undefined,
+    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((done) => {
+    timer = setTimeout(done, waitMs);
+  });
+  return Promise.race([read, deadline]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Bring the live sessions of one account in line with it, in the session
  * store (memory): its sessions take its new role, and are ended when it was
@@ -176,6 +251,29 @@ export function reviseLiveSessions(
     });
   } catch {
     // The directory decides; the store is only kept tidy.
+  }
+}
+
+/**
+ * End every live session of one account but the one named (the session that
+ * just changed its password), in the session store (memory). Best-effort and
+ * in the background, as reviseLiveSessions is.
+ */
+export function endOtherSessions(
+  store: import("express-session").Store | undefined,
+  id: string,
+  keep: string,
+): void {
+  if (!store || typeof store.all !== "function") return;
+  try {
+    store.all((error, sessions) => {
+      if (error || !sessions || Array.isArray(sessions)) return;
+      for (const [sid, data] of Object.entries(sessions as Record<string, import("express-session").SessionData>)) {
+        if (sid !== keep && data?.userId === id) store.destroy(sid, () => undefined);
+      }
+    });
+  } catch {
+    // Nothing to hold up: the password has changed either way.
   }
 }
 
@@ -257,14 +355,119 @@ function isSignatureRelay(req: Request): boolean {
   return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path);
 }
 
+/**
+ * A command's withdrawal: a stop only when its command is a resume or a
+ * release, which only the control plane knows (the cancel route decides, with
+ * requireAdminUnlessStop).
+ */
+function isWithdrawal(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/cancel$/i.test(path);
+}
+
+/** A claim transition that takes a claim down: a stop (server/assurance.ts CLAIM_TAKE_DOWN). */
+const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
+
+/**
+ * Every stop decided from the request alone (method, path, body), each
+ * authorised from the session in memory (sessionUser), never from the account
+ * read now:
+ *
+ *   - isStopRequest: a scan's or a retest's Stop; engaging the kill switch;
+ *     drafting a failsafe pause, stand-down or terminate; revoking an API key;
+ *   - the stops relayed to the control plane with the failsafe service token
+ *     (`stop:` in server/failsafe.ts and server/assurance.ts): pausing a
+ *     deployment (recompute with `paused: true`); revoking or contradicting
+ *     a claim; and the reads a second operator stops from -- the failsafe
+ *     state, its commands, one command, and the console's status (a read of
+ *     the state with the service token, which the console reads before it
+ *     lists the commands a second operator signs).
+ *
+ * The second group was authorised from the account, read now: so a session
+ * the account no longer holds (signed in under a password it no longer has:
+ * asTheSessionHoldsIt) could not read the state it stops from, pause a
+ * deployment or take a claim down, and a failed account read refused them
+ * (#65 review round 3, F4). Like every stop, they go from a session this
+ * process holds as an active admin's; a stale account gains nothing else.
+ */
+export function isStopFromTheRequest(req: Request): boolean {
+  if (isStopRequest(req)) return true;
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  if (req.method === "GET" && /^\/api\/failsafe\/(status|state|commands|commands\/[^/]+)$/i.test(path)) return true;
+  if (req.method === "POST" && /^\/api\/assurance\/deployments\/[^/]+\/recompute$/i.test(path)) return body.paused === true;
+  if (req.method === "POST" && /^\/api\/assurance\/claims\/[^/]+\/transition$/i.test(path)) {
+    return typeof body.toStatus === "string" && CLAIM_TAKE_DOWN.has(body.toStatus.trim());
+  }
+  return false;
+}
+
+/** What every route but the few allowedBeforePasswordChange names answers an account that must change its password. */
+export const PASSWORD_CHANGE_REQUIRED = "password change required"; // pragma: allowlist secret
+
+/** The answer, exactly: `{"error":"password change required"}`, with 403. */
+export function refusePasswordChangeRequired(res: import("express").Response): void {
+  res.status(403).json({ error: PASSWORD_CHANGE_REQUIRED });
+}
+
+/**
+ * What an account that must change its password may call besides a stop:
+ * changing it, signing out, and reading itself. (Sign-out and reading itself
+ * are mounted before requireAuth, so they never reach the guard; they are
+ * named here so the list is the whole of it.)
+ */
+function allowedBeforePasswordChange(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  if (req.method === "POST" && /^\/api\/auth\/(change-password|logout)$/i.test(path)) return true;
+  if (req.method === "GET" && /^\/api\/auth\/check$/i.test(path)) return true;
+  return false;
+}
+
+/**
+ * Every stop this server takes, from the request alone (method, path, body),
+ * for the guard below. Each is one the code treats as a stop elsewhere:
+ *
+ *   - isStopFromTheRequest: every stop the request alone says is one;
+ *   - a signature relay and a command's withdrawal, which are stops or not by
+ *     the command's action, which only the control plane knows: they pass
+ *     here, and their own handlers refuse this account once the action is
+ *     known not to be a stop's (requireAdminUnlessStop; the cancel route,
+ *     where withdrawing a resume or a release is the stop).
+ */
+export function isStopForPasswordGuard(req: Request): boolean {
+  return isStopFromTheRequest(req) || isSignatureRelay(req) || isWithdrawal(req);
+}
+
+/**
+ * Refuses every request from an account that must change its password
+ * (users.mustChangePassword) with 403 `{"error":"password change required"}`,
+ * except: changing the password, signing out, reading itself -- and EVERY
+ * stop (isStopForPasswordGuard), decided before anything else and from the
+ * request alone, so a stop waits on nothing here and is never refused by it.
+ *
+ * Mounted after requireAuth, which has read the account (req.currentUser)
+ * for every request that is not a stop; this reads nothing.
+ */
+export const requirePasswordChanged: RequestHandler = (req, res, next) => {
+  if (isStopForPasswordGuard(req) || allowedBeforePasswordChange(req)) {
+    next();
+    return;
+  }
+  if (req.currentUser?.mustChangePassword === true) {
+    refusePasswordChangeRequired(res);
+    return;
+  }
+  next();
+};
+
 /** Rejects the request with 401 unless a live, active account is behind it. */
 export const requireAuth: RequestHandler = (req, res, next) => {
   // A stop with a session is authorised from it. One presented with an API key
   // instead is authorised as any request is: the key has to be looked up (two
   // reads; its usage stamp, a write, is never waited on -- touchOnce). A
-  // signature relay with a session is left to its route's guard
-  // (requireAdminUnlessStop), which reads the account unless it may be a stop's.
-  if ((isStopRequest(req) || isSignatureRelay(req)) && sessionUser(req)) {
+  // signature relay or a withdrawal with a session is left to its route's guard
+  // (requireAdminUnlessStop), which reads the account unless it is a stop's.
+  if ((isStopFromTheRequest(req) || isSignatureRelay(req) || isWithdrawal(req)) && sessionUser(req)) {
     next();
     return;
   }
@@ -281,17 +484,41 @@ export const requireAuth: RequestHandler = (req, res, next) => {
 
 /** Rejects with 401 when anonymous and 403 when the account is not an admin. */
 export const requireAdmin: RequestHandler = (req, res, next) => {
-  const user = isStopRequest(req) ? sessionUser(req) : null;
-  if (user) {
-    // A stop: the account's role as this process knows it now, from memory.
-    if (user.role !== "admin") {
-      res.status(403).json({ message: "Admin role required" });
-      return;
-    }
+  if (!isStopFromTheRequest(req)) {
+    adminFromAccount(req, res, next);
+    return;
+  }
+  const remembered = sessionUser(req);
+  if (remembered?.role === "admin" && req.method !== "GET") {
+    // A stop, by an admin as this process knows the account now: authorised from
+    // memory, waiting on nothing.
     req.authorisedFromSession = true;
     next();
     return;
   }
+  // Memory would refuse it -- or it is one of the failsafe reads, which serve
+  // what the control plane holds and so are not served on memory alone: the
+  // account is read first, for at most ACCOUNT_REFRESH_MS. Memory learns of a
+  // promotion, a demotion or a deletion made on another dashboard only from a
+  // read, and refusing a stop on what memory last knew refused an admin promoted
+  // elsewhere, while an account deleted elsewhere read every command (#65 review
+  // round 4, F1 and F2). A read that cannot answer in time leaves it to memory:
+  // an admin's read is served, and anything else is decided from the account.
+  void refreshAccount(req, ACCOUNT_REFRESH_MS)
+    .then(() => {
+      const user = sessionUser(req);
+      if (user?.role === "admin") {
+        req.authorisedFromSession = true;
+        next();
+        return;
+      }
+      adminFromAccount(req, res, next);
+    })
+    .catch(next);
+};
+
+/** The admin guard from the account, read now (loadSessionUser): every request that is not a stop. */
+const adminFromAccount: RequestHandler = (req, res, next) => {
   loadSessionUser(req)
     .then((user) => {
       if (!user) {
@@ -313,9 +540,12 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
  * a signature relay, whose command's action only the control plane knows --
  * turned out to be: a stop's ("stop"), not a stop's ("not_stop"), or not
  * known in time ("possible_stop": the action could not be learnt within its
- * deadline, so it may be a stop's).
+ * deadline, so it may be a stop's) -- or, for a request that must never be
+ * taken for a stop it may not be (a withdrawal, which cannot be taken back),
+ * not known in time ("unread": authorised from the account, and left to its
+ * route to refuse or not).
  */
-export type StopKind = "stop" | "possible_stop" | "not_stop";
+export type StopKind = "stop" | "possible_stop" | "not_stop" | "unread";
 
 /**
  * An admin's guard for a route whose request is a stop or not depending on
@@ -341,7 +571,7 @@ export function requireAdminUnlessStop(kindOf: (req: Request) => Promise<StopKin
     void (async () => {
       const me = sessionUser(req);
       const kind: StopKind = await kindOf(req).catch(() => "possible_stop" as const);
-      if (me !== null && me.role === "admin" && kind !== "not_stop") {
+      if (me !== null && me.role === "admin" && (kind === "stop" || kind === "possible_stop")) {
         req.authorisedFromSession = true;
         if (kind === "possible_stop") req.relayedAsPossibleStop = true;
         next();
@@ -364,6 +594,11 @@ export function requireAdminUnlessStop(kindOf: (req: Request) => Promise<StopKin
       }
       if (user.role !== "admin") {
         res.status(403).json({ message: "Admin role required" });
+        return;
+      }
+      // Known not to be a stop's: an account that must change its password is refused it.
+      if (kind === "not_stop" && user.mustChangePassword === true) {
+        refusePasswordChangeRequired(res);
         return;
       }
       if (kind === "possible_stop") req.relayedAsPossibleStop = true;

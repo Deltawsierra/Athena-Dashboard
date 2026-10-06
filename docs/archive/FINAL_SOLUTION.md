@@ -65,9 +65,8 @@ You should see:
 2. **No trade-offs or compromises** - we achieved full security compliance
 3. **React Query works fine without 'unsafe-eval'** - it was not actually required
 
-## Login Credentials
-- Username: **admin**
-- Password: **admin123**
+## First sign-in
+The first sign-in is described under "First sign-in" in the top-level README.md. This archived page once listed fixed default passwords; no release seeds them any more, and an install that still has one is made to change it.
 
 ---
 

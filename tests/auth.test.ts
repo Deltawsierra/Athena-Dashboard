@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 describe("authentication", () => {
   let app: Express;
@@ -15,7 +16,7 @@ describe("authentication", () => {
   });
 
   it("accepts the seeded admin and returns the user without a password", async () => {
-    const res = await request(app).post("/api/auth/login").send({ username: "admin", password: "admin123" });
+    const res = await request(app).post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
     expect(res.status).toBe(200);
     expect(res.body.user.username).toBe("admin");
     expect(res.body.user.role).toBe("admin");
