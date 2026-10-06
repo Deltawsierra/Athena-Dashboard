@@ -188,6 +188,42 @@ export function noteAccountDeleted(id: string): void {
   accounts.set(id, null);
 }
 
+/** How long a guard waits on a fresh read of the account before it decides from memory (refreshAccount). */
+export const ACCOUNT_REFRESH_MS = 250;
+
+/**
+ * Read the session's account now, into the directory above (noteAccount /
+ * noteAccountDeleted), waiting for it at most `waitMs`; a read still running
+ * then finishes in the background. Never throws: a read that fails or runs out
+ * of time leaves the directory as it was, and the caller decides from it.
+ *
+ * Memory only learns of a change made on another dashboard on the same
+ * database when something reads the account. A guard about to refuse a stop
+ * from memory, or to serve a failsafe read, asks first, for a bounded time
+ * (#65 review round 4, F1 and F2). A stop memory authorises never reads the
+ * account, here or in the background: a session whose account was deleted
+ * elsewhere keeps its stops, and a read that taught memory the deletion would
+ * refuse its next one.
+ */
+export function refreshAccount(req: Request, waitMs: number): Promise<void> {
+  const id = req.session?.userId;
+  if (!id) return Promise.resolve();
+  const read = Promise.resolve()
+    .then(() => storage.getUser(id))
+    .then(
+      (user) => {
+        if (user) noteAccount(user);
+        else noteAccountDeleted(id);
+      },
+      () => undefined,
+    );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((done) => {
+    timer = setTimeout(done, waitMs);
+  });
+  return Promise.race([read, deadline]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Bring the live sessions of one account in line with it, in the session
  * store (memory): its sessions take its new role, and are ended when it was
@@ -448,17 +484,41 @@ export const requireAuth: RequestHandler = (req, res, next) => {
 
 /** Rejects with 401 when anonymous and 403 when the account is not an admin. */
 export const requireAdmin: RequestHandler = (req, res, next) => {
-  const user = isStopFromTheRequest(req) ? sessionUser(req) : null;
-  if (user) {
-    // A stop: the account's role as this process knows it now, from memory.
-    if (user.role !== "admin") {
-      res.status(403).json({ message: "Admin role required" });
-      return;
-    }
+  if (!isStopFromTheRequest(req)) {
+    adminFromAccount(req, res, next);
+    return;
+  }
+  const remembered = sessionUser(req);
+  if (remembered?.role === "admin" && req.method !== "GET") {
+    // A stop, by an admin as this process knows the account now: authorised from
+    // memory, waiting on nothing.
     req.authorisedFromSession = true;
     next();
     return;
   }
+  // Memory would refuse it -- or it is one of the failsafe reads, which serve
+  // what the control plane holds and so are not served on memory alone: the
+  // account is read first, for at most ACCOUNT_REFRESH_MS. Memory learns of a
+  // promotion, a demotion or a deletion made on another dashboard only from a
+  // read, and refusing a stop on what memory last knew refused an admin promoted
+  // elsewhere, while an account deleted elsewhere read every command (#65 review
+  // round 4, F1 and F2). A read that cannot answer in time leaves it to memory:
+  // an admin's read is served, and anything else is decided from the account.
+  void refreshAccount(req, ACCOUNT_REFRESH_MS)
+    .then(() => {
+      const user = sessionUser(req);
+      if (user?.role === "admin") {
+        req.authorisedFromSession = true;
+        next();
+        return;
+      }
+      adminFromAccount(req, res, next);
+    })
+    .catch(next);
+};
+
+/** The admin guard from the account, read now (loadSessionUser): every request that is not a stop. */
+const adminFromAccount: RequestHandler = (req, res, next) => {
   loadSessionUser(req)
     .then((user) => {
       if (!user) {

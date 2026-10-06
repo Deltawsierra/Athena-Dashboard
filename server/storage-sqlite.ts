@@ -135,7 +135,14 @@ export class SqliteStorage implements IStorage {
         .set({ password: rehashed })
         .where(and(eq(schema.users.id, user.id), eq(schema.users.password, user.password)))
         .run();
-      if (written.changes === 0) return undefined;
+      if (written.changes === 0) {
+        // Replaced under it: by another sign-in's rehash of this same password
+        // (the password is still the account's), or by a change (it is not). The
+        // hash in force decides, as a sign-in would (#65 review round 4, F3).
+        const now = await this.getUser(user.id);
+        if (!now || !(await verifyPassword(password, now.password)).ok) return undefined;
+        return now;
+      }
       user.password = rehashed;
     }
     return user;
