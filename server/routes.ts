@@ -4238,7 +4238,7 @@ export function registerRoutes(app: Express): void {
         unread = causeOf(cause);
       }
       if (unread !== null) refused = { status: 503, why: `the account behind this session could not be read (${unread})` };
-      else if (!account) refused = { status: 401, why: "the account behind this session is no longer active" };
+      else if (!account) refused = { status: 401, why: "the account behind this session is no longer active, or its password has changed since this session signed in" };
       else if (account.role !== "admin") refused = { status: 403, why: "the account behind this session is no longer an admin" };
       else if (account.mustChangePassword === true) refused = { status: 403, why: PASSWORD_CHANGE_REQUIRED };
       else if (notStored !== null) refused = { status: 500, why: "the kill switch itself could not be stored" };
@@ -4826,7 +4826,20 @@ export function registerRoutes(app: Express): void {
     res.json(result.command);
   }));
 
-  app.post("/api/failsafe/commands/:uuid/cancel", requireAdmin, asyncHandler(async (req, res) => {
+  // Withdrawing a resume or a release is a stop, authorised from the session in
+  // memory like every stop: a session the account no longer holds, or an
+  // account that cannot be read, may still keep an engine stopped (#65 review
+  // round 3, F4). Withdrawing anything else -- or a command whose action was
+  // not learnt in time, which may be a pause's -- takes a stop away and cannot
+  // be taken back: it needs the account, read now.
+  const withdrawalKind = async (req: Request): Promise<StopKind> => {
+    // Never a rejection: requireAdminUnlessStop reads one as a possible stop.
+    const read = await actionOfRequest(req).catch(() => ({ action: null }));
+    if (read.action === null) return "unread";
+    return FAILSAFE_RECOVER_ACTIONS.has(read.action) ? "stop" : "not_stop";
+  };
+
+  app.post("/api/failsafe/commands/:uuid/cancel", requireAdminUnlessStop(withdrawalKind), asyncHandler(async (req, res) => {
     const read = await actionOfRequest(req);
     if (await killSwitchRefusesCommand(res, "cancel", read)) return;
     // Withdrawing a resume or a release keeps an engine stopped: a stop, which

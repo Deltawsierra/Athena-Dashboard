@@ -22,13 +22,20 @@ import express from "express";
  * one -- so one request for `.env` took the dev server, and the kill switch
  * and every Stop it serves, down.
  *
- * The files here are stand-ins, holding random bytes, in a directory this test
+ * It serves files only from the app's own directories and its dependencies
+ * (DEV_SERVER_ALLOW): a file at the top of the repository, where a dev start
+ * writes, is outside them, and so is every tool's dot-directory there. One
+ * inside an app directory is refused as well (#65 review round 3, F2: the
+ * dotfile rule names files, and a file in a dot-directory was served).
+ *
+ * The files here are stand-ins, holding random bytes, in directories this test
  * makes and removes: a harmless file beside them is served, so a refusal is the
  * rule's, not the path's.
  */
 
 const root = path.resolve(import.meta.dirname, "..");
 let dir: string;
+let outside: string;
 let server: http.Server;
 let base: string;
 let exits: ReturnType<typeof vi.spyOn>;
@@ -62,10 +69,21 @@ const SECRET_FILES = [
   "app.log",
 ];
 
+/** Stand-ins in a dot-directory inside an app directory. */
+const IN_A_DOT_DIRECTORY = [".private/notes.txt", ".tool/state/cache.json", "nested/.hidden/a.txt"];
+
 beforeAll(async () => {
-  dir = fs.mkdtempSync(path.join(root, "tests", "dev-server-fixture-"));
-  for (const name of [...SECRET_FILES, "harmless.txt"]) {
+  // Inside an app directory, where the dev server serves files from.
+  dir = fs.mkdtempSync(path.join(root, "client", "dev-server-fixture-"));
+  for (const name of [...SECRET_FILES, ...IN_A_DOT_DIRECTORY, "harmless.txt"]) {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
     fs.writeFileSync(path.join(dir, name), crypto.randomBytes(16).toString("hex"));
+  }
+  // At the top of the repository, outside every directory it serves.
+  outside = fs.mkdtempSync(path.join(root, "dev-server-fixture-"));
+  for (const name of ["harmless.txt", ".private/notes.txt"]) {
+    fs.mkdirSync(path.dirname(path.join(outside, name)), { recursive: true });
+    fs.writeFileSync(path.join(outside, name), crypto.randomBytes(16).toString("hex"));
   }
   delete process.env.ATHENA_DEV_ALLOWED_HOSTS;
   const { setupVite } = await import("../server/vite");
@@ -81,11 +99,12 @@ afterAll(async () => {
   exits?.mockRestore();
   server?.closeAllConnections?.();
   await new Promise<void>((done) => (server ? server.close(() => done()) : done()));
-  fs.rmSync(dir, { recursive: true, force: true });
+  if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  if (outside) fs.rmSync(outside, { recursive: true, force: true });
 });
 
 describe("the dev server", () => {
-  it("serves an ordinary file under the repository (the control)", async () => {
+  it("serves an ordinary file in an app directory (the control)", async () => {
     const harmless = fs.readFileSync(path.join(dir, "harmless.txt"), "utf8");
     const res = await get(`/@fs${path.join(dir, "harmless.txt")}?raw`);
     expect(res.status).toBe(200);
@@ -100,6 +119,27 @@ describe("the dev server", () => {
       expect(res.status, `${name}${suffix}`).toBe(403);
     }
   });
+
+  it.each(IN_A_DOT_DIRECTORY)("never serves %s, a file in a dot-directory of the app's own", async (name) => {
+    const content = fs.readFileSync(path.join(dir, name), "utf8");
+    for (const suffix of ["", "?raw", "?import&raw", "?url"]) {
+      const res = await get(`/@fs${path.join(dir, name)}${suffix}`);
+      expect(res.body, `${name}${suffix}`).not.toContain(content);
+      expect(res.status, `${name}${suffix}`).toBe(403);
+    }
+  });
+
+  it.each(["harmless.txt", ".private/notes.txt"])(
+    "never serves %s at the top of the repository: outside every directory it serves",
+    async (name) => {
+      const content = fs.readFileSync(path.join(outside, name), "utf8");
+      for (const suffix of ["", "?raw", "?import&raw", "?url"]) {
+        const res = await get(`/@fs${path.join(outside, name)}${suffix}`);
+        expect(res.body, `${name}${suffix}`).not.toContain(content);
+        expect(res.status, `${name}${suffix}`).toBe(403);
+      }
+    },
+  );
 
   it("is still up after every refusal: a refused request never ends the process", async () => {
     expect(exits).not.toHaveBeenCalled();
@@ -120,5 +160,5 @@ describe("the dev server", () => {
     expect((await get("/", "attacker.example")).status).toBe(403);
     expect((await get(`/@fs${path.join(dir, "harmless.txt")}?raw`, "attacker.example")).status).toBe(403);
     expect((await get("/", `localhost:${new URL(base).port}`)).status).toBe(200);
-  });
+  }, 60_000);
 });

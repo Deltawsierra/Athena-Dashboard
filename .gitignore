@@ -84,4 +84,5 @@ tools/assistant-bench/results/
 
 # The first-run admin password a dev start writes beside the database (server/init-data.ts)
 initial-admin-password.txt
-tests/dev-server-fixture-*/
+client/dev-server-fixture-*/
+/dev-server-fixture-*/

@@ -125,7 +125,17 @@ export class SqliteStorage implements IStorage {
     if (!result.ok) return undefined;
     if (result.needsRehash) {
       const rehashed = await hashPassword(password);
-      db.update(schema.users).set({ password: rehashed }).where(eq(schema.users.id, user.id)).run();
+      // Only over the hash this sign-in verified. The rehash is slow, and a
+      // password changed while it ran is the account's now: written over it,
+      // the old password stood again, and this sign-in's session held the
+      // account's current stamp. A sign-in whose hash was replaced under it
+      // verified a password the account no longer has, and is refused.
+      const written = db
+        .update(schema.users)
+        .set({ password: rehashed })
+        .where(and(eq(schema.users.id, user.id), eq(schema.users.password, user.password)))
+        .run();
+      if (written.changes === 0) return undefined;
       user.password = rehashed;
     }
     return user;

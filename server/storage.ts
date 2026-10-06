@@ -320,8 +320,15 @@ export class MemStorage implements IStorage {
     const result = await verifyPassword(password, user.password);
     if (!result.ok) return undefined;
     if (result.needsRehash) {
-      user.password = await hashPassword(password);
-      this.users.set(user.id, user);
+      const verified = user.password;
+      const rehashed = await hashPassword(password);
+      // Only over the hash this sign-in verified (see storage-sqlite.ts): a
+      // password changed while the rehash ran is the account's now.
+      const current = this.users.get(user.id);
+      if (!current || current.password !== verified) return undefined;
+      const updated: User = { ...current, password: rehashed };
+      this.users.set(user.id, updated);
+      return updated;
     }
     return user;
   }

@@ -319,6 +319,53 @@ function isSignatureRelay(req: Request): boolean {
   return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/signatures$/i.test(path);
 }
 
+/**
+ * A command's withdrawal: a stop only when its command is a resume or a
+ * release, which only the control plane knows (the cancel route decides, with
+ * requireAdminUnlessStop).
+ */
+function isWithdrawal(req: Request): boolean {
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  return req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/cancel$/i.test(path);
+}
+
+/** A claim transition that takes a claim down: a stop (server/assurance.ts CLAIM_TAKE_DOWN). */
+const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
+
+/**
+ * Every stop decided from the request alone (method, path, body), each
+ * authorised from the session in memory (sessionUser), never from the account
+ * read now:
+ *
+ *   - isStopRequest: a scan's or a retest's Stop; engaging the kill switch;
+ *     drafting a failsafe pause, stand-down or terminate; revoking an API key;
+ *   - the stops relayed to the control plane with the failsafe service token
+ *     (`stop:` in server/failsafe.ts and server/assurance.ts): pausing a
+ *     deployment (recompute with `paused: true`); revoking or contradicting
+ *     a claim; and the reads a second operator stops from -- the failsafe
+ *     state, its commands, one command, and the console's status (a read of
+ *     the state with the service token, which the console reads before it
+ *     lists the commands a second operator signs).
+ *
+ * The second group was authorised from the account, read now: so a session
+ * the account no longer holds (signed in under a password it no longer has:
+ * asTheSessionHoldsIt) could not read the state it stops from, pause a
+ * deployment or take a claim down, and a failed account read refused them
+ * (#65 review round 3, F4). Like every stop, they go from a session this
+ * process holds as an active admin's; a stale account gains nothing else.
+ */
+export function isStopFromTheRequest(req: Request): boolean {
+  if (isStopRequest(req)) return true;
+  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  if (req.method === "GET" && /^\/api\/failsafe\/(status|state|commands|commands\/[^/]+)$/i.test(path)) return true;
+  if (req.method === "POST" && /^\/api\/assurance\/deployments\/[^/]+\/recompute$/i.test(path)) return body.paused === true;
+  if (req.method === "POST" && /^\/api\/assurance\/claims\/[^/]+\/transition$/i.test(path)) {
+    return typeof body.toStatus === "string" && CLAIM_TAKE_DOWN.has(body.toStatus.trim());
+  }
+  return false;
+}
+
 /** What every route but the few allowedBeforePasswordChange names answers an account that must change its password. */
 export const PASSWORD_CHANGE_REQUIRED = "password change required"; // pragma: allowlist secret
 
@@ -340,22 +387,11 @@ function allowedBeforePasswordChange(req: Request): boolean {
   return false;
 }
 
-/** A claim transition that takes a claim down: a stop (server/assurance.ts CLAIM_TAKE_DOWN). */
-const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
-
 /**
  * Every stop this server takes, from the request alone (method, path, body),
  * for the guard below. Each is one the code treats as a stop elsewhere:
  *
- *   - isStopRequest: a scan's or a retest's Stop; engaging the kill switch;
- *     drafting a failsafe pause, stand-down or terminate; revoking an API key;
- *   - the stops relayed to the control plane with the failsafe service token
- *     (`stop:` in server/failsafe.ts and server/assurance.ts): pausing a
- *     deployment (recompute with `paused: true`); revoking or contradicting
- *     a claim; and the reads a second operator stops from -- the failsafe
- *     state, its commands, one command, and the console's status (a read of
- *     the state with the service token, which the console reads before it
- *     lists the commands a second operator signs);
+ *   - isStopFromTheRequest: every stop the request alone says is one;
  *   - a signature relay and a command's withdrawal, which are stops or not by
  *     the command's action, which only the control plane knows: they pass
  *     here, and their own handlers refuse this account once the action is
@@ -363,16 +399,7 @@ const CLAIM_TAKE_DOWN = new Set(["revoked", "contradicted"]);
  *     where withdrawing a resume or a release is the stop).
  */
 export function isStopForPasswordGuard(req: Request): boolean {
-  if (isStopRequest(req) || isSignatureRelay(req)) return true;
-  const path = `${req.baseUrl}${req.path}`.replace(/\/+$/, "");
-  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
-  if (req.method === "POST" && /^\/api\/failsafe\/commands\/[^/]+\/cancel$/i.test(path)) return true;
-  if (req.method === "GET" && /^\/api\/failsafe\/(status|state|commands|commands\/[^/]+)$/i.test(path)) return true;
-  if (req.method === "POST" && /^\/api\/assurance\/deployments\/[^/]+\/recompute$/i.test(path)) return body.paused === true;
-  if (req.method === "POST" && /^\/api\/assurance\/claims\/[^/]+\/transition$/i.test(path)) {
-    return typeof body.toStatus === "string" && CLAIM_TAKE_DOWN.has(body.toStatus.trim());
-  }
-  return false;
+  return isStopFromTheRequest(req) || isSignatureRelay(req) || isWithdrawal(req);
 }
 
 /**
@@ -402,9 +429,9 @@ export const requireAuth: RequestHandler = (req, res, next) => {
   // A stop with a session is authorised from it. One presented with an API key
   // instead is authorised as any request is: the key has to be looked up (two
   // reads; its usage stamp, a write, is never waited on -- touchOnce). A
-  // signature relay with a session is left to its route's guard
-  // (requireAdminUnlessStop), which reads the account unless it may be a stop's.
-  if ((isStopRequest(req) || isSignatureRelay(req)) && sessionUser(req)) {
+  // signature relay or a withdrawal with a session is left to its route's guard
+  // (requireAdminUnlessStop), which reads the account unless it is a stop's.
+  if ((isStopFromTheRequest(req) || isSignatureRelay(req) || isWithdrawal(req)) && sessionUser(req)) {
     next();
     return;
   }
@@ -421,7 +448,7 @@ export const requireAuth: RequestHandler = (req, res, next) => {
 
 /** Rejects with 401 when anonymous and 403 when the account is not an admin. */
 export const requireAdmin: RequestHandler = (req, res, next) => {
-  const user = isStopRequest(req) ? sessionUser(req) : null;
+  const user = isStopFromTheRequest(req) ? sessionUser(req) : null;
   if (user) {
     // A stop: the account's role as this process knows it now, from memory.
     if (user.role !== "admin") {
@@ -453,9 +480,12 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
  * a signature relay, whose command's action only the control plane knows --
  * turned out to be: a stop's ("stop"), not a stop's ("not_stop"), or not
  * known in time ("possible_stop": the action could not be learnt within its
- * deadline, so it may be a stop's).
+ * deadline, so it may be a stop's) -- or, for a request that must never be
+ * taken for a stop it may not be (a withdrawal, which cannot be taken back),
+ * not known in time ("unread": authorised from the account, and left to its
+ * route to refuse or not).
  */
-export type StopKind = "stop" | "possible_stop" | "not_stop";
+export type StopKind = "stop" | "possible_stop" | "not_stop" | "unread";
 
 /**
  * An admin's guard for a route whose request is a stop or not depending on
@@ -481,7 +511,7 @@ export function requireAdminUnlessStop(kindOf: (req: Request) => Promise<StopKin
     void (async () => {
       const me = sessionUser(req);
       const kind: StopKind = await kindOf(req).catch(() => "possible_stop" as const);
-      if (me !== null && me.role === "admin" && kind !== "not_stop") {
+      if (me !== null && me.role === "admin" && (kind === "stop" || kind === "possible_stop")) {
         req.authorisedFromSession = true;
         if (kind === "possible_stop") req.relayedAsPossibleStop = true;
         next();

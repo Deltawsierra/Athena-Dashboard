@@ -21,10 +21,12 @@ export default defineConfig({
     emptyOutDir: true,
   },
   // `vite` run on its own. The dev server this app starts (server/vite.ts
-  // setupVite) sets its own, with the files it never serves.
+  // setupVite) sets its own: the directories it serves (DEV_SERVER_ALLOW) and
+  // the files it never serves.
   server: {
     fs: {
       strict: true,
+      allow: ["client", "shared", "attached_assets", "node_modules"].map((dir) => path.resolve(rootDir, dir)),
       deny: [".env", ".env.*", "*.{crt,pem}", "**/.git/**", "**/.*", "**/*.db", "**/*.db-*",
         "**/initial-admin-password.txt", "**/session-secret"],
     },

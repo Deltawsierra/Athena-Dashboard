@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
 import fs from "fs";
 import path from "path";
-import { createServer as createViteServer, createLogger } from "vite";
+import { createServer as createViteServer, createLogger, normalizePath } from "vite";
 import { type Server } from "http";
 import viteConfig from "../vite.config";
 import { nanoid } from "nanoid";
@@ -19,18 +19,41 @@ export function log(message: string, source = "express") {
   console.log(`${formattedTime} [${source}] ${message}`);
 }
 
+const repo = path.resolve(import.meta.dirname, "..");
+
+/** The app's own directories: the client, the code it shares, its assets. */
+const APP_DIRS = ["client", "shared", "attached_assets"].map((dir) => normalizePath(path.join(repo, dir)));
+
+/**
+ * The only directories the dev server serves files from: the app's own and the
+ * dependencies it imports. Vite's default is the whole repository, and a dev
+ * start writes the database, the first-run admin's password and the session
+ * secret at its top, beside .env and any tool's dot-directory, all served at
+ * /@fs/<path>. Allowed directories are the rule; DEV_SERVER_DENY is the second
+ * line, for what lands inside one of them.
+ */
+export const DEV_SERVER_ALLOW: readonly string[] = Object.freeze([
+  ...APP_DIRS,
+  normalizePath(path.join(repo, "node_modules")),
+]);
+
+const globEscaped = (dir: string) => dir.replace(/[*?[\]{}()!+@]/g, "\\$&");
+
 /**
  * What the dev server never serves, wherever it lies under the files it may
- * serve (the repository, by default): a dev start keeps the database, the
- * first-run admin's password file and the session secret in the working
- * directory, and Vite serves any file there at /@fs/<its path>. Vite's own
- * defaults are kept: a `deny` given replaces them.
+ * serve (DEV_SERVER_ALLOW). Vite's own defaults are kept: a `deny` given
+ * replaces them. Patterns are matched against the file's absolute path.
  */
 export const DEV_SERVER_DENY: readonly string[] = Object.freeze([
   ".env", ".env.*", "*.{crt,pem}", "**/.git/**",
-  // Every dotfile and dot-directory (.npmrc, .secrets.baseline, .config/): the
-  // config's own rule, which this replaced and dropped (#65 review round 2, N3).
+  // Every dotfile (.npmrc, .secrets.baseline): the config's own rule, which
+  // this replaced and dropped (#65 review round 2, N3). It names files, not
+  // directories: "**/.*" does not match a file inside one.
   "**/.*",
+  // Every file in a dot-directory of the app's own (.config/, an editor's or
+  // a tool's). Not under node_modules: Vite serves the app's prebundled
+  // dependencies from node_modules/.vite.
+  ...APP_DIRS.map((dir) => `${globEscaped(dir)}/**/.*/**`),
   "**/*.{key,cert,crt,pem,p12,pfx}",
   "**/*.db", "**/*.db-*", "**/*.db.*",
   "**/*.sqlite", "**/*.sqlite3", "**/*.sqlite-*", "**/*.sqlite3-*",
@@ -55,7 +78,7 @@ export async function setupVite(app: Express, server: Server) {
     middlewareMode: true,
     hmr: { server },
     allowedHosts: devAllowedHosts(),
-    fs: { strict: true, deny: [...DEV_SERVER_DENY] },
+    fs: { strict: true, allow: [...DEV_SERVER_ALLOW], deny: [...DEV_SERVER_DENY] },
   };
 
   // An error while the dev server starts ends the process (a broken config
