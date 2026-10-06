@@ -442,7 +442,7 @@ describe("a stale account gains nothing but stops", () => {
     expect((await ex.agent.post("/api/retests/r4-unrelated-run/abort")).status).toBe(200);
     expect(getUser).not.toHaveBeenCalled();
     // A guarded request that is not a stop reads the account, and finds it gone (noteAccountDeleted).
-    expect((await ex.agent.get("/api/failsafe/commands")).status).toBe(401);
+    expect((await ex.agent.get("/api/failsafe/audit")).status).toBe(401);
     expect(getUser).toHaveBeenCalledTimes(1);
     // From then on the session authorises nothing -- its stops included -- from memory.
     calls.length = 0;
