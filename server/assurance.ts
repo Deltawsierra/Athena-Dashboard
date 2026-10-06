@@ -94,6 +94,60 @@ export interface AssuranceFinding {
    */
   assignee: string | null;
   remediationState: string;
+  /**
+   * What a closure of this finding stands on: the backend closure gate's own
+   * verdict, per finding (athena-backend assurance/retest_closure.py
+   * closure_standing). Null when the backend did not serve one -- an older
+   * backend, or a shape this server cannot read -- which is "not said", never
+   * "verified".
+   */
+  closure: AssuranceClosure | null;
+}
+
+/** The closure standings the backend serves, closed. Anything else reads "unknown". */
+export const CLOSURE_STANDINGS = [
+  "verified_closed",
+  "closable",
+  "not_closable",
+  "closed_without_retest",
+  "not_retest_gated",
+  // Accepted as residual risk, or a false positive: a human decision, not a
+  // closure, so the backend claims no closure standing for it.
+  "not_a_closure",
+] as const;
+export type ClosureStanding = (typeof CLOSURE_STANDINGS)[number] | "unknown";
+
+export interface ClosureRun {
+  /** Whether it ran; null when the backend could not read the run. */
+  ran: boolean | null;
+  /** "passed" | "failed" | "errored" when it ran; "unreadable"; or null when it did not run. */
+  outcome: string | null;
+}
+
+export interface AssuranceClosure {
+  /**
+   * "verified_closed" is the only standing that says a closure is effect-backed.
+   * "closed_without_retest" is a disposition, never a verified closure;
+   * "not_a_closure" is an accepted risk or a false positive; and
+   * "unknown" is a standing this server does not know, never read as either.
+   */
+  standing: ClosureStanding;
+  retestRequired: boolean;
+  /** Every reason the gate would refuse a closure now; empty when it would stand. */
+  reasons: string[];
+  /** The latest closure evidence the gate reads, or null when there is none. */
+  evidence: {
+    uuid: string;
+    origin: string;
+    contentDigest: string;
+    recordedAt: string | null;
+    fixtures: {
+      vulnerable: ClosureRun;
+      repaired: ClosureRun;
+      benign: ClosureRun;
+      incompleteRepair: Record<string, ClosureRun>;
+    };
+  } | null;
 }
 
 export interface AssuranceReceipt {
@@ -1408,6 +1462,57 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     lastSeen: strOrNull(raw.last_seen),
     assignee: raw.assignee == null ? null : String(raw.assignee),
     remediationState: str(raw.remediation_state),
+    closure: closure(raw.closure),
+  };
+}
+
+function closureRun(raw: unknown): ClosureRun {
+  const r = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+  if (!r) return { ran: null, outcome: "unreadable" };
+  return { ran: boolOrNull(r.ran), outcome: strOrNull(r.outcome) };
+}
+
+/**
+ * A finding's closure standing, as the backend served it -- or null when it served
+ * none it could be read as. A standing outside CLOSURE_STANDINGS reads "unknown":
+ * never promoted to "verified_closed", and never to a disposition.
+ */
+function closure(raw: unknown): AssuranceClosure | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const reasons = Array.isArray(r.reasons) ? r.reasons.map((reason) => String(reason)) : [];
+  const known = (CLOSURE_STANDINGS as readonly string[]).includes(String(r.standing))
+    ? (r.standing as ClosureStanding)
+    : "unknown";
+  // Never better than the answer itself says: a "verified_closed" that also names
+  // reasons the gate would refuse is not one this console can read as verified.
+  const standing: ClosureStanding = known === "verified_closed" && reasons.length > 0 ? "unknown" : known;
+  const e = r.evidence && typeof r.evidence === "object" && !Array.isArray(r.evidence)
+    ? (r.evidence as Record<string, unknown>)
+    : null;
+  const fixtures = e && e.fixtures && typeof e.fixtures === "object" && !Array.isArray(e.fixtures)
+    ? (e.fixtures as Record<string, unknown>)
+    : {};
+  const patterns = fixtures.incomplete_repair && typeof fixtures.incomplete_repair === "object"
+    && !Array.isArray(fixtures.incomplete_repair)
+    ? (fixtures.incomplete_repair as Record<string, unknown>)
+    : {};
+  return {
+    standing,
+    retestRequired: bool(r.retest_required),
+    reasons,
+    evidence: e === null ? null : {
+      uuid: str(e.uuid),
+      origin: str(e.origin),
+      contentDigest: str(e.content_digest),
+      recordedAt: strOrNull(e.recorded_at),
+      fixtures: {
+        vulnerable: closureRun(fixtures.vulnerable),
+        repaired: closureRun(fixtures.repaired),
+        benign: closureRun(fixtures.benign),
+        incompleteRepair: Object.fromEntries(Object.entries(patterns).map(([name, run]) => [name, closureRun(run)])),
+      },
+    },
   };
 }
 
