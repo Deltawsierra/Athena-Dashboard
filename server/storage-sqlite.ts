@@ -92,6 +92,7 @@ export class SqliteStorage implements IStorage {
     const row: User = {
       email: null,
       isActive: true,
+      mustChangePassword: false,
       ...user,
       password: await hashPassword(user.password),
       id: crypto.randomUUID(),
@@ -124,7 +125,24 @@ export class SqliteStorage implements IStorage {
     if (!result.ok) return undefined;
     if (result.needsRehash) {
       const rehashed = await hashPassword(password);
-      db.update(schema.users).set({ password: rehashed }).where(eq(schema.users.id, user.id)).run();
+      // Only over the hash this sign-in verified. The rehash is slow, and a
+      // password changed while it ran is the account's now: written over it,
+      // the old password stood again, and this sign-in's session held the
+      // account's current stamp. A sign-in whose hash was replaced under it
+      // verified a password the account no longer has, and is refused.
+      const written = db
+        .update(schema.users)
+        .set({ password: rehashed })
+        .where(and(eq(schema.users.id, user.id), eq(schema.users.password, user.password)))
+        .run();
+      if (written.changes === 0) {
+        // Replaced under it: by another sign-in's rehash of this same password
+        // (the password is still the account's), or by a change (it is not). The
+        // hash in force decides, as a sign-in would (#65 review round 4, F3).
+        const now = await this.getUser(user.id);
+        if (!now || !(await verifyPassword(password, now.password)).ok) return undefined;
+        return now;
+      }
       user.password = rehashed;
     }
     return user;

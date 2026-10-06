@@ -7,6 +7,7 @@ import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * SAFETY, round four of PR #56 (the round-three review's findings), on the
@@ -157,8 +158,9 @@ beforeAll(async () => {
   const { initializeDefaultData } = await import("../server/init-data");
   app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   admin = request.agent(app);
-  expect((await admin.post("/api/auth/login").send({ username: "admin", password: "admin123" })).status).toBe(200);
+  expect((await admin.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD })).status).toBe(200);
   adminId = (await admin.get("/api/auth/check")).body.user.id;
   const made = await admin.post("/api/users").send({ username: "analyst3", password: "analyst-password", role: "user", email: "a3@a.test" });
   expect(made.status).toBe(201);
@@ -440,7 +442,7 @@ describe("a stale account gains nothing but stops", () => {
     expect((await ex.agent.post("/api/retests/r4-unrelated-run/abort")).status).toBe(200);
     expect(getUser).not.toHaveBeenCalled();
     // A guarded request that is not a stop reads the account, and finds it gone (noteAccountDeleted).
-    expect((await ex.agent.get("/api/failsafe/commands")).status).toBe(401);
+    expect((await ex.agent.get("/api/failsafe/audit")).status).toBe(401);
     expect(getUser).toHaveBeenCalledTimes(1);
     // From then on the session authorises nothing -- its stops included -- from memory.
     calls.length = 0;

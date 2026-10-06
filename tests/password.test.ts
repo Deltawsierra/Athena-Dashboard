@@ -20,14 +20,14 @@ describe("password hashing", () => {
   });
 
   it("accepts a legacy unsalted SHA-256 hash and asks for a rehash", async () => {
-    const legacy = crypto.createHash("sha256").update("admin123").digest("hex");
-    const result = await verifyPassword("admin123", legacy);
+    const legacy = crypto.createHash("sha256").update("a-legacy-sha256-password").digest("hex");
+    const result = await verifyPassword("a-legacy-sha256-password", legacy);
     expect(result.ok).toBe(true);
     expect(result.needsRehash).toBe(true);
   });
 
   it("rejects a wrong password against a legacy hash", async () => {
-    const legacy = crypto.createHash("sha256").update("admin123").digest("hex");
+    const legacy = crypto.createHash("sha256").update("a-legacy-sha256-password").digest("hex");
     expect((await verifyPassword("nope", legacy)).ok).toBe(false);
   });
 

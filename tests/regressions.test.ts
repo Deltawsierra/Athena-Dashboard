@@ -4,6 +4,7 @@ import request from "supertest";
 import { makeApp, signIn } from "./helpers";
 import { verifyPassword, hashPassword } from "../server/password";
 import { resetLoginThrottle } from "../server/routes";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /**
  * Regressions found by an adversarial audit of the Phase 0 branch itself.
@@ -210,7 +211,7 @@ describe("login throttling", () => {
     expect(blocked.status).toBe(429);
 
     // Even the right password is refused while the block stands.
-    const correct = await request(app).post("/api/auth/login").send({ username: "admin", password: "admin123" });
+    const correct = await request(app).post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD });
     expect(correct.status).toBe(429);
   });
 
@@ -218,7 +219,7 @@ describe("login throttling", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await request(app).post("/api/auth/login").send({ username: "admin", password: "wrong" });
     }
-    expect((await request(app).post("/api/auth/login").send({ username: "admin", password: "admin123" })).status).toBe(200);
+    expect((await request(app).post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD })).status).toBe(200);
 
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const res = await request(app).post("/api/auth/login").send({ username: "admin", password: "wrong" });

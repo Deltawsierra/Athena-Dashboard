@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 describe("user administration", () => {
   let app: Express;
@@ -42,7 +43,7 @@ describe("user administration", () => {
     expect(res.status).toBe(403);
 
     // The admin password still works.
-    await request(app).post("/api/auth/login").send({ username: "admin", password: "admin123" }).expect(200);
+    await request(app).post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD }).expect(200);
   });
 
   it("refuses unknown fields on update", async () => {

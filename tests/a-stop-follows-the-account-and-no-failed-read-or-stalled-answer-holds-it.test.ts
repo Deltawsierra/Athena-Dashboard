@@ -7,6 +7,7 @@ import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
+import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 
 /**
  * SAFETY, round three of PR #56: nothing -- a stale session, a failed or slow
@@ -149,8 +150,9 @@ beforeAll(async () => {
   const { initializeDefaultData } = await import("../server/init-data");
   app = createApp();
   await initializeDefaultData();
+  await adminHasSetPassword();
   admin = request.agent(app);
-  expect((await admin.post("/api/auth/login").send({ username: "admin", password: "admin123" })).status).toBe(200);
+  expect((await admin.post("/api/auth/login").send({ username: "admin", password: TEST_ADMIN_PASSWORD })).status).toBe(200);
   adminId = (await admin.get("/api/auth/check")).body.user.id;
   const made = await admin.post("/api/users").send({ username: "analyst3", password: "analyst-password", role: "user", email: "a3@a.test" });
   expect(made.status).toBe(201);
@@ -710,5 +712,25 @@ describe("the kill switch says what each stop came to, and writes it after every
     expect(writes.length).toBeGreaterThan(0);
     expect(Math.min(...writes)).toBeGreaterThanOrEqual(slowAnswered);
     await admin.patch("/api/ai-control").send(REACTIVATE);
+  });
+});
+
+describe("a retest's Stop follows an account changed on another dashboard (#65 review round 5)", () => {
+  it("an account promoted to admin elsewhere stops another's retest: memory is asked again before it refuses", async () => {
+    await storage.updateUser(analystId, { role: "admin" }); // another dashboard: this process is not told
+    try {
+      const fx2 = load(PR71, "at-once-then-stopped");
+      const { testId } = await scanned(fx2);
+      eng.statusReads = [statusReadsOf(fx2)[0]];
+      const runId = (await admin.post(`/api/tests/${testId}/retest`).send({ twinId: 1 })).body.engineRunId as string;
+      calls.length = 0;
+
+      const stop = await analyst.post(`/api/retests/${runId}/abort`);
+
+      expect(stop.status).toBe(200);
+      expect(aborts().length).toBeGreaterThan(0);
+    } finally {
+      await storage.updateUser(analystId, { role: "user" });
+    }
   });
 });

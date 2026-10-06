@@ -1,5 +1,5 @@
 import { Switch, Route, Redirect, useLocation } from "wouter";
-import { queryClient, onUnauthorized } from "./lib/queryClient";
+import { queryClient, onUnauthorized, onPasswordChangeRequired } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -12,6 +12,7 @@ import CursorGlow from "@/components/CursorGlow";
 import SmoothScroll from "@/components/SmoothScroll";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import Login from "@/pages/Login";
+import ChangePassword from "@/pages/ChangePassword";
 import Overview from "@/pages/Overview";
 import PentestScan from "@/pages/PentestScan";
 import AthenaScan from "@/pages/AthenaScan";
@@ -33,7 +34,7 @@ import Classifiers from "@/pages/Classifiers";
 import Failsafe from "@/pages/Failsafe";
 import Assurance from "@/pages/Assurance";
 import NotFound from "@/pages/not-found";
-import { checkAuth, logout as apiLogout, isAdmin } from "@/utils/auth";
+import { checkAuth, logout as apiLogout, isAdmin, mustChangePassword } from "@/utils/auth";
 import { applyStoredTheme } from "@/lib/theme";
 import type { PublicUser } from "@shared/schema";
 
@@ -116,6 +117,28 @@ function App() {
     [setLocation],
   );
 
+  // An account marked to change its password while the app was open: the
+  // server refuses it everything but that and the stops, so the session is
+  // read again and the change-password screen comes first.
+  useEffect(
+    () =>
+      onPasswordChangeRequired(() => {
+        void checkAuth().then((state) => {
+          if (state.authenticated && state.user) setUser(state.user);
+        });
+      }),
+    [],
+  );
+
+  const handlePasswordChanged = useCallback(
+    (nextUser: PublicUser) => {
+      queryClient.clear();
+      setUser(nextUser);
+      setLocation("/dashboard");
+    },
+    [setLocation],
+  );
+
   const handleAuthenticated = useCallback(
     (nextUser: PublicUser) => {
       setUser(nextUser);
@@ -146,6 +169,12 @@ function App() {
     );
   } else if (!user) {
     content = <Login onAuthenticated={handleAuthenticated} />;
+  } else if (mustChangePassword(user)) {
+    // Before anything else. The kill switch is on this screen for an admin:
+    // nothing that stops a scan waits on the password being changed.
+    content = (
+      <ChangePassword user={user} admin={isAdmin(user)} onChanged={handlePasswordChanged} onLogout={handleLogout} />
+    );
   } else {
     content = (
       <AppShell onLogout={handleLogout} isAdmin={isAdmin(user)} username={user.username}>

@@ -35,10 +35,11 @@ WHAT THIS FIXES:
 • Sets up desktop shortcuts
 • Fixes Windows permissions
 
-DEFAULT LOGIN:
+FIRST SIGN-IN:
 --------------
-Username: admin
-Password: admin123
+See "First sign-in" in README.md. This archived page once listed
+fixed default passwords; no release seeds them any more, and an install
+that still has one is made to change it.
 
 STILL HAVING ISSUES?
 --------------------

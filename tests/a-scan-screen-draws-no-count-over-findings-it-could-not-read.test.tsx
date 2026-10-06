@@ -42,6 +42,7 @@ import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import type { IStorage } from "../server/storage";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 const HIGH = { type: "reflected_xss", severity: "high", message: "Reflected input on /search", confidence: 0.65 };
 const UNREAD = "The findings could not be read, so none are listed here. That is not the same as none found.";
@@ -97,7 +98,7 @@ beforeAll(async () => {
   const login = await fetch(`${base}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "admin", password: "admin123" }),
+    body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
   });
   expect(login.status).toBe(200);
   session = (login.headers.get("set-cookie") ?? "").split(";")[0];

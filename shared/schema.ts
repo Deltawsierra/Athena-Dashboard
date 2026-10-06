@@ -61,6 +61,13 @@ export const users = sqliteTable("users", {
   role: text("role").notNull().default("user"),
   email: text("email"),
   isActive: bool("is_active").notNull().default(true),
+  /**
+   * Set on the first-run admin, and on an account found still holding a
+   * legacy default password: until a new password is set (POST
+   * /api/auth/change-password), the account may sign out, read itself,
+   * change its password and send every stop -- nothing else (server/auth.ts).
+   */
+  mustChangePassword: bool("must_change_password").notNull().default(false),
   createdAt: timestamp("created_at").notNull(),
 });
 

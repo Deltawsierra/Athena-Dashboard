@@ -231,6 +231,7 @@ function createSchema(handle: DatabaseType): void {
       role TEXT NOT NULL DEFAULT 'user',
       email TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
+      must_change_password INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
     );
 
@@ -550,6 +551,7 @@ function addMissingColumns(handle: DatabaseType): void {
     ["finding_checks", "filed_via", "TEXT"],
     ["finding_checks", "requested_at", "INTEGER"],
     ["retest_watches", "stop_unread_at", "INTEGER"],
+    ["users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

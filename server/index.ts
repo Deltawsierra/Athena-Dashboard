@@ -2,7 +2,7 @@ import "./boot-uv"; // Must be first: raises UV_THREADPOOL_SIZE before any libuv
 import { createServer } from "http";
 import { createApp, errorHandler } from "./app";
 import { setupVite, serveStatic, log } from "./vite";
-import { initializeDefaultData } from "./init-data";
+import { initializeDefaultData, flagLegacyDefaultPasswords } from "./init-data";
 import { startSampling } from "./health";
 import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
 import { loadServiceToken } from "./failsafe-service-token";
@@ -60,5 +60,8 @@ import { primeNow as primeEngineHost } from "./engine";
 
   server.listen({ port, host }, () => {
     log(`serving on http://${host}:${port}`);
+    // After listening, never awaited: an account still on a legacy default
+    // password is made to change it, and nothing a stop waits on waits on it.
+    void flagLegacyDefaultPasswords();
   });
 })();

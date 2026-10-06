@@ -5,7 +5,7 @@ import express from "express";
 import { createServer } from "http";
 import path from "path";
 import { createApp, errorHandler } from "./app";
-import { initializeDefaultData } from "./init-data";
+import { initializeDefaultData, flagLegacyDefaultPasswords } from "./init-data";
 import { startSampling } from "./health";
 import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
 import { loadServiceToken } from "./failsafe-service-token";
@@ -57,5 +57,8 @@ function serveStatic(app: express.Application): void {
 
   server.listen({ port, host }, () => {
     console.log(`[server] Electron server running on http://${host}:${port}`);
+    // After listening, never awaited: an account still on a legacy default
+    // password is made to change it, and nothing a stop waits on waits on it.
+    void flagLegacyDefaultPasswords();
   });
 })();

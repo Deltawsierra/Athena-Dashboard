@@ -26,6 +26,7 @@ import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import type { IStorage } from "../server/storage";
 import { makeApp, signIn } from "./helpers";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /** mythos-core `evidence.BASIS`, as the engine sends it on every finding it scores. */
 const BASIS =
@@ -88,7 +89,7 @@ beforeAll(async () => {
   const login = await fetch(`${base}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "admin", password: "admin123" }),
+    body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
   });
   expect(login.status).toBe(200);
   session = (login.headers.get("set-cookie") ?? "").split(";")[0];

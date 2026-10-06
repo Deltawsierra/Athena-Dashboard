@@ -289,6 +289,7 @@ export class MemStorage implements IStorage {
     const user: User = {
       email: null,
       isActive: true,
+      mustChangePassword: false,
       ...insertUser,
       password: await hashPassword(insertUser.password),
       id: randomUUID(),
@@ -319,8 +320,20 @@ export class MemStorage implements IStorage {
     const result = await verifyPassword(password, user.password);
     if (!result.ok) return undefined;
     if (result.needsRehash) {
-      user.password = await hashPassword(password);
-      this.users.set(user.id, user);
+      const verified = user.password;
+      const rehashed = await hashPassword(password);
+      // Only over the hash this sign-in verified (see storage-sqlite.ts): a
+      // password changed while the rehash ran is the account's now.
+      const current = this.users.get(user.id);
+      if (!current) return undefined;
+      if (current.password !== verified) {
+        // Replaced under it: another sign-in's rehash of this same password, or a
+        // change. The hash in force decides (storage-sqlite.ts).
+        return (await verifyPassword(password, current.password)).ok ? current : undefined;
+      }
+      const updated: User = { ...current, password: rehashed };
+      this.users.set(user.id, updated);
+      return updated;
     }
     return user;
   }

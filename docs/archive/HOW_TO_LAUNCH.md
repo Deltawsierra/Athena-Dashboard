@@ -56,12 +56,6 @@ The launcher needs to run from the application folder where all the files are in
 - Choose the LTS version
 - Restart your computer after installation
 
-## Login Credentials
+## First sign-in
 
-Once the application launches, use these credentials:
-- Username: **admin**
-- Password: **admin123**
-
-Or for testing:
-- Username: **testadmin**
-- Password: **testpass123**
+The first sign-in is described under "First sign-in" in the top-level README.md. This archived page once listed fixed default passwords; no release seeds them any more, and an install that still has one is made to change it.

@@ -1,13 +1,32 @@
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { storage } from "./storage-unified";
-import type { InsertUser, InsertClient, InsertTest, InsertDocument, InsertSite } from "@shared/schema";
+import { resolveDbPath } from "./db-sqlite";
+import {
+  verifyPassword, newPasswordRefusal, LEGACY_DEFAULT_PASSWORDS, LEGACY_DEFAULT_USERNAMES, MIN_PASSWORD_LENGTH,
+} from "./password";
+import type { User, InsertClient, InsertTest, InsertDocument, InsertSite } from "@shared/schema";
 import { DEFAULT_ACTIVE_SYSTEMS, LEGACY_SEEDED_SYSTEMS } from "@shared/ai-systems";
 
 /**
  * First-run seeding. Runs only when the users table is empty.
  *
- * Default credentials (change them after first login):
- *   admin      / admin123     (admin)
- *   testadmin  / testpass123  (admin)
+ * It creates ONE account, `admin`, and no password is written in this code:
+ * the password is ATHENA_INITIAL_ADMIN_PASSWORD when that is set and meets
+ * the rules every password meets (password.ts newPasswordRefusal), and
+ * otherwise a random one, written once to
+ * INITIAL_ADMIN_PASSWORD_FILE in the data directory (beside the database),
+ * readable only by the user the server runs as. The log names that file,
+ * never the password. Either way the account must set a new password at its
+ * first sign-in (users.mustChangePassword): until it does, it may change its
+ * password, read itself, sign out and send every stop, and nothing else.
+ *
+ * Earlier releases created two admins with fixed passwords, written here and
+ * in the docs of a public repository. An install that kept either is found
+ * after the server is listening (flagLegacyDefaultPasswords) and made to
+ * change it.
+ *
  * Sample clients, sites, tests and documents are written only when
  * ATHENA_SEED_SAMPLE_DATA=1 (see sampleSeedingRequested). A default install
  * gets the users and nothing else.
@@ -69,32 +88,116 @@ export async function migrateLegacyActiveSystems(): Promise<void> {
   }
 }
 
+/** The account first run creates. */
+const INITIAL_ADMIN_USERNAME = "admin";
+
+/** The file the first-run admin's generated password is written to, in the data directory. */
+export const INITIAL_ADMIN_PASSWORD_FILE = "initial-admin-password.txt"; // pragma: allowlist secret
+
+/**
+ * Where this install keeps its data: the directory of the SQLite database.
+ * A database held in memory has none, so ATHENA_USER_DATA, then the working
+ * directory -- where the database file would otherwise have been.
+ */
+export function dataDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const db = resolveDbPath();
+  if (db !== ":memory:") return path.dirname(path.resolve(db));
+  if (env.ATHENA_USER_DATA) return env.ATHENA_USER_DATA;
+  return process.cwd();
+}
+
+/**
+ * The first-run admin's password, and where it can be read: from
+ * ATHENA_INITIAL_ADMIN_PASSWORD when it meets the rules every password meets
+ * (password.ts newPasswordRefusal -- twelve spaces, or a value carried in
+ * with a file's newline, is not taken), otherwise generated
+ * (crypto.randomBytes, 32 url-safe characters) and written to the password
+ * file, created anew with mode 0600 -- a file a previous install left behind
+ * names a password no account has, so it is replaced. Throws when the file
+ * cannot be written: an admin whose password nobody can read is not created.
+ */
+function initialAdminPassword(env: NodeJS.ProcessEnv): { password: string; file: string | null; refused: string | null } {
+  const fromEnv = env.ATHENA_INITIAL_ADMIN_PASSWORD;
+  const refused = typeof fromEnv === "string" && fromEnv.length > 0
+    ? newPasswordRefusal(fromEnv, null, INITIAL_ADMIN_USERNAME)
+    : null;
+  if (typeof fromEnv === "string" && fromEnv.length > 0 && refused === null) {
+    return { password: fromEnv, file: null, refused: null };
+  }
+  const password = crypto.randomBytes(24).toString("base64url");
+  const dir = dataDirectory(env);
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, INITIAL_ADMIN_PASSWORD_FILE);
+  fs.rmSync(file, { force: true });
+  fs.writeFileSync(file, `${password}\n`, { mode: 0o600, flag: "wx" });
+  // The mode given at creation is narrowed by the umask, never widened; this
+  // makes it exactly 0600 whatever the umask was.
+  fs.chmodSync(file, 0o600);
+  return { password, file, refused };
+}
+
 export async function initializeDefaultData(): Promise<void> {
   await migrateLegacyActiveSystems();
+  // Best-effort, as migrateLegacyActiveSystems is: it runs before the server
+  // listens, and nothing in it -- an unwritable data directory, a full disk,
+  // a failed read -- may keep the server, and so every Stop and the kill
+  // switch, from coming up. What failed is logged; with no user written, the
+  // next start is a first run again and tries again.
+  try {
+    await seedFirstRun();
+  } catch (cause) {
+    console.error(
+      `[init] First-run seeding did not complete: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
+async function seedFirstRun(): Promise<void> {
   const existing = await storage.getAllUsers();
   if (existing.length > 0) {
     return;
   }
 
-  console.log("[init] First run: creating default users");
+  console.log("[init] First run: creating the admin account");
 
-  const adminUser: InsertUser = {
-    username: "admin",
-    password: "admin123",
-    email: "admin@athena.ai",
+  let initial: ReturnType<typeof initialAdminPassword>;
+  try {
+    initial = initialAdminPassword(process.env);
+  } catch (cause) {
+    console.error(
+      "[init] First run: the admin account was not created, because its generated password could not be " +
+        `written to ${path.join(dataDirectory(), INITIAL_ADMIN_PASSWORD_FILE)}: ` +
+        `${cause instanceof Error ? cause.message : String(cause)}. ` +
+        `Set ATHENA_INITIAL_ADMIN_PASSWORD (at least ${MIN_PASSWORD_LENGTH} characters, no whitespace at either end), ` +
+        "or make the directory writable, and restart.",
+    );
+    return;
+  }
+
+  const admin = await storage.createUser({
+    username: INITIAL_ADMIN_USERNAME,
+    password: initial.password,
+    email: null,
     role: "admin",
     isActive: true,
-  };
-  const admin = await storage.createUser(adminUser);
+    mustChangePassword: true,
+  });
 
-  const testUser: InsertUser = {
-    username: "testadmin",
-    password: "testpass123",
-    email: "test@athena.ai",
-    role: "admin",
-    isActive: true,
-  };
-  await storage.createUser(testUser);
+  if (initial.file === null) {
+    console.log(
+      '[init] First run: created the admin account "admin" with the password set in ATHENA_INITIAL_ADMIN_PASSWORD. ' +
+        "It must be changed at the first sign-in.",
+    );
+  } else {
+    if (initial.refused !== null) {
+      // Why, never the value.
+      console.warn(`[init] ATHENA_INITIAL_ADMIN_PASSWORD was not used: ${initial.refused}.`);
+    }
+    console.log(
+      `[init] First run: created the admin account "admin". Its generated password is in ${initial.file} ` +
+        "(readable only by this user). Sign in with it and set a new one; then delete the file.",
+    );
+  }
 
   // The page's own ids: the installer used to write ids no screen knew
   // (LEGACY_SEEDED_SYSTEMS), and every switch read off over a record that
@@ -109,7 +212,7 @@ export async function initializeDefaultData(): Promise<void> {
 
   if (!sampleSeedingRequested()) {
     console.log(
-      "[init] Default users created. No sample records written " +
+      "[init] No sample records written " +
         "(set ATHENA_SEED_SAMPLE_DATA=1 to seed them for a demo).",
     );
     return;
@@ -187,5 +290,50 @@ export async function initializeDefaultData(): Promise<void> {
     ipAddress: null,
   });
 
-  console.log("[init] Default users and sample data created. Default login: admin / admin123");
+  console.log("[init] Sample data created.");
+}
+
+/**
+ * An install that kept a legacy default password, found and made to change it.
+ *
+ * Each account named in LEGACY_DEFAULT_USERNAMES that is not already flagged
+ * is checked against the LEGACY_DEFAULT_PASSWORDS with verifyPassword -- at
+ * most two key derivations per account, off the event loop, once per start.
+ * A match sets mustChangePassword, so the account can do nothing but change
+ * its password, sign out and send stops until it does; a warning names the
+ * account, never the password.
+ *
+ * Called after the server is listening and never awaited by anything on a
+ * stop's path. Best-effort: a read or write that fails is logged and the
+ * start goes on. Returns the accounts it flagged.
+ */
+export async function flagLegacyDefaultPasswords(): Promise<string[]> {
+  const flagged: string[] = [];
+  for (const username of LEGACY_DEFAULT_USERNAMES) {
+    try {
+      const user: User | undefined = await storage.getUserByUsername(username);
+      if (!user || user.mustChangePassword) continue;
+      let match = false;
+      for (const legacy of LEGACY_DEFAULT_PASSWORDS) {
+        if ((await verifyPassword(legacy, user.password)).ok) {
+          match = true;
+          break;
+        }
+      }
+      if (!match) continue;
+      await storage.updateUser(user.id, { mustChangePassword: true });
+      flagged.push(username);
+      console.warn(
+        `[init] The account "${username}" still has a default password an earlier release shipped with, ` +
+          "which anyone who has read the public repository knows. It must set a new password at its next sign-in, " +
+          "and can do nothing else but sign out and send stops until it does.",
+      );
+    } catch (cause) {
+      console.error(
+        `[init] Whether the account "${username}" still has a legacy default password could not be checked: ${
+          cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+  return flagged;
 }
