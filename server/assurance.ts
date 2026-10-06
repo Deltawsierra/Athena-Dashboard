@@ -1480,9 +1480,13 @@ function closureRun(raw: unknown): ClosureRun {
 function closure(raw: unknown): AssuranceClosure | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
-  const standing = (CLOSURE_STANDINGS as readonly string[]).includes(String(r.standing))
+  const reasons = Array.isArray(r.reasons) ? r.reasons.map((reason) => String(reason)) : [];
+  const known = (CLOSURE_STANDINGS as readonly string[]).includes(String(r.standing))
     ? (r.standing as ClosureStanding)
     : "unknown";
+  // Never better than the answer itself says: a "verified_closed" that also names
+  // reasons the gate would refuse is not one this console can read as verified.
+  const standing: ClosureStanding = known === "verified_closed" && reasons.length > 0 ? "unknown" : known;
   const e = r.evidence && typeof r.evidence === "object" && !Array.isArray(r.evidence)
     ? (r.evidence as Record<string, unknown>)
     : null;
@@ -1496,7 +1500,7 @@ function closure(raw: unknown): AssuranceClosure | null {
   return {
     standing,
     retestRequired: bool(r.retest_required),
-    reasons: Array.isArray(r.reasons) ? r.reasons.map((reason) => String(reason)) : [],
+    reasons,
     evidence: e === null ? null : {
       uuid: str(e.uuid),
       origin: str(e.origin),
