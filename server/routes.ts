@@ -5,6 +5,7 @@ import { openReport } from "./db-sqlite";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
   requireAuth, requireAdmin, requireAdminUnlessStop, type StopKind, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
+  refreshAccount, ACCOUNT_REFRESH_MS,
   requirePasswordChanged, refusePasswordChangeRequired, PASSWORD_CHANGE_REQUIRED, endOtherSessions, passwordStamp,
   asTheSessionHoldsIt,
 } from "./auth";
@@ -3714,15 +3715,16 @@ export function registerRoutes(app: Express): void {
     // Authorised from memory, never from a read: an admin, or the owner of the
     // retest -- who pressed Retest, or who ran the test it was run from. The
     // session's role is the account's now (auth.ts sessionUser).
-    const me = sessionUser(req) ?? (req.currentUser ? { id: req.currentUser.id, role: req.currentUser.role } : null);
+    const signedIn = sessionUser(req) ?? (req.currentUser ? { id: req.currentUser.id, role: req.currentUser.role } : null);
+    let me = signedIn;
     const watched = watcher.peek(runId);
     // A run a retest's unread answer named, whose own stop did not take
     // (unreadRunHandles): its owner is who pressed that Retest, or ran the test
     // -- of any test whose answer named it.
     const handles = watched === undefined ? handlesForRun(runId) : [];
     const owned: Array<{ requestedBy: string | null; testId: string }> = watched !== undefined ? [watched] : handles;
-    const owner = me !== null
-      && owned.some((one) => one.requestedBy === me.id || storage.peekTest(one.testId)?.executedBy === me.id);
+    const owner = signedIn !== null
+      && owned.some((one) => one.requestedBy === signedIn.id || storage.peekTest(one.testId)?.executedBy === signedIn.id);
     // Until the watches on record have been read (RetestWatcher.resume, which
     // tries until it can), who owns a retest this dashboard has not read is
     // not known here -- nor whether the run id is a retest's at all -- and
@@ -3731,6 +3733,15 @@ export function registerRoutes(app: Express): void {
     // id it names, and the log says who sent it: "sent before watches loaded,
     // id not verified as a retest".
     const unverified = owned.length === 0 && me !== null && !watcher.resumeState().loaded;
+    if (me?.role !== "admin" && !owner && !unverified && req.session?.userId) {
+      // About to refuse on the role memory last knew: read the account first, for
+      // a bounded time (auth.ts refreshAccount). An account promoted to admin on
+      // another dashboard was refused this Stop, while the kill switch, through
+      // requireAdmin, went (#65 review round 5, M1). A Stop memory allows waits on
+      // nothing.
+      await refreshAccount(req, ACCOUNT_REFRESH_MS);
+      me = sessionUser(req) ?? me;
+    }
     if (me?.role !== "admin" && !owner && !unverified) {
       return void res.status(403).json({
         error: "only an admin, or the owner of the test this retest was run from, can stop it here. " +

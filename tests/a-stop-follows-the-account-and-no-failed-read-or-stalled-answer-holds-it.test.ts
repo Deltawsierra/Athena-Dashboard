@@ -714,3 +714,23 @@ describe("the kill switch says what each stop came to, and writes it after every
     await admin.patch("/api/ai-control").send(REACTIVATE);
   });
 });
+
+describe("a retest's Stop follows an account changed on another dashboard (#65 review round 5)", () => {
+  it("an account promoted to admin elsewhere stops another's retest: memory is asked again before it refuses", async () => {
+    await storage.updateUser(analystId, { role: "admin" }); // another dashboard: this process is not told
+    try {
+      const fx2 = load(PR71, "at-once-then-stopped");
+      const { testId } = await scanned(fx2);
+      eng.statusReads = [statusReadsOf(fx2)[0]];
+      const runId = (await admin.post(`/api/tests/${testId}/retest`).send({ twinId: 1 })).body.engineRunId as string;
+      calls.length = 0;
+
+      const stop = await analyst.post(`/api/retests/${runId}/abort`);
+
+      expect(stop.status).toBe(200);
+      expect(aborts().length).toBeGreaterThan(0);
+    } finally {
+      await storage.updateUser(analystId, { role: "user" });
+    }
+  });
+});
