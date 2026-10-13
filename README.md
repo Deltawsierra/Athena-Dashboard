@@ -255,35 +255,67 @@ severe-but-plausible, for gross and retained cash), the cost waterfall (the
 market-value reaction on its own line, never in cash), the sensitivity tornado,
 current against residual (the remediation option's ROI, with the deployment's
 standing decision and the gross line beside a retained headline), the currency
-bridge, the Validity Card, and the receipt's reference with the result's own
-report to download. It reads three documents through this server
-(`server/economics.ts`): `GET /api/economics/report`, `/events` and `/roi`, each
-for one `?deployment=&scenario=` (and, for the report, an optional `&simulation=`
-and `&download=1`), all uuids. No other parameter is forwarded.
+bridge (the report's valuation date and its conversions), the Validity Card, and
+the receipt: its reference, the result's own report to download, and the
+receipt's signed bytes.
+
+The version is picked, not typed: a deployment from the deployments list, then
+one of its scenario versions from the backend's scenario list, a page at a time
+(25 a page, as served). Each version shows its templates, its latest exposure
+run's status, and that run's grade, banner and exclusion from every total, with
+why. Paging moves only to the `previous` and `next` pages the list names.
+Picking a version reads its latest exposure run.
+
+It reads five things through this server (`server/economics.ts`), all named by
+uuid or page number. No other parameter is forwarded.
+
+| Route | Reads |
+| --- | --- |
+| `GET /api/economics/report?deployment=&scenario=[&simulation=][&download=1]` | the report of one result (`mythos.economics.report/v2`) |
+| `GET /api/economics/events?deployment=&scenario=` | the scenario's events and their templates |
+| `GET /api/economics/roi?deployment=&scenario=` | the remediation option's economics |
+| `GET /api/economics/scenarios?deployment=[&page=][&page_size=]` | the deployment's scenario versions, a page at a time (a page size of at most 100) |
+| `GET /api/economics/receipt?deployment=&receipt=&digest=` | a Financial Exposure Receipt's signed DSSE envelope, as stored, as a download |
+
+A receipt is the report's `receipt_id`, sent to the backend dashed; `digest` is the
+report's `receipt.document_digest`, the digest the page shows. The receipt's bytes
+are passed on only when both of these hold, and otherwise refused (502) with none
+of them sent:
+
+- their SHA-256 is the `X-Content-SHA256` the backend sent with them;
+- the envelope's payload is the document whose digest the page shows.
+
+The page checks both again on the bytes it receives, before it saves them. A missing
+header is refused too. When both agree, the bytes go out exactly as they came, with
+`Content-Disposition: attachment`, `nosniff`, `no-store` and the header.
 
 How a read is passed on:
 
 - Only a backend 200 with a JSON media type is passed on, as its bytes, unmodified;
   anything else is refused (502) and none of it is sent.
 - Every answer is `Content-Type: application/json`, `X-Content-Type-Options:
-  nosniff` and `Cache-Control: no-store`; a download is `Content-Disposition:
-  attachment; filename="economics-report.json"`, pinned to the result on screen.
+  nosniff` and `Cache-Control: no-store`. The report's download is
+  `Content-Disposition: attachment; filename="economics-report.json"`, pinned to
+  the result on screen. A receipt is `financial-exposure-receipt-<id>.json`.
 - A backend 4xx is quoted; a 5xx, an unreachable backend or a timeout is a fixed
   sentence and code (the cause is logged on the server).
 - **SAFETY:** one total deadline, 20 s for headers and body together, bounds every
   read (see [Relay reads never hold a stop](#relay-reads-never-hold-a-stop)): past
   it the browser's connection is answered (504) or cut, and the backend read
-  cancelled. The screen cancels its reads when it is left or shows another
-  scenario. So stalled economics reads never fill the browser's few connections
-  to this server ahead of a stop. The reads use the same service account as the
-  assurance reads, behind the session.
+  cancelled, headers or body. Every economics route is mounted behind
+  `boundedRelayRead`. The screen cancels its reads, the picker's and the receipt
+  download included, when it is left or shows another scenario. So stalled
+  economics reads never fill the browser's few connections to this server ahead
+  of a stop. The reads use the same service account as the assurance reads,
+  behind the session.
 
 The rules the views keep, each pinned by a test (`tests/economics-*.test.ts*`):
 
 - The browser does no arithmetic on money: every amount is the backend's decimal
   string, shown as served, at the currency's minor unit as the backend states it
   (JPY 0 places, KWD 3), and never parsed to a float.
-- Scenarios are never totalled; a portfolio total is the backend's to make.
+- Scenarios are never totalled; a portfolio total is the backend's to make. The
+  scenario list carries no figure; the picker adds nothing up.
 - A result graded Unknown (or not graded, or refused) carries the report's banner,
   "Unknown: not for capital decisions", above every figure.
 - A refused result shows its refusal code and kept inputs, by name, and no figure;
@@ -296,10 +328,13 @@ The rules the views keep, each pinned by a test (`tests/economics-*.test.ts*`):
   has settled, served or answered "not served" by the backend itself.
 
 "Not served" is read from the document, never written in: it is shown only where
-the served document lacks the field. Against Athena-Backend master 4c1edf3 that is
-a report's valuation date, its currency bridge, and a route for a receipt's signed
-bytes. The fixtures the tests read are the backend's own answers at 4c1edf3,
-synthetic, regenerated by `tests/fixtures/economics/generate.py`.
+the served document lacks the field. A field the backend serves as not reported
+shows the backend's reason. The valuation date is the currency bridge's, with
+where the backend read it from. While a run converts nothing (`conversions: []`),
+the bridge shows the backend's statement why. A v1 report, which has no currency
+bridge, says both are not served. The fixtures the tests read are the backend's own
+answers at Athena-Backend master e7ee3eb, headers included. They are synthetic,
+and are regenerated by `tests/fixtures/economics/generate.py`.
 
 ## Retries and duplicates
 

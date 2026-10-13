@@ -1,13 +1,14 @@
 /**
  * The economics fixtures: what Athena-Backend's own economics routes answered,
  * SYNTHETIC, recorded by tests/fixtures/economics/generate.py at backend master
- * 4c1edf3 (#160 merged). A test reads its uuids, digests and figures from the
- * files, never from its own expectations.
+ * e7ee3eb (#163 and #164 merged: the v2 report with its currency bridge, the
+ * receipt's signed bytes and the scenario list). A test reads its uuids, digests
+ * and figures from the files, never from its own expectations.
  */
 import fs from "node:fs";
 import path from "node:path";
 
-export const MASTER = "ab-master-4c1edf3";
+export const MASTER = "ab-master-e7ee3eb";
 const ROOT = path.resolve(__dirname, "..", "fixtures", "economics");
 
 export interface Exchange {
@@ -16,8 +17,15 @@ export interface Exchange {
   path: string;
   status: number;
   content_type: string;
-  /** The answer's bytes, as text, exactly. */
+  /** The answer's own headers, of those the generator records (RECORDED_HEADERS). */
+  headers?: Record<string, string>;
+  /**
+   * The answer's bytes, as text, exactly. A receipt's bytes are recorded in hex
+   * (`body_hex`: the base64 of its payload and signature reads as a secret to the
+   * repository's secret scan); `fixture()` turns them back into `body`.
+   */
   body: string;
+  body_hex?: string;
 }
 
 export interface Fixture {
@@ -28,11 +36,19 @@ export interface Fixture {
   engine_record?: Record<string, unknown>;
   /** residual-report only: the backend's own report of the residual run (no route serves it). */
   residual_report?: { note: string; simulation: string; body: string };
+  /** canonical-spellings only: a payload as it is signed (its bytes in hex), and the digest a report names for it. */
+  cases?: Array<{ payload_hex: string; document_digest: string }>;
 }
 
 export function fixture(dir: typeof MASTER, name: string): Fixture {
   const loaded = JSON.parse(fs.readFileSync(path.join(ROOT, dir, `${name}.json`), "utf8")) as Fixture;
   if (!loaded.synthetic.startsWith("SYNTHETIC")) throw new Error(`${dir}/${name} is not marked synthetic`);
+  for (const one of loaded.exchanges ?? []) {
+    if (one.body_hex !== undefined) {
+      if (!/^(?:[0-9a-f]{2})*$/.test(one.body_hex)) throw new Error(`${dir}/${name}: ${one.name}'s body_hex is not hex`);
+      one.body = Buffer.from(one.body_hex, "hex").toString("utf8");
+    }
+  }
   return loaded;
 }
 

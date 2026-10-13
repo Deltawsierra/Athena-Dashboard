@@ -2,7 +2,7 @@
   "synthetic": "SYNTHETIC / ILLUSTRATIVE: made by Athena-Backend's own test helpers in a throwaway test database; no customer data, no real tenant, no key that outlived the run",
   "backend": {
     "repository": "Deltawsierra/Athena-Backend",
-    "sha": "4c1edf3be10fa24d72aadd1139dbda4c404fbe8b",
+    "sha": "e7ee3ebc5a384256be1f9bf43c219639751692dd",
     "ref": "master"
   },
   "scenario": "bridge-unavailable",
@@ -29,6 +29,8 @@
     "estimate": false,
     "stale": false,
     "confidence_downgrades": [],
+    "conflicts": [],
+    "primary_unavailable": [],
     "unavailable": {
       "step": "event_fx",
       "reason": "rate_missing",
@@ -61,5 +63,5 @@
     },
     "chain": []
   },
-  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; no route serves a currency bridge at this commit"
+  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; a report's currency_bridge.conversions is empty at this commit"
 }

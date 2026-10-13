@@ -8,10 +8,11 @@ import { NOT_SERVED_ROI, bytesOf, mountEconomics, renderedAmounts, shims, type A
 /**
  * "Not served" is read from the served document, never written in (review round 1,
  * LOW-4): a field the document has is shown (or, where this dashboard does not
- * read it yet, said so), and only a field it truly lacks reads "not served". Against
- * Athena-Backend master 4c1edf3, which serves the deployment's standing decision
- * and the gross-cash line beside a retained headline (#160), and does not serve a
- * valuation date, a currency bridge or a receipt's signed bytes for a report.
+ * read it yet, said so), and only a field it truly lacks reads "not served"; a
+ * field served as not reported shows the backend's reason. Against Athena-Backend
+ * master e7ee3eb, which serves the deployment's standing decision and the
+ * gross-cash line beside a retained headline (#160), and a report's valuation date
+ * and currency bridge, and a receipt's signed bytes (#163).
  */
 
 beforeAll(shims);
@@ -91,37 +92,84 @@ describe("the report's fields", () => {
   const report = served(graded, "report") as Record<string, any>;
   const mount = (answer: Answer) => mountEconomics(graded, { report: answer, events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
 
-  it("the valuation date: 'not served' while the report has none, and shown once it does", async () => {
-    expect("valuation_date" in report).toBe(false);
-    const absent = await mount(bytesOf(graded, "report"));
-    expect(within(absent.container).getByTestId("scenario-valuation-date").textContent).toMatch(/^not served/);
-    cleanup();
-    vi.unstubAllGlobals();
-    const present = await mount(withField(report, ["valuation_date"], "2026-09-30"));
-    const shown = within(present.container).getByTestId("scenario-valuation-date").textContent;
-    expect(shown).toBe("2026-09-30");
+  it("the valuation date: the currency bridge's, with where it was read from, never 'not served'", async () => {
+    const bridge = report.currency_bridge;
+    expect(bridge.valuation_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const { container } = await mount(bytesOf(graded, "report"));
+    const shown = within(container).getByTestId("scenario-valuation-date");
+    expect(within(shown).getByTestId("valuation-date").textContent).toBe(bridge.valuation_date);
+    expect(within(shown).getByTestId("valuation-date-from").textContent).toContain(bridge.valuation_date_from);
+    expect(shown.textContent).not.toMatch(/not served/);
   });
 
-  it("a receipt's signed bytes: 'not served' while the report names no route for them, never once it does", async () => {
-    const absent = await mount(bytesOf(graded, "report"));
-    expect(within(absent.container).getByTestId("receipt-download").textContent).toMatch(/not served: the report names no route/);
-    cleanup();
-    vi.unstubAllGlobals();
-    const present = await mount(withField(report, ["receipt", "url"], "/api/assurance/economics/receipts/x/"));
-    const shown = within(present.container).getByTestId("receipt-download").textContent ?? "";
-    expect(shown).not.toMatch(/not served/);
-    expect(shown).toMatch(/served \(receipt\.url\), but not read by this dashboard version yet/);
+  it("a valuation date read from the stored inputs says so, as served", async () => {
+    const inputs = fixture(MASTER, "valuation-from-inputs-usd");
+    const bridge = (served(inputs, "report") as Record<string, any>).currency_bridge;
+    expect(bridge.valuation_date_from).not.toBe(report.currency_bridge.valuation_date_from);
+    const { container } = await mountEconomics(inputs, { report: bytesOf(inputs, "report"), roi: NOT_SERVED_ROI });
+    const shown = within(container).getByTestId("scenario-valuation-date");
+    expect(within(shown).getByTestId("valuation-date").textContent).toBe(bridge.valuation_date);
+    expect(within(shown).getByTestId("valuation-date-from").textContent).toContain(bridge.valuation_date_from);
   });
 
-  it("a currency bridge: 'not served' while the report carries none, and rendered from the record once it does", async () => {
-    const absent = await mount(bytesOf(graded, "report"));
-    expect(within(absent.container).getByTestId("bridge-steps").textContent).toMatch(/not served: Athena-Backend serves no currency bridge/);
-    cleanup();
-    vi.unstubAllGlobals();
-    const record = fixture(MASTER, "bridge-eur-normalized").engine_record;
-    const present = await mount(withField(report, ["currency_bridge"], record));
-    const steps = within(present.container).getByTestId("bridge-steps");
+  it("a valuation date the report does not report shows the backend's reason: served, so never 'not served'", async () => {
+    const missing = fixture(MASTER, "valuation-not-reported-usd");
+    const bridge = (served(missing, "report") as Record<string, any>).currency_bridge;
+    expect(bridge.valuation_date).toBeNull();
+    const { container } = await mountEconomics(missing, { report: bytesOf(missing, "report"), roi: NOT_SERVED_ROI });
+    for (const where of [within(container).getByTestId("scenario-valuation-date"), within(container).getByTestId("bridge-valuation-date")]) {
+      expect(where.textContent).toContain(`not reported: ${bridge.not_reported}`);
+      expect(where.textContent).not.toMatch(/not served/);
+    }
+  });
+
+  it("a report with no currency bridge (v1) says the valuation date and the bridge are not served", async () => {
+    const { container } = await mount(without(report, "currency_bridge"));
+    expect(within(container).getByTestId("scenario-valuation-date").textContent).toMatch(/^not served: the report states no valuation date/);
+    expect(within(container).getByTestId("bridge-steps").textContent).toMatch(/not served: Athena-Backend serves no currency bridge/);
+  });
+
+  it("the currency bridge: no conversion, with the backend's statement why, while `conversions` is empty", async () => {
+    expect(report.currency_bridge.conversions).toEqual([]);
+    const { container } = await mount(bytesOf(graded, "report"));
+    const steps = within(container).getByTestId("bridge-steps");
+    expect(within(steps).getByTestId("bridge-statement").textContent).toBe(report.currency_bridge.statement);
     expect(steps.textContent).not.toMatch(/not served/);
+    expect(steps.querySelectorAll("[data-bridge-step]")).toHaveLength(0);
+  });
+
+  it("a conversion, once one is served, is rendered from its record", async () => {
+    // The engine's own normalization record (bridge-eur-normalized): the shape a
+    // conversion has; no route serves one at e7ee3eb (a run converts nothing).
+    const record = fixture(MASTER, "bridge-eur-normalized").engine_record;
+    const { container } = await mount(withField(report, ["currency_bridge", "conversions"], [record]));
+    const steps = within(container).getByTestId("bridge-steps");
+    expect(steps.textContent).not.toMatch(/not served/);
+    expect(within(steps).queryByTestId("bridge-no-conversion")).toBeNull();
     expect(steps.querySelectorAll("[data-bridge-step]")).toHaveLength(3);
+  });
+
+  it("a receipt's signed bytes: offered for a recorded receipt, never 'not served'", async () => {
+    const { container } = await mount(bytesOf(graded, "report"));
+    const shown = within(container).getByTestId("receipt-download");
+    expect(within(shown).getByTestId("receipt-download-button")).toBeTruthy();
+    expect(shown.textContent).not.toMatch(/not served/);
+  });
+
+  it("a result with no receipt shows the backend's reason, and offers no bytes", async () => {
+    const unknown = fixture(MASTER, "unknown-usd");
+    const receipt = (served(unknown, "report") as Record<string, any>).receipt;
+    expect(receipt.not_reported).toBeTruthy();
+    const { container } = await mountEconomics(unknown, { report: bytesOf(unknown, "report"), roi: NOT_SERVED_ROI });
+    expect(within(container).getByTestId("receipt-reference").textContent).toBe(`not reported: ${receipt.not_reported}`);
+    const shown = within(container).getByTestId("receipt-download");
+    expect(within(shown).queryByTestId("receipt-download-button")).toBeNull();
+    expect(shown.textContent).toMatch(/none: this result has no recorded receipt/);
+  });
+
+  it("a report with no receipt field says it is not served", async () => {
+    const { container } = await mount(without(report, "receipt"));
+    expect(within(container).getByTestId("receipt-reference").textContent).toBe("not served: the report names no receipt");
+    expect(within(container).queryByTestId("receipt-download-button")).toBeNull();
   });
 });

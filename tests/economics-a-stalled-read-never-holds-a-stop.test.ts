@@ -7,8 +7,8 @@ import type { Express } from "express";
 import { makeApp } from "./helpers";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 import { economicsStandIn, type EconomicsStandIn } from "./helpers/economics-stand-in";
-import { MASTER, exchange, fixture, idsOf } from "./helpers/economics-fixtures";
-import { _setEconomicsDeadlineForTests, ECONOMICS_DEADLINE_MS } from "../server/economics";
+import { MASTER, exchange, fixture, idsOf, served } from "./helpers/economics-fixtures";
+import { _setEconomicsDeadlineForTests, ECONOMICS_DEADLINE_MS, ECONOMICS_ROUTES } from "../server/economics";
 
 /**
  * SAFETY (review round 1, MEDIUM-3; the lead's decision): a stalled economics read
@@ -24,14 +24,26 @@ import { _setEconomicsDeadlineForTests, ECONOMICS_DEADLINE_MS } from "../server/
  * mid-body fill it, and a pause sent through it is answered. Without the deadline
  * the pause waits for a socket that never frees.
  *
+ * The deployment's two reads (Athena-Backend #163) are under the same deadline:
+ * the scenario list, streamed like a document, and a receipt's signed bytes,
+ * which are held until both digests are checked -- so a receipt stalled anywhere
+ * is answered 504 with none of its bytes, and its backend read is cancelled.
+ *
  * No clock is read: the reads are cut because the deadline fires, and the test
  * waits on the answers themselves.
  */
 
 const graded = fixture(MASTER, "graded-usd-policy-market-value-receipt");
+const list = fixture(MASTER, "scenario-list");
 const { deployment, scenario } = idsOf(graded);
 const reportPath = exchange(graded, "report").path;
 const reportUrl = `/api/economics/report?deployment=${deployment}&scenario=${scenario}`;
+const receiptPath = exchange(graded, "receipt").path;
+const receiptId = /receipts\/([0-9a-f-]{36})\//.exec(receiptPath)![1];
+const receiptUrl = `/api/economics/receipt?deployment=${deployment}&receipt=${receiptId}&digest=${(served(graded, "report") as Record<string, any>).receipt.document_digest}`;
+const listPath = exchange(list, "list-default").path;
+const listDeployment = /deployments\/([0-9a-f-]{36})\//.exec(listPath)![1];
+const listUrl = `/api/economics/scenarios?deployment=${listDeployment}`;
 
 let app: Express;
 let server: http.Server;
@@ -56,7 +68,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  backend = await economicsStandIn([...graded.exchanges!]);
+  backend = await economicsStandIn([...graded.exchanges!, ...list.exchanges!]);
   process.env.ATHENA_FAILSAFE_URL = backend.url;
   process.env.ATHENA_FAILSAFE_USER = "svc-dashboard";
   process.env.ATHENA_FAILSAFE_PASSWORD = "stand-in-only"; // pragma: allowlist secret
@@ -130,6 +142,81 @@ describe("a stalled economics read is cut at its deadline", () => {
     expect(outcome.complete).toBe(true);
     expect(JSON.parse(outcome.body)).toEqual({ error: "Athena-Backend did not answer the report of a stored result in time", code: "backend_timeout" });
     agent.destroy();
+  });
+});
+
+describe("the deployment's reads are cut at the same deadline", () => {
+  it("every economics route is mounted behind the read deadline", () => {
+    type Layer = { route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: { name: string } }> } };
+    const stack = (app as unknown as { _router: { stack: Layer[] } })._router.stack;
+    for (const path of ECONOMICS_ROUTES) {
+      const layer = stack.find((one) => one.route?.path === path);
+      expect(layer?.route?.methods.get, path).toBe(true);
+      expect(layer!.route!.stack.map((one) => one.handle.name)[0], path).toBe("boundedRelayReadLayer");
+    }
+  });
+
+  it("a receipt whose headers never come: the browser is answered 504, with a fixed sentence", async () => {
+    backend.holdHeaders(receiptPath);
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const outcome = await send(agent, "GET", receiptUrl);
+    expect(outcome.status).toBe(504);
+    expect(JSON.parse(outcome.body)).toEqual({ error: "Athena-Backend did not answer a Financial Exposure Receipt's signed bytes in time", code: "backend_timeout" });
+    // The backend read was abandoned too: the held answer's connection closed.
+    await backend.heldClosedAtLeast(1);
+    agent.destroy();
+  });
+
+  it("a receipt stalled mid-body: answered 504 with none of its bytes, and the backend read cancelled", async () => {
+    backend.hold(receiptPath);
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const outcome = await send(agent, "GET", receiptUrl);
+    expect(outcome.status).toBe(504);
+    expect(outcome.complete).toBe(true);
+    expect(JSON.parse(outcome.body).code).toBe("backend_timeout");
+    expect(outcome.body).not.toContain(JSON.parse(exchange(graded, "receipt").body).payload.slice(0, 32));
+    await backend.heldClosedAtLeast(1);
+    expect(backend.holdingOpen()).toBe(false);
+    agent.destroy();
+  });
+
+  it("a scenario list stalled mid-body: the browser's connection is cut and the backend read cancelled", async () => {
+    backend.hold(listPath);
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const outcome = await send(agent, "GET", listUrl);
+    expect(outcome.status).toBe(200);
+    expect(outcome.complete).toBe(false);
+    await backend.heldClosedAtLeast(1);
+    expect(backend.holdingOpen()).toBe(false);
+    agent.destroy();
+  });
+
+  it("a scenario list whose headers never come: answered 504", async () => {
+    backend.holdHeaders(listPath);
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const outcome = await send(agent, "GET", listUrl);
+    expect(outcome.status).toBe(504);
+    expect(JSON.parse(outcome.body)).toEqual({ error: "Athena-Backend did not answer the deployment's scenario versions in time", code: "backend_timeout" });
+    agent.destroy();
+  });
+
+  it("with the browser's six connections held by stalled receipts and lists, a pause sent after them is answered", async () => {
+    backend.hold(receiptPath);
+    backend.holdHeaders(listPath);
+    const pool = new http.Agent({ keepAlive: true, maxSockets: 6 });
+    const reads = [
+      ...Array.from({ length: 3 }, () => send(pool, "GET", receiptUrl)),
+      ...Array.from({ length: 3 }, () => send(pool, "GET", listUrl)),
+    ];
+    await backend.waitFor(() => backend.seen.filter((seen) => seen.path === receiptPath).length >= 3);
+    await backend.waitFor(() => backend.seen.filter((seen) => seen.path === listPath).length >= 3);
+    const paused = await send(pool, "POST", `/api/assurance/deployments/${deployment}/recompute`, JSON.stringify({ paused: true }));
+    expect(paused.status).toBe(200);
+    expect(JSON.parse(paused.body).decision).toBe("paused");
+    const outcomes = await Promise.all(reads);
+    for (const outcome of outcomes) expect(outcome.status).toBe(504);
+    await backend.heldClosedAtLeast(6);
+    pool.destroy();
   });
 });
 

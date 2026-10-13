@@ -6,7 +6,9 @@
  * HELD: its headers and the first part of its body are sent, and the rest waits
  * until `release()` -- a backend that is slow, or stuck, mid-answer -- or held
  * before its headers (`holdHeaders`). A path's answer can be replaced
- * (`answer(path, ...)`): another status, content type or body.
+ * (`answer(path, ...)`): another status, content type, body or headers. A
+ * recorded answer is sent with the headers it was recorded with (its
+ * `X-Content-SHA256`, its `Content-Disposition`).
  *
  * Every request is recorded in the order it arrived. No clock is read.
  */
@@ -31,7 +33,7 @@ export async function economicsStandIn(answers: Exchange[]) {
   let holdingHeaders: string | null = null;
   const held: http.ServerResponse[] = [];
   const heldRest: Array<string | null> = [];
-  const overrides = new Map<string, { status: number; contentType: string | null; body: string }>();
+  const overrides = new Map<string, { status: number; contentType: string | null; body: string; headers?: Record<string, string> }>();
   let heldClosed = 0;
   const closed = new WeakSet<http.ServerResponse>();
   let closeWaiters: Array<{ count: number; resolve: () => void }> = [];
@@ -81,7 +83,9 @@ export async function economicsStandIn(answers: Exchange[]) {
       const replaced = overrides.get(entry.path);
       const recorded = answers.find((one) => one.path === entry.path + entry.query)
         ?? answers.find((one) => one.path === entry.path);
-      const answer = replaced ?? (recorded ? { status: recorded.status, contentType: recorded.content_type, body: recorded.body } : undefined);
+      const answer = replaced ?? (recorded
+        ? { status: recorded.status, contentType: recorded.content_type, body: recorded.body, headers: recorded.headers }
+        : undefined);
       if (entry.method !== "GET" || answer === undefined) {
         res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
         res.end(DJANGO_404);
@@ -93,7 +97,8 @@ export async function economicsStandIn(answers: Exchange[]) {
         heldRest.push(null);
         return;
       }
-      res.writeHead(answer.status, answer.contentType === null ? {} : { "Content-Type": answer.contentType });
+      const extra = Object.fromEntries(Object.entries(answer.headers ?? {}).filter(([name]) => name.toLowerCase() !== "content-type"));
+      res.writeHead(answer.status, { ...extra, ...(answer.contentType === null ? {} : { "Content-Type": answer.contentType }) });
       if (holding !== null && entry.path === holding) {
         const half = Math.floor(answer.body.length / 2);
         res.on("close", () => { closed.add(res); noteClosed(); });
@@ -116,14 +121,20 @@ export async function economicsStandIn(answers: Exchange[]) {
     hold(path: string): void { holding = path; },
     /** Hold every answer to this path before its headers, until the stand-in closes. */
     holdHeaders(path: string): void { holdingHeaders = path; },
-    /** Answer this path with another status, content type (null: none) and body. */
-    answer(path: string, status: number, contentType: string | null, body: string): void {
-      overrides.set(path, { status, contentType, body });
+    /** Answer this path with another status, content type (null: none), body and headers. */
+    answer(path: string, status: number, contentType: string | null, body: string, headers?: Record<string, string>): void {
+      overrides.set(path, { status, contentType, body, headers });
     },
     /** Resolves once `count` held answers have been closed (by either side). */
     heldClosedAtLeast(count: number): Promise<void> {
       if (heldClosed >= count) return Promise.resolve();
       return new Promise((resolve) => { closeWaiters.push({ count, resolve }); });
+    },
+    /** Break off every held answer mid-body: its connection is destroyed, its rest never sent. */
+    cutHeld(): void {
+      held.forEach((res) => res.destroy());
+      held.length = 0;
+      heldRest.length = 0;
     },
     /** Whether a held answer is still open. */
     holdingOpen: () => held.some((res) => !res.writableEnded && !closed.has(res)),
