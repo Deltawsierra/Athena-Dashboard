@@ -4,7 +4,7 @@ import { cleanup, render } from "@testing-library/react";
 
 import { BridgeRecord } from "@/components/economics/CurrencyBridge";
 import { MASTER, fixture, served } from "./helpers/economics-fixtures";
-import { NO_ROI_ROUTE, bytesOf, mountEconomics, shims } from "./helpers/economics-render";
+import { NOT_SERVED_ROI, bytesOf, mountEconomics, shims } from "./helpers/economics-render";
 
 /**
  * Honesty rule: stale or downgraded data is visibly marked -- a figure past its
@@ -25,7 +25,7 @@ describe("stale data", () => {
     const report = served(loaded, "report") as Record<string, any>;
     const freshness = report.validity_card.fields.data_freshness;
     expect(freshness.stale).toEqual(["frequency"]);
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NOT_SERVED_ROI });
     for (const one of freshness.parameters) {
       const row = container.querySelector(`[data-freshness="${one.name}"]`) as HTMLElement;
       const stale = freshness.stale.includes(one.name);
@@ -42,7 +42,7 @@ describe("stale data", () => {
     const report = served(loaded, "report") as Record<string, any>;
     expect(report.validity_card.fields.data_freshness.stale).toEqual([]);
     expect(report.validity_card.fields.confidence_grade.downgrades).toEqual([]);
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NOT_SERVED_ROI });
     expect(container.querySelectorAll('[data-mark="stale"], [data-mark="downgraded"]')).toHaveLength(0);
   });
 });

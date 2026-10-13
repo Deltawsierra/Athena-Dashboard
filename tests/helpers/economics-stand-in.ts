@@ -4,7 +4,9 @@
  * (/api/token/), and a deployment's recompute (a pause is a stop) with a
  * decision. A path it has no answer for is Django's own 404 page. One path may be
  * HELD: its headers and the first part of its body are sent, and the rest waits
- * until `release()` -- a backend that is slow, or stuck, mid-answer.
+ * until `release()` -- a backend that is slow, or stuck, mid-answer -- or held
+ * before its headers (`holdHeaders`). A path's answer can be replaced
+ * (`answer(path, ...)`): another status, content type or body.
  *
  * Every request is recorded in the order it arrived. No clock is read.
  */
@@ -26,8 +28,19 @@ export async function economicsStandIn(answers: Exchange[]) {
   const seen: EconomicsSeen[] = [];
   let waiters: Array<{ match: (one: EconomicsSeen) => boolean; resolve: (one: EconomicsSeen) => void }> = [];
   let holding: string | null = null;
+  let holdingHeaders: string | null = null;
   const held: http.ServerResponse[] = [];
-  const heldRest: string[] = [];
+  const heldRest: Array<string | null> = [];
+  const overrides = new Map<string, { status: number; contentType: string | null; body: string }>();
+  let heldClosed = 0;
+  const closed = new WeakSet<http.ServerResponse>();
+  let closeWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const noteClosed = () => {
+    heldClosed += 1;
+    const ready = closeWaiters.filter((w) => heldClosed >= w.count);
+    closeWaiters = closeWaiters.filter((w) => heldClosed < w.count);
+    ready.forEach((w) => w.resolve());
+  };
   let issued = 0;
 
   const server = http.createServer((req, res) => {
@@ -65,16 +78,25 @@ export async function economicsStandIn(answers: Exchange[]) {
         res.end(JSON.stringify({ decision: "paused", decision_label: "Paused" }));
         return;
       }
-      const answer = answers.find((one) => one.path === entry.path + entry.query)
+      const replaced = overrides.get(entry.path);
+      const recorded = answers.find((one) => one.path === entry.path + entry.query)
         ?? answers.find((one) => one.path === entry.path);
+      const answer = replaced ?? (recorded ? { status: recorded.status, contentType: recorded.content_type, body: recorded.body } : undefined);
       if (entry.method !== "GET" || answer === undefined) {
         res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
         res.end(DJANGO_404);
         return;
       }
-      res.writeHead(answer.status, { "Content-Type": answer.content_type });
+      if (holdingHeaders !== null && entry.path === holdingHeaders) {
+        res.on("close", () => { closed.add(res); noteClosed(); });
+        held.push(res);
+        heldRest.push(null);
+        return;
+      }
+      res.writeHead(answer.status, answer.contentType === null ? {} : { "Content-Type": answer.contentType });
       if (holding !== null && entry.path === holding) {
         const half = Math.floor(answer.body.length / 2);
+        res.on("close", () => { closed.add(res); noteClosed(); });
         res.write(answer.body.slice(0, half));
         held.push(res);
         heldRest.push(answer.body.slice(half));
@@ -92,10 +114,24 @@ export async function economicsStandIn(answers: Exchange[]) {
     economicsReads: () => seen.filter((one) => one.path.includes("/economics/")),
     /** Hold every answer to this path mid-body until release(). */
     hold(path: string): void { holding = path; },
+    /** Hold every answer to this path before its headers, until the stand-in closes. */
+    holdHeaders(path: string): void { holdingHeaders = path; },
+    /** Answer this path with another status, content type (null: none) and body. */
+    answer(path: string, status: number, contentType: string | null, body: string): void {
+      overrides.set(path, { status, contentType, body });
+    },
+    /** Resolves once `count` held answers have been closed (by either side). */
+    heldClosedAtLeast(count: number): Promise<void> {
+      if (heldClosed >= count) return Promise.resolve();
+      return new Promise((resolve) => { closeWaiters.push({ count, resolve }); });
+    },
     /** Whether a held answer is still open. */
-    holdingOpen: () => held.some((res) => !res.writableEnded),
+    holdingOpen: () => held.some((res) => !res.writableEnded && !closed.has(res)),
     release(): void {
-      held.forEach((res, index) => res.end(heldRest[index]));
+      held.forEach((res, index) => {
+        const rest = heldRest[index];
+        if (rest !== null && !res.destroyed) res.end(rest);
+      });
       held.length = 0;
       heldRest.length = 0;
       holding = null;
@@ -107,6 +143,7 @@ export async function economicsStandIn(answers: Exchange[]) {
     },
     close: async () => {
       waiters = [];
+      closeWaiters = [];
       held.forEach((res) => res.destroy());
       server.closeAllConnections?.();
       await new Promise<void>((done) => server.close(() => done()));

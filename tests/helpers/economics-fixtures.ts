@@ -1,14 +1,13 @@
 /**
  * The economics fixtures: what Athena-Backend's own economics routes answered,
- * SYNTHETIC, recorded by tests/fixtures/economics/generate.py at two backend
- * commits. A test reads its uuids, digests and figures from the files, never
- * from its own expectations.
+ * SYNTHETIC, recorded by tests/fixtures/economics/generate.py at backend master
+ * 4c1edf3 (#160 merged). A test reads its uuids, digests and figures from the
+ * files, never from its own expectations.
  */
 import fs from "node:fs";
 import path from "node:path";
 
-export const MASTER = "ab-master-6a8f8e6";
-export const PR160 = "ab-pr160-f7c9f09";
+export const MASTER = "ab-master-4c1edf3";
 const ROOT = path.resolve(__dirname, "..", "fixtures", "economics");
 
 export interface Exchange {
@@ -27,9 +26,11 @@ export interface Fixture {
   scenario: string;
   exchanges?: Exchange[];
   engine_record?: Record<string, unknown>;
+  /** residual-report only: the backend's own report of the residual run (no route serves it). */
+  residual_report?: { note: string; simulation: string; body: string };
 }
 
-export function fixture(dir: typeof MASTER | typeof PR160, name: string): Fixture {
+export function fixture(dir: typeof MASTER, name: string): Fixture {
   const loaded = JSON.parse(fs.readFileSync(path.join(ROOT, dir, `${name}.json`), "utf8")) as Fixture;
   if (!loaded.synthetic.startsWith("SYNTHETIC")) throw new Error(`${dir}/${name} is not marked synthetic`);
   return loaded;

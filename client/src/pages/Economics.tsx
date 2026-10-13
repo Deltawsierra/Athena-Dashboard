@@ -32,7 +32,7 @@ import {
   Tornado,
   ValidityCardView,
 } from "@/components/economics/sections";
-import { isRefused, isResidualRun, obj, type Doc } from "@/lib/economics";
+import { at, isConfirmedNotServed, isRefused, isResidualRun, obj, residualMarker, text, type Doc } from "@/lib/economics";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -43,22 +43,62 @@ export interface EconomicsTarget {
   simulation?: string;
 }
 
-/** The report's own URL on this server: what the page reads, and what the download fetches. */
+/** The report's own URL on this server: what the page reads. */
 export function reportUrl(target: EconomicsTarget): string {
   const query = new URLSearchParams({ deployment: target.deployment, scenario: target.scenario });
   if (target.simulation) query.set("simulation", target.simulation);
   return `/api/economics/report?${query.toString()}`;
 }
 
+/**
+ * The download of the result ON SCREEN: pinned to the uuid of the result the report
+ * shown is of (never "the latest", which can have moved on), or null where the
+ * report names none.
+ */
+export function downloadUrl(target: EconomicsTarget, report: unknown): string | null {
+  const shown = text(at(report, "simulation", "uuid"));
+  if (shown === null || !UUID.test(shown)) return null;
+  return `${reportUrl({ ...target, simulation: shown })}&download=1`;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "the read failed";
 }
 
+/** Every economics read is cancelled when the view showing it is left or replaced. */
+const CANCEL_WHEN_LEFT = { cancelWhenLeft: true };
+
+function ResidualRefused({ roi, roiError }: { roi: Doc | null; roiError: string | null }) {
+  return (
+    <div className="space-y-6">
+      <GlassCard hover={false} glow={false}>
+        <p className="text-sm" data-testid="residual-refused">
+          This result is the residual (counterfactual) run of the scenario&apos;s remediation option. It is not exposure,
+          and is shown only against the current run, below.
+        </p>
+      </GlassCard>
+      <CurrentAgainstResidual roi={roi} roiError={roiError} reportRefused={false} />
+    </div>
+  );
+}
+
+/** No figure of a result whose run could not be shown to be the scenario's own: only why. */
+function Unchecked({ why }: { why: string }) {
+  return (
+    <GlassCard hover={false} glow={false}>
+      <p className="text-sm" data-testid="residual-unchecked">
+        Whether this result is a residual (counterfactual) run could not be checked: {why}. A residual run is never
+        exposure, so no figure of this result is shown.
+      </p>
+    </GlassCard>
+  );
+}
+
 /** The eight views of one scenario version. */
 export function EconomicsView({ deployment, scenario, simulation }: EconomicsTarget) {
-  const report = useQuery<Doc>({ queryKey: ["/api/economics/report", { deployment, scenario, simulation }] });
-  const events = useQuery<Doc>({ queryKey: ["/api/economics/events", { deployment, scenario }] });
-  const roi = useQuery<Doc>({ queryKey: ["/api/economics/roi", { deployment, scenario }] });
+  const report = useQuery<Doc>({ queryKey: ["/api/economics/report", { deployment, scenario, simulation }], meta: CANCEL_WHEN_LEFT });
+  const events = useQuery<Doc>({ queryKey: ["/api/economics/events", { deployment, scenario }], meta: CANCEL_WHEN_LEFT });
+  const roi = useQuery<Doc>({ queryKey: ["/api/economics/roi", { deployment, scenario }], meta: CANCEL_WHEN_LEFT });
 
   if (report.isError) {
     return (
@@ -67,29 +107,37 @@ export function EconomicsView({ deployment, scenario, simulation }: EconomicsTar
       </GlassCard>
     );
   }
-  // The exposure views wait for the ROI read to settle: until it has, whether this
-  // result is a residual run cannot be told, and a residual run is never exposure.
-  if (report.data === undefined || (!roi.isSuccess && !roi.isError)) {
+  if (report.data === undefined) {
     return <p className="text-sm text-muted-foreground" data-testid="economics-loading">Reading the report...</p>;
   }
   const doc = obj(report.data) ?? {};
   const roiDoc = roi.isSuccess ? obj(roi.data) : null;
-  const roiError = roi.isError ? errorText(roi.error) : null;
+  // The backend's own "not served" (its sentence says so), or a failure, said as one.
+  const roiError = !roi.isError ? null
+    : isConfirmedNotServed(roi.error) ? errorText(roi.error) : `the ROI read failed: ${errorText(roi.error)}`;
   const refused = isRefused(doc);
 
-  if (roiDoc !== null && isResidualRun(doc, roiDoc)) {
+  // Is this result a residual (counterfactual) run? A residual run is never
+  // exposure, and the guard FAILS CLOSED. The report must say it is the scenario's
+  // own run (`residual_of: null`); a report that does not say, or says it unreadably,
+  // shows no figure. And the ROI read must have settled, served or answered "not
+  // served" by the backend itself: on any other failure of it (a 5xx, a refusal, a
+  // timeout, a dropped connection) no figure is shown either -- only why. A served
+  // ROI document that names this result as its residual run wins over the marker.
+  const marker = residualMarker(doc);
+  if (marker === "residual") return <ResidualRefused roi={roiDoc} roiError={roiError} />;
+  if (marker !== "own") {
     return (
-      <div className="space-y-6">
-        <GlassCard hover={false} glow={false}>
-          <p className="text-sm" data-testid="residual-refused">
-            This result is the residual (counterfactual) run of the scenario&apos;s remediation option. It is not exposure,
-            and is shown only against the current run, below.
-          </p>
-        </GlassCard>
-        <CurrentAgainstResidual roi={roiDoc} roiError={null} reportRefused={false} />
-      </div>
+      <Unchecked why={marker === "absent"
+        ? "the report does not say (it carries no residual_of)"
+        : "the report's residual_of cannot be read"} />
     );
   }
+  if (!roi.isSuccess && !roi.isError) {
+    return <p className="text-sm text-muted-foreground" data-testid="economics-loading">Reading the report...</p>;
+  }
+  if (roi.isError && !isConfirmedNotServed(roi.error)) return <Unchecked why={roiError ?? "the ROI read failed"} />;
+  if (roiDoc !== null && isResidualRun(doc, roiDoc)) return <ResidualRefused roi={roiDoc} roiError={null} />;
 
   const target = { deployment, scenario, simulation };
   return (
@@ -105,9 +153,9 @@ export function EconomicsView({ deployment, scenario, simulation }: EconomicsTar
         </>
       )}
       <CurrentAgainstResidual roi={roiDoc} roiError={roiError} reportRefused={refused} report={doc} />
-      <CurrencyBridge report={doc} record={null} />
+      <CurrencyBridge report={doc} />
       <ValidityCardView report={doc} refused={refused} />
-      <ReceiptPanel report={doc} href={reportUrl(target)} filename={`economics-report-${scenario}.json`} />
+      <ReceiptPanel report={doc} href={downloadUrl(target, doc)} />
     </div>
   );
 }

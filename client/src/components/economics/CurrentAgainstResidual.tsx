@@ -18,7 +18,7 @@ import type { ReactNode } from "react";
 import GlassCard from "@/components/GlassCard";
 import Money from "@/components/economics/Money";
 import { Banner, NotServed, Served } from "@/components/economics/sections";
-import { LINE_LABEL, at, bannerOf, currencyOf, isRefused, list, obj, text, type Doc } from "@/lib/economics";
+import { LINE_LABEL, at, bannerOf, currencyOf, has, isRefused, list, obj, text, type Doc } from "@/lib/economics";
 
 function Row({ label, children, testId }: { label: string; children: ReactNode; testId?: string }) {
   return (
@@ -80,15 +80,8 @@ function Side({ label, side }: { label: string; side: unknown }) {
   );
 }
 
-function Figures({ roi, reportRefused }: { roi: Doc; reportRefused: boolean }) {
-  const { code, minorUnit } = currencyOf(roi);
-  const figures = obj(roi.figures);
-  if (reportRefused) {
-    return <p data-testid="roi-figures"><NotServed why="the scenario's report is refused: no figure is shown beside a refusal" /></p>;
-  }
-  if (isRefused({ status: roi.status, refusal: null }) || figures === null || "not_reported" in figures) {
-    return <p data-testid="roi-figures"><NotServed why={text(figures?.not_reported) ?? `the document's status is ${text(roi.status) ?? "not served"}`} /></p>;
-  }
+/** One line's economics, as served: the exposures, the reduction, the ROI, the payback, the tail. */
+function EconomicsRows({ figures, code, minorUnit, line }: { figures: Doc; code: string; minorUnit: number | null; line: string }) {
   const money = (value: unknown) => <Money value={value} currency={code} minorUnit={minorUnit} />;
   const ratio = (part: unknown, unit?: string) => {
     const entry = obj(part);
@@ -110,22 +103,90 @@ function Figures({ roi, reportRefused }: { roi: Doc; reportRefused: boolean }) {
       </span>
     );
   };
-  const investment = obj(figures.first_year_investment) ?? {};
+  const id = (name: string) => (line === "headline" ? `roi-${name}` : `roi-${line}-${name}`);
   return (
-    <dl data-testid="roi-figures">
+    <>
       <Row label="Current expected annual exposure">{money(figures.current_expected_annual_exposure)}</Row>
       <Row label="Residual expected annual exposure">{money(figures.residual_expected_annual_exposure)}</Row>
-      <Row label="Expected reduction" testId="roi-reduction">{money(figures.expected_reduction)}</Row>
+      <Row label="Expected reduction" testId={id("reduction")}>{money(figures.expected_reduction)}</Row>
+      <Row label="Risk-adjusted ROI" testId={id("ratio")}>{ratio(figures.risk_adjusted_roi)}</Row>
+      <Row label="Payback" testId={id("payback")}>{ratio(figures.payback, text(at(figures, "payback", "unit")) ?? undefined)}</Row>
+      <Row label="Tail reduction, P90">{tail("p90")}</Row>
+      <Row label="Tail reduction, P95">{tail("p95")}</Row>
+      <Row label="Tail basis"><Served value={at(figures, "tail_reduction", "basis")} /></Row>
+    </>
+  );
+}
+
+/** The headline line's economics, or why there are none. */
+function Figures({ roi }: { roi: Doc }) {
+  const { code, minorUnit } = currencyOf(roi);
+  const figures = obj(roi.figures);
+  if (isRefused({ status: roi.status, refusal: null }) || figures === null || "not_reported" in figures) {
+    return <p data-testid="roi-figures"><NotServed why={text(figures?.not_reported) ?? `the document's status is ${text(roi.status) ?? "not served"}`} /></p>;
+  }
+  const investment = obj(figures.first_year_investment) ?? {};
+  const money = (value: unknown) => <Money value={value} currency={code} minorUnit={minorUnit} />;
+  return (
+    <dl data-testid="roi-figures">
       <Row label="First-year investment" testId="roi-investment">
         base {money(investment.base)} <span className="text-muted-foreground">within low</span> {money(investment.low)}{" "}
         <span className="text-muted-foreground">to high</span> {money(investment.high)}
       </Row>
-      <Row label="Risk-adjusted ROI" testId="roi-ratio">{ratio(figures.risk_adjusted_roi)}</Row>
-      <Row label="Payback" testId="roi-payback">{ratio(figures.payback, text(at(figures, "payback", "unit")) ?? undefined)}</Row>
-      <Row label="Tail reduction, P90">{tail("p90")}</Row>
-      <Row label="Tail reduction, P95">{tail("p95")}</Row>
-      <Row label="Tail basis"><Served value={at(figures, "tail_reduction", "basis")} /></Row>
+      <EconomicsRows figures={figures} code={code} minorUnit={minorUnit} line="headline" />
     </dl>
+  );
+}
+
+/**
+ * The gross-cash line beside a retained headline (#160's owner interim, decision 6),
+ * as the document serves it: "not served" only where the document has no such field.
+ */
+function GrossBeside({ roi }: { roi: Doc }) {
+  const { code, minorUnit } = currencyOf(roi);
+  const figures = obj(roi.figures);
+  let body: ReactNode;
+  if (figures === null || "not_reported" in figures) {
+    body = <NotServed why={text(figures?.not_reported) ?? "no figures are served"} />;
+  } else if (!has(roi, "figures", "gross_cash")) {
+    body = <NotServed why="the ROI document carries no gross-cash line beside the headline" />;
+  } else {
+    const gross = obj(figures.gross_cash);
+    body = (
+      <>
+        {gross === null ? (
+          <p data-served-field="figures.gross_cash">The headline line is gross cash itself: there is no second line.</p>
+        ) : (
+          <dl><EconomicsRows figures={gross} code={code} minorUnit={minorUnit} line="gross" /></dl>
+        )}
+        {text(figures.gross_cash_statement) ? <p className="text-xs text-muted-foreground">{text(figures.gross_cash_statement)}</p> : null}
+      </>
+    );
+  }
+  return (
+    <div className="mt-3 rounded-lg border border-border/40 p-3 text-sm" data-testid="roi-gross-beside-retained">
+      <h3 className="font-semibold">Gross cash, beside the headline</h3>
+      {body}
+    </div>
+  );
+}
+
+/** The deployment's standing decision, stated beside the economics (#160, decision 9): never a veto. */
+function DeploymentDecision({ roi }: { roi: Doc }) {
+  if (!has(roi, "deployment_decision")) {
+    return <NotServed why="the ROI document carries no deployment-decision statement" />;
+  }
+  const decision = obj(roi.deployment_decision);
+  if (decision === null || text(decision.statement) === null) {
+    return <span className="text-muted-foreground" data-not-read="">served, but not read by this dashboard version yet</span>;
+  }
+  return (
+    <span data-served-field="deployment_decision">
+      {text(decision.statement)}
+      <span className="block text-xs text-muted-foreground">
+        {text(decision.veto) ?? ""} {text(decision.source) ? `(${text(decision.source)})` : ""}
+      </span>
+    </span>
   );
 }
 
@@ -137,14 +198,29 @@ export default function CurrentAgainstResidual(
       <GlassCard hover={false} glow={false}>{body}</GlassCard>
     </section>
   );
+  if (reportRefused) {
+    // Beside a refused report the ROI view shows nothing but the refusal: no amount,
+    // no ratio, no days, no run.
+    const code = text(at(report, "refusal", "code"));
+    return (
+      <section data-section="current-against-residual" aria-label="Current against residual">
+        <GlassCard hover={false} glow={false}>
+          <h2 className="text-lg font-semibold tracking-tight">Current against residual</h2>
+          <p className="mt-2 text-sm" data-testid="roi-refused-only">
+            The scenario&apos;s report is refused{code ? ` (${code})` : ""}: beside a refusal this view shows nothing else.
+          </p>
+        </GlassCard>
+      </section>
+    );
+  }
   if (roi === null) {
     // Nothing served: no figure here, so no figure section.
     return (
       <section data-section="current-against-residual" aria-label="Current against residual">
         <GlassCard hover={false} glow={false}>
           <h2 className="text-lg font-semibold tracking-tight">Current against residual</h2>
-          <p className="mt-2 text-sm" data-testid="roi-not-served">
-            <NotServed why={roiError ?? "reading the remediation option's economics"} />
+          <p className="mt-2 text-sm text-muted-foreground" data-testid="roi-not-served">
+            {roiError ?? "Reading the remediation option's economics..."}
           </p>
         </GlassCard>
       </section>
@@ -164,11 +240,9 @@ export default function CurrentAgainstResidual(
       </span>
     );
   };
-  // With the scenario's report refused, or no economics computed, no amount is
-  // shown here at all, not even the option's recorded costs: a refusal shows no figure.
-  const withheld = reportRefused
-    ? "the scenario's report is refused: no figure is shown beside a refusal"
-    : roi.status !== "completed" ? `no economics were computed (${text(roi.status) ?? "status not served"})` : null;
+  // With no economics computed, no amount is shown here, not even the option's
+  // recorded costs. (Beside a refused report this view shows only the refusal, above.)
+  const withheld = roi.status !== "completed" ? `no economics were computed (${text(roi.status) ?? "status not served"})` : null;
   const cost = (key: string) => {
     const entry = obj(option[key]);
     if (entry === null) return <NotServed />;
@@ -204,16 +278,12 @@ export default function CurrentAgainstResidual(
         <Side label="Current run" side={roi.current} />
         <Side label="Residual run" side={roi.residual} />
         <Row label="Line" testId="roi-line">{LINE_LABEL[text(roi.line) ?? ""] ?? <NotServed why={text(at(roi, "figures", "not_reported")) ?? undefined} />}</Row>
-        <Row label="Gross cash beside retained" testId="roi-gross-beside-retained">
-          <NotServed why="Athena-Backend #160 adds the gross line beside the retained one in its fix round; its head does not serve it" />
-        </Row>
-        <Row label="Deployment decision" testId="roi-deployment-decision">
-          <NotServed why="Athena-Backend #160 adds the deployment-decision statement in its fix round; its head does not serve it" />
-        </Row>
+        <Row label="Deployment decision" testId="roi-deployment-decision"><DeploymentDecision roi={roi} /></Row>
       </dl>
       <div className="mt-3 text-sm">
-        <Figures roi={roi} reportRefused={reportRefused} />
+        <Figures roi={roi} />
       </div>
+      <GrossBeside roi={roi} />
       <dl className="mt-3 text-sm">
         <Row label="Utility retained"><Served value={utility.status} /> <span className="text-xs text-muted-foreground">{text(utility.reason) ?? ""}</span></Row>
         <Row label="Confidence">

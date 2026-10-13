@@ -4,7 +4,7 @@ import type { Express } from "express";
 
 import { makeApp, signIn } from "./helpers";
 import { economicsStandIn, type EconomicsStandIn } from "./helpers/economics-stand-in";
-import { MASTER, PR160, exchange, fixture, idsOf } from "./helpers/economics-fixtures";
+import { MASTER, exchange, fixture, idsOf } from "./helpers/economics-fixtures";
 
 /**
  * The economics reads (server/economics.ts): three documents of ONE scenario
@@ -18,7 +18,7 @@ import { MASTER, PR160, exchange, fixture, idsOf } from "./helpers/economics-fix
  */
 
 const graded = fixture(MASTER, "graded-usd-policy-market-value-receipt");
-const vetoed = fixture(PR160, "roi-vetoed");
+const vetoed = fixture(MASTER, "roi-vetoed");
 const { deployment, scenario } = idsOf(graded);
 const query = (extra = "") => `?deployment=${deployment}&scenario=${scenario}${extra}`;
 
@@ -121,13 +121,21 @@ describe("the economics reads", () => {
     expect(backend.economicsReads()).toEqual([]);
   });
 
-  it("say a document the backend does not serve is not served: the ROI route this backend version has not got", async () => {
-    // Athena-Backend master answers its own 404 page for the ROI route (#160 adds it).
+  it("say a document the backend does not serve is not served, quoting the backend's own 404 and never a framework page", async () => {
+    // Athena-Backend's ROI route answers 404 with its detail for a scenario with no remediation option.
     const res = await admin.get(`/api/economics/roi${query()}`);
+    expect(exchange(graded, "roi").status).toBe(404);
     expect(res.status).toBe(404);
     expect(res.headers["cache-control"]).toBe("no-store");
-    expect(res.body.error).toMatch(/^not served: Athena-Backend answered 404/);
-    expect(res.body.error).not.toMatch(/<html|<h1/);
+    expect(res.body.code).toBe("not_served");
+    expect(res.body.error).toBe(`not served: Athena-Backend does not serve the remediation option's economics here (${JSON.parse(exchange(graded, "roi").body).detail})`);
+    // A path the backend has no route for: Django's own HTML 404 page, which is never quoted.
+    const other = "00000000-0000-4000-8000-000000000000";
+    const html = await admin.get(`/api/economics/events?deployment=${other}&scenario=${other}`);
+    expect(html.status).toBe(404);
+    expect(html.body.code).toBe("not_served");
+    expect(html.body.error).toMatch(/^not served: Athena-Backend answered 404/);
+    expect(html.body.error).not.toMatch(/<html|<h1/);
   });
 
   it("answer 503 when no backend is configured, before reading the request", async () => {

@@ -70,7 +70,7 @@ export function servedAmount(value: unknown): Amount {
   if (value === null || value === undefined) return { kind: "absent" };
   if (typeof value === "number") return { kind: "unreadable", why: "served as a number, not as a decimal string" };
   if (typeof value !== "string") return { kind: "unreadable", why: "not a decimal string" };
-  if (!DECIMAL.test(value)) return { kind: "unreadable", why: `"${value}" is not a plain decimal` };
+  if (!DECIMAL.test(value)) return { kind: "unreadable", why: "not a plain decimal string" };
   return { kind: "amount", text: value };
 }
 
@@ -122,6 +122,13 @@ export function bannerOf(doc: unknown): { text: string; served: boolean; reason:
   return null;
 }
 
+/** Whether a served document has a field, down a path of keys: present, even if null. */
+export function has(value: unknown, ...path: string[]): boolean {
+  if (path.length === 0) return value !== undefined;
+  const parent = obj(at(value, ...path.slice(0, -1)));
+  return parent !== null && Object.prototype.hasOwnProperty.call(parent, path[path.length - 1]);
+}
+
 /**
  * Whether a report is of a residual (counterfactual) run: its result is the one
  * the ROI document names as the residual run. Such a run is never exposure; it is
@@ -131,6 +138,32 @@ export function isResidualRun(report: unknown, roi: unknown): boolean {
   const shown = text(at(report, "simulation", "uuid"));
   const residual = text(at(roi, "residual", "simulation"));
   return shown !== null && residual !== null && shown === residual;
+}
+
+/**
+ * What the report itself says of its run (Athena-Backend #160, merged:
+ * `residual_of`, null for the scenario's own run, the remediation option for a
+ * residual run): "own" or "residual" where it says so; "absent" where the report
+ * carries no such field (a backend from before #160), and "unreadable" where the
+ * field is neither null nor an object. Only "own" lets a result be read as exposure.
+ */
+export function residualMarker(report: unknown): "own" | "residual" | "absent" | "unreadable" {
+  if (!has(report, "residual_of")) return "absent";
+  const marker = at(report, "residual_of");
+  if (marker === null) return "own";
+  return obj(marker) !== null ? "residual" : "unreadable";
+}
+
+/**
+ * Whether a failed ROI read is the backend's own "not served" (it answered 404: no
+ * remediation option with a residual run, or no ROI route at this version), which
+ * this server answers 404 with `code: "not_served"`. Only that confirms there is no
+ * residual run to mistake for exposure; any other failure -- a 5xx, a refusal, a
+ * timeout, a dropped connection, this server's own 404 -- confirms nothing.
+ */
+export function isConfirmedNotServed(error: unknown): boolean {
+  const failed = error as { status?: unknown; body?: unknown } | null;
+  return failed !== null && typeof failed === "object" && failed.status === 404 && at(failed.body, "code") === "not_served";
 }
 
 /** The lines a report states figures for, in its order (report.LINES). */

@@ -3,8 +3,8 @@ import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
 import { BridgeRecord } from "@/components/economics/CurrencyBridge";
-import { MASTER, PR160, fixture, served } from "./helpers/economics-fixtures";
-import { NO_ROI_ROUTE, bytesOf, mountEconomics, renderedAmounts, shims } from "./helpers/economics-render";
+import { MASTER, fixture, served } from "./helpers/economics-fixtures";
+import { NOT_SERVED_ROI, bytesOf, mountEconomics, renderedAmounts, shims } from "./helpers/economics-render";
 
 /**
  * The eight financial views of one scenario version (MVP step 14), each showing
@@ -33,7 +33,7 @@ const section = (container: HTMLElement, id: string) => {
 
 describe("a graded report, with a policy, a market-value reaction and a receipt (backend master)", () => {
   it("the scenario card: name, template, deployment, grade, status, as-of, and no valuation date it was not served", async () => {
-    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
     const card = within(section(container, "scenario-card"));
     expect(card.getByTestId("scenario-name").textContent).toBe(report.scenario.title);
     const template = events.events[0].template;
@@ -50,7 +50,7 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
   });
 
   it("the distribution: P10, P50, P90, mean, expected annual loss and severe-but-plausible for gross AND retained cash, the headline marked, each line's grade, a range with every point", async () => {
-    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
     const distribution = section(container, "distribution");
     const lines = report.summary.lines;
     for (const line of ["gross_cash", "retained_cash"]) {
@@ -82,7 +82,7 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
   });
 
   it("the cost waterfall: the components in the report's order, the totals as served, and the market-value reaction on its own line, never among the cash", async () => {
-    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
     const waterfall = section(container, "waterfall");
     const event = report.loss_events[0];
     const cashSteps = waterfall.querySelector("[data-cash-steps]") as HTMLElement;
@@ -103,7 +103,7 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
   });
 
   it("the tornado: the sensitivity rows as served, in rank order", async () => {
-    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
     const rows = Array.from(section(container, "tornado").querySelectorAll("[data-tornado-row]"));
     expect(rows.map((one) => one.getAttribute("data-tornado-row"))).toEqual(report.sensitivity.tornado.map((one: any) => one.name));
     rows.forEach((row, index) => {
@@ -114,9 +114,9 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
   });
 
   it("current against residual, the currency bridge, the Validity Card and the receipt, as served", async () => {
-    const { container, deployment, scenario } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NO_ROI_ROUTE });
-    // This backend version has no ROI route: said so, nothing computed in its place.
-    expect(screen.getByTestId("roi-not-served").textContent).toMatch(/not served: Athena-Backend answered 404/);
+    const { container, deployment, scenario } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
+    // The backend serves no ROI document for a scenario with no option: said so, nothing computed in its place.
+    expect(screen.getByTestId("roi-not-served").textContent).toMatch(/^not served: Athena-Backend does not serve the remediation option's economics/);
     expect(renderedAmounts(section(container, "current-against-residual"))).toEqual([]);
     // The bridge: the reporting currency and the snapshots the report serves; no conversion steps it did not serve.
     const bridge = section(container, "currency-bridge");
@@ -132,16 +132,20 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
     expect(within(receipt).getByTestId("receipt-digest").textContent).toBe(report.receipt.document_digest);
     expect(receipt.textContent).toContain(report.receipt.receipt_id);
     expect(within(receipt).getByTestId("report-digest").textContent).toContain(report.digest);
+    // The download is pinned to the result on screen, though the page named none (review round 1, LOW-2).
     const link = within(receipt).getByTestId("report-download") as HTMLAnchorElement;
-    expect(link.getAttribute("href")).toBe(`/api/economics/report?deployment=${deployment}&scenario=${scenario}`);
+    expect(link.getAttribute("href")).toBe(
+      `/api/economics/report?deployment=${deployment}&scenario=${scenario}&simulation=${report.simulation.uuid}&download=1`,
+    );
     expect(link.hasAttribute("download")).toBe(true);
-    // The backend serves no route for a receipt's signed bytes: none is offered.
-    expect(within(receipt).getByTestId("receipt-download").textContent).toMatch(/not served: Athena-Backend serves no route for a receipt's signed bytes/);
+    expect(receipt.textContent).toMatch(/A fresh read of the same result/);
+    // The report names no route for a receipt's signed bytes: none is offered.
+    expect(within(receipt).getByTestId("receipt-download").textContent).toMatch(/not served: the report names no route for a receipt's signed bytes/);
   });
 });
 
-describe("current against residual (Athena-Backend #160 head f7c9f09)", () => {
-  const vetoed = fixture(PR160, "roi-vetoed");
+describe("current against residual (Athena-Backend master 4c1edf3, #160 merged)", () => {
+  const vetoed = fixture(MASTER, "roi-vetoed");
   const roi = served(vetoed, "roi") as Record<string, any>;
 
   it("states the veto ABOVE every figure, marks the ROI and payback display-only, and shows each figure as served", async () => {
@@ -163,14 +167,15 @@ describe("current against residual (Athena-Backend #160 head f7c9f09)", () => {
     expect(renderedAmounts(within(figures).getByTestId("roi-reduction"))).toEqual([roi.figures.expected_reduction]);
     expect(renderedAmounts(within(figures).getByTestId("roi-investment")))
       .toEqual([roi.figures.first_year_investment.base, roi.figures.first_year_investment.low, roi.figures.first_year_investment.high]);
-    // What #160's fix round adds is not served at its head: said so, never computed.
-    expect(within(view).getByTestId("roi-deployment-decision").textContent).toMatch(/not served/);
-    expect(within(view).getByTestId("roi-gross-beside-retained").textContent).toMatch(/not served/);
+    // What #160 serves beside the economics: the deployment's standing decision, as served (never a veto),
+    // and, for a gross headline, no second line.
+    expect(within(view).getByTestId("roi-deployment-decision").textContent).toContain(roi.deployment_decision.statement);
+    expect(within(view).getByTestId("roi-gross-beside-retained").textContent).toMatch(/The headline line is gross cash itself/);
     expect(within(view).getByTestId("roi-line").textContent).toBe("Gross cash");
   });
 
   it("says the veto does not apply where it does not, and shows no veto statement", async () => {
-    const clean = fixture(PR160, "roi-clean");
+    const clean = fixture(MASTER, "roi-clean");
     const { container } = await mountEconomics(clean, { report: bytesOf(clean, "report"), events: bytesOf(clean, "events"), roi: bytesOf(clean, "roi") });
     const view = section(container, "current-against-residual");
     expect(view.querySelector('[data-veto="does-not-apply"]')).not.toBeNull();

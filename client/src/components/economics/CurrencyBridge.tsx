@@ -11,8 +11,8 @@
  * currency and the source snapshots the report does serve.
  */
 import Money from "@/components/economics/Money";
-import { Mark, NotServed, PlainSection, Served } from "@/components/economics/sections";
-import { at, list, obj, text, type Doc } from "@/lib/economics";
+import { FigureSection, Mark, NotServed, Served } from "@/components/economics/sections";
+import { at, has, list, obj, text, type Doc } from "@/lib/economics";
 
 const STEP_LABEL: Record<string, string> = {
   event_fx: "Event-date FX",
@@ -104,12 +104,21 @@ export function BridgeRecord({ record }: { record: Doc }) {
   );
 }
 
-/** The bridge section of a report: its currency and snapshots, and the bridge itself where served. */
-export default function CurrencyBridge({ report, record }: { report: Doc; record: Doc | null }) {
+/** Where a report would carry a currency bridge (a Normalization record), were it to (it carries none today). */
+const BRIDGE: string[][] = [["currency_bridge"], ["normalization"]];
+
+/**
+ * The bridge section of a report: its currency and snapshots, and the bridge itself
+ * where the report carries one. A section with figures, so under the report's
+ * banner like every other.
+ */
+export default function CurrencyBridge({ report }: { report: Doc }) {
   const snapshots = obj(report.source_snapshots);
   const oneCurrency = list(report.limitations).find((line) => typeof line === "string" && line.startsWith("one reporting currency"));
+  const found = BRIDGE.find((path) => has(report, ...path));
+  const record = found === undefined ? null : obj(at(report, ...found));
   return (
-    <PlainSection title="Currency bridge" id="currency-bridge">
+    <FigureSection title="Currency bridge" id="currency-bridge" doc={report}>
       <dl className="text-sm">
         <div className="py-1"><span className="text-muted-foreground">Reporting currency </span><Served value={at(report, "currency", "code")} />{" "}
           <span className="text-xs text-muted-foreground">(minor unit {String(at(report, "currency", "minor_unit") ?? "?")}; {text(at(report, "currency", "rounding")) ?? ""})</span>
@@ -129,14 +138,16 @@ export default function CurrencyBridge({ report, record }: { report: Doc; record
       </div>
       <div data-testid="bridge-steps">
         <h3 className="text-sm font-semibold">Native to reporting currency</h3>
-        {record === null ? (
+        {found === undefined ? (
           <p>
             <NotServed why={`Athena-Backend serves no currency bridge for this report${typeof oneCurrency === "string" ? ` (${oneCurrency})` : ""}`} />
           </p>
-        ) : (
+        ) : record !== null && Array.isArray(record.chain) ? (
           <BridgeRecord record={record} />
+        ) : (
+          <p className="text-muted-foreground" data-not-read="">served ({found.join(".")}), but not read by this dashboard version yet</p>
         )}
       </div>
-    </PlainSection>
+    </FigureSection>
   );
 }

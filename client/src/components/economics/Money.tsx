@@ -36,7 +36,7 @@ export default function Money({ value, currency, minorUnit, reason }: MoneyProps
   if (amount.kind === "unreadable") {
     return (
       <span className="text-sev-high" data-unreadable-amount="">
-        unreadable amount ({amount.why}): not shown
+        unreadable amount ({amount.why}): not shown as an amount
       </span>
     );
   }

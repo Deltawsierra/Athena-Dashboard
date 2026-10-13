@@ -12,24 +12,27 @@ with a key generated in memory for the run and discarded: no key is written.
 Nothing in the fixtures is written by hand. The dashboard is tested against what the
 backend sends, not against what somebody expected it to send.
 
-Two backend commits, one directory each:
+One backend commit, one directory:
 
-  ab-master-6a8f8e6/  Athena-Backend master 6a8f8e61e85e9aaf152b461bc75d816ead6fbf07
-                      (steps 5, 6 and 8: the scenario, events and results routes;
-                      no ROI route, whose answer is recorded as it is: 404)
-  ab-pr160-f7c9f09/   Athena-Backend PR #160 head f7c9f09ed176bf9dc2d8ad2fcd1ff75466bc346f
-                      (step 13, in fix: the ROI route; its fix round adds the
-                      deployment-decision statement and the gross line beside the
-                      retained one, which this head does not serve yet)
+  ab-master-4c1edf3/  Athena-Backend master 4c1edf3be10fa24d72aadd1139dbda4c404fbe8b
+                      (#160 merged: steps 5, 6, 8 and 13. Every report carries
+                      `residual_of`, null for the scenario's own run; the ROI
+                      document carries `deployment_decision`, and `figures.gross_cash`
+                      beside a retained headline. A scenario with no remediation
+                      option answers the ROI route 404, recorded as it is.)
+
+`residual-report` also holds `residual_report`: not a route's answer -- no route
+serves a residual run's report, by design -- but the backend's own
+`report.build_report` of the residual run, as its ROI route reads it.
 
 The ``bridge-*`` files are not a route's answer: no route serves a currency bridge
-at either commit. They are ``Normalization.as_dict()`` records the backend's own
+at this commit. They are ``Normalization.as_dict()`` records the backend's own
 engine (``assurance/economics/engine/normalization.py``) made from its committed
 synthetic snapshot (``snapshots/synthetic-fx-and-cost-index-v1.json``), the shape
 the spec (section 12.6) gives the provenance chain; the dashboard renders that shape
 as served and, until a route serves one, says "not served".
 
-Usage, from a checkout of Athena-Backend at one of those commits with its CI
+Usage, from a checkout of Athena-Backend at that commit with its CI
 dependencies installed: copy this file into the checkout's ``tests/`` as
 ``test_zz_dashboard_economics_fixtures.py`` and run it there with pytest, in the
 environment the backend's CI gives its tests, plus ``ECON_FIXTURES_OUT`` (the output
@@ -65,12 +68,8 @@ from assurance.economics.engine.fx import FXPolicy
 from assurance.economics.engine.money import Money
 from assurance.economics.models import FinancialParameter, LossComponent, LossEvent, SimulationResult
 from assurance.models import Deployment
+from tests.test_economics_remediation import proposed
 from tests.test_economics_report import POISSON, QUICK, _base, _client, _parameter, _simulate, stored
-
-try:  # PR #160 only
-    from tests.test_economics_remediation import proposed
-except ImportError:  # master: no remediation option, no ROI route
-    proposed = None
 
 pytestmark = pytest.mark.django_db
 User = get_user_model()
@@ -80,8 +79,7 @@ SYNTHETIC = (
 )
 OUT = Path(os.environ.get("ECON_FIXTURES_OUT", "")) if os.environ.get("ECON_FIXTURES_OUT") else None
 SHA = os.environ.get("ECON_FIXTURES_SHA", "")
-MASTER = "6a8f8e61e85e9aaf152b461bc75d816ead6fbf07"
-PR160 = "f7c9f09ed176bf9dc2d8ad2fcd1ff75466bc346f"
+MASTER = "4c1edf3be10fa24d72aadd1139dbda4c404fbe8b"
 SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "assurance" / "economics" / "snapshots" / (
     "synthetic-fx-and-cost-index-v1.json")
 CPI = "consumer prices, all items (SYNTHETIC)"
@@ -102,8 +100,8 @@ def deployment(people):
 
 
 def _backend() -> dict:
-    assert SHA in (MASTER, PR160), f"generate from master {MASTER} or PR #160 {PR160}, not {SHA!r}"
-    return {"repository": "Deltawsierra/Athena-Backend", "sha": SHA, "ref": "master" if SHA == MASTER else "pr160"}
+    assert SHA == MASTER, f"generate from master {MASTER}, not {SHA!r}"
+    return {"repository": "Deltawsierra/Athena-Backend", "sha": SHA, "ref": "master"}
 
 
 def _exchange(name: str, client, path: str) -> dict:
@@ -164,117 +162,127 @@ def _simulated(deployment, people, body=None, **kwargs):
     return scenario, _simulate(_client(people["analyst"]), deployment, scenario, body)
 
 
-# Which generators a checkout defines is decided by what it serves: master has no
-# remediation option (the ROI fixtures are made at PR #160), and the master fixtures
-# are made at master only, so a directory always names the commit that made it.
-MASTER_FIXTURES = proposed is None
+def test_graded_with_a_policy_a_market_value_reaction_and_a_receipt(deployment, people, monkeypatch):
+    _signing(monkeypatch)
+    scenario = stored(deployment, people["analyst"], policy=True, affected_source="CUSTOMER_PROVIDED")
+    _with_market_value(scenario)
+    answer = _simulate(_client(people["analyst"]), deployment, scenario, {"seed": 7, "policy": QUICK, "receipt": True})
+    assert answer.status_code == 201, answer.content
+    assert answer.json()["receipt"]["issued"] is True, answer.json()["receipt"]
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "scenario", "roi")
+    report = json.loads(exchanges[0]["body"])
+    assert report["grade"] in {"A", "B", "C", "D"} and report["banner"] is None, report["banner_reason"]
+    assert report["summary"]["lines"]["market_value"].get("p50") is not None
+    _write("graded-usd-policy-market-value-receipt", exchanges)
 
 
-if MASTER_FIXTURES:
-
-    def test_graded_with_a_policy_a_market_value_reaction_and_a_receipt(deployment, people, monkeypatch):
-        _signing(monkeypatch)
-        scenario = stored(deployment, people["analyst"], policy=True, affected_source="CUSTOMER_PROVIDED")
-        _with_market_value(scenario)
-        answer = _simulate(_client(people["analyst"]), deployment, scenario, {"seed": 7, "policy": QUICK, "receipt": True})
-        assert answer.status_code == 201, answer.content
-        assert answer.json()["receipt"]["issued"] is True, answer.json()["receipt"]
-        exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "scenario", "roi")
-        report = json.loads(exchanges[0]["body"])
-        assert report["grade"] in {"A", "B", "C", "D"} and report["banner"] is None, report["banner_reason"]
-        assert report["summary"]["lines"]["market_value"].get("p50") is not None
-        _write("graded-usd-policy-market-value-receipt", exchanges)
+def test_graded_unknown(deployment, people):
+    scenario, answer = _simulated(deployment, people, unknown=True)
+    assert answer.status_code == 201, answer.content
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "roi")
+    assert json.loads(exchanges[0]["body"])["grade"] == "Unknown"
+    _write("unknown-usd", exchanges)
 
 
-    def test_graded_unknown(deployment, people):
-        scenario, answer = _simulated(deployment, people, unknown=True)
-        assert answer.status_code == 201, answer.content
-        exchanges = _routes(deployment, scenario, people["owner"], "report", "events")
-        assert json.loads(exchanges[0]["body"])["grade"] == "Unknown"
-        _write("unknown-usd", exchanges)
+def test_refused(deployment, people):
+    scenario, answer = _simulated(deployment, people, refused=True)
+    assert answer.status_code == 201, answer.content
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "roi")
+    assert json.loads(exchanges[0]["body"])["status"] == "refused"
+    _write("refused-usd", exchanges)
 
 
-    def test_refused(deployment, people):
-        scenario, answer = _simulated(deployment, people, refused=True)
-        assert answer.status_code == 201, answer.content
-        exchanges = _routes(deployment, scenario, people["owner"], "report", "events")
-        assert json.loads(exchanges[0]["body"])["status"] == "refused"
-        _write("refused-usd", exchanges)
+def test_a_record_edited_outside_the_code(deployment, people):
+    """The backend's own MEDIUM-1 repro: the record's gross P50 edited, so the stored rows
+    no longer give their digest and the result is served as a refusal."""
+    scenario, answer = _simulated(deployment, people)
+    assert answer.status_code == 201, answer.content
+    result = SimulationResult.objects.get(scenario=scenario)
+    record = json.loads(json.dumps(result.record))
+    record["scenario"]["gross_cash"]["p50"] = "1.00"
+    SimulationResult._base_manager.filter(pk=result.pk).update(record=record)
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "roi")
+    assert json.loads(exchanges[0]["body"])["refusal"]["code"] == "stored_row_unverified"
+    _write("unverified-usd", exchanges)
 
 
-    def test_a_record_edited_outside_the_code(deployment, people):
-        """The backend's own MEDIUM-1 repro: the record's gross P50 edited, so the stored rows
-        no longer give their digest and the result is served as a refusal."""
-        scenario, answer = _simulated(deployment, people)
-        assert answer.status_code == 201, answer.content
-        result = SimulationResult.objects.get(scenario=scenario)
-        record = json.loads(json.dumps(result.record))
-        record["scenario"]["gross_cash"]["p50"] = "1.00"
-        SimulationResult._base_manager.filter(pk=result.pk).update(record=record)
-        exchanges = _routes(deployment, scenario, people["owner"], "report")
-        assert json.loads(exchanges[0]["body"])["refusal"]["code"] == "stored_row_unverified"
-        _write("unverified-usd", exchanges)
-
-
-    def test_a_stale_input(deployment, people):
-        """A benchmark frequency past its fresh_until at the run's as-of date (records are
-        append-only, so it is recorded so, never edited): the card marks it stale and the
-        grade drops a step."""
-        scenario = stored(deployment, people["analyst"], frequency=False, affected_source="CUSTOMER_PROVIDED")
-        FinancialParameter.objects.create(
-            scenario=scenario, name=ss.FREQUENCY_PARAMETER, unit="count", source_type="INDUSTRY_BENCHMARK",
-            currency="", low="1", base="2", high="4", evidence_ref="SYNTHETIC / ILLUSTRATIVE: made up",
-            effective_date=date(2026, 9, 1), fresh_until=date(2026, 9, 15), distribution=POISSON,
-        )
-        answer = _simulate(_client(people["analyst"]), deployment, scenario)
-        assert answer.status_code == 201, answer.content
-        exchanges = _routes(deployment, scenario, people["owner"], "report")
-        card = json.loads(exchanges[0]["body"])["validity_card"]
-        assert card["fields"]["data_freshness"]["stale"], card["fields"]["data_freshness"]
-        _write("stale-usd", exchanges)
-
-
-    @pytest.mark.parametrize("currency", ["JPY", "KWD"])
-    def test_minor_units(deployment, people, currency):
-        scenario, answer = _simulated(deployment, people, currency=currency, affected_source="CUSTOMER_PROVIDED")
-        assert answer.status_code == 201, answer.content
-        exchanges = _routes(deployment, scenario, people["owner"], "report")
-        assert json.loads(exchanges[0]["body"])["currency"]["code"] == currency
-        _write(f"graded-{currency.lower()}", exchanges)
-
-
-    def test_currency_bridges():
-        """Engine records, not a route's answer: no route serves a bridge at this commit."""
-        snap = snapshot.parse_snapshot(SNAPSHOT_PATH.read_bytes())
-        fx_book, index_book = snap.fx_book(), snap.index_book()
-        cases = {
-            "bridge-eur-normalized": (date(2020, 3, 2), "EUR", FXPolicy(("SYNTHETIC-REF",))),
-            "bridge-jpy-estimated": (date(2020, 3, 2), "JPY", FXPolicy(("SYNTHETIC-REF",), missing_rate="interpolate")),
-            "bridge-unavailable": (date(2020, 3, 4), "EUR", FXPolicy(("SYNTHETIC-REF",))),
-        }
-        for name, (event_date, reporting, rules) in cases.items():
-            made = normalization.normalize(
-                Money.parse("1000", "EUR"), event_date=event_date, valuation_date=date(2026, 9, 30),
-                policy=normalization.NormalizationPolicy("USD", reporting, rules, US_CPI, 0),
-                fx_book=fx_book, index_book=index_book,
-            )
-            _write(name, served_by=None, engine_record=made.as_dict(),
-                   note="not a route's answer: Normalization.as_dict() from the backend's engine and its committed "
-                   "synthetic snapshot; no route serves a currency bridge at this commit")
-
-else:
-
-    @pytest.mark.parametrize(
-        "name, severity, kwargs",
-        [
-            ("roi-clean", "medium", {}),
-            ("roi-vetoed", "high", {}),
-            ("roi-unknown", "medium", {"unknown": True}),
-            ("roi-refused", "medium", {"refused": True}),
-        ],
+def test_a_stale_input(deployment, people):
+    """A benchmark frequency past its fresh_until at the run's as-of date (records are
+    append-only, so it is recorded so, never edited): the card marks it stale and the
+    grade drops a step."""
+    scenario = stored(deployment, people["analyst"], frequency=False, affected_source="CUSTOMER_PROVIDED")
+    FinancialParameter.objects.create(
+        scenario=scenario, name=ss.FREQUENCY_PARAMETER, unit="count", source_type="INDUSTRY_BENCHMARK",
+        currency="", low="1", base="2", high="4", evidence_ref="SYNTHETIC / ILLUSTRATIVE: made up",
+        effective_date=date(2026, 9, 1), fresh_until=date(2026, 9, 15), distribution=POISSON,
     )
-    def test_roi(deployment, people, name, severity, kwargs):
-        scenario, _, _ = proposed(deployment, people, severity=severity, **kwargs)
-        exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "roi")
-        assert exchanges[2]["status"] == 200, exchanges[2]["body"]
-        _write(name, exchanges)
+    answer = _simulate(_client(people["analyst"]), deployment, scenario)
+    assert answer.status_code == 201, answer.content
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "roi")
+    card = json.loads(exchanges[0]["body"])["validity_card"]
+    assert card["fields"]["data_freshness"]["stale"], card["fields"]["data_freshness"]
+    _write("stale-usd", exchanges)
+
+
+@pytest.mark.parametrize("currency", ["JPY", "KWD"])
+def test_minor_units(deployment, people, currency):
+    scenario, answer = _simulated(deployment, people, currency=currency, affected_source="CUSTOMER_PROVIDED")
+    assert answer.status_code == 201, answer.content
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "roi")
+    assert json.loads(exchanges[0]["body"])["currency"]["code"] == currency
+    _write(f"graded-{currency.lower()}", exchanges)
+
+
+def test_currency_bridges():
+    """Engine records, not a route's answer: no route serves a bridge at this commit."""
+    snap = snapshot.parse_snapshot(SNAPSHOT_PATH.read_bytes())
+    fx_book, index_book = snap.fx_book(), snap.index_book()
+    cases = {
+        "bridge-eur-normalized": (date(2020, 3, 2), "EUR", FXPolicy(("SYNTHETIC-REF",))),
+        "bridge-jpy-estimated": (date(2020, 3, 2), "JPY", FXPolicy(("SYNTHETIC-REF",), missing_rate="interpolate")),
+        "bridge-unavailable": (date(2020, 3, 4), "EUR", FXPolicy(("SYNTHETIC-REF",))),
+    }
+    for name, (event_date, reporting, rules) in cases.items():
+        made = normalization.normalize(
+            Money.parse("1000", "EUR"), event_date=event_date, valuation_date=date(2026, 9, 30),
+            policy=normalization.NormalizationPolicy("USD", reporting, rules, US_CPI, 0),
+            fx_book=fx_book, index_book=index_book,
+        )
+        _write(name, served_by=None, engine_record=made.as_dict(),
+               note="not a route's answer: Normalization.as_dict() from the backend's engine and its committed "
+               "synthetic snapshot; no route serves a currency bridge at this commit")
+
+
+@pytest.mark.parametrize(
+    "name, severity, kwargs",
+    [
+        ("roi-clean", "medium", {}),
+        ("roi-vetoed", "high", {}),
+        ("roi-unknown", "medium", {"unknown": True}),
+        ("roi-refused", "medium", {"refused": True}),
+        ("roi-policy", "medium", {"policy": True}),
+    ],
+)
+def test_roi(deployment, people, name, severity, kwargs):
+    scenario, _, _ = proposed(deployment, people, severity=severity, **kwargs)
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "roi")
+    assert exchanges[2]["status"] == 200, exchanges[2]["body"]
+    _write(name, exchanges)
+
+def test_the_residual_runs_own_report(deployment, people):
+    """The scenario's routes, and the report of its residual run as the backend's
+    own report.build_report makes it (no route serves it: a residual run is never
+    exposure). SYNTHETIC."""
+    from assurance.economics import report as report_module
+
+    scenario, _, _ = proposed(deployment, people)
+    exchanges = _routes(deployment, scenario, people["owner"], "report", "events", "roi")
+    residual = SimulationResult.objects.filter(scenario=scenario, remediation__isnull=False).order_by("-id").first()
+    assert residual is not None
+    body = report_module.canonical_bytes(report_module.build_report(residual)).decode("ascii")
+    _write("residual-report", exchanges, residual_report={
+        "note": "not a route's answer: report.build_report of the residual run, as the ROI route reads it; no "
+        "route serves a residual run's report",
+        "simulation": str(residual.uuid),
+        "body": body,
+    })

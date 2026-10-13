@@ -15,6 +15,7 @@ import {
   at,
   bannerOf,
   currencyOf,
+  has,
   isMoneyUnit,
   list,
   obj,
@@ -102,6 +103,29 @@ export function PlainSection({ title, id, children }: { title: string; id: strin
   );
 }
 
+/** Where a report would state its valuation date, were it to (it states none today). */
+const VALUATION_DATE: string[][] = [["valuation_date"], ["build", "valuation_date"], ["currency", "valuation_date"]];
+
+/**
+ * A field the dashboard looks for: "not served" only where the document does not
+ * have it -- decided by the document, never by a fixed sentence -- and its value
+ * where it does. A value that is not plain text is served, but not read by this
+ * dashboard version yet.
+ */
+export function Presence(
+  { doc, paths, absent, showsValue = true }: { doc: unknown; paths: string[][]; absent: string; showsValue?: boolean },
+) {
+  const found = paths.find((path) => has(doc, ...path));
+  if (found === undefined) return <NotServed why={absent} />;
+  const value = at(doc, ...found);
+  if (showsValue && typeof value === "string" && value !== "") return <span data-served-field={found.join(".")}>{value}</span>;
+  return (
+    <span className="text-muted-foreground" data-served-field={found.join(".")} data-not-read="">
+      served ({found.join(".")}), but not read by this dashboard version yet
+    </span>
+  );
+}
+
 function Row({ label, children, testId }: { label: string; children: ReactNode; testId?: string }) {
   return (
     <div className="grid grid-cols-[minmax(9rem,14rem)_1fr] gap-3 border-b border-border/30 py-1.5 last:border-0">
@@ -179,7 +203,7 @@ export function ScenarioCard({ report, events, eventsError }: { report: Doc; eve
           </Row>
           <Row label="As of" testId="scenario-as-of"><Served value={at(report, "build", "as_of")} /></Row>
           <Row label="Valuation date" testId="scenario-valuation-date">
-            <NotServed why="the report states no valuation date" />
+            <Presence doc={report} paths={VALUATION_DATE} absent="the report states no valuation date" />
           </Row>
           <Row label="Excluded from every total" testId="excluded-from-totals">
             {excluded === false ? "no" : excluded === true ? "yes" : "not served (read as yes)"}
@@ -620,9 +644,9 @@ export function ValidityCardView({ report, refused }: { report: Doc; refused: bo
   const card = obj(report.validity_card);
   if (card === null || "not_reported" in card) {
     return (
-      <PlainSection title="Validity Card" id="validity-card">
+      <FigureSection title="Validity Card" id="validity-card" doc={report}>
         <NotServed why={text(card?.not_reported) ?? undefined} />
-      </PlainSection>
+      </FigureSection>
     );
   }
   const fields = obj(card.fields) ?? {};
@@ -632,19 +656,19 @@ export function ValidityCardView({ report, refused }: { report: Doc; refused: bo
     // A refused result shows no figure: the card's grade, its digest and its
     // downgrades only; the rest of the card is in the report's bytes.
     return (
-      <PlainSection title="Validity Card" id="validity-card">
+      <FigureSection title="Validity Card" id="validity-card" doc={report}>
         <dl>
           <Row label="Grade" testId="card-grade">{text(card.grade) ?? "not served"}</Row>
           <Row label="Digest"><span className="font-mono text-xs">{text(card.digest)}</span></Row>
           {grade !== null && <Row label="Downgrades" testId="card-downgrades"><Downgrades grade={grade} /></Row>}
         </dl>
         <p className="text-xs text-muted-foreground">The run was refused: the card&apos;s other fields are in the report&apos;s bytes.</p>
-      </PlainSection>
+      </FigureSection>
     );
   }
   const staleNames = new Set([...strings(freshness?.stale), ...strings(freshness?.stale_not_graded)]);
   return (
-    <PlainSection title="Validity Card" id="validity-card">
+    <FigureSection title="Validity Card" id="validity-card" doc={report}>
       <dl>
         <Row label="Grade" testId="card-grade">{text(card.grade) ?? "not served"}</Row>
         <Row label="Digest"><span className="font-mono text-xs">{text(card.digest)}</span></Row>
@@ -724,18 +748,21 @@ export function ValidityCardView({ report, refused }: { report: Doc; refused: bo
         </Row>
       </dl>
       <p className="text-xs text-muted-foreground">{text(card.statement) ?? ""}</p>
-    </PlainSection>
+    </FigureSection>
   );
 }
 
 // ------------------------------------------------------------------ 8. receipt
 
+/** Where a report would name a route for its receipt's signed bytes (it names none today). */
+const RECEIPT_BYTES: string[][] = [["receipt", "url"], ["receipt", "href"], ["receipt", "download"]];
+
 /**
- * The report's bytes as served, with the digest it carries; and the receipt's
- * reference as the report states it. The backend serves no route for a receipt's
- * signed bytes at this version, so there is nothing of it to download yet.
+ * The report's bytes, pinned to the result on screen, with the digest it carries;
+ * and the receipt's reference as the report states it. The receipt's signed bytes
+ * are offered only once the report names a route for them; it names none today.
  */
-export function ReceiptPanel({ report, href, filename }: { report: Doc; href: string; filename: string }) {
+export function ReceiptPanel({ report, href }: { report: Doc; href: string | null }) {
   const receipt = obj(report.receipt);
   return (
     <PlainSection title="Receipt and download" id="receipt">
@@ -745,9 +772,19 @@ export function ReceiptPanel({ report, href, filename }: { report: Doc; href: st
           <span className="text-xs text-muted-foreground">(as served; not verified by this dashboard)</span>
         </Row>
         <Row label="Report bytes">
-          <a className="text-primary underline" href={href} download={filename} data-testid="report-download">
-            Download the report, its bytes as served
-          </a>
+          {href === null ? (
+            <NotServed why="the report names no result uuid to pin a download to" />
+          ) : (
+            <>
+              <a className="text-primary underline" href={href} download data-testid="report-download">
+                Download this result&apos;s report, its bytes as served
+              </a>
+              <p className="text-xs text-muted-foreground">
+                A fresh read of the same result: the backend builds the report from its stored rows when it is read, so a
+                review or card recorded since can change its bytes and digest.
+              </p>
+            </>
+          )}
         </Row>
       </dl>
       {receipt === null || "not_reported" in receipt ? (
@@ -766,9 +803,8 @@ export function ReceiptPanel({ report, href, filename }: { report: Doc; href: st
       )}
       <p data-testid="receipt-download">
         Signed receipt bytes:{" "}
-        <NotServed why="Athena-Backend serves no route for a receipt's signed bytes at this version; when it does, they are streamed through unmodified" />
+        <Presence doc={report} paths={RECEIPT_BYTES} absent="the report names no route for a receipt's signed bytes" showsValue={false} />
       </p>
     </PlainSection>
   );
 }
-

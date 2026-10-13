@@ -3,8 +3,8 @@ import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import { cleanup, render, within } from "@testing-library/react";
 
 import { BridgeRecord } from "@/components/economics/CurrencyBridge";
-import { MASTER, PR160, fixture, served } from "./helpers/economics-fixtures";
-import { NO_ROI_ROUTE, bytesOf, mountEconomics, shims } from "./helpers/economics-render";
+import { MASTER, fixture, served } from "./helpers/economics-fixtures";
+import { NOT_SERVED_ROI, bytesOf, mountEconomics, shims } from "./helpers/economics-render";
 
 /**
  * Honesty rule: `excluded_from_totals`, and every reason a figure is downgraded or
@@ -26,7 +26,7 @@ describe("excluded from every total, and why", () => {
     const loaded = fixture(MASTER, "unknown-usd");
     const report = served(loaded, "report") as Record<string, any>;
     expect(report.excluded_from_totals).toBe(true);
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NOT_SERVED_ROI });
     expect(within(card(container)).getByTestId("excluded-from-totals").textContent).toBe("yes");
     expect(within(card(container)).getByTestId("banner-reason").textContent).toBe(report.banner_reason);
     expect(report.unknowns.length).toBeGreaterThan(0);
@@ -40,14 +40,14 @@ describe("excluded from every total, and why", () => {
 
   it("a graded result says it is not excluded", async () => {
     const loaded = fixture(MASTER, "graded-usd-policy-market-value-receipt");
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: NOT_SERVED_ROI });
     expect(within(card(container)).getByTestId("excluded-from-totals").textContent).toBe("no");
   });
 
   it("rows that no longer verify name the check they failed", async () => {
     const loaded = fixture(MASTER, "unverified-usd");
     const report = served(loaded, "report") as Record<string, any>;
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NOT_SERVED_ROI });
     expect(within(card(container)).getByTestId("integrity").textContent).toBe(`not verified: failed ${report.integrity.failed.join(", ")}`);
     expect(within(card(container)).getByTestId("excluded-from-totals").textContent).toBe("yes");
     expect(within(card(container)).getByTestId("banner-reason").textContent).toBe(report.banner_reason);
@@ -55,7 +55,7 @@ describe("excluded from every total, and why", () => {
   });
 
   it("the ROI document's exclusion and its reason (#160)", async () => {
-    const loaded = fixture(PR160, "roi-unknown");
+    const loaded = fixture(MASTER, "roi-unknown");
     const roi = served(loaded, "roi") as Record<string, any>;
     expect(roi.excluded_from_totals).toBe(true);
     const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), events: bytesOf(loaded, "events"), roi: bytesOf(loaded, "roi") });
@@ -72,7 +72,7 @@ describe("every downgrade reason", () => {
     const report = served(loaded, "report") as Record<string, any>;
     const grade = report.validity_card.fields.confidence_grade;
     expect(grade.downgrades.length).toBeGreaterThan(0);
-    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NO_ROI_ROUTE });
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NOT_SERVED_ROI });
     const downgrades = container.querySelector('[data-testid="card-downgrades"]') as HTMLElement;
     for (const one of grade.downgrades) {
       const shown = downgrades.querySelector(`[data-downgrade="${one.rule}"]`);

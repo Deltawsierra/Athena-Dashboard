@@ -21,14 +21,22 @@ export function bytesOf(loaded: Fixture, name: string): Answer {
 }
 
 /** What this server answers when the backend did not serve the document. */
-export function refusedWith(status: number, error: string): Answer {
-  return { status, body: JSON.stringify({ error }), contentType: "application/json" };
+export function refusedWith(status: number, error: string, code?: string): Answer {
+  return { status, body: JSON.stringify({ error, ...(code ? { code } : {}) }), contentType: "application/json" };
 }
 
-export const NO_ROI_ROUTE = refusedWith(
-  404,
-  "not served: Athena-Backend answered 404 for the remediation option's economics (no such document, or no such route at this backend version)",
-);
+/**
+ * What this server answers for the backend's own 404 of the ROI route (a scenario
+ * with no remediation option): "not served", with the code the views read as such
+ * (tests/economics-route.test.ts pins the server's side of it).
+ */
+export const NOT_SERVED_ROI = {
+  ...refusedWith(
+    404,
+    "not served: Athena-Backend does not serve the remediation option's economics here (The scenario has no remediation option with a residual run: record one and simulate it.)",
+    "not_served",
+  ),
+};
 
 export function shims(): void {
   globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
@@ -41,9 +49,12 @@ export function shims(): void {
  * Render one scenario's views. `answers` maps a document (report, events, roi) to
  * what the server answers for it; `simulation` names a result.
  */
+/** A read whose connection failed: no answer at all (fetch rejects, as a browser's does). */
+export const NETWORK_ERROR = "network-error" as const;
+
 export async function mountEconomics(
   loaded: Fixture,
-  answers: { report: Answer; events?: Answer; roi?: Answer },
+  answers: { report: Answer; events?: Answer; roi?: Answer | typeof NETWORK_ERROR },
   simulation?: string,
 ) {
   const { deployment, scenario } = idsOf(loaded);
@@ -53,6 +64,7 @@ export async function mountEconomics(
     const document = /^\/api\/economics\/(report|events|roi)\?/.exec(String(url))?.[1] as keyof typeof answers | undefined;
     const answer = document ? answers[document] : undefined;
     if (!answer) return new Response(JSON.stringify({ message: "Not found" }), { status: 404 });
+    if (answer === NETWORK_ERROR) throw new TypeError("Failed to fetch");
     return new Response(answer.body, { status: answer.status, headers: { "Content-Type": answer.contentType ?? "application/json" } });
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, queryFn: getQueryFn({ on401: "throw" }) } } });

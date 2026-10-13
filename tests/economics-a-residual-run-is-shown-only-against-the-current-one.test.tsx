@@ -2,7 +2,7 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import { cleanup, screen } from "@testing-library/react";
 
-import { PR160, fixture, served } from "./helpers/economics-fixtures";
+import { MASTER, fixture, served } from "./helpers/economics-fixtures";
 import { bytesOf, mountEconomics, shims, type Answer } from "./helpers/economics-render";
 
 /**
@@ -20,7 +20,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const loaded = fixture(PR160, "roi-clean");
+const loaded = fixture(MASTER, "roi-clean");
 const report = served(loaded, "report") as Record<string, any>;
 const roi = served(loaded, "roi") as Record<string, any>;
 const EXPOSURE = ['[data-section="scenario-card"]', '[data-figure-section="distribution"]', '[data-figure-section="waterfall"]', '[data-figure-section="tornado"]'];
@@ -44,8 +44,9 @@ describe("the residual run", () => {
     for (const figure of residualFigures) expect(inView).toContain(figure);
   });
 
-  it("a report OF the residual run is refused as exposure, and shown only against the current run", async () => {
-    // A results route that served the residual run (an older or faulty backend): its report names the residual's uuid.
+  it("a report the ROI document names as its residual run is refused as exposure, whatever it says of itself", async () => {
+    // A results route that served the residual run (a faulty backend): its report names the residual's uuid,
+    // and says it is the scenario's own run. The served ROI document wins: refused as exposure.
     const residualReport = structuredClone(report);
     residualReport.simulation.uuid = roi.residual.simulation;
     const { container } = await mountEconomics(
