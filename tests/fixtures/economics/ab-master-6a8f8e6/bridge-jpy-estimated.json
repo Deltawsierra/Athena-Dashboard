@@ -1,0 +1,215 @@
+{
+  "synthetic": "SYNTHETIC / ILLUSTRATIVE: made by Athena-Backend's own test helpers in a throwaway test database; no customer data, no real tenant, no key that outlived the run",
+  "backend": {
+    "repository": "Deltawsierra/Athena-Backend",
+    "sha": "6a8f8e61e85e9aaf152b461bc75d816ead6fbf07",
+    "ref": "master"
+  },
+  "scenario": "bridge-jpy-estimated",
+  "served_by": null,
+  "engine_record": {
+    "status": "normalized",
+    "native": {
+      "amount": "1000",
+      "currency": "EUR"
+    },
+    "event_date": "2020-03-02",
+    "valuation_date": "2026-09-30",
+    "base_currency": "USD",
+    "reporting_currency": "JPY",
+    "order": [
+      "event_fx",
+      "cost_index",
+      "valuation_fx"
+    ],
+    "value": {
+      "amount": "203500",
+      "currency": "JPY"
+    },
+    "display": "203500 JPY",
+    "arithmetic": "Decimal, 60 significant digits, ROUND_HALF_EVEN",
+    "display_rounding": "ROUND_HALF_EVEN to the reporting currency's minor unit, for display only",
+    "estimate": true,
+    "stale": false,
+    "confidence_downgrades": [
+      "estimated_rate"
+    ],
+    "unavailable": null,
+    "policy": {
+      "base_currency": "USD",
+      "reporting_currency": "JPY",
+      "fx": {
+        "providers": [
+          "SYNTHETIC-REF"
+        ],
+        "rate_types": [
+          "reference",
+          "mid"
+        ],
+        "weekend_holiday_rule": "last_official_rate",
+        "missing_rate": "interpolate",
+        "max_interpolation_gap_days": 7,
+        "freshness_days": 4
+      },
+      "index": {
+        "series_id": "SYN-CPI-US",
+        "geography": "US",
+        "category": "consumer prices, all items (SYNTHETIC)",
+        "base": "2020-03=100",
+        "currency": "USD"
+      },
+      "index_max_lag_months": 0
+    },
+    "chain": [
+      {
+        "step": "event_fx",
+        "from": "EUR",
+        "to": "USD",
+        "requested_date": "2020-03-02",
+        "rule": "exact",
+        "provider": "SYNTHETIC-REF",
+        "rate_type": "reference",
+        "direction": "direct",
+        "rate_date": "2020-03-02",
+        "quoted_rate": "1.1",
+        "factor": "1.1",
+        "interpolation_weight": null,
+        "age_days": 0,
+        "stale": false,
+        "estimate": false,
+        "downgrades": [],
+        "observations": [
+          {
+            "provider": "SYNTHETIC-REF",
+            "base": "EUR",
+            "quote": "USD",
+            "rate": "1.1",
+            "rate_type": "reference",
+            "effective_date": "2020-03-02",
+            "observed_at": "2020-03-02T15:00:00+00:00",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          }
+        ],
+        "input": {
+          "amount": "1000",
+          "currency": "EUR"
+        },
+        "output": {
+          "amount": "1100",
+          "currency": "USD"
+        }
+      },
+      {
+        "step": "cost_index",
+        "series_id": "SYN-CPI-US",
+        "geography": "US",
+        "category": "consumer prices, all items (SYNTHETIC)",
+        "base": "2020-03=100",
+        "currency": "USD",
+        "from_date": "2020-03-02",
+        "to_date": "2026-09-30",
+        "from_period": "2020-03",
+        "to_period": "2026-09",
+        "period_used": "2026-09",
+        "as_of": "2026-09-30",
+        "rule": "exact_period",
+        "lag_months": 0,
+        "ratio": "1.25",
+        "stale": false,
+        "estimate": false,
+        "downgrades": [],
+        "observations": [
+          {
+            "series_id": "SYN-CPI-US",
+            "geography": "US",
+            "category": "consumer prices, all items (SYNTHETIC)",
+            "base": "2020-03=100",
+            "period": "2020-03",
+            "value": "100",
+            "vintage_date": "2020-04-10",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          },
+          {
+            "series_id": "SYN-CPI-US",
+            "geography": "US",
+            "category": "consumer prices, all items (SYNTHETIC)",
+            "base": "2020-03=100",
+            "period": "2026-09",
+            "value": "125",
+            "vintage_date": "2026-09-30",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          }
+        ],
+        "input": {
+          "amount": "1100",
+          "currency": "USD"
+        },
+        "output": {
+          "amount": "1375",
+          "currency": "USD"
+        }
+      },
+      {
+        "step": "valuation_fx",
+        "from": "USD",
+        "to": "JPY",
+        "requested_date": "2026-09-30",
+        "rule": "linear_interpolation",
+        "provider": "SYNTHETIC-REF",
+        "rate_type": "reference",
+        "direction": "direct",
+        "rate_date": "2026-09-30",
+        "quoted_rate": "148",
+        "factor": "148",
+        "interpolation_weight": "0.5",
+        "age_days": 1,
+        "stale": false,
+        "estimate": true,
+        "downgrades": [
+          "estimated_rate"
+        ],
+        "observations": [
+          {
+            "provider": "SYNTHETIC-REF",
+            "base": "USD",
+            "quote": "JPY",
+            "rate": "147",
+            "rate_type": "reference",
+            "effective_date": "2026-09-29",
+            "observed_at": "2026-09-29T15:00:00+00:00",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          },
+          {
+            "provider": "SYNTHETIC-REF",
+            "base": "USD",
+            "quote": "JPY",
+            "rate": "149",
+            "rate_type": "reference",
+            "effective_date": "2026-10-01",
+            "observed_at": "2026-10-01T15:00:00+00:00",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          }
+        ],
+        "input": {
+          "amount": "1375",
+          "currency": "USD"
+        },
+        "output": {
+          "amount": "203500",
+          "currency": "JPY"
+        }
+      }
+    ]
+  },
+  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; no route serves a currency bridge at this commit"
+}

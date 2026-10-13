@@ -33,6 +33,7 @@ import DeletionManagement from "@/pages/DeletionManagement";
 import Classifiers from "@/pages/Classifiers";
 import Failsafe from "@/pages/Failsafe";
 import Assurance from "@/pages/Assurance";
+import Economics from "@/pages/Economics";
 import NotFound from "@/pages/not-found";
 import { checkAuth, logout as apiLogout, isAdmin, mustChangePassword } from "@/utils/auth";
 import { applyStoredTheme } from "@/lib/theme";
@@ -61,6 +62,7 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route path="/pentest" component={PentestScan} />
       <Route path="/findings" component={Risks} />
       <Route path="/assurance">{() => <Assurance admin={admin} />}</Route>
+      <Route path="/economics" component={Economics} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/classify-cve" component={CVEClassifier} />
       <Route path="/ai-health" component={AIHealth} />

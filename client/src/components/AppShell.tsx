@@ -22,6 +22,7 @@ import {
   ShieldHalf,
   ShieldAlert,
   ShieldQuestion,
+  Landmark,
   ListChecks,
   FolderOpen,
   Brain,
@@ -86,6 +87,7 @@ const PRIMARY: NavItem[] = [
 /** Everything else the app can do, kept reachable without crowding the pitch. */
 const TOOLS: NavItem[] = [
   { path: "/assurance", label: "Assurance", icon: ShieldQuestion },
+  { path: "/economics", label: "Economics", icon: Landmark },
   { path: "/pentest", label: "Pentest", icon: ShieldHalf },
   { path: "/tests", label: "Tests", icon: ListChecks },
   { path: "/documents", label: "Documents", icon: FolderOpen },
