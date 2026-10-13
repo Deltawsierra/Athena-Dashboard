@@ -1,17 +1,20 @@
 /**
- * The currency bridge: native amount -> event-date FX -> cost index ->
- * valuation-date FX, each step with its source, its observation date and its
- * snapshot hash, as served.
+ * The currency bridge, as a v2 report serves it (`currency_bridge`, Athena-Backend
+ * #163): the run's valuation date and where it was read from, the reporting
+ * currency, and the normalization record of each figure the run converted
+ * (`conversions`), with the backend's statement of why there are none -- a run
+ * converts nothing, so `conversions` is empty and the statement is shown. Every
+ * value is the report's; nothing is converted, dated or filled in here.
  *
- * It renders Athena-Backend's own provenance record (`Normalization.as_dict()`,
- * spec section 12.6) exactly: every rate, ratio and amount is the record's string,
- * and nothing is converted here. No economics route serves such a record at this
- * backend version -- a report states ONE reporting currency and converts nothing
- * inside a run -- so on a report the bridge reads "not served", beside the
- * currency and the source snapshots the report does serve.
+ * A conversion record, were one served, is Athena-Backend's own provenance record
+ * (`Normalization.as_dict()`, spec section 12.6): native amount -> event-date FX ->
+ * cost index -> valuation-date FX, each step with its source, its observation date
+ * and its snapshot hash, rendered exactly (<BridgeRecord>): every rate, ratio and
+ * amount is the record's string. "Not served" is said only where a report has no
+ * currency bridge at all (v1).
  */
 import Money from "@/components/economics/Money";
-import { FigureSection, Mark, NotServed, Served } from "@/components/economics/sections";
+import { FigureSection, Mark, NotServed, Served, ValuationDate } from "@/components/economics/sections";
 import { at, has, list, obj, text, type Doc } from "@/lib/economics";
 
 const STEP_LABEL: Record<string, string> = {
@@ -104,25 +107,74 @@ export function BridgeRecord({ record }: { record: Doc }) {
   );
 }
 
-/** Where a report would carry a currency bridge (a Normalization record), were it to (it carries none today). */
-const BRIDGE: string[][] = [["currency_bridge"], ["normalization"]];
+/** One served conversion: a normalization record step by step, or said to be unread. */
+function Conversion({ conversion, index }: { conversion: unknown; index: number }) {
+  const record = obj(conversion);
+  if (record !== null && Array.isArray(record.chain)) return <BridgeRecord record={record} />;
+  return (
+    <p className="text-muted-foreground" data-not-read="">
+      served (currency_bridge.conversions[{index}]), but not read by this dashboard version yet
+    </p>
+  );
+}
+
+/** The bridge's conversions: each record, or the backend's statement of why there is none. */
+function Conversions({ bridge }: { bridge: Doc }) {
+  if (!has(bridge, "conversions")) {
+    return <NotServed why="the report's currency bridge names no conversions" />;
+  }
+  const conversions = bridge.conversions;
+  if (!Array.isArray(conversions)) {
+    return (
+      <p className="text-muted-foreground" data-not-read="">
+        served (currency_bridge.conversions), but not read by this dashboard version yet
+      </p>
+    );
+  }
+  if (conversions.length === 0) {
+    return (
+      <p data-testid="bridge-no-conversion">
+        No figure was converted.{" "}
+        <span className="text-muted-foreground" data-testid="bridge-statement">
+          {text(bridge.statement) ?? "(the report served no statement why)"}
+        </span>
+      </p>
+    );
+  }
+  return (
+    <ol className="space-y-3">
+      {conversions.map((one, index) => (
+        <li key={index}><Conversion conversion={one} index={index} /></li>
+      ))}
+    </ol>
+  );
+}
 
 /**
- * The bridge section of a report: its currency and snapshots, and the bridge itself
- * where the report carries one. A section with figures, so under the report's
- * banner like every other.
+ * The bridge section of a report: its currency, valuation date and snapshots, and
+ * the bridge itself. A section with figures, so under the report's banner like
+ * every other.
  */
 export default function CurrencyBridge({ report }: { report: Doc }) {
   const snapshots = obj(report.source_snapshots);
   const oneCurrency = list(report.limitations).find((line) => typeof line === "string" && line.startsWith("one reporting currency"));
-  const found = BRIDGE.find((path) => has(report, ...path));
-  const record = found === undefined ? null : obj(at(report, ...found));
+  const bridge = has(report, "currency_bridge") ? obj(report.currency_bridge) : null;
+  // A report before v2 might carry a normalization record by itself: rendered as served.
+  const legacy = !has(report, "currency_bridge") && has(report, "normalization") ? obj(report.normalization) : null;
   return (
     <FigureSection title="Currency bridge" id="currency-bridge" doc={report}>
       <dl className="text-sm">
         <div className="py-1"><span className="text-muted-foreground">Reporting currency </span><Served value={at(report, "currency", "code")} />{" "}
           <span className="text-xs text-muted-foreground">(minor unit {String(at(report, "currency", "minor_unit") ?? "?")}; {text(at(report, "currency", "rounding")) ?? ""})</span>
         </div>
+        <div className="py-1" data-testid="bridge-valuation-date">
+          <span className="text-muted-foreground">Valuation date </span><ValuationDate report={report} />
+        </div>
+        {bridge !== null && has(bridge, "reporting_currency") ? (
+          <div className="py-1" data-testid="bridge-reporting-currency">
+            <span className="text-muted-foreground">The bridge&apos;s reporting currency </span><Served value={bridge.reporting_currency} />
+          </div>
+        ) : null}
       </dl>
       <div>
         <h3 className="text-sm font-semibold">Source snapshots</h3>
@@ -138,14 +190,18 @@ export default function CurrencyBridge({ report }: { report: Doc }) {
       </div>
       <div data-testid="bridge-steps">
         <h3 className="text-sm font-semibold">Native to reporting currency</h3>
-        {found === undefined ? (
+        {bridge !== null ? (
+          <Conversions bridge={bridge} />
+        ) : has(report, "currency_bridge") ? (
+          <p className="text-muted-foreground" data-not-read="">served (currency_bridge), but not read by this dashboard version yet</p>
+        ) : legacy !== null && Array.isArray(legacy.chain) ? (
+          <BridgeRecord record={legacy} />
+        ) : has(report, "normalization") ? (
+          <p className="text-muted-foreground" data-not-read="">served (normalization), but not read by this dashboard version yet</p>
+        ) : (
           <p>
             <NotServed why={`Athena-Backend serves no currency bridge for this report${typeof oneCurrency === "string" ? ` (${oneCurrency})` : ""}`} />
           </p>
-        ) : record !== null && Array.isArray(record.chain) ? (
-          <BridgeRecord record={record} />
-        ) : (
-          <p className="text-muted-foreground" data-not-read="">served ({found.join(".")}), but not read by this dashboard version yet</p>
         )}
       </div>
     </FigureSection>

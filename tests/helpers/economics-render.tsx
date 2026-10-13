@@ -12,12 +12,12 @@ import { getQueryFn } from "@/lib/queryClient";
 import { EconomicsView } from "@/pages/Economics";
 import { exchange, idsOf, type Fixture } from "./economics-fixtures";
 
-export type Answer = { status: number; body: string; contentType?: string };
+export type Answer = { status: number; body: string; contentType?: string; headers?: Record<string, string> };
 
-/** The bytes of a recorded exchange, as this server streams them through. */
+/** The bytes of a recorded exchange, as this server streams them through (with the headers it passes on). */
 export function bytesOf(loaded: Fixture, name: string): Answer {
   const one = exchange(loaded, name);
-  return { status: one.status, body: one.body, contentType: one.content_type };
+  return { status: one.status, body: one.body, contentType: one.content_type, headers: one.headers };
 }
 
 /** What this server answers when the backend did not serve the document. */
@@ -52,20 +52,38 @@ export function shims(): void {
 /** A read whose connection failed: no answer at all (fetch rejects, as a browser's does). */
 export const NETWORK_ERROR = "network-error" as const;
 
+/** A read the backend never answers: it waits until its signal aborts it. */
+export const STALLED = "stalled" as const;
+
 export async function mountEconomics(
   loaded: Fixture,
-  answers: { report: Answer; events?: Answer; roi?: Answer | typeof NETWORK_ERROR },
+  answers: {
+    report: Answer;
+    events?: Answer;
+    roi?: Answer | typeof NETWORK_ERROR;
+    receipt?: Answer | typeof STALLED;
+  },
   simulation?: string,
 ) {
   const { deployment, scenario } = idsOf(loaded);
   const requested: string[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+  const signals: Array<AbortSignal | undefined> = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     requested.push(String(url));
-    const document = /^\/api\/economics\/(report|events|roi)\?/.exec(String(url))?.[1] as keyof typeof answers | undefined;
+    signals.push(init?.signal ?? undefined);
+    const document = /^\/api\/economics\/(report|events|roi|receipt)\?/.exec(String(url))?.[1] as keyof typeof answers | undefined;
     const answer = document ? answers[document] : undefined;
     if (!answer) return new Response(JSON.stringify({ message: "Not found" }), { status: 404 });
     if (answer === NETWORK_ERROR) throw new TypeError("Failed to fetch");
-    return new Response(answer.body, { status: answer.status, headers: { "Content-Type": answer.contentType ?? "application/json" } });
+    if (answer === STALLED) {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    }
+    return new Response(answer.body, {
+      status: answer.status,
+      headers: { ...(answer.headers ?? {}), "Content-Type": answer.contentType ?? "application/json" },
+    });
   }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, queryFn: getQueryFn({ on401: "throw" }) } } });
   const view = render(
@@ -76,7 +94,7 @@ export async function mountEconomics(
   await waitFor(() => {
     if (screen.queryByTestId("economics-loading")) throw new Error("still reading");
   });
-  return { ...view, requested, deployment, scenario };
+  return { ...view, requested, signals, deployment, scenario };
 }
 
 /** Every amount the views render: the string each one shows. */

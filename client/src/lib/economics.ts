@@ -1,9 +1,10 @@
 /**
  * Reading Athena-Backend's Economic Exposure documents in the browser, as served.
  *
- * The documents (mythos.economics.report/v1, the events route's, and
- * mythos.economics.roi/v1) arrive as the backend's own bytes (server/economics.ts)
- * and are read here, never recomputed. The rules every view follows:
+ * The documents (mythos.economics.report/v2 -- v1 and its currency bridge --, the
+ * events route's, mythos.economics.roi/v1 and the deployment's scenario list)
+ * arrive as the backend's own bytes (server/economics.ts) and are read here, never
+ * recomputed. The rules every view follows:
  *
  * - NO arithmetic on money. An amount is the backend's decimal string, shown as
  *   it is, with the served currency: no sum, no conversion, no rounding, never a
@@ -11,7 +12,8 @@
  *   (JPY 0 places, KWD 3); an amount that is not a plain decimal string -- a
  *   number, an exponent, anything else -- is unreadable and shown so, never
  *   converted.
- * - Nothing is totalled across scenarios: a view reads one scenario version.
+ * - Nothing is totalled across scenarios: a view reads one scenario version, and
+ *   the picker lists versions with their own standing, adding nothing up.
  * - A result not for capital decisions carries the report's banner text, shown
  *   exactly, above every figure.
  * - A refused result shows its refusal code and its kept inputs, never a figure.

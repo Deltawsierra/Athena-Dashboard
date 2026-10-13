@@ -32,7 +32,7 @@ const section = (container: HTMLElement, id: string) => {
 };
 
 describe("a graded report, with a policy, a market-value reaction and a receipt (backend master)", () => {
-  it("the scenario card: name, template, deployment, grade, status, as-of, and no valuation date it was not served", async () => {
+  it("the scenario card: name, template, deployment, grade, status, as-of, and the valuation date its currency bridge serves", async () => {
     const { container } = await mountEconomics(graded, { report: bytesOf(graded, "report"), events: bytesOf(graded, "events"), roi: NOT_SERVED_ROI });
     const card = within(section(container, "scenario-card"));
     expect(card.getByTestId("scenario-name").textContent).toBe(report.scenario.title);
@@ -44,8 +44,9 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
     expect(["A", "B", "C", "D"]).toContain(report.grade);
     expect(card.getByTestId("scenario-status").textContent).toContain("completed");
     expect(card.getByTestId("scenario-as-of").textContent).toContain(report.build.as_of);
-    // The report states no valuation date: none is made up from the as-of date or anything else.
-    expect(card.getByTestId("scenario-valuation-date").textContent).toMatch(/^not served/);
+    // The valuation date is the currency bridge's, with where the backend read it from (#163).
+    expect(card.getByTestId("valuation-date").textContent).toBe(report.currency_bridge.valuation_date);
+    expect(card.getByTestId("valuation-date-from").textContent).toContain(report.currency_bridge.valuation_date_from);
     expect(card.getByTestId("excluded-from-totals").textContent).toContain("no");
   });
 
@@ -118,11 +119,16 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
     // The backend serves no ROI document for a scenario with no option: said so, nothing computed in its place.
     expect(screen.getByTestId("roi-not-served").textContent).toMatch(/^not served: Athena-Backend does not serve the remediation option's economics/);
     expect(renderedAmounts(section(container, "current-against-residual"))).toEqual([]);
-    // The bridge: the reporting currency and the snapshots the report serves; no conversion steps it did not serve.
+    // The bridge: the reporting currency, the valuation date and the snapshots the report serves, and its
+    // statement that no figure was converted (conversions: []); no conversion step it did not serve.
     const bridge = section(container, "currency-bridge");
     expect(bridge.textContent).toContain(report.currency.code);
+    expect(within(bridge).getByTestId("bridge-reporting-currency").textContent).toContain(report.currency_bridge.reporting_currency);
+    expect(within(bridge).getByTestId("valuation-date").textContent).toBe(report.currency_bridge.valuation_date);
     for (const snapshot of report.source_snapshots.snapshots) expect(bridge.textContent).toContain(snapshot.content_hash);
-    expect(within(bridge).getByTestId("bridge-steps").textContent).toMatch(/not served: Athena-Backend serves no currency bridge for this report/);
+    expect(within(bridge).getByTestId("bridge-statement").textContent).toBe(report.currency_bridge.statement);
+    expect(bridge.querySelectorAll("[data-bridge-step]")).toHaveLength(0);
+    expect(bridge.textContent).not.toMatch(/not served/);
     // The Validity Card.
     const card = section(container, "validity-card");
     expect(within(card).getByTestId("card-grade").textContent).toBe(report.validity_card.grade);
@@ -139,12 +145,12 @@ describe("a graded report, with a policy, a market-value reaction and a receipt 
     );
     expect(link.hasAttribute("download")).toBe(true);
     expect(receipt.textContent).toMatch(/A fresh read of the same result/);
-    // The report names no route for a receipt's signed bytes: none is offered.
-    expect(within(receipt).getByTestId("receipt-download").textContent).toMatch(/not served: the report names no route for a receipt's signed bytes/);
+    // The receipt's signed bytes are offered, checked against the digest shown (tests/economics-the-receipt-is-saved-only-when-its-digests-agree).
+    expect(within(receipt).getByTestId("receipt-download-button").textContent).toMatch(/Download the signed receipt/);
   });
 });
 
-describe("current against residual (Athena-Backend master 4c1edf3, #160 merged)", () => {
+describe("current against residual (Athena-Backend master e7ee3eb, #160 merged)", () => {
   const vetoed = fixture(MASTER, "roi-vetoed");
   const roi = served(vetoed, "roi") as Record<string, any>;
 

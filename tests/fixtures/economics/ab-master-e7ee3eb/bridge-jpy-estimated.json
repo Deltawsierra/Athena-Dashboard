@@ -2,10 +2,10 @@
   "synthetic": "SYNTHETIC / ILLUSTRATIVE: made by Athena-Backend's own test helpers in a throwaway test database; no customer data, no real tenant, no key that outlived the run",
   "backend": {
     "repository": "Deltawsierra/Athena-Backend",
-    "sha": "4c1edf3be10fa24d72aadd1139dbda4c404fbe8b",
+    "sha": "e7ee3ebc5a384256be1f9bf43c219639751692dd",
     "ref": "master"
   },
-  "scenario": "bridge-eur-normalized",
+  "scenario": "bridge-jpy-estimated",
   "served_by": null,
   "engine_record": {
     "status": "normalized",
@@ -16,26 +16,30 @@
     "event_date": "2020-03-02",
     "valuation_date": "2026-09-30",
     "base_currency": "USD",
-    "reporting_currency": "EUR",
+    "reporting_currency": "JPY",
     "order": [
       "event_fx",
       "cost_index",
       "valuation_fx"
     ],
     "value": {
-      "amount": "1309.52380952380952380952380952380952380952380952380952380952",
-      "currency": "EUR"
+      "amount": "203500",
+      "currency": "JPY"
     },
-    "display": "1309.52 EUR",
+    "display": "203500 JPY",
     "arithmetic": "Decimal, 60 significant digits, ROUND_HALF_EVEN",
     "display_rounding": "ROUND_HALF_EVEN to the reporting currency's minor unit, for display only",
-    "estimate": false,
+    "estimate": true,
     "stale": false,
-    "confidence_downgrades": [],
+    "confidence_downgrades": [
+      "estimated_rate"
+    ],
+    "conflicts": [],
+    "primary_unavailable": [],
     "unavailable": null,
     "policy": {
       "base_currency": "USD",
-      "reporting_currency": "EUR",
+      "reporting_currency": "JPY",
       "fx": {
         "providers": [
           "SYNTHETIC-REF"
@@ -45,7 +49,7 @@
           "mid"
         ],
         "weekend_holiday_rule": "last_official_rate",
-        "missing_rate": "unavailable",
+        "missing_rate": "interpolate",
         "max_interpolation_gap_days": 7,
         "freshness_days": 4
       },
@@ -75,7 +79,10 @@
         "age_days": 0,
         "stale": false,
         "estimate": false,
+        "configured_primary": "SYNTHETIC-REF",
+        "primary_unavailable": false,
         "downgrades": [],
+        "conflicts": [],
         "observations": [
           {
             "provider": "SYNTHETIC-REF",
@@ -117,7 +124,11 @@
         "ratio": "1.25",
         "stale": false,
         "estimate": false,
+        "provider": "Mythos (synthetic test data)",
+        "configured_primary": null,
+        "primary_unavailable": false,
         "downgrades": [],
+        "conflicts": [],
         "observations": [
           {
             "series_id": "SYN-CPI-US",
@@ -129,7 +140,8 @@
             "vintage_date": "2020-04-10",
             "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
             "source_key": "synthetic-fx-and-cost-index",
-            "source_version": null
+            "source_version": null,
+            "provider": "Mythos (synthetic test data)"
           },
           {
             "series_id": "SYN-CPI-US",
@@ -141,7 +153,8 @@
             "vintage_date": "2026-09-30",
             "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
             "source_key": "synthetic-fx-and-cost-index",
-            "source_version": null
+            "source_version": null,
+            "provider": "Mythos (synthetic test data)"
           }
         ],
         "input": {
@@ -156,29 +169,46 @@
       {
         "step": "valuation_fx",
         "from": "USD",
-        "to": "EUR",
+        "to": "JPY",
         "requested_date": "2026-09-30",
-        "rule": "exact",
+        "rule": "linear_interpolation",
         "provider": "SYNTHETIC-REF",
         "rate_type": "reference",
-        "direction": "inverted",
+        "direction": "direct",
         "rate_date": "2026-09-30",
-        "quoted_rate": "1.05",
-        "factor": "0.952380952380952380952380952380952380952380952380952380952381",
-        "interpolation_weight": null,
-        "age_days": 0,
+        "quoted_rate": "148",
+        "factor": "148",
+        "interpolation_weight": "0.5",
+        "age_days": 1,
         "stale": false,
-        "estimate": false,
-        "downgrades": [],
+        "estimate": true,
+        "configured_primary": "SYNTHETIC-REF",
+        "primary_unavailable": false,
+        "downgrades": [
+          "estimated_rate"
+        ],
+        "conflicts": [],
         "observations": [
           {
             "provider": "SYNTHETIC-REF",
-            "base": "EUR",
-            "quote": "USD",
-            "rate": "1.05",
+            "base": "USD",
+            "quote": "JPY",
+            "rate": "147",
             "rate_type": "reference",
-            "effective_date": "2026-09-30",
-            "observed_at": "2026-09-30T15:00:00+00:00",
+            "effective_date": "2026-09-29",
+            "observed_at": "2026-09-29T15:00:00+00:00",
+            "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
+            "source_key": "synthetic-fx-and-cost-index",
+            "source_version": null
+          },
+          {
+            "provider": "SYNTHETIC-REF",
+            "base": "USD",
+            "quote": "JPY",
+            "rate": "149",
+            "rate_type": "reference",
+            "effective_date": "2026-10-01",
+            "observed_at": "2026-10-01T15:00:00+00:00",
             "source_snapshot_hash": "sha256:e719dc303cf8eb9e2c72bc80d0261ddf4fdac810d59ebcb5472f09075c48b90f",
             "source_key": "synthetic-fx-and-cost-index",
             "source_version": null
@@ -189,11 +219,11 @@
           "currency": "USD"
         },
         "output": {
-          "amount": "1309.52380952380952380952380952380952380952380952380952380952",
-          "currency": "EUR"
+          "amount": "203500",
+          "currency": "JPY"
         }
       }
     ]
   },
-  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; no route serves a currency bridge at this commit"
+  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; a report's currency_bridge.conversions is empty at this commit"
 }

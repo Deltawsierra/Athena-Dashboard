@@ -3,9 +3,13 @@
  * Athena-Backend's economics routes and nothing else (server/economics.ts).
  *
  *   1. Scenario card          5. Current against residual (the ROI document, #160)
- *   2. Distribution           6. Currency bridge
+ *   2. Distribution           6. Currency bridge (the v2 report's, #163)
  *   3. Cost waterfall         7. Validity Card
- *   4. Sensitivity tornado    8. Receipt and the report's bytes
+ *   4. Sensitivity tornado    8. Receipt: the report's bytes, and the receipt's
+ *                                signed bytes, checked against the digests (#163)
+ *
+ * The version is picked from the deployment's scenario list (#163), a page at a
+ * time (components/economics/ScenarioPicker.tsx): no uuid is typed.
  *
  * The browser does no arithmetic on money: every amount is the backend's decimal
  * string, shown as served (lib/economics.ts). One scenario is read at a time and
@@ -16,13 +20,13 @@
  * stop controls elsewhere are untouched.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
-import { useLocation, useSearch } from "wouter";
+import { useSearch } from "wouter";
 import { Landmark } from "lucide-react";
 import PageHeader from "@/components/PageHeader";
 import GlassCard from "@/components/GlassCard";
 import CurrentAgainstResidual from "@/components/economics/CurrentAgainstResidual";
 import CurrencyBridge from "@/components/economics/CurrencyBridge";
+import ScenarioPicker from "@/components/economics/ScenarioPicker";
 import {
   CostWaterfall,
   Distribution,
@@ -153,48 +157,8 @@ export function EconomicsView({ deployment, scenario, simulation }: EconomicsTar
       <CurrentAgainstResidual roi={roiDoc} roiError={roiError} reportRefused={refused} report={doc} />
       <CurrencyBridge report={doc} />
       <ValidityCardView report={doc} refused={refused} />
-      <ReceiptPanel report={doc} href={downloadUrl(target, doc)} />
+      <ReceiptPanel report={doc} href={downloadUrl(target, doc)} deployment={deployment} />
     </div>
-  );
-}
-
-/** Which scenario to read: a deployment and a scenario by uuid, and optionally a result. */
-function ChooseScenario({ initial }: { initial: Partial<EconomicsTarget> }) {
-  const [, setLocation] = useLocation();
-  const [deployment, setDeployment] = useState(initial.deployment ?? "");
-  const [scenario, setScenario] = useState(initial.scenario ?? "");
-  const [simulation, setSimulation] = useState(initial.simulation ?? "");
-  const valid = UUID.test(deployment) && UUID.test(scenario) && (simulation === "" || UUID.test(simulation));
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (!valid) return;
-    const query = new URLSearchParams({ deployment, scenario });
-    if (simulation) query.set("simulation", simulation);
-    setLocation(`/economics?${query.toString()}`);
-  };
-  const field = (label: string, value: string, set: (next: string) => void, id: string) => (
-    <label className="block text-sm" htmlFor={id}>
-      <span className="text-muted-foreground">{label}</span>
-      <input
-        id={id}
-        className="mt-1 w-full rounded-md border border-border bg-background/60 px-2 py-1 font-mono text-xs"
-        value={value}
-        onChange={(event) => set(event.target.value.trim().toLowerCase())}
-        placeholder="00000000-0000-0000-0000-000000000000"
-      />
-    </label>
-  );
-  return (
-    <GlassCard hover={false} glow={false}>
-      <form className="space-y-3" onSubmit={submit} data-testid="choose-scenario">
-        {field("Deployment", deployment, setDeployment, "economics-deployment")}
-        {field("Scenario version", scenario, setScenario, "economics-scenario")}
-        {field("Result (optional: the scenario's latest when empty)", simulation, setSimulation, "economics-simulation")}
-        <button type="submit" disabled={!valid} className="rounded-md border border-primary/50 px-3 py-1 text-sm disabled:opacity-40">
-          Read
-        </button>
-      </form>
-    </GlassCard>
   );
 }
 
@@ -211,7 +175,7 @@ export default function Economics() {
         icon={<Landmark className="h-8 w-8" />}
         description="One scenario version's financial exposure, exactly as Athena-Backend's economics routes serve it: estimates with their ranges, not a prediction or advice."
       />
-      <ChooseScenario initial={{ deployment, scenario, simulation }} />
+      <ScenarioPicker deployment={deployment} scenario={UUID.test(scenario) ? scenario : null} />
       {chosen ? <EconomicsView deployment={deployment} scenario={scenario} simulation={simulation} /> : null}
     </div>
   );

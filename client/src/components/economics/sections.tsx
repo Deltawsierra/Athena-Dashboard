@@ -1,5 +1,6 @@
 /**
- * The economics views of one scenario version's report (mythos.economics.report/v1),
+ * The economics views of one scenario version's report (mythos.economics.report/v2:
+ * v1 and its currency bridge, Athena-Backend #163),
  * each rendering what the report serves and nothing else (lib/economics.ts has the
  * rules). Every amount goes through <Money>; every figure section opens with the
  * report's banner where it carries one; a refused report renders none of these
@@ -8,6 +9,7 @@
 import type { ReactNode } from "react";
 import GlassCard from "@/components/GlassCard";
 import Money from "@/components/economics/Money";
+import ReceiptDownload from "@/components/economics/ReceiptDownload";
 import {
   CASH_LINES,
   LINE_LABEL,
@@ -30,6 +32,18 @@ export function NotServed({ why }: { why?: string }) {
   return (
     <span className="text-muted-foreground" data-not-served="">
       not served{why ? `: ${why}` : ""}
+    </span>
+  );
+}
+
+/**
+ * A value the document serves as not reported, with the backend's own reason: it
+ * is served (the field is there), so it is never "not served".
+ */
+export function NotReported({ why }: { why: string | null }) {
+  return (
+    <span className="text-muted-foreground" data-not-reported="">
+      not reported: {why ?? "the backend served no reason"}
     </span>
   );
 }
@@ -103,8 +117,41 @@ export function PlainSection({ title, id, children }: { title: string; id: strin
   );
 }
 
-/** Where a report would state its valuation date, were it to (it states none today). */
+/**
+ * Where a report states its valuation date: its currency bridge (v2, Athena-Backend
+ * #163), and before it any other place a report might; a v1 report states none.
+ */
 const VALUATION_DATE: string[][] = [["valuation_date"], ["build", "valuation_date"], ["currency", "valuation_date"]];
+
+/**
+ * The run's valuation date as the report's currency bridge states it, with where
+ * the backend read it from; or the bridge's reason it is not reported. A report
+ * with no currency bridge (v1) is looked through for one elsewhere, and says
+ * "not served" only where it has none. Never computed here from the as-of date
+ * or anything else.
+ */
+export function ValuationDate({ report }: { report: Doc }) {
+  if (!has(report, "currency_bridge")) {
+    return <Presence doc={report} paths={VALUATION_DATE} absent="the report states no valuation date" />;
+  }
+  const bridge = obj(report.currency_bridge);
+  const date = text(at(bridge, "valuation_date"));
+  if (bridge === null) {
+    return (
+      <span className="text-muted-foreground" data-served-field="currency_bridge" data-not-read="">
+        served (currency_bridge), but not read by this dashboard version yet
+      </span>
+    );
+  }
+  if (date === null) return <NotReported why={text(bridge.not_reported)} />;
+  const from = text(bridge.valuation_date_from);
+  return (
+    <span data-served-field="currency_bridge.valuation_date">
+      <span data-testid="valuation-date">{date}</span>
+      {from !== null ? <span className="text-xs text-muted-foreground" data-testid="valuation-date-from"> ({from})</span> : null}
+    </span>
+  );
+}
 
 /**
  * A field the dashboard looks for: "not served" only where the document does not
@@ -144,8 +191,8 @@ function strings(value: unknown): string[] {
 /**
  * The scenario card: name, template, deployment, grade, status, as-of and valuation
  * date, and whether it is excluded from every total, with why. The template is the
- * events route's (each event's), the rest the report's. The report states no
- * valuation date, so none is shown: it is not computed here from anything else.
+ * events route's (each event's), the rest the report's. The valuation date is the
+ * currency bridge's (<ValuationDate>): never computed here from anything else.
  */
 export function ScenarioCard({ report, events, eventsError }: { report: Doc; events: unknown; eventsError: string | null }) {
   const refusal = obj(report.refusal);
@@ -203,7 +250,7 @@ export function ScenarioCard({ report, events, eventsError }: { report: Doc; eve
           </Row>
           <Row label="As of" testId="scenario-as-of"><Served value={at(report, "build", "as_of")} /></Row>
           <Row label="Valuation date" testId="scenario-valuation-date">
-            <Presence doc={report} paths={VALUATION_DATE} absent="the report states no valuation date" />
+            <ValuationDate report={report} />
           </Row>
           <Row label="Excluded from every total" testId="excluded-from-totals">
             {excluded === false ? "no" : excluded === true ? "yes" : "not served (read as yes)"}
@@ -754,16 +801,16 @@ export function ValidityCardView({ report, refused }: { report: Doc; refused: bo
 
 // ------------------------------------------------------------------ 8. receipt
 
-/** Where a report would name a route for its receipt's signed bytes (it names none today). */
-const RECEIPT_BYTES: string[][] = [["receipt", "url"], ["receipt", "href"], ["receipt", "download"]];
-
 /**
  * The report's bytes, pinned to the result on screen, with the digest it carries;
- * and the receipt's reference as the report states it. The receipt's signed bytes
- * are offered only once the report names a route for them; it names none today.
+ * the receipt's reference as the report states it; and the receipt's signed bytes,
+ * read through this server's relay (Athena-Backend #163's receipt route) and saved
+ * only when they agree with their X-Content-SHA256 and with the document digest
+ * shown here (<ReceiptDownload>).
  */
-export function ReceiptPanel({ report, href }: { report: Doc; href: string | null }) {
+export function ReceiptPanel({ report, href, deployment }: { report: Doc; href: string | null; deployment: string }) {
   const receipt = obj(report.receipt);
+  const recorded = receipt !== null && !("not_reported" in receipt);
   return (
     <PlainSection title="Receipt and download" id="receipt">
       <dl>
@@ -787,8 +834,14 @@ export function ReceiptPanel({ report, href }: { report: Doc; href: string | nul
           )}
         </Row>
       </dl>
-      {receipt === null || "not_reported" in receipt ? (
-        <p data-testid="receipt-reference"><NotServed why={text(receipt?.not_reported) ?? undefined} /></p>
+      {!has(report, "receipt") ? (
+        <p data-testid="receipt-reference"><NotServed why="the report names no receipt" /></p>
+      ) : receipt === null ? (
+        <p data-testid="receipt-reference" className="text-muted-foreground" data-not-read="">
+          served (receipt), but not read by this dashboard version yet
+        </p>
+      ) : !recorded ? (
+        <p data-testid="receipt-reference"><NotReported why={text(receipt.not_reported)} /></p>
       ) : (
         <dl data-testid="receipt-reference">
           <Row label="Receipt id"><span className="font-mono text-xs">{text(receipt.receipt_id)}</span></Row>
@@ -801,10 +854,14 @@ export function ReceiptPanel({ report, href }: { report: Doc; href: string | nul
           </Row>
         </dl>
       )}
-      <p data-testid="receipt-download">
-        Signed receipt bytes:{" "}
-        <Presence doc={report} paths={RECEIPT_BYTES} absent="the report names no route for a receipt's signed bytes" showsValue={false} />
-      </p>
+      <div data-testid="receipt-download">
+        <h3 className="text-sm font-semibold">Signed receipt bytes</h3>
+        {recorded ? (
+          <ReceiptDownload deployment={deployment} receipt={receipt} />
+        ) : (
+          <p className="text-muted-foreground">none: this result has no recorded receipt to download</p>
+        )}
+      </div>
     </PlainSection>
   );
 }

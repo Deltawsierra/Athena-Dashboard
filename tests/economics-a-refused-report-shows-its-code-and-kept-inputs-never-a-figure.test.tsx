@@ -59,6 +59,19 @@ describe("a refused report", () => {
     noFigure(container);
   });
 
+  it("a refused v2 report shows its currency bridge's dates and statement, and still no figure", async () => {
+    const loaded = fixture(MASTER, "valuation-not-reported-usd");
+    const report = served(loaded, "report") as Record<string, any>;
+    expect(report.schema).toBe("mythos.economics.report/v2");
+    expect(report.refusal.code).toBe("stored_row_unverified");
+    const { container } = await mountEconomics(loaded, { report: bytesOf(loaded, "report"), roi: NOT_SERVED_ROI });
+    const bridge = container.querySelector('[data-figure-section="currency-bridge"]') as HTMLElement;
+    expect(within(bridge).getByTestId("bridge-statement").textContent).toBe(report.currency_bridge.statement);
+    expect(within(bridge).getByTestId("bridge-valuation-date").textContent).toContain(report.currency_bridge.not_reported);
+    noFigure(container);
+    expect(container.querySelector("[data-economics-banner]")).not.toBeNull();
+  });
+
   it("a refused document that carries a figure anyway still shows none of it", async () => {
     const loaded = fixture(MASTER, "refused-usd");
     const report = served(loaded, "report") as Record<string, any>;

@@ -1,0 +1,25 @@
+{
+  "synthetic": "SYNTHETIC / ILLUSTRATIVE: made by Athena-Backend's own test helpers in a throwaway test database; no customer data, no real tenant, no key that outlived the run",
+  "backend": {
+    "repository": "Deltawsierra/Athena-Backend",
+    "sha": "e7ee3ebc5a384256be1f9bf43c219639751692dd",
+    "ref": "master"
+  },
+  "scenario": "canonical-spellings",
+  "served_by": null,
+  "cases": [
+    {
+      "payload_hex": "7b2264656c657465223a22617f62222c227469746c65223a2253594e54484554494320636166c3a9206578706f73757265227d",
+      "document_digest": "sha256:ce0535446ba3c3d65de4d22a520d615adc3b228f03f5ab35063b49a3f217c4aa"
+    },
+    {
+      "payload_hex": "7b226e223a332c226e6f7465223a226c696e65e280a8736570617261746f72222c227469746c65223a2253594e54484554494320e282ac20616e6420c2a5227d",
+      "document_digest": "sha256:be72ff138a3b667f29e7d47b6f647a05d23e18c2c14d4aaa75a26f720c2859e2"
+    },
+    {
+      "payload_hex": "7b226e6573746564223a7b2261223a5b22c3bc222c315d2c227a223a225c2271756f7465645c22205c5c206261636b227d2c227469746c65223a2253594e54484554494320f09f92b620706173742074686520666972737420706c616e65227d",
+      "document_digest": "sha256:ac6989a67177354ea54eb51cd020e4482fe9b16e9d215eded382e55155e73834"
+    }
+  ],
+  "note": "not a route's answer: mythos_core.outcome.canonical_bytes (the DSSE payload's UTF-8 spelling) and models.canonical_digest (the digest a report names for a receipt's document) of SYNTHETIC documents"
+}
