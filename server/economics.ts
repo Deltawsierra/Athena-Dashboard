@@ -47,13 +47,14 @@
  * together): past it, the browser's connection is answered 504 or cut, and the
  * backend read is cancelled, so stalled economics reads can never fill the
  * browser's few connections to this server ahead of a stop. The views cancel a
- * read they no longer show (lib/queryClient.ts `meta.cancelWhenLeft`).
+ * read they no longer show (lib/queryClient.ts: every query passes its AbortSignal).
  * (tests/economics-route.test.ts, tests/economics-a-stalled-read-never-holds-a-stop.test.ts)
  */
 import { Readable } from "node:stream";
 import type { Express, Request, Response } from "express";
 import { asyncHandler } from "./auth";
 import { call, body as quoted, isConfigured, ControlPlaneUnavailable } from "./control-plane";
+import { READ_DEADLINE_MS, _setReadDeadlineForTests, startReadDeadline } from "./read-deadline";
 
 /** A uuid as the backend's `<uuid:...>` route converter takes one: lowercase hex. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -74,14 +75,14 @@ export const ECONOMICS_ROUTES = (Object.keys(ECONOMICS_DOCUMENTS) as EconomicsDo
 /**
  * The most one economics read may take, from its arrival to its last byte:
  * waiting for the backend's headers AND streaming its body. Past it the read is
- * cut. (The control plane's own 15 s bounds only the headers.)
+ * cut. (The control plane's own 15 s bounds only the headers.) It is every relay
+ * read's deadline (server/read-deadline.ts), which this relay first had.
  */
-export const ECONOMICS_DEADLINE_MS = 20_000;
-let deadlineMs = ECONOMICS_DEADLINE_MS;
+export const ECONOMICS_DEADLINE_MS = READ_DEADLINE_MS;
 
-/** Test seam: a shorter deadline, or back to the default with null. */
+/** Test seam: a shorter deadline, or back to the default with null (every relay read's). */
 export function _setEconomicsDeadlineForTests(ms: number | null): void {
-  deadlineMs = ms ?? ECONOMICS_DEADLINE_MS;
+  _setReadDeadlineForTests(ms);
 }
 
 /** The only query parameters read; any other is dropped, never forwarded. */
@@ -217,40 +218,23 @@ async function relay(document: EconomicsDocument, req: Request, res: Response): 
   }
   const what = ECONOMICS_DOCUMENTS[document].what;
 
-  // ONE deadline for the whole read, headers and body: past it the browser's
-  // connection is answered or cut, and the backend read cancelled.
-  let over = false;
+  // ONE deadline for the whole read, headers and body (server/read-deadline.ts):
+  // past it the browser's connection is answered or cut, and the backend read
+  // cancelled. A browser that goes away stops the backend read too.
   let stream: Readable | null = null;
   let upstreamBody: globalThis.ReadableStream<Uint8Array> | null = null;
   const cut = () => {
     if (stream !== null) stream.destroy();
     else if (upstreamBody !== null) void upstreamBody.cancel().catch(() => undefined);
   };
-  const deadline = setTimeout(() => {
-    if (res.writableFinished) return;
-    over = true;
-    console.warn(`[economics] the read of ${what} passed its ${deadlineMs} ms deadline: cut`);
-    cut();
-    if (!res.headersSent) {
-      res.status(504).json({ error: `Athena-Backend did not answer ${what} in time`, code: "backend_timeout" });
-    } else {
-      res.destroy();
-    }
-  }, deadlineMs);
-  (deadline as { unref?: () => void }).unref?.();
-  // A browser that goes away stops the backend read too: nothing is held for it.
-  res.on("close", () => {
-    clearTimeout(deadline);
-    if (!res.writableFinished) cut();
-  });
-  const gone = () => over || res.writableEnded || res.destroyed;
+  const deadline = startReadDeadline(res, { who: "Athena-Backend", what }, cut);
+  const gone = () => deadline.passed() || res.writableEnded || res.destroyed;
 
   let upstream: globalThis.Response;
   try {
     upstream = await call(path, { method: "GET", headers: { Accept: "application/json" } });
   } catch (cause) {
     if (gone()) return;
-    clearTimeout(deadline);
     if (cause instanceof ControlPlaneUnavailable) {
       console.warn(`[economics] the read of ${what} reached no backend: ${cause.message}`);
       res.status(503).json({ error: `Athena-Backend could not be reached for ${what}`, code: "backend_unavailable" });
@@ -265,7 +249,6 @@ async function relay(document: EconomicsDocument, req: Request, res: Response): 
   }
   if (upstream.status !== 200 || upstream.body === null) {
     const answer = await refusal(document, upstream);
-    clearTimeout(deadline);
     if (gone()) return;
     const { status, ...rest } = answer;
     res.status(status).json(rest);
@@ -274,7 +257,6 @@ async function relay(document: EconomicsDocument, req: Request, res: Response): 
   if (!isJsonMediaType(upstream.headers.get("content-type"))) {
     // A 200 that is not JSON is not a document these views read: none of its bytes
     // is sent on, so it can never run as a page on this server's origin.
-    clearTimeout(deadline);
     cut();
     console.warn(`[economics] Athena-Backend answered ${what} with ${upstream.headers.get("content-type") ?? "no content type"}: refused`);
     res.status(502).json({ error: `Athena-Backend did not answer ${what} as JSON: refused`, code: "backend_not_json" });
@@ -289,7 +271,6 @@ async function relay(document: EconomicsDocument, req: Request, res: Response): 
   );
   stream = Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>);
   stream.on("error", () => res.destroy());
-  res.on("finish", () => clearTimeout(deadline));
   stream.pipe(res);
 }
 

@@ -17,6 +17,7 @@ import * as retests from "./retests";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
+import { boundedRelayRead } from "./read-deadline";
 import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
@@ -2196,6 +2197,21 @@ async function answerRetestStatus(
   });
 }
 
+/**
+ * The relay reads, other than the control plane's, that the read deadline bounds
+ * (server/read-deadline.ts): each reads the engine, or the assistant, for display.
+ * The engine client's own limits still end its read (engineTimeouts); the
+ * deadline frees the browser's connection at its own, shorter, bound.
+ */
+export const ENGINE_RELAY_READS = [
+  "/api/engine/status",
+  "/api/engine/runs",
+  "/api/scans/:testId",
+  "/api/tests/:testId/decisions",
+  "/api/compliance/:clientId",
+];
+export const ASSISTANT_RELAY_READS = ["/api/assistant/status"];
+
 export function registerRoutes(app: Express): void {
   // This app's retest watches, resumed from the record in the background:
   // a restart loses no verdict, and holds up no start-up and no stop.
@@ -2444,6 +2460,22 @@ export function registerRoutes(app: Express): void {
 
   // ...and, for writes, that the kill switch is not engaged.
   app.use("/api", enforceKillSwitch);
+
+  // ==== RELAY READS: ONE TOTAL DEADLINE (SAFETY) ====
+  //
+  // Every read this server relays from a backend, other than a stop's, holds the
+  // browser's connection for at most one total deadline, headers and body
+  // (server/read-deadline.ts): past it the browser is answered 504 or cut, and a
+  // control-plane read is cancelled with it. A browser keeps few connections to
+  // this server, and a stop needs one, so no stalled read may keep one. GETs only:
+  // no stop, pause, stand-down, terminate or revoke is a GET, and a control-plane
+  // stop is never given a read's signal (control-plane.ts readSignalFor). The
+  // failsafe console's reads, which the control plane judges stops, are not
+  // mounted here: server/failsafe.ts bounds each itself. Economics is bounded in
+  // its own relay (server/economics.ts), by the same deadline.
+  app.use("/api/assurance", boundedRelayRead({ who: "Athena-Backend", what: "this assurance read" }));
+  app.get(ENGINE_RELAY_READS, boundedRelayRead({ who: "the engine", what: "this engine read" }));
+  app.get(ASSISTANT_RELAY_READS, boundedRelayRead({ who: "the assistant", what: "its status" }));
 
   // ==== CHANGING ONE'S OWN PASSWORD ====
   // The one write an account that must change its password may make. The

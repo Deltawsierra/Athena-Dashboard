@@ -65,8 +65,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "the read failed";
 }
 
-/** Every economics read is cancelled when the view showing it is left or replaced. */
-const CANCEL_WHEN_LEFT = { cancelWhenLeft: true };
 
 function ResidualRefused({ roi, roiError }: { roi: Doc | null; roiError: string | null }) {
   return (
@@ -96,9 +94,9 @@ function Unchecked({ why }: { why: string }) {
 
 /** The eight views of one scenario version. */
 export function EconomicsView({ deployment, scenario, simulation }: EconomicsTarget) {
-  const report = useQuery<Doc>({ queryKey: ["/api/economics/report", { deployment, scenario, simulation }], meta: CANCEL_WHEN_LEFT });
-  const events = useQuery<Doc>({ queryKey: ["/api/economics/events", { deployment, scenario }], meta: CANCEL_WHEN_LEFT });
-  const roi = useQuery<Doc>({ queryKey: ["/api/economics/roi", { deployment, scenario }], meta: CANCEL_WHEN_LEFT });
+  const report = useQuery<Doc>({ queryKey: ["/api/economics/report", { deployment, scenario, simulation }] });
+  const events = useQuery<Doc>({ queryKey: ["/api/economics/events", { deployment, scenario }] });
+  const roi = useQuery<Doc>({ queryKey: ["/api/economics/roi", { deployment, scenario }] });
 
   if (report.isError) {
     return (

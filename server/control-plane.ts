@@ -30,6 +30,7 @@
  */
 
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
+import { currentReadSignal } from "./read-deadline";
 
 const URL_ENV = "ATHENA_FAILSAFE_URL";
 const USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -229,6 +230,20 @@ async function signIn(base: string): Promise<Tokens> {
 export type CallInit = RequestInit & { stop?: boolean };
 
 /**
+ * The read deadline's signal a call is cancelled by (server/read-deadline.ts), or
+ * undefined. Only a READ -- a GET or HEAD that is not a stop -- made while a
+ * bounded read is being served: the deadline, or a browser that went away, then
+ * cancels its backend request, headers and body. A stop, and any write, is never
+ * given it: no read's deadline can cut a stop.
+ */
+export function readSignalFor(init: CallInit): AbortSignal | undefined {
+  if (init.stop) return undefined;
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD") return undefined;
+  return currentReadSignal();
+}
+
+/**
  * Call a backend route, authenticated by the cached service token.
  *
  * A stop (`init.stop`) presents the failsafe service token as well, when one is
@@ -253,6 +268,8 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
   // SAFETY: a stop with the service token waits on no sign-in and no refresh --
   // failing, throttled, locked or hung -- so none of them holds it back or drops it.
   const presented = stop ? serviceToken() : null;
+  // A read served under the read deadline is cancelled with it; a stop never is.
+  const read = readSignalFor(init);
   const access = presented !== null ? cachedAccess : await accessToken(base);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -266,7 +283,7 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
         ...(request.headers ?? {}),
         ...(presented !== null ? { [SERVICE_TOKEN_HEADER]: presented } : {}),
       },
-      signal: controller.signal,
+      signal: read ? AbortSignal.any([controller.signal, read]) : controller.signal,
     });
   } catch (cause) {
     const why = cause instanceof Error ? cause.message : String(cause);
