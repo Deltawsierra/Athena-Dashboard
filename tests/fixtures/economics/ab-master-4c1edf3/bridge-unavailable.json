@@ -1,0 +1,65 @@
+{
+  "synthetic": "SYNTHETIC / ILLUSTRATIVE: made by Athena-Backend's own test helpers in a throwaway test database; no customer data, no real tenant, no key that outlived the run",
+  "backend": {
+    "repository": "Deltawsierra/Athena-Backend",
+    "sha": "4c1edf3be10fa24d72aadd1139dbda4c404fbe8b",
+    "ref": "master"
+  },
+  "scenario": "bridge-unavailable",
+  "served_by": null,
+  "engine_record": {
+    "status": "unavailable",
+    "native": {
+      "amount": "1000",
+      "currency": "EUR"
+    },
+    "event_date": "2020-03-04",
+    "valuation_date": "2026-09-30",
+    "base_currency": "USD",
+    "reporting_currency": "EUR",
+    "order": [
+      "event_fx",
+      "cost_index",
+      "valuation_fx"
+    ],
+    "value": null,
+    "display": null,
+    "arithmetic": "Decimal, 60 significant digits, ROUND_HALF_EVEN",
+    "display_rounding": "ROUND_HALF_EVEN to the reporting currency's minor unit, for display only",
+    "estimate": false,
+    "stale": false,
+    "confidence_downgrades": [],
+    "unavailable": {
+      "step": "event_fx",
+      "reason": "rate_missing",
+      "detail": "no EUR/USD rate for 2020-03-04 from SYNTHETIC-REF (reference, mid), missing rate rule 'unavailable'; the last rate between them before that day is 2020-03-03"
+    },
+    "policy": {
+      "base_currency": "USD",
+      "reporting_currency": "EUR",
+      "fx": {
+        "providers": [
+          "SYNTHETIC-REF"
+        ],
+        "rate_types": [
+          "reference",
+          "mid"
+        ],
+        "weekend_holiday_rule": "last_official_rate",
+        "missing_rate": "unavailable",
+        "max_interpolation_gap_days": 7,
+        "freshness_days": 4
+      },
+      "index": {
+        "series_id": "SYN-CPI-US",
+        "geography": "US",
+        "category": "consumer prices, all items (SYNTHETIC)",
+        "base": "2020-03=100",
+        "currency": "USD"
+      },
+      "index_max_lag_months": 0
+    },
+    "chain": []
+  },
+  "note": "not a route's answer: Normalization.as_dict() from the backend's engine and its committed synthetic snapshot; no route serves a currency bridge at this commit"
+}

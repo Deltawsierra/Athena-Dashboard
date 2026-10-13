@@ -16,6 +16,7 @@ import * as engine from "./engine";
 import * as retests from "./retests";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
+import { registerEconomicsRoutes } from "./economics";
 import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
@@ -5412,6 +5413,15 @@ export function registerRoutes(app: Express): void {
     });
     res.json(result.unknown);
   }));
+
+  // ==== ECONOMIC EXPOSURE (read-only; Athena-Backend's economics routes) ====
+  //
+  // The financial views read three documents of ONE scenario version -- its
+  // report, its events (for their templates) and its remediation option's ROI --
+  // each streamed through as the backend's bytes, unmodified. Reads only, behind
+  // requireAuth; nothing totals scenarios, and nothing here is on a stop's path
+  // (server/economics.ts).
+  registerEconomicsRoutes(app);
 
   // ==== REMEDIATION WORKFLOW (Phase 2.3; admin-only writes) ====
   //
