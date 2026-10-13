@@ -197,18 +197,19 @@ function urlFromQueryKey(queryKey: readonly unknown[]): string {
 type UnauthorizedBehavior = "returnNull" | "throw";
 
 /**
- * A query whose `meta` says `cancelWhenLeft: true` passes React Query's
- * AbortSignal to its fetch, so the read is cancelled when the screen showing it is
- * left or shows something else: a read nobody will see never keeps one of the
- * browser's few connections to this server (a stop needs one). The signal is read
- * ONLY for such a query: React Query cancels a query on unmount once its signal is
- * read, and every other query keeps the behaviour it had.
+ * Every read passes React Query's AbortSignal to its fetch, so a read is cancelled
+ * when the screen showing it is left or shows something else: a read nobody will
+ * see never keeps one of the browser's few connections to this server, and a stop
+ * needs one (SAFETY). The server bounds every relay read by one deadline too
+ * (server/read-deadline.ts). A query whose `meta` says `cancelWhenLeft: false`
+ * opts out (none does). Stops are not reads: they go through apiRequest, which
+ * takes no signal and is never cancelled.
  */
 export const getQueryFn: <T>(options: { on401: UnauthorizedBehavior }) => QueryFunction<T> =
   ({ on401 }) =>
   async (context) => {
     const { queryKey } = context;
-    const signal = context.meta?.cancelWhenLeft === true ? context.signal : undefined;
+    const signal = context.meta?.cancelWhenLeft === false ? undefined : context.signal;
     const res = await fetch(urlFromQueryKey(queryKey), { credentials: "include", ...(signal ? { signal } : {}) });
     if (res.status === 401 && on401 === "returnNull") return null as never;
     await throwIfResNotOk(res);

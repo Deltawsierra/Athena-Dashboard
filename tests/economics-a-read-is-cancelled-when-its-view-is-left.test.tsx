@@ -11,9 +11,10 @@ import { shims } from "./helpers/economics-render";
  * SAFETY (review round 1, MEDIUM-3): an economics read nobody will see is
  * cancelled, so it never keeps one of the browser's few connections to this
  * server -- which a stop needs. The views' reads pass React Query's AbortSignal to
- * fetch (`meta.cancelWhenLeft`); leaving the view, or replacing it with another
- * scenario's, aborts every read still open. Other screens' reads are untouched:
- * a query without that meta passes no signal.
+ * fetch; leaving the view, or replacing it with another scenario's, aborts every
+ * read still open. Since the relay-read deadline PR every query passes it (the
+ * assurance reads included: tests/a-relay-read-is-cancelled-when-its-view-is-left);
+ * only a query whose meta says `cancelWhenLeft: false` passes none.
  */
 
 beforeAll(shims);
@@ -82,15 +83,17 @@ describe("an economics read is cancelled when its view is left", () => {
     expect(second.some((one) => one.signal!.aborted)).toBe(false);
   });
 
-  it("a query that does not ask for it passes no signal: other screens' reads are unchanged", async () => {
+  it("every query passes its signal, another screen's included; only an explicit opt-out passes none", async () => {
     const reads = stalledFetch();
     const fn = getQueryFn({ on401: "throw" });
     const controller = new AbortController();
     void fn({ queryKey: ["/api/assurance/deployments"], meta: undefined, signal: controller.signal } as never).catch(() => undefined);
-    void fn({ queryKey: ["/api/economics/report", A], meta: { cancelWhenLeft: true }, signal: controller.signal } as never).catch(() => undefined);
-    await waitFor(() => expect(reads).toHaveLength(2));
-    expect(reads[0].signal).toBeUndefined();
+    void fn({ queryKey: ["/api/economics/report", A], meta: undefined, signal: controller.signal } as never).catch(() => undefined);
+    void fn({ queryKey: ["/api/clients"], meta: { cancelWhenLeft: false }, signal: controller.signal } as never).catch(() => undefined);
+    await waitFor(() => expect(reads).toHaveLength(3));
+    expect(reads[0].signal).toBe(controller.signal);
     expect(reads[1].signal).toBe(controller.signal);
+    expect(reads[2].signal).toBeUndefined();
     controller.abort();
   });
 });

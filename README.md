@@ -222,6 +222,30 @@ the stop route within 300 ms while the sign-in answers 429, 500 or 401, or
 hangs) and `tests/the-service-token-rides-on-every-stop-and-on-nothing-else.test.ts`
 (the whole route list, no leaks, the unset case, the refresh).
 
+## Relay reads never hold a stop
+
+A browser keeps few connections to this server (Chromium, so Electron: six over
+HTTP/1.1), and a stop needs one. So every read this server relays from a backend,
+other than a stop's, holds the browser's connection for at most **one total
+deadline: 20 s, headers and body together** (`server/read-deadline.ts`).
+
+- **What is bounded:** every assurance read (`/api/assurance/*`, GET), the
+  economics reads, and the engine's and the assistant's display reads
+  (`ENGINE_RELAY_READS`, `ASSISTANT_RELAY_READS` in `server/routes.ts`).
+- **At the deadline:** the browser is answered `504 {"code":"backend_timeout"}`,
+  or cut where the answer had begun. A control-plane read is cancelled with it,
+  headers and body.
+- **In the browser:** every query passes React Query's AbortSignal
+  (`client/src/lib/queryClient.ts`). A read is cancelled when its screen is left
+  or shows something else.
+- **What is never bounded:** a stop, pause, stand-down, terminate or revoke.
+  - The deadline is laid on GETs only, and no stop is a GET.
+  - The control-plane client never gives a stop, or any write, a read's
+    cancellation signal (`readSignalFor`).
+  - The failsafe console's reads, which the control plane judges stops, are not
+    under it. `server/failsafe.ts` bounds each of them itself.
+  - Stops in the browser are mutations (`apiRequest`), which take no signal.
+
 ## Economic Exposure (financial views)
 
 The **Economics** screen (`/economics`, under Tools) shows one scenario version's
@@ -247,8 +271,9 @@ How a read is passed on:
 - A backend 4xx is quoted; a 5xx, an unreachable backend or a timeout is a fixed
   sentence and code (the cause is logged on the server).
 - **SAFETY:** one total deadline, 20 s for headers and body together, bounds every
-  read: past it the browser's connection is answered (504) or cut, and the backend
-  read cancelled. The screen cancels its reads when it is left or shows another
+  read (see [Relay reads never hold a stop](#relay-reads-never-hold-a-stop)): past
+  it the browser's connection is answered (504) or cut, and the backend read
+  cancelled. The screen cancels its reads when it is left or shows another
   scenario. So stalled economics reads never fill the browser's few connections
   to this server ahead of a stop. The reads use the same service account as the
   assurance reads, behind the session.
