@@ -7,19 +7,25 @@
  * findings graded by *how strongly each is known*, the six-state deployment
  * decision, and the Unknowns Register (the gaps the evidence could not close).
  * The browser keeps calling this server same-origin with its session cookie;
- * this server reaches the backend with its service account (see
- * server/control-plane.ts). So a screen never learns a second origin or a
- * second auth scheme, and this file is the only place the two vocabularies
- * meet: snake_case from Django is mapped to camelCase here, once.
+ * this server reaches the backend as the signed-in person, with their own
+ * backend sign-in (server/person-credential.ts), so the backend's tenant
+ * scoping and role checks apply to them; only a stop goes as the stop
+ * credential (see server/control-plane.ts). So a screen never learns a second
+ * origin or a second auth scheme, and this file is the only place the two
+ * vocabularies meet: snake_case from Django is mapped to camelCase here, once.
  *
  * Nothing here decides anything. It surfaces the backend's own conclusions;
  * a release decision stays a human's to make from them.
  */
 
-import { call, body, baseUrl, isConfigured, ControlPlaneUnavailable, ControlPlaneUnanswered } from "./control-plane";
+import {
+  call, body, baseUrl, isConfigured, ControlPlaneUnavailable, ControlPlaneUnanswered, ControlPlaneRefused,
+  ControlPlaneSignInRequired,
+} from "./control-plane";
+import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
 
-export { ControlPlaneUnavailable, isConfigured };
+export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
 
 // ==== Typed views (camelCase; snake_case stays on the wire) ====
 
@@ -504,11 +510,19 @@ export interface AssuranceAssignable {
 
 export interface AssuranceStatus {
   configured: boolean;
-  reachable: boolean;
-  /** Whether the backend accepted the service credential. null = could not tell. */
+  /** Whether the backend answered. null = not known: nothing was sent (the person has no sign-in it takes). */
+  reachable: boolean | null;
+  /** Whether the backend accepted the signed-in person's own sign-in. null = could not tell. */
   authorized: boolean | null;
   url: string | null;
   detail: string;
+  /**
+   * "backend_sign_in_required" when the person has no sign-in the backend takes
+   * (nothing was sent): the view offers to sign in to Athena-Backend. Absent otherwise.
+   */
+  code?: string;
+  /** The backend username the person is signed in as, when they are. */
+  signedInAs?: string | null;
 }
 
 // ==== Data Boundary Assessment (Phase 1.4) ====
@@ -2543,6 +2557,25 @@ function queryString(params: Record<string, string | undefined>): string {
  */
 const PASSTHROUGH_STATUS = new Set([400, 403, 404, 409]);
 
+/**
+ * Why a read was not answered, as the error its caller throws (T6). Every read
+ * goes to the backend as the signed-in person, so a 403 (their role may not) or
+ * a 404 (not theirs to see, or no such record) is the backend refusing THEM:
+ * ControlPlaneRefused, passed on with its status, so the view shows the refusal
+ * rather than an outage. A 401 the person's renewed token still drew is their
+ * sign-in ended: ControlPlaneSignInRequired. Anything else is unavailability, as
+ * before. Each is a ControlPlaneUnavailable, so every caller that catches one
+ * still does.
+ */
+async function refusedRead(response: Response): Promise<ControlPlaneUnavailable> {
+  const message = `the Athena control plane answered ${response.status}: ${await body(response)}`;
+  if (response.status === 403 || response.status === 404) return new ControlPlaneRefused(message, response.status);
+  if (response.status === 401) {
+    return new ControlPlaneSignInRequired(`${message} (Athena-Backend no longer takes your sign-in: sign in to it again)`);
+  }
+  return new ControlPlaneUnavailable(message);
+}
+
 /** A cap on how many pages we will follow, so a backend that always sets `next` cannot spin forever. */
 const MAX_PAGES = 200;
 
@@ -2605,9 +2638,7 @@ async function pagedRows(
   for (let page = 0; path !== null && page < MAX_PAGES; page += 1) {
     const response = await call(path);
     if (!response.ok) {
-      throw new ControlPlaneUnavailable(
-        `the Athena control plane answered ${response.status}: ${await body(response)}`,
-      );
+      throw await refusedRead(response);
     }
     const payload = whole ? await response.json().catch(() => null) : await response.json();
     // A bare array is not paginated: as the first answer it is the complete one.
@@ -3178,7 +3209,11 @@ function mapMetadataLogging(raw: Record<string, unknown>): AssuranceMetadataLogg
 
 // ==== Reads ====
 
-/** Is the assurance backend there, and does it accept our service credential? */
+/**
+ * Is the assurance backend there, and does it accept the signed-in person? Read
+ * as the person (T6): it is their sign-in the backend takes or refuses, never a
+ * service account's.
+ */
 export async function status(): Promise<AssuranceStatus> {
   const url = baseUrl();
   if (!url) {
@@ -3189,8 +3224,7 @@ export async function status(): Promise<AssuranceStatus> {
       url: null,
       detail:
         "no Athena control plane is configured, so this console has no system " +
-        "of record to read. Set ATHENA_FAILSAFE_URL (and a service credential, " +
-        "ATHENA_FAILSAFE_USER/ATHENA_FAILSAFE_PASSWORD) on the backend.",
+        "of record to read. Set ATHENA_FAILSAFE_URL to the backend's address.",
     };
   }
   try {
@@ -3203,7 +3237,8 @@ export async function status(): Promise<AssuranceStatus> {
         reachable: true,
         authorized: false,
         url,
-        detail: `the control plane rejected the service credential (${response.status})`,
+        detail: `Athena-Backend refused your sign-in (${response.status}): ${await body(response)}`,
+        code: response.status === 401 ? "backend_sign_in_required" : undefined,
       };
     }
     if (!response.ok) {
@@ -3215,14 +3250,25 @@ export async function status(): Promise<AssuranceStatus> {
         detail: `the control plane answered ${response.status}: ${await body(response)}`,
       };
     }
+    void response.body?.cancel().catch(() => undefined);
+    const you = currentPersonState();
     return {
       configured: true,
       reachable: true,
       authorized: true,
       url,
-      detail: "the control plane answered and accepted the service credential",
+      detail: you.username !== null
+        ? `the control plane answered and accepted your sign-in, as ${you.username}`
+        : "the control plane answered and accepted your sign-in",
+      signedInAs: you.username,
     };
   } catch (cause) {
+    if (cause instanceof ControlPlaneSignInRequired) {
+      // Nothing was sent: whether the backend answers is not known from here.
+      return {
+        configured: true, reachable: null, authorized: false, url, detail: cause.message, code: cause.code,
+      };
+    }
     if (cause instanceof ControlPlaneUnavailable) {
       return { configured: true, reachable: false, authorized: false, url, detail: cause.message };
     }
@@ -3243,9 +3289,7 @@ export async function listDeployments(): Promise<AssuranceDeployment[]> {
 export async function deploymentReceipt(uuid: string): Promise<AssuranceReceipt> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/receipt/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return receipt(await response.json());
 }
@@ -3265,9 +3309,7 @@ export async function assuranceReceipt(uuid: string): Promise<AssuranceReceiptSt
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-receipt/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapAssuranceReceipt(await readObject(response));
 }
@@ -3281,9 +3323,7 @@ export async function assuranceReceipt(uuid: string): Promise<AssuranceReceiptSt
 export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/capabilities/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return capabilityMap(await readObject(response));
 }
@@ -3297,9 +3337,7 @@ export async function capabilities(uuid: string): Promise<AssuranceCapabilityMap
 export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/route-map/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapRouteMap(await readObject(response));
 }
@@ -3313,9 +3351,7 @@ export async function routeMap(uuid: string): Promise<AssuranceRouteMap> {
 export async function aiBom(uuid: string): Promise<AssuranceAiBom> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/ai-bom/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapAiBom(await readObject(response));
 }
@@ -3331,9 +3367,7 @@ export async function dataBoundary(uuid: string): Promise<AssuranceDataBoundary>
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/data-boundary/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return dataBoundaryAssessment(await readObject(response));
 }
@@ -3350,9 +3384,7 @@ export async function dataBoundary(uuid: string): Promise<AssuranceDataBoundary>
 export async function compliance(uuid: string): Promise<AssuranceCompliance> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/compliance/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapCompliance(await readObject(response));
 }
@@ -3372,9 +3404,7 @@ export async function businessImpact(uuid: string): Promise<AssuranceBusinessImp
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/business-impact/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapBusinessImpact(await readObject(response));
 }
@@ -3393,9 +3423,7 @@ export async function vendorAssurance(uuid: string): Promise<AssuranceVendorAssu
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/vendor-assurance/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapVendorAssurance(await readObject(response));
 }
@@ -3415,9 +3443,7 @@ export async function executiveSummary(uuid: string): Promise<AssuranceExecutive
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/executive-summary/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapExecutiveSummary(await readObject(response));
 }
@@ -3438,9 +3464,7 @@ export async function operationalAssurance(uuid: string): Promise<AssuranceOpera
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/operational-assurance/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapOperationalAssurance(await readObject(response));
 }
@@ -3457,9 +3481,7 @@ export async function assurancePacks(uuid: string): Promise<AssurancePacksCatalo
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-packs/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapAssurancePacks(await readObject(response));
 }
@@ -3486,9 +3508,7 @@ export async function assurancePack(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true, value: mapAssurancePack(await readObject(response)) };
 }
@@ -3504,9 +3524,7 @@ export async function remediation(uuid: string): Promise<AssuranceRemediation> {
     `/api/assurance/findings/${encodeURIComponent(uuid)}/remediation/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapRemediation(await readObject(response));
 }
@@ -3566,9 +3584,7 @@ export async function effectiveAccess(uuid: string): Promise<AssuranceEffectiveA
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/effective-access/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapEffectiveAccess(await readObject(response));
 }
@@ -3587,9 +3603,7 @@ export async function rippleEffect(uuid: string): Promise<AssuranceRippleEffect>
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/ripple-effect/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapRippleEffect(await readObject(response));
 }
@@ -3603,9 +3617,7 @@ export async function rippleEffect(uuid: string): Promise<AssuranceRippleEffect>
 export async function postureCatalog(uuid: string): Promise<AssurancePostureCatalog> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/posture/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapPostureCatalog(await readObject(response));
 }
@@ -3619,9 +3631,7 @@ export async function postureCatalog(uuid: string): Promise<AssurancePostureCata
 export async function cloudPosture(uuid: string): Promise<AssurancePostureDomain> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/cloud-posture/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapPostureDomain(await readObject(response));
 }
@@ -3635,9 +3645,7 @@ export async function cloudPosture(uuid: string): Promise<AssurancePostureDomain
 export async function secretsPosture(uuid: string): Promise<AssurancePostureDomain> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/secrets-posture/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapPostureDomain(await readObject(response));
 }
@@ -3650,9 +3658,7 @@ export async function secretsPosture(uuid: string): Promise<AssurancePostureDoma
 export async function repoPosture(uuid: string): Promise<AssurancePostureDomain> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/repo-posture/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapPostureDomain(await readObject(response));
 }
@@ -3669,9 +3675,7 @@ export async function personalContext(uuid: string): Promise<AssurancePersonalCo
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/personal-context/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapPersonalContext(await readObject(response));
 }
@@ -3688,9 +3692,7 @@ export async function dataLifecycle(uuid: string): Promise<AssuranceDataLifecycl
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/data-lifecycle/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapDataLifecycle(await readObject(response));
 }
@@ -3708,9 +3710,7 @@ export async function trainingReuse(uuid: string): Promise<AssuranceTrainingReus
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/training-reuse/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapTrainingReuse(await readObject(response));
 }
@@ -3728,9 +3728,7 @@ export async function metadataLogging(uuid: string): Promise<AssuranceMetadataLo
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/metadata-logging/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapMetadataLogging(await readObject(response));
 }
@@ -3762,9 +3760,7 @@ export async function recomputeDecision(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   const payload = await readObject(response);
   return { ok: true, decision: strOrNull(payload.decision), decisionLabel: str(payload.decision_label) };
@@ -3801,9 +3797,7 @@ export async function patchUnknown(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true, unknown: unknown(await readObject(response)) };
 }
@@ -3827,9 +3821,7 @@ async function writeJson<T>(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true, value: map(await readObject(response)) };
 }
@@ -3862,9 +3854,7 @@ export async function setDataBoundary(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return {
     ok: true,
@@ -3974,9 +3964,7 @@ export async function deleteProviderAssertion(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true };
 }
@@ -4041,9 +4029,7 @@ export async function getAssignable(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true, value: mapAssignable(await readObject(response)) };
 }
@@ -4208,9 +4194,7 @@ export async function listClaims(
 export async function claimEvents(uuid: string): Promise<ClaimEvent[]> {
   const response = await call(`/api/assurance/claims/${encodeURIComponent(uuid)}/events/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   const payload = await response.json().catch(() => null);
   return rows(payload).map(claimEvent);
@@ -4251,9 +4235,7 @@ export async function deploymentClaims(uuid: string): Promise<AssuranceClaim[]> 
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/assurance-claims/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   const payload = await response.json().catch(() => null);
   return rows(payload).map(claim);
@@ -4585,9 +4567,7 @@ export async function coverageManifest(uuid: string): Promise<CoverageManifest> 
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/coverage-manifest/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapCoverageManifest(await readObject(response));
 }
@@ -4600,9 +4580,7 @@ export async function coverageManifest(uuid: string): Promise<CoverageManifest> 
 export async function bomDrift(uuid: string): Promise<BomDrift> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/bom-drift/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapBomDrift(await readObject(response));
 }
@@ -4636,9 +4614,7 @@ export async function declaredArchitecture(uuid: string): Promise<DeclaredArchit
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/declared-architecture/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapDeclaredArchitecture(await readObject(response));
 }
@@ -4673,9 +4649,7 @@ export async function setDeclaredArchitecture(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return { ok: true, value: mapDeclaredArchitecture(await readObject(response)) };
 }
@@ -4754,9 +4728,7 @@ export async function decisionSupport(uuid: string): Promise<DecisionSupport> {
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/decision-support/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapDecisionSupport(await readObject(response));
 }
@@ -4848,9 +4820,7 @@ export async function revalidationPlan(uuid: string): Promise<RevalidationPlan> 
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/revalidation-plan/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapRevalidationPlan(await readObject(response));
 }
@@ -5097,9 +5067,7 @@ export async function operationalRisk(uuid: string): Promise<OperationalRisk> {
     `/api/assurance/deployments/${encodeURIComponent(uuid)}/operational-risk/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapOperationalRisk(await readObject(response));
 }
@@ -5325,9 +5293,7 @@ export async function incidentPack(uuid: string): Promise<IncidentPack> {
     `/api/assurance/findings/${encodeURIComponent(uuid)}/incident-pack/`,
   );
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapIncidentPack(await readObject(response));
 }
@@ -5371,9 +5337,7 @@ function mapConnectors(raw: Record<string, unknown>): ConnectorsView {
 export async function connectors(uuid: string): Promise<ConnectorsView> {
   const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/connectors/`);
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   return mapConnectors(await readObject(response));
 }
@@ -5451,9 +5415,7 @@ export async function pushConnector(
     };
   }
   if (!response.ok) {
-    throw new ControlPlaneUnavailable(
-      `the Athena control plane answered ${response.status}: ${await body(response)}`,
-    );
+    throw await refusedRead(response);
   }
   const payload = await readObject(response);
   return {

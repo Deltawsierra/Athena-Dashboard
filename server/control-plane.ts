@@ -1,5 +1,5 @@
 /**
- * A minimal service-account client for the Athena control plane (Athena-Backend).
+ * A minimal client for the Athena control plane (Athena-Backend).
  *
  * The dashboard's own Express+SQLite server is what the browser talks to; the
  * control plane is the separate Django backend that is the *system of record*
@@ -8,28 +8,36 @@
  * caller (see server/assurance.ts) never has to know two origins or two auth
  * schemes: it hands this a backend path and gets a `fetch` Response back.
  *
- * Trust model: this holds a *service account*, not an operator's key. The
- * backend authenticates with SimpleJWT; this exchanges a configured credential
- * for a short-lived access token, caches it, and renews it on expiry -- by the
- * refresh token its sign-in issued, and by the password only when that fails.
- * The credential decides who may read and draft against the backend and nothing
- * more — every consequential failsafe command still needs out-of-band operator
- * signatures the engine verifies (see server/failsafe.ts, which predates this
- * and keeps its own copy of the same dance; new code shares this one).
+ * Who a call goes as (T6, the owner's decision 8):
  *
- * A stop sent through here (a deployment paused, a claim revoked or
- * contradicted: `stop` on call) presents the failsafe service token as well,
- * when one is configured, and waits on no sign-in
- * (server/failsafe-service-token.ts).
+ *   - Everything that is not a stop -- every read, and every write that is not
+ *     one -- goes as the signed-in PERSON whose request is being served, with
+ *     their own backend token (server/person-credential.ts), so the backend's
+ *     tenant scoping and role checks apply to them and the backend attributes
+ *     the act to them. A person the backend refuses a deployment (403/404) is
+ *     refused it here too. With no person, or one with no credential the
+ *     backend takes, nothing is sent (ControlPlaneSignInRequired). It is never
+ *     sent as the service account.
+ *   - A stop (a deployment paused, a claim revoked or contradicted: `stop` on
+ *     call) goes exactly as it always has: it presents the failsafe service
+ *     token, when one is configured, and waits on no sign-in
+ *     (server/failsafe-service-token.ts); a token of the SERVICE ACCOUNT in hand
+ *     rides along, and without the service token the stop goes on that account's
+ *     token. The service account is the stop credential and nothing else: it
+ *     exchanges a configured credential for a short-lived access token, caches
+ *     it, and renews it on expiry -- by the refresh token its sign-in issued, and
+ *     by the password only when that fails. A person's credential, stale or
+ *     not, plays no part in a stop.
  *
  * Configured from the environment (ATHENA_FAILSAFE_*), not the in-app settings
- * row: the backend address and its service credential are a property of the
+ * row: the backend address and the stop credential are a property of the
  * deployment, set once by whoever stands the backend up. The assurance API and
  * the failsafe API are the same Django backend, so they share one address and
- * one service account rather than duplicating the configuration.
+ * one stop credential rather than duplicating the configuration.
  */
 
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
+import { PersonCredentialUnavailable, PersonSignInRequired, personAccessToken, renewPersonToken } from "./person-credential";
 import { currentReadSignal } from "./read-deadline";
 
 const URL_ENV = "ATHENA_FAILSAFE_URL";
@@ -55,6 +63,52 @@ export class ControlPlaneUnavailable extends Error {}
  * token -- which is raised before the request is sent.
  */
 export class ControlPlaneUnanswered extends ControlPlaneUnavailable {}
+
+/**
+ * A call that goes as the signed-in person, who has no credential the backend
+ * takes: no person at all (a request with no signed-in session), never signed
+ * in to the backend, or their sign-in ended. Raised before anything is sent.
+ * Answered 503 with `code` (SIGN_IN_REQUIRED), never 401: a 401 would send the
+ * browser back to this console's sign-in screen, away from the kill switch.
+ */
+export class ControlPlaneSignInRequired extends ControlPlaneUnavailable {
+  readonly code = "backend_sign_in_required";
+}
+
+/**
+ * The backend refused a person's read: 403 (their role may not) or 404 (not
+ * theirs to see, or there is no such record -- the backend does not say which,
+ * and neither does this). Passed on with its status, so the view says so.
+ */
+export class ControlPlaneRefused extends ControlPlaneUnavailable {
+  constructor(message: string, readonly status: 403 | 404) {
+    super(message);
+  }
+}
+
+/** The person's access token, or why there is none, in this client's terms. */
+async function personAccess(): Promise<string> {
+  try {
+    return await personAccessToken();
+  } catch (cause) {
+    throw personFailure(cause);
+  }
+}
+
+/** A new access token for the person after the backend refused `rejected` (401), in this client's terms. */
+async function personRenewed(rejected: string | null): Promise<string> {
+  try {
+    return await renewPersonToken(rejected);
+  } catch (cause) {
+    throw personFailure(cause);
+  }
+}
+
+function personFailure(cause: unknown): unknown {
+  if (cause instanceof PersonSignInRequired) return new ControlPlaneSignInRequired(cause.message);
+  if (cause instanceof PersonCredentialUnavailable) return new ControlPlaneUnavailable(cause.message);
+  return cause;
+}
 
 /** The configured backend base URL with any trailing slash removed, or null. */
 export function baseUrl(): string | null {
@@ -244,16 +298,22 @@ export function readSignalFor(init: CallInit): AbortSignal | undefined {
 }
 
 /**
- * Call a backend route, authenticated by the cached service token.
+ * Call a backend route: a stop as the stop credential, anything else as the
+ * signed-in person (see the head of this file).
  *
  * A stop (`init.stop`) presents the failsafe service token as well, when one is
- * configured, and is sent AT ONCE: it waits for no token. A token already in
- * hand rides along, so a service token the backend does not take still leaves
- * the stop the path every other call has.
+ * configured, and is sent AT ONCE: it waits for no token. A service-account
+ * token already in hand rides along, so a service token the backend does not
+ * take still leaves the stop the path it always had: the service account.
+ *
+ * Anything else carries the person's own token, waiting only for their sign-in
+ * or refresh when one is in flight; with none the backend takes, it is not
+ * sent (ControlPlaneSignInRequired).
  *
  * A 401 means no credential sent was taken -- the short-lived token expired, or
  * a stop's service token was refused with no token in hand -- so this obtains
- * a fresh one and retries exactly once. Any other non-ok answer is the
+ * a fresh one (the person's by their refresh token; a stop's the service
+ * account's) and retries exactly once. Any other non-ok answer is the
  * caller's to interpret — a 403 is a real "you may not do this", not
  * something to retry.
  */
@@ -270,7 +330,11 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
   const presented = stop ? serviceToken() : null;
   // A read served under the read deadline is cancelled with it; a stop never is.
   const read = readSignalFor(init);
-  const access = presented !== null ? cachedAccess : await accessToken(base);
+  // A stop: exactly as before, and never the person's credential. Anything else:
+  // the person's, and never the service account's (T6).
+  const access = stop
+    ? (presented !== null ? cachedAccess : await accessToken(base))
+    : await personAccess();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   let response: Response;
@@ -292,6 +356,12 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
     clearTimeout(timer);
   }
   if (response.status === 401 && retryAuth) {
+    if (!stop) {
+      // The person's token, renewed by their refresh token; never the service account.
+      void response.body?.cancel().catch(() => undefined);
+      await personRenewed(access);
+      return call(path, init, false);
+    }
     if (access !== null && cachedAccess === access) cachedAccess = null;
     await accessToken(base);
     return call(path, init, false);

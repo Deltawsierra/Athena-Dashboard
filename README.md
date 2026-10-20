@@ -94,9 +94,9 @@ CI runs all of the above plus both builds on every push and pull request.
 | `ATHENA_ENGINE_KEY`       | unset                          | The engine's operator key. Same two places. |
 | `ATHENA_ASSISTANT_URL`, `ATHENA_ASSISTANT_KEY`, `ATHENA_ASSISTANT_MODEL` | unset | An OpenAI-compatible endpoint, its key and its model, for AI Chat. With none set, AI Chat records the message and answers nothing. Same two places. |
 | `ATHENA_MAX_INFLIGHT_RETESTS` | `4`                        | The most retests this dashboard asks of the engine at once. |
-| `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console. |
-| `ATHENA_FAILSAFE_USER`    | unset                          | Service-account username the console uses to reach the control plane. |
-| `ATHENA_FAILSAFE_PASSWORD`| unset                          | Service-account password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. Its token is renewed with the refresh token; the password is used again only when a refresh is refused. |
+| `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console, the assurance screens and the financial views. Each person reaches it as themselves: see [Each person reaches Athena-Backend as themselves](#each-person-reaches-athena-backend-as-themselves). |
+| `ATHENA_FAILSAFE_USER`    | unset                          | The stop credential's username: the service account every stop goes as (beside the service token, or alone without it). Nothing else uses it: every read and every other write goes as the signed-in person. |
+| `ATHENA_FAILSAFE_PASSWORD`| unset                          | The stop credential's password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. Its token is renewed with the refresh token; the password is used again only when a refresh is refused. Used only by stops. |
 | `ATHENA_FAILSAFE_SERVICE_TOKEN` | unset                    | The control plane's failsafe service token (its `FAILSAFE_SERVICE_TOKEN`). Every stop this server relays presents it and waits on no sign-in; see [Stops and the failsafe service token](#stops-and-the-failsafe-service-token). Read once at start-up; never logged or sent to the browser. |
 | `ATHENA_FAILSAFE_ENGINE_ID` | unset                        | Default engine id a fresh failsafe draft targets. |
 | `VITE_MYTHOS_SAMPLE_MODE` | unset (off)                    | Build time. `1` turns on sample mode for prospect demos; see below. Never set it for a customer build. |
@@ -222,6 +222,94 @@ the stop route within 300 ms while the sign-in answers 429, 500 or 401, or
 hangs) and `tests/the-service-token-rides-on-every-stop-and-on-nothing-else.test.ts`
 (the whole route list, no leaks, the unset case, the refresh).
 
+## Each person reaches Athena-Backend as themselves
+
+Every read this server relays from Athena-Backend, and every write that is not
+a stop, goes there as the person who asked, with their own backend sign-in. The
+backend's own tenant scoping applies to them: an owner sees only their own
+deployments, and an admin or analyst sees every one. So do its role checks. And
+it records them, not a shared account, as the one who acted: a reviewer and an
+approver are two people. Until T6 every read went as ONE service account, an
+analyst or admin that sees every tenant, and any deployment uuid a signed-in
+person named was forwarded. One dashboard user could read another tenant's
+reports, events and ROI.
+
+- **Signing in.** When a person signs in here, the same username and password
+  are sent to the backend's sign-in (`/api/token/`) in the background. The
+  sign-in here is answered at once and never waits on the backend. If the
+  backend refuses them (a different password there, no such account), or cannot
+  be reached, they sign in to Athena-Backend from the banner on the Assurance
+  page (`POST /api/auth/backend-sign-in` with their password there).
+- **Where the token lives.** In this server's memory, keyed by the session, next
+  to the session itself. The browser holds only the httpOnly session cookie, as
+  before. No token is ever put in an answer, a URL, a log line or the browser's
+  storage.
+- **Renewal.** A token the backend refuses is renewed once with the person's
+  refresh token, shared by all of that session's requests at that moment. The
+  backend rotates it, and the rotated one is kept. A refused refresh ends the
+  backend sign-in. The person signs in to the backend again: there is no
+  password to fall back on, and never the service account.
+- **Signing out revokes.** When a session ends (signing out, signing in again, an
+  admin deactivating or removing the account, a password change ending the
+  other sessions), its refresh token is revoked at the backend
+  (`POST /api/token/revoke/`, athena-backend `safety/revoke.py`) in the
+  background. Signing out never waits on it.
+- **Refusals are shown.** A deployment the person's account cannot see is the
+  backend's 404, passed on (`not_found` on the assurance screens, `not_served` on
+  the financial views). A read their role may not make is its 403
+  (`backend_refused`). A person with no backend sign-in the backend takes is
+  answered 503 `backend_sign_in_required` and nothing is sent. It is never a 401,
+  which would send the browser back to this console's sign-in, away from the
+  kill switch.
+- **API keys** carry no backend sign-in of their own. A request made with one is
+  answered `backend_sign_in_required`, and nothing is sent to the backend for it.
+- **SAFETY: stops are unchanged.** Every stop (the table in
+  [Stops and the failsafe service token](#stops-and-the-failsafe-service-token))
+  goes exactly as before: with the failsafe service token and the service
+  account (`ATHENA_FAILSAFE_USER`). It never reads, waits for or renews a
+  person's credential. A person whose backend sign-in is stale, refused or still
+  in flight sends every stop as before.
+
+What to set when deploying (the owner's notes):
+
+1. **On Athena-Backend, one account per person** who uses this console, with the
+   same username as their account here. Give each the role they should have
+   there. A viewer sees only the deployments they own (set each deployment's
+   owner). An analyst or an admin sees every tenant, so give those roles only to
+   your own staff. With the same password as here, they are signed in to the
+   backend automatically when they sign in here. Otherwise they sign in to it
+   from the Assurance page.
+2. **Deploy the Athena-Backend version with the sign-out route**
+   (`/api/token/revoke/`). An older backend works, but a signed-out person's
+   refresh token then stays valid until it expires (held by nobody: this server
+   forgets it). The log says so.
+3. **Keep** `ATHENA_FAILSAFE_URL`, `ATHENA_FAILSAFE_SERVICE_TOKEN`, and
+   `ATHENA_FAILSAFE_USER` / `ATHENA_FAILSAFE_PASSWORD`. The last pair is now the
+   stop credential and nothing else. Do not downgrade that account: a pause or
+   stand-down needs an analyst, a terminate an admin.
+4. The backend limits sign-ins per address. Every person's sign-in now comes from
+   this server's address, so they share that address's budget (60 a minute by
+   default).
+5. Serve Athena-Backend over HTTPS (`ATHENA_FAILSAFE_URL=https://...`): each
+   person's password now goes to it when they sign in, as the service account's
+   always has.
+
+What to remove: there was never a separate read credential. The one
+service-account pair (`ATHENA_FAILSAFE_USER` / `ATHENA_FAILSAFE_PASSWORD`) served
+both the reads and the stops. No read uses it now, so nothing is removed from
+this server's environment. Keep the pair, as the stop credential. On the
+backend, deactivate any account that existed only so this console could read
+every tenant, if it is not the stop account.
+
+Tests: `tests/each-person-reaches-the-backend-as-themselves.test.ts`. A backend
+stand-in scopes by who asks. A cross-tenant read through this console is refused
+and the right person's is served. No read goes as the service account, and none
+falls back to it. Stops land with the person's sign-in stale, refused or hung.
+Renewal, revocation, and no token in the browser are covered too.
+`tests/the-service-token-rides-on-every-stop-and-on-nothing-else.test.ts` walks
+the whole route list: every request that is not a stop goes as the signed-in
+person.
+
 ## Relay reads never hold a stop
 
 A browser keeps few connections to this server (Chromium, so Electron: six over
@@ -306,8 +394,10 @@ How a read is passed on:
   `boundedRelayRead`. The screen cancels its reads, the picker's and the receipt
   download included, when it is left or shows another scenario. So stalled
   economics reads never fill the browser's few connections to this server ahead
-  of a stop. The reads use the same service account as the assurance reads,
-  behind the session.
+  of a stop. The reads go to the backend as the signed-in person, as the
+  assurance reads do: a deployment their account cannot see is the backend's 404
+  (`not_served`) or 403, shown, never its documents (see
+  [Each person reaches Athena-Backend as themselves](#each-person-reaches-athena-backend-as-themselves)).
 
 The rules the views keep, each pinned by a test (`tests/economics-*.test.ts*`):
 
