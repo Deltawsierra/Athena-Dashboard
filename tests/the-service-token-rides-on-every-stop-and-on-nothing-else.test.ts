@@ -30,12 +30,17 @@ import { TEST_ADMIN_PASSWORD } from "./test-admin";
  *     reached -- none is left out.
  *   - The token is in no log line, no answer, and cannot be in the client
  *     bundle, even from a control plane that quotes a request's headers back.
- *   - Without the variable, nothing changes: no request carries the header,
- *     and a stop waits for the service account's token as before. A value the
- *     backend would ignore, or one no header can carry, is not sent at all.
+ *   - Without the variable, nothing changes for a stop: no request carries the
+ *     header, and a stop waits for the service account's token as before. A
+ *     value the backend would ignore, or one no header can carry, is not sent at
+ *     all.
  *   - The service account's token is renewed by its refresh token, and the
  *     rotated refresh token is the one sent next; the password only when the
  *     refresh is refused.
+ *   - Since T6 the service account is the stop credential and nothing else:
+ *     every request that is not a stop goes as the signed-in person (the
+ *     stand-in names the account each request was made as), with or without
+ *     the service token.
  */
 
 const ROOT = path.resolve(__dirname, "..");
@@ -251,6 +256,11 @@ describe("the service token rides on every stop the server relays, and on nothin
     // The configured token, and the control plane took it on every stop.
     expect(operator.filter((one) => one.serviceToken !== undefined && one.serviceToken !== TOKEN).map(said)).toEqual([]);
     expect(operator.filter((one) => one.stop && one.by !== "service token").map(said)).toEqual([]);
+    // T6: everything that is not a stop went as the signed-in admin, never as the service
+    // account, which did not even sign in: every stop carried the service token.
+    expect(operator.filter((one) => !one.stop && (one.by !== "bearer" || one.account !== "admin")).map(said),
+      "not a stop, and not sent as the signed-in person").toEqual([]);
+    expect(p.seen.filter((one) => one.account === "svc-failsafe" && !one.stop).map(said)).toEqual([]);
     // Every stop this server relays was among them, and so was every non-stop form of the same routes.
     const kinds = new Set(operator.map((one) => what(one, p.actionOf)));
     expect(STOPS_RELAYED.filter((kind) => !kinds.has(kind)), "stops the walk did not reach").toEqual([]);
@@ -317,7 +327,7 @@ describe("the service token never leaves this server but toward the control plan
 });
 
 describe("without ATHENA_FAILSAFE_SERVICE_TOKEN nothing changes", () => {
-  it("over the full route list, no request carries the header, and every one -- the stops too -- goes on the service account's token", async () => {
+  it("over the full route list, no request carries the header: every stop goes on the service account's token, everything else on the signed-in person's", async () => {
     plane = await controlPlaneStandIn({ serviceToken: TOKEN });
     const p = plane;
     const { app, admin } = await boot(p, null);
@@ -328,9 +338,14 @@ describe("without ATHENA_FAILSAFE_SERVICE_TOKEN nothing changes", () => {
     expect(operator.filter((one) => one.stop).length).toBeGreaterThan(STOPS_RELAYED.length);
     expect(operator.filter((one) => one.serviceToken !== undefined)).toEqual([]);
     expect(operator.filter((one) => one.by !== "bearer").map((one) => `${one.method} ${one.path}`)).toEqual([]);
-    // A stop waited for the sign-in, as before: the first one went after it.
+    expect(operator.filter((one) => one.stop && one.account !== "svc-failsafe").map((one) => `${one.method} ${one.path}`)).toEqual([]);
+    // T6: and only the stops. Everything else went as the signed-in admin.
+    expect(operator.filter((one) => !one.stop && one.account !== "admin").map((one) => `${one.method} ${one.path}`)).toEqual([]);
+    // A stop waited for the service account's sign-in, as before: the first one went after it.
     const firstStop = operator.find((one) => one.stop)!;
-    expect(p.seen.findIndex((one) => one.path === "/api/token/")).toBeLessThan(p.seen.indexOf(firstStop));
+    const serviceSignIn = p.seen.findIndex((one) => one.path === "/api/token/" && one.account === "svc-failsafe");
+    expect(serviceSignIn).toBeGreaterThanOrEqual(0);
+    expect(serviceSignIn).toBeLessThan(p.seen.indexOf(firstStop));
   }, 120_000);
 
   it.each([
@@ -345,37 +360,48 @@ describe("without ATHENA_FAILSAFE_SERVICE_TOKEN nothing changes", () => {
     expect((await admin.post(`/api/assurance/deployments/${randomUUID()}/recompute`).send({ paused: true })).status).toBe(200);
     const stops = p.seen.filter((one) => one.stop);
     expect(stops.length).toBe(2);
-    expect(stops.filter((one) => one.serviceToken !== undefined || one.by !== "bearer")).toEqual([]);
+    expect(stops.filter((one) => one.serviceToken !== undefined || one.by !== "bearer" || one.account !== "svc-failsafe")).toEqual([]);
     expect(logs.some((line) => line.includes("ATHENA_FAILSAFE_SERVICE_TOKEN is set but is not used"))).toBe(true);
     expect(logs.filter((line) => line.includes(value) || line.includes(value.trim()))).toEqual([]);
   }, 60_000);
 });
 
-describe("the service account's token is renewed by its refresh token before its password", () => {
+describe("the service account's token -- the stop credential -- is renewed by its refresh token before its password", () => {
+  // Since T6 only a stop goes as the service account, so its token is obtained and
+  // renewed by stops: a stop-lane read on the failsafe console, a pause on the
+  // assurance screens. The person's own sign-in is another account's, and is left
+  // out of what is counted here (each-person-reaches-the-backend-as-themselves.test.ts).
+  const SERVICE = "svc-failsafe";
   it.each([
-    ["the failsafe console (server/failsafe.ts)", "/api/failsafe/audit"],
-    ["the assurance screens (server/control-plane.ts)", "/api/assurance/deployments"],
-  ])("%s: an expired token is renewed by refresh; the rotated refresh token is the one sent next; the password only once the refresh is refused", async (_client, route) => {
+    ["the failsafe console (server/failsafe.ts), a stop-lane read", (admin: ReturnType<typeof request.agent>) => admin.get("/api/failsafe/state")],
+    ["the assurance screens (server/control-plane.ts), a pause", (admin: ReturnType<typeof request.agent>) =>
+      admin.post(`/api/assurance/deployments/${randomUUID()}/recompute`).send({ paused: true })],
+  ])("%s: an expired token is renewed by refresh; the rotated refresh token is the one sent next; the password only once the refresh is refused", async (_client, stop) => {
     plane = await controlPlaneStandIn({ serviceToken: null });
     const p = plane;
     const { admin } = await boot(p, null);
     captureLogs();
-    const renewals = () => p.seen.filter((one) => one.path.startsWith("/api/token/"))
+    const renewals = () => p.seen.filter((one) => one.path.startsWith("/api/token/") && one.account === SERVICE)
       .map((one) => (one.path === "/api/token/" ? "sign-in" : `refresh ${JSON.parse(one.body).refresh}`));
+    const issued = () => p.refreshIssuedTo(SERVICE);
 
-    expect((await admin.get(route)).status).toBe(200);
-    p.expireAccess();
-    expect((await admin.get(route)).status).toBe(200);
-    p.expireAccess();
-    expect((await admin.get(route)).status).toBe(200);
-    expect(renewals()).toEqual(["sign-in", "refresh refresh-1", "refresh refresh-2"]);
-    expect(p.spentRefresh).toEqual(["refresh-1", "refresh-2"]);
+    expect((await stop(admin)).status).toBe(200);
+    p.expireAccessOf(SERVICE);
+    expect((await stop(admin)).status).toBe(200);
+    p.expireAccessOf(SERVICE);
+    expect((await stop(admin)).status).toBe(200);
+    expect(renewals()).toEqual(["sign-in", `refresh ${issued()[0]}`, `refresh ${issued()[1]}`]);
+    expect(p.spentRefresh.filter((one) => p.accountOf(one) === SERVICE)).toEqual([issued()[0], issued()[1]]);
 
     // The control plane refuses the refresh: then, and only then, the password.
     p.settings.refresh = 401;
-    p.expireAccess();
-    expect((await admin.get(route)).status).toBe(200);
-    expect(renewals()).toEqual(["sign-in", "refresh refresh-1", "refresh refresh-2", "refresh refresh-3", "sign-in"]);
+    p.expireAccessOf(SERVICE);
+    expect((await stop(admin)).status).toBe(200);
+    expect(renewals()).toEqual(["sign-in", `refresh ${issued()[0]}`, `refresh ${issued()[1]}`, `refresh ${issued()[2]}`, "sign-in"]);
+    // And every one of them was a stop, on the service account's token.
+    const operator = p.seen.filter((one) => !one.path.startsWith("/api/token/"));
+    expect(operator.filter((one) => one.account === SERVICE).length).toBeGreaterThanOrEqual(4);
+    expect(operator.filter((one) => one.account === SERVICE && !one.stop)).toEqual([]);
   }, 60_000);
 
   it("the failsafe token kept warm ahead of its expiry is renewed by refresh, each time with the refresh token the last one answered with", async () => {
@@ -388,12 +414,13 @@ describe("the service account's token is renewed by its refresh token before its
     failsafe.tokenRefresh.minMs = 3_600_000;
     failsafe.tokenRefresh.retryMs = 25;
     try {
-      expect((await admin.get("/api/failsafe/audit")).status).toBe(200);
-      const first = await p.waitFor((one) => one.path === "/api/token/refresh/");
-      const second = await p.waitFor((one) => one.path === "/api/token/refresh/" && one.n > first.n);
-      expect(JSON.parse(first.body)).toEqual({ refresh: "refresh-1" });
-      expect(JSON.parse(second.body)).toEqual({ refresh: "refresh-2" });
-      expect(p.signIns()).toBe(1);
+      // A stop-lane read: the service account's token is got for it, and kept warm.
+      expect((await admin.get("/api/failsafe/state")).status).toBe(200);
+      const first = await p.waitFor((one) => one.path === "/api/token/refresh/" && one.account === SERVICE);
+      const second = await p.waitFor((one) => one.path === "/api/token/refresh/" && one.account === SERVICE && one.n > first.n);
+      expect(JSON.parse(first.body)).toEqual({ refresh: p.refreshIssuedTo(SERVICE)[0] });
+      expect(JSON.parse(second.body)).toEqual({ refresh: p.refreshIssuedTo(SERVICE)[1] });
+      expect(p.seen.filter((one) => one.path === "/api/token/" && one.account === SERVICE).length).toBe(1);
     } finally {
       failsafe._resetForTests();
     }

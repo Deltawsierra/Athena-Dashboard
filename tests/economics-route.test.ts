@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import request from "supertest";
 import type { Express } from "express";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
 import { economicsStandIn, type EconomicsStandIn } from "./helpers/economics-stand-in";
 import { MASTER, exchange, fixture, idsOf } from "./helpers/economics-fixtures";
 
@@ -48,6 +48,8 @@ beforeEach(async () => {
   process.env.ATHENA_FAILSAFE_USER = "svc-dashboard";
   process.env.ATHENA_FAILSAFE_PASSWORD = "stand-in-only"; // pragma: allowlist secret
   (await import("../server/control-plane"))._resetForTests();
+  // T6: the person reads the backend as themselves; signed in to this one.
+  await signInToBackend(admin);
 });
 
 afterEach(async () => {

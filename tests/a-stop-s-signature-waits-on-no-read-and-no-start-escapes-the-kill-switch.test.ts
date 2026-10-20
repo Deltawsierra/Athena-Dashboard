@@ -8,6 +8,7 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { signInToBackend } from "./helpers";
 
 /**
  * SAFETY, round five of PR #56 (the round-four review's findings), on the
@@ -478,6 +479,8 @@ describe("a stop's signature waits on no unbounded read", () => {
   it("a resume known from memory (drafted here) is not a stop: an admin deleted on the record by another dashboard is refused 401, not relayed, and nothing is read from the control plane", async () => {
     const p = await plane({ getDelayMs: 1_500 });
     try {
+      // A resume is not a stop: it goes as the admin, signed in to this control plane (T6).
+      await signInToBackend(admin);
       const drafted = await admin.post("/api/failsafe/commands").send({ action: "resume", engineId: "engine-1", reason: "r5" });
       expect(drafted.status).toBe(201);
       const uuid = drafted.body.command.uuid as string;
@@ -801,6 +804,8 @@ describe("the kill switch holds from the instant it is pressed", () => {
     eng.fixture = fx;
     const { clientId, siteId } = await clientAndSite("Held flag");
     const p = await plane();
+    // A resume is not a stop: it goes as the admin, signed in to this control plane (T6).
+    await signInToBackend(admin);
     const letGo = holdTheFlagWrite();
     try {
       const drafted = await admin.post("/api/failsafe/commands").send({ action: "resume", engineId: "engine-1", reason: "r5" });

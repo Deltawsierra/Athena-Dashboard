@@ -26,7 +26,11 @@
  * fields and nothing else but a text `note` or `reason` (stops.py `_fields`).
  *
  * Every request is recorded with the moment it had arrived, on the monotonic
- * clock (performance.now()), in the order it arrived.
+ * clock (performance.now()), in the order it arrived, and with the ACCOUNT it
+ * was made as: each token is issued to the username that signed in for it, so a
+ * request on the service account's token is told from one on a person's (T6).
+ * A refresh token sent to /api/token/revoke/ is revoked (blacklisted), as
+ * athena-backend safety/revoke.py does.
  */
 import http from "node:http";
 import type { AddressInfo } from "node:net";
@@ -56,6 +60,12 @@ export interface Seen {
   stop: boolean;
   /** What authenticated it; null when nothing did (answered 401), or for the token endpoints. */
   by: "service token" | "bearer" | null;
+  /**
+   * The account it was made as: the service token's service user, the username a
+   * bearer was issued to, or -- for the token endpoints -- the username signing in,
+   * or the account whose refresh token was sent. null when none.
+   */
+  account: string | null;
   /** performance.now() when the whole request had arrived. */
   at: number;
 }
@@ -146,6 +156,8 @@ const LIST_PATHS = [
 export interface StandInOptions {
   /** The FAILSAFE_SERVICE_TOKEN the backend is configured with; null for none. */
   serviceToken?: string | null;
+  /** The account the service token authenticates as (FAILSAFE_SERVICE_USER). */
+  serviceUser?: string;
   /** How the sign-in answers: null (the default) issues an access and a refresh token. */
   signIn?: TokenFault | null;
   /** How the refresh answers: null (the default) rotates the refresh token and blacklists the one spent. */
@@ -161,17 +173,25 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
   const validAccess = new Set<string>();
   const validRefresh = new Set<string>();
   const spentRefresh: string[] = [];
+  const revokedRefresh: string[] = [];
+  /** The account each token was issued to. */
+  const accountOf = new Map<string, string>();
+  /** Every pair issued, in the order it was, with the account it was issued to. */
+  const issuedLog: Array<{ account: string; access: string; refresh: string }> = [];
   let issued = 0;
   let waiters: Array<{ match: (one: Seen) => boolean; resolve: (one: Seen) => void }> = [];
   const settings = { signIn: opts.signIn ?? null, refresh: opts.refresh ?? null };
   /** Commands whose read (GET of the command) is held unanswered. */
   const stalledReads = new Set<string>();
 
-  const issue = () => {
+  const issue = (account: string) => {
     issued += 1;
     const tokens = { access: `access-${issued}`, refresh: `refresh-${issued}` };
     validAccess.add(tokens.access);
     validRefresh.add(tokens.refresh);
+    accountOf.set(tokens.access, account);
+    accountOf.set(tokens.refresh, account);
+    issuedLog.push({ account, ...tokens });
     return tokens;
   };
   const commandJson = (one: { uuid: string; action: string; status: string; signers: string[] }) => ({
@@ -202,10 +222,10 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(payload === undefined ? "" : JSON.stringify(payload));
       };
-      const record = (by: Seen["by"]) => {
+      const record = (by: Seen["by"], account: string | null = null) => {
         const entry: Seen = {
           n: seen.length + 1, method, path, query: url.search, body: raw,
-          serviceToken: presented, bearer, stop, by, at,
+          serviceToken: presented, bearer, stop, by, account, at,
         };
         seen.push(entry);
         const ready = waiters.filter((w) => w.match(entry));
@@ -218,27 +238,43 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
       };
 
       if (path === "/api/token/" && method === "POST") {
-        record(null);
+        const username = (canonical(raw) ?? {}).username;
+        const account = typeof username === "string" ? username : null;
+        record(null, account);
         if (settings.signIn !== null) return fault(settings.signIn);
-        return json(200, issue());
+        return json(200, issue(account ?? "(no username)"));
       }
       if (path === "/api/token/refresh/" && method === "POST") {
-        record(null);
-        if (settings.refresh !== null) return fault(settings.refresh);
         const sent = (canonical(raw) ?? {}).refresh;
+        const account = typeof sent === "string" ? accountOf.get(sent) ?? null : null;
+        record(null, account);
+        if (settings.refresh !== null) return fault(settings.refresh);
         if (typeof sent !== "string" || !validRefresh.has(sent)) {
           return json(401, { detail: "Token is blacklisted", code: "token_not_valid" });
         }
         validRefresh.delete(sent);
         spentRefresh.push(sent);
-        return json(200, issue());
+        return json(200, issue(account ?? "(unknown)"));
+      }
+      if (path === "/api/token/revoke/" && method === "POST") {
+        const sent = (canonical(raw) ?? {}).refresh;
+        record(null, typeof sent === "string" ? accountOf.get(sent) ?? null : null);
+        if (typeof sent !== "string" || !accountOf.has(sent)) {
+          return json(401, { detail: "the refresh token does not verify: nothing was revoked", code: "token_not_valid" });
+        }
+        validRefresh.delete(sent);
+        revokedRefresh.push(sent);
+        return json(200, { revoked: true });
       }
 
       // Authentication, in the backend's order.
       const by: Seen["by"] = presented !== undefined && stop && opts.serviceToken && presented === opts.serviceToken
         ? "service token"
         : bearer !== undefined && validAccess.has(bearer) ? "bearer" : null;
-      record(by);
+      const account = by === "service token"
+        ? opts.serviceUser ?? "svc-failsafe"
+        : by === "bearer" ? accountOf.get(bearer!) ?? null : null;
+      record(by, account);
       if (by === null) return json(401, { detail: "Authentication credentials were not provided." });
       if (opts.echoHeaders) return json(400, { detail: "refused", headers: req.headers });
 
@@ -276,6 +312,16 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
     settings,
     /** The refresh tokens spent, in the order they were: each refresh blacklists the one it was sent. */
     spentRefresh,
+    /** The refresh tokens revoked (/api/token/revoke/), in the order they were. */
+    revokedRefresh,
+    /** The account a token was issued to. */
+    accountOf: (token: string): string | undefined => accountOf.get(token),
+    /** The refresh tokens issued to `account`, in the order they were. */
+    refreshIssuedTo: (account: string): string[] => issuedLog.filter((one) => one.account === account).map((one) => one.refresh),
+    /** The access tokens issued to `account`, in the order they were. */
+    accessIssuedTo: (account: string): string[] => issuedLog.filter((one) => one.account === account).map((one) => one.access),
+    /** Whether a refresh token would still be taken by a refresh. */
+    refreshValid: (token: string): boolean => validRefresh.has(token),
     /** A command this control plane holds, of the given action. */
     command(action: string): string {
       const uuid = randomUUID();
@@ -288,6 +334,14 @@ export async function controlPlaneStandIn(opts: StandInOptions = {}) {
     actionOf: (uuid: string): string | undefined => commands.get(uuid)?.action,
     /** Every access token issued so far is expired from now on. */
     expireAccess(): void { validAccess.clear(); },
+    /** Every access token issued so far to `account` is expired from now on. */
+    expireAccessOf(account: string): void {
+      for (const token of Array.from(validAccess)) if (accountOf.get(token) === account) validAccess.delete(token);
+    },
+    /** Every refresh token issued so far to `account` is refused from now on (blacklisted). */
+    refuseRefreshOf(account: string): void {
+      for (const token of Array.from(validRefresh)) if (accountOf.get(token) === account) validRefresh.delete(token);
+    },
     /** The first request, arrived or yet to arrive, that matches. */
     waitFor(match: (one: Seen) => boolean): Promise<Seen> {
       const already = seen.find(match);

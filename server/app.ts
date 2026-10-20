@@ -9,6 +9,7 @@ import { registerRoutes } from "./routes";
 import * as settings from "./settings";
 import * as health from "./health";
 import * as engine from "./engine";
+import { forgetPerson } from "./person-credential";
 
 const SESSION_COOKIE = "athena.sid";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -69,6 +70,17 @@ interface CreateAppOptions {
 export function createApp(options: CreateAppOptions = {}): Express {
   const app = express();
   const MemoryStore = createMemoryStore(session);
+  const store = new MemoryStore({ checkPeriod: 24 * 60 * 60 * 1000 });
+  // Every session that ends -- signed out, signed in again (regenerated), or
+  // ended by an admin's deactivation or removal, or a password change -- is
+  // destroyed here; its person's Athena-Backend sign-in ends with it, revoked at
+  // the backend in the background (T6, server/person-credential.ts). Nothing
+  // waits on that.
+  const destroy = store.destroy.bind(store);
+  store.destroy = (sid: string, callback?: (err?: unknown) => void) => {
+    forgetPerson(sid);
+    return destroy(sid, callback);
+  };
 
   app.disable("x-powered-by");
 
@@ -76,7 +88,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
     session({
       name: SESSION_COOKIE,
       secret: resolveSessionSecret(),
-      store: new MemoryStore({ checkPeriod: 24 * 60 * 60 * 1000 }),
+      store,
       resave: false,
       saveUninitialized: false,
       cookie: {

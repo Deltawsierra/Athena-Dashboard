@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Express } from "express";
 
-import { makeApp } from "./helpers";
+import { makeApp, signInToBackendWithCookie } from "./helpers";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 import { economicsStandIn, type EconomicsStandIn } from "./helpers/economics-stand-in";
 import { MASTER, exchange, fixture, idsOf, served } from "./helpers/economics-fixtures";
@@ -73,6 +73,8 @@ beforeEach(async () => {
   process.env.ATHENA_FAILSAFE_USER = "svc-dashboard";
   process.env.ATHENA_FAILSAFE_PASSWORD = "stand-in-only"; // pragma: allowlist secret
   (await import("../server/control-plane"))._resetForTests();
+  // T6: the person reads the backend as themselves; signed in to this one.
+  await signInToBackendWithCookie(app, cookie);
   _setEconomicsDeadlineForTests(300);
 });
 

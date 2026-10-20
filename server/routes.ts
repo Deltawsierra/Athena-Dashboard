@@ -18,6 +18,7 @@ import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
 import { boundedRelayRead } from "./read-deadline";
+import { SIGN_IN_REQUIRED, asThePerson, signInPerson } from "./person-credential";
 import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
@@ -1295,6 +1296,11 @@ const loginSchema = z.object({
   password: z.string().min(1).max(256),
 });
 
+/** POST /api/auth/backend-sign-in: the signed-in person's password on Athena-Backend (T6). */
+const backendSignInSchema = z.object({
+  password: z.string().min(1).max(256),
+});
+
 /** POST /api/auth/change-password. The rules a new password must meet are password.ts newPasswordRefusal. */
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1).max(256),
@@ -1373,7 +1379,11 @@ async function parentMissing(res: Response, clientId?: string | null, siteId?: s
 // account made to change one (a legacy default, a first-run password) must be
 // able to secure itself while the switch is engaged -- an emergency may be
 // the very takeover that password invited.
-const killSwitchExempt = new Set(["/api/ai-control", "/api/auth/login", "/api/auth/logout", "/api/auth/change-password"]);
+const killSwitchExempt = new Set([
+  "/api/ai-control", "/api/auth/login", "/api/auth/logout", "/api/auth/change-password",
+  // Signing in to Athena-Backend starts nothing: it is how a person reads as themselves (T6).
+  "/api/auth/backend-sign-in",
+]);
 
 /**
  * The failsafe actions that stop an engine, and the two that put one back to
@@ -2388,6 +2398,11 @@ export function registerRoutes(app: Express): void {
       if (markedInSession) req.session.mustChangePassword = true;
       // The account as it is now: what this session's stops are authorised by (auth.ts).
       noteAccount(user);
+      // T6: the same username and password to Athena-Backend, so this person reads
+      // and acts there as themselves. In the background: this sign-in is answered
+      // now and never waits on the backend, so no backend fault keeps a person
+      // from the kill switch or a Stop (server/person-credential.ts).
+      void signInPerson(req.sessionID, user.username, parsed.data.password);
 
       await storage.createActivityLog({
         action: "login",
@@ -2454,6 +2469,12 @@ export function registerRoutes(app: Express): void {
 
   app.use("/api", requireAuth);
 
+  // Every request from here on is served as its signed-in person: whatever it
+  // sends Athena-Backend that is not a stop goes with their own sign-in (T6,
+  // server/person-credential.ts). Synchronous and reads nothing, so a stop
+  // passes through it at once; no stop ever goes as the person.
+  app.use("/api", asThePerson);
+
   // An account that must change its password may do that, sign out, read
   // itself and send every stop; everything else answers 403 (auth.ts).
   app.use("/api", requirePasswordChanged);
@@ -2476,6 +2497,40 @@ export function registerRoutes(app: Express): void {
   app.use("/api/assurance", boundedRelayRead({ who: "Athena-Backend", what: "this assurance read" }));
   app.get(ENGINE_RELAY_READS, boundedRelayRead({ who: "the engine", what: "this engine read" }));
   app.get(ASSISTANT_RELAY_READS, boundedRelayRead({ who: "the assistant", what: "its status" }));
+
+  // ==== SIGNING IN TO ATHENA-BACKEND (T6) ====
+  // A person whose password on Athena-Backend is not the one they use here, or
+  // whose backend could not be reached when they signed in, or whose backend
+  // sign-in has ended, signs in to it with this: their own username, and the
+  // password the backend knows. Only from a signed-in session -- an API key has
+  // no backend sign-in of its own. The backend limits these sign-ins itself.
+  // Never needed for a stop, which goes as the stop credential.
+  app.post(
+    "/api/auth/backend-sign-in",
+    asyncHandler(async (req, res) => {
+      const parsed = backendSignInSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ message: "password is required" });
+        return;
+      }
+      const user = req.currentUser;
+      if (!user || !req.session?.userId || req.session.userId !== user.id) {
+        res.status(403).json({ message: "Athena-Backend is signed in to from a signed-in session, not with an API key" });
+        return;
+      }
+      if (!assurance.isConfigured()) {
+        res.status(503).json({ error: "no Athena control plane is configured, so there is nothing to sign in to", code: "backend_unavailable" });
+        return;
+      }
+      const backend = await signInPerson(req.sessionID, user.username, parsed.data.password);
+      const { refused, ...state } = backend;
+      if (state.state === "signed_in") {
+        res.json({ backend: state });
+        return;
+      }
+      res.status(refused ? 403 : 503).json({ error: state.detail, code: SIGN_IN_REQUIRED, backend: state });
+    }),
+  );
 
   // ==== CHANGING ONE'S OWN PASSWORD ====
   // The one write an account that must change its password may make. The
@@ -4606,6 +4661,11 @@ export function registerRoutes(app: Express): void {
     sig: z.string().trim().regex(/^[0-9a-fA-F]+$/, "a signature is hex").max(256),
   });
   const failsafeUnavailable = (res: Response, cause: unknown): boolean => {
+    if (cause instanceof failsafe.FailsafeSignInRequired) {
+      // Not a stop (a stop never goes as the person): the person has no backend sign-in.
+      res.status(503).json({ error: cause.message, code: cause.code });
+      return true;
+    }
     if (cause instanceof failsafe.FailsafeUnavailable) {
       // 503, not 500: the control plane is not there or not answering, which
       // is a fact about the deployment, not a bug in this server.
@@ -4761,8 +4821,8 @@ export function registerRoutes(app: Express): void {
    * A signature relayed as a possible stop whose command turned out to be a
    * resume or a release. When the relay would have been refused had that been
    * known (wouldRefuseRecovery), the command is withdrawn at once -- by this
-   * dashboard's service account, the one credential it holds on the control
-   * plane, in the name of the admin whose session relayed it -- and recorded
+   * dashboard's stop credential (the withdrawal of a resume or a release is a
+   * stop), in the name of the admin whose session relayed it -- and recorded
    * against that admin. Withdrawing a resume or a release keeps an engine
    * stopped; it is never refused (killSwitchRefusesCommand). Tried twice.
    */
@@ -4937,15 +4997,30 @@ export function registerRoutes(app: Express): void {
   // their findings graded by how strongly each is known, the six-state
   // deployment decision, and the Unknowns Register. The browser calls this
   // server same-origin with its session cookie; this server reaches the backend
-  // with its service account (server/assurance.ts). Every route is behind the
-  // `/api` requireAuth guard above; the reads stay open to any signed-in
-  // operator, but the two writes -- recompute a decision, dispose of an Unknown
-  // -- are admin-only, so a non-admin gets a clean 403 at the front door rather
-  // than reaching the backend (which enforces the same rule independently).
+  // as that signed-in person, with their own backend sign-in (T6:
+  // server/person-credential.ts), so the backend's tenant scoping and role
+  // checks are applied to them -- only a stop goes as the stop credential
+  // (server/control-plane.ts). Every route is behind the `/api` requireAuth
+  // guard above; the reads stay open to any signed-in operator, but the two
+  // writes -- recompute a decision, dispose of an Unknown -- are admin-only, so
+  // a non-admin gets a clean 403 at the front door rather than reaching the
+  // backend (which enforces the same rule independently).
   // When no control plane is configured the calls answer 503 with a reason, and
-  // the screen says so in words rather than inventing data.
+  // the screen says so in words rather than inventing data. A read the backend
+  // refuses the person (403, or 404: not theirs to see) is answered with that
+  // status and the backend's words; a person with no backend sign-in is
+  // answered 503 `backend_sign_in_required` -- never 401, which would send the
+  // browser back to this console's sign-in, away from the kill switch.
 
   const assuranceUnavailable = (res: Response, cause: unknown): boolean => {
+    if (cause instanceof assurance.ControlPlaneRefused) {
+      res.status(cause.status).json({ error: cause.message, code: cause.status === 404 ? "not_found" : "backend_refused" });
+      return true;
+    }
+    if (cause instanceof assurance.ControlPlaneSignInRequired) {
+      res.status(503).json({ error: cause.message, code: cause.code });
+      return true;
+    }
     if (cause instanceof assurance.ControlPlaneUnavailable) {
       res.status(503).json({ error: cause.message });
       return true;

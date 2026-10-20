@@ -21,8 +21,15 @@
  *     the finished, signed command. Nothing this file does can shortcut that.
  *
  * Because the real gate is the signatures, the credential this uses to reach
- * the control plane is a service account, not the root of trust: it decides who
- * may DRAFT and SUBMIT, which is inert without out-of-band operator signatures.
+ * the control plane is not the root of trust: it decides who may DRAFT and
+ * SUBMIT, which is inert without out-of-band operator signatures. A STOP -- a
+ * pause, stand-down or terminate drafted or signed, a resume or release
+ * withdrawn, the stop lane's reads -- goes as the service account (and the
+ * failsafe service token), exactly as it always has. Everything else -- a resume
+ * or release drafted or signed, a stop withdrawn, the audit trail -- goes as the
+ * signed-in person, with their own token (server/person-credential.ts), so the
+ * control plane's role checks apply to them and it records them as the actor;
+ * never as the service account (T6).
  *
  * Configured from the environment (ATHENA_FAILSAFE_*), not the in-app settings
  * row: the control-plane address and its service credential are a property of
@@ -34,6 +41,7 @@ import http from "node:http";
 import https from "node:https";
 import * as dnsCache from "./dns-cache";
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
+import { PersonCredentialUnavailable, PersonSignInRequired, personAccessToken, renewPersonToken } from "./person-credential";
 
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -140,6 +148,38 @@ const MAX_ERROR_BODY = 500;
 
 export class FailsafeUnavailable extends Error {}
 
+/**
+ * A call that goes as the signed-in person (not a stop), who has no credential
+ * the control plane takes. Raised before anything is sent; never on a stop.
+ */
+export class FailsafeSignInRequired extends FailsafeUnavailable {
+  readonly code = "backend_sign_in_required";
+}
+
+/** The person's access token, or why there is none, in this client's terms. */
+async function personAccess(): Promise<string> {
+  try {
+    return await personAccessToken();
+  } catch (cause) {
+    throw personFailure(cause);
+  }
+}
+
+/** A new access token for the person after the control plane refused `rejected` (401). */
+async function personRenewed(rejected: string | null): Promise<string> {
+  try {
+    return await renewPersonToken(rejected);
+  } catch (cause) {
+    throw personFailure(cause);
+  }
+}
+
+function personFailure(cause: unknown): unknown {
+  if (cause instanceof PersonSignInRequired) return new FailsafeSignInRequired(cause.message);
+  if (cause instanceof PersonCredentialUnavailable) return new FailsafeUnavailable(cause.message);
+  return cause;
+}
+
 function baseUrl(): string | null {
   const raw = (process.env[FAILSAFE_URL_ENV] ?? "").trim();
   return raw ? raw.replace(/\/+$/, "") : null;
@@ -165,6 +205,10 @@ export function defaultEngineId(): string {
 // ed25519 signatures the engine verifies. The credential decides who may
 // draft, nothing more. A stop waits on none of this when the failsafe service
 // token is configured (server/failsafe-service-token.ts; call).
+//
+// Since T6 this account is the STOP credential and nothing else: only a call
+// marked `stop` uses it. Every other call goes as the signed-in person
+// (server/person-credential.ts), and never falls back to this account.
 
 let cachedAccess: string | null = null;
 /**
@@ -519,7 +563,12 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
   // SAFETY: a stop with the service token waits on no sign-in and no refresh --
   // failing, throttled, locked or hung -- so none of them holds it back or drops it.
   const presented = init.stop ? serviceToken() : null;
-  const access = presented !== null ? cachedAccess : await accessToken(base, signal);
+  // A stop: exactly as before, and never the person's credential. Anything else
+  // (a resume or release drafted, a signature on one, a stop withdrawn, the audit
+  // trail): the signed-in person's own, and never the service account's (T6).
+  const access = init.stop
+    ? (presented !== null ? cachedAccess : await accessToken(base, signal))
+    : await personAccess();
   const controller = linked(signal);
   const timer = setTimeout(() => controller.abort(), failsafeTimeouts.callMs);
   let response: ControlPlaneResponse;
@@ -545,6 +594,11 @@ async function call(path: string, init: CallInit = {}, retryAuth = true, signal?
   if (response.status === 401 && retryAuth) {
     // No credential taken; get a new token and try once more.
     void response.body?.cancel().catch(() => undefined);
+    if (!init.stop) {
+      // The person's token, renewed by their refresh token; never the service account.
+      await personRenewed(access);
+      return call(path, init, false, signal);
+    }
     if (access !== null && cachedAccess === access) cachedAccess = null;
     await accessToken(base, signal);
     return call(path, init, false, signal);

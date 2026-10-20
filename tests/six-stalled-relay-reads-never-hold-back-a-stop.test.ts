@@ -5,7 +5,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Express } from "express";
 
-import { makeApp } from "./helpers";
+import { makeApp, signInToBackendWithCookie } from "./helpers";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 import { stallingBackend, type StallingBackend } from "./helpers/stalling-backend";
 import { _setReadDeadlineForTests, boundedRelayRead } from "../server/read-deadline";
@@ -59,6 +59,8 @@ beforeEach(async () => {
   process.env.ATHENA_FAILSAFE_USER = "svc-dashboard";
   process.env.ATHENA_FAILSAFE_PASSWORD = "stand-in-only"; // pragma: allowlist secret
   (await import("../server/control-plane"))._resetForTests();
+  // T6: the person reads the backend as themselves; signed in to this one.
+  await signInToBackendWithCookie(app, cookie);
   _setReadDeadlineForTests(300);
 });
 

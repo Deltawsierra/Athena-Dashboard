@@ -77,11 +77,18 @@ import { cn } from "@/lib/utils";
 
 interface AssuranceStatus {
   configured: boolean;
-  reachable: boolean;
+  /** null: not known -- nothing was sent, since you have no Athena-Backend sign-in it takes. */
+  reachable: boolean | null;
   authorized: boolean | null;
   url: string | null;
   detail: string;
+  /** "backend_sign_in_required": you are not signed in to Athena-Backend on this console. */
+  code?: string;
+  signedInAs?: string | null;
 }
+
+/** The server's code for a read that goes as you, when you have no Athena-Backend sign-in it takes (T6). */
+const SIGN_IN_REQUIRED = "backend_sign_in_required";
 interface Deployment {
   uuid: string;
   name: string;
@@ -1544,9 +1551,64 @@ export function asSeverity(s: string): Severity {
  */
 function bannerHeadline(status: AssuranceStatus): string {
   if (!status.configured) return "No control plane is configured.";
+  if (status.code === SIGN_IN_REQUIRED) return "You are not signed in to Athena-Backend.";
   if (status.reachable === false) return "The control plane is not answering.";
-  if (status.authorized === false) return "The control plane rejected this console's credential.";
+  if (status.authorized === false) return "Athena-Backend refused your sign-in.";
   return "The control plane returned an error.";
+}
+
+/**
+ * Sign in to Athena-Backend as yourself (T6): every read and write this page
+ * makes goes there as you, and only what your account there may see is shown.
+ * Your password goes to this console's server, which passes it to Athena-Backend's
+ * sign-in once and keeps only the session it answers with -- never in this page.
+ * Stops never need it: the kill switch and every failsafe stop work without it.
+ */
+function BackendSignIn() {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const signIn = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/auth/backend-sign-in", { password });
+    },
+    onSuccess: async () => {
+      setPassword("");
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: ["/api/assurance/status"] });
+    },
+    onError: (cause: unknown) => {
+      setPassword("");
+      setError(cause instanceof Error ? cause.message : "the sign-in failed");
+    },
+  });
+  return (
+    <form
+      className="mt-3 flex flex-wrap items-center gap-2"
+      data-testid="backend-sign-in"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (password) signIn.mutate();
+      }}
+    >
+      <input
+        type="password"
+        autoComplete="current-password"
+        className={cn(fieldInput, "min-w-[12rem]")}
+        value={password}
+        placeholder="Your Athena-Backend password"
+        aria-label="Your Athena-Backend password"
+        onChange={(event) => setPassword(event.target.value)}
+      />
+      <button
+        type="submit"
+        className="rounded-md bg-primary/15 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/25 disabled:opacity-50"
+        disabled={signIn.isPending || !password}
+      >
+        Sign in to Athena-Backend
+      </button>
+      {error && <p className="basis-full text-[12px] text-sev-high">{error}</p>}
+    </form>
+  );
 }
 
 /* --- shared presentational parts (used by both views) ------------------- */
@@ -8363,6 +8425,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
           <div className="text-[13px] leading-relaxed">
             <p className="font-medium text-foreground">{bannerHeadline(status)}</p>
             <p className="mt-1 text-muted-foreground">{status.detail}</p>
+            {status.code === SIGN_IN_REQUIRED && <BackendSignIn />}
           </div>
         </GlassCard>
       )}

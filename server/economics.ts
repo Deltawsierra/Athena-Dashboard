@@ -51,14 +51,20 @@
  * (LOW-1): no backend address, no traceback. The cause is logged here, on the
  * server.
  *
- * Tenancy and roles stay with the backend. The browser calls this server
- * same-origin with its session (requireAuth guards every /api route); this
- * server reaches the backend with its service account, as every assurance read
- * does (server/control-plane.ts). A request names one deployment by uuid, and a
- * scenario, a result or a receipt by uuid, or a page by number, where it names
- * one; only those are forwarded -- any other query parameter is dropped, never
- * passed on -- so no request can widen what the backend is asked. Nothing is
- * cached: every read is a new backend read.
+ * Tenancy and roles stay with the backend, and are applied to the PERSON (T6).
+ * The browser calls this server same-origin with its session (requireAuth
+ * guards every /api route); this server reaches the backend as that signed-in
+ * person, with their own backend sign-in, as every assurance read does
+ * (server/control-plane.ts, server/person-credential.ts) -- never as a service
+ * account that sees every tenant. So a deployment the person's account cannot
+ * see is the backend's 404 (`not_served`) or 403, passed on, and never its
+ * documents; a person with no backend sign-in is answered 503
+ * `backend_sign_in_required` and nothing is asked of the backend. A request
+ * names one deployment by uuid, and a scenario, a result or a receipt by uuid,
+ * or a page by number, where it names one; only those are forwarded -- any
+ * other query parameter is dropped, never passed on -- so no request can widen
+ * what the backend is asked. Nothing is cached: every read is a new backend
+ * read.
  *
  * SAFETY: none of these is a stop and none is on a stop's path. A read waits on
  * the backend only for itself: it holds no lock and takes no slot a stop needs.
@@ -81,7 +87,7 @@ import { Readable } from "node:stream";
 import type { Express, Request, Response } from "express";
 import { SHA256_DIGEST, receiptFileName, receiptIdOf, signedDocumentSpelling } from "@shared/economics-receipt";
 import { asyncHandler } from "./auth";
-import { call, body as quoted, isConfigured, ControlPlaneUnavailable } from "./control-plane";
+import { call, body as quoted, isConfigured, ControlPlaneSignInRequired, ControlPlaneUnavailable } from "./control-plane";
 import { READ_DEADLINE_MS, _setReadDeadlineForTests, boundedRelayRead } from "./read-deadline";
 
 /** A uuid as the backend's `<uuid:...>` route converter takes one: lowercase hex. */
@@ -250,10 +256,13 @@ async function refusal(what: string, upstream: globalThis.Response): Promise<Ans
     };
   }
   if (status === 401) {
+    // The person's token, renewed once already (control-plane.ts call), was still
+    // refused: their backend sign-in has ended. Never 401 to the browser.
+    void upstream.body?.cancel().catch(() => undefined);
     return {
       status: 503,
-      error: "Athena-Backend did not accept this server's service credential",
-      code: "backend_credential_refused",
+      error: "Athena-Backend no longer takes your sign-in: sign in to Athena-Backend again",
+      code: "backend_sign_in_required",
       upstream_status: status,
     };
   }
@@ -344,6 +353,11 @@ async function backendRead(path: string, what: string, res: Response): Promise<g
     return upstream;
   } catch (cause) {
     if (gone(res)) return null;
+    if (cause instanceof ControlPlaneSignInRequired) {
+      // The person has no backend sign-in: nothing was asked of the backend.
+      res.status(503).json({ error: `${what} is read as you, and ${cause.message}`, code: cause.code });
+      return null;
+    }
     if (cause instanceof ControlPlaneUnavailable) {
       console.warn(`[economics] the read of ${what} reached no backend: ${cause.message}`);
       res.status(503).json({ error: `Athena-Backend could not be reached for ${what}`, code: "backend_unavailable" });
