@@ -6,6 +6,7 @@
  */
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { errorMessage } from "@/lib/loaded";
+import { microcopy } from "@shared/persona-microcopy";
 import {
   Users,
   UserCheck,
@@ -303,9 +304,9 @@ function ApiKeysPanel({
       </div>
 
       {failure !== null ? (
-        <p className="text-[12px] text-muted-foreground">Could not load API keys: {failure}</p>
+        <p className="text-[12px] text-muted-foreground">{microcopy.error.couldNotLoad("API keys", failure)}</p>
       ) : loading ? (
-        <p className="text-[12px] text-muted-foreground">Loading keys…</p>
+        <p className="text-[12px] text-muted-foreground">{microcopy.progress.loading("keys")}</p>
       ) : keys.length === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No API keys yet. A key grants programmatic access with the role of the admin who created it.
@@ -493,9 +494,9 @@ export default function Teams() {
               />
             )}
             {usersFailed ? (
-              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">Could not load team members: {errorMessage(usersError)}</p>
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{microcopy.error.couldNotLoad("team members", errorMessage(usersError))}</p>
             ) : users.length === 0 ? (
-              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{isLoading ? "Loading team…" : "No team members found."}</p>
+              <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{isLoading ? microcopy.progress.loading("team") : microcopy.empty.noneFound("team members")}</p>
             ) : tab === "Team Members" ? (
               filtered.length === 0 ? (
                 <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">No members match the current filter.</p>
@@ -626,7 +627,7 @@ export default function Teams() {
             </div>
             <ul className="space-y-2.5">
               {roleMatrix.length === 0 ? (
-                <li className="text-[12px] text-muted-foreground">{isLoading ? "Loading…" : "No roles defined."}</li>
+                <li className="text-[12px] text-muted-foreground">{isLoading ? microcopy.progress.generic : microcopy.empty.noneDefined("roles")}</li>
               ) : roleMatrix.map((r) => (
                 <li key={r.role} className="flex items-center gap-2.5">
                   <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
