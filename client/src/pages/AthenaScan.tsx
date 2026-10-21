@@ -27,6 +27,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import FindingConfidence from "@/components/FindingConfidence";
+import FindingNarrative from "@/components/FindingNarrative";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import NoStopPanel from "@/components/NoStopPanel";
@@ -74,6 +75,8 @@ interface EngineFinding {
   confidence?: number | null;
   /** The engine's own sentence for what `confidence` is, shown with it verbatim. */
   confidence_basis?: string | null;
+  /** The engine's own prose account of this finding, shown verbatim when it is a string with visible content (FindingNarrative). */
+  narrative?: string | null;
   /** The engine's own diagnostic when truthy, as the engine reads it (shared/engine-internal). */
   internal?: unknown;
 }
@@ -647,6 +650,7 @@ export default function AthenaScan() {
                       <p className="text-[13px] font-medium text-foreground">{f.message}</p>
                       {f.details && <p className="text-[13px] text-muted-foreground">{f.details}</p>}
                       <FindingConfidence finding={f} />
+                      <FindingNarrative finding={f} />
                     </li>
                   );
                 })}
