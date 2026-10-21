@@ -5,6 +5,7 @@
  * "…" while a source is loading, "—" when it failed, and the reason beside it.
  */
 import type { UseQueryResult } from "@tanstack/react-query";
+import { microcopy } from "@shared/persona-microcopy";
 
 export type Loaded<T> =
   | { state: "loading" }
@@ -12,7 +13,7 @@ export type Loaded<T> =
   | { state: "ready"; data: T };
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "request failed";
+  return error instanceof Error ? error.message : microcopy.error.requestFailed;
 }
 
 export function loaded<T>(query: UseQueryResult<T>): Loaded<T> {
@@ -37,5 +38,5 @@ export function figure<T>(source: Loaded<T>, read: (data: T) => string | number)
 
 /** The sentence a panel shows while its source is not in hand. */
 export function notInHand(source: Loaded<unknown>, what: string): string {
-  return source.state === "error" ? `Could not load ${what}: ${source.message}` : "Loading…";
+  return source.state === "error" ? microcopy.error.couldNotLoad(what, source.message) : microcopy.progress.generic;
 }
