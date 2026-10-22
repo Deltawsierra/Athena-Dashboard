@@ -28,7 +28,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { loaded, notInHand } from "@/lib/loaded";
-import { formatDistanceToNow } from "date-fns";
 import {
   Activity, Boxes, Clock, Cpu, Gauge, MemoryStick, ScanLine, ShieldCheck,
 } from "lucide-react";
@@ -347,8 +346,6 @@ export default function AIHealth() {
       scans: one.activeScans,
     }));
 
-  const models = latest?.modelsLoaded ?? [];
-
   return (
     <div className="min-h-screen">
       <div className="container mx-auto space-y-6 p-6">
@@ -545,13 +542,19 @@ export default function AIHealth() {
                   <Boxes className="h-3.5 w-3.5" />
                   Models loaded
                 </div>
-                {models.length === 0 ? (
+                {latest.modelsLoaded === null ? (
+                  // null, not []: the engine could not be asked. "Unavailable",
+                  // never "none loaded", and never the operator's records.
+                  <p className="text-sm text-muted-foreground" data-testid="text-models-unavailable">
+                    The engine's loaded-model inventory could not be read, so what is loaded is not known.
+                  </p>
+                ) : latest.modelsLoaded.length === 0 ? (
                   <p className="text-sm text-muted-foreground" data-testid="text-no-models">
-                    No classifier is registered as active, so nothing is loaded.
+                    The engine reports no models loaded.
                   </p>
                 ) : (
                   <ul className="flex flex-wrap gap-2" data-testid="list-models">
-                    {models.map((name) => (
+                    {latest.modelsLoaded.map((name) => (
                       <li
                         key={name}
                         className="athena-mono rounded-md border px-2 py-1 text-xs"
@@ -563,9 +566,8 @@ export default function AIHealth() {
                   </ul>
                 )}
                 <p className="mt-3 text-xs text-muted-foreground">
-                  {latest.lastTrainingDate
-                    ? `Most recently trained ${formatDistanceToNow(new Date(latest.lastTrainingDate), { addSuffix: true })}.`
-                    : "No training date is recorded against any of them."}
+                  Measured from the engine's extension inventory, not from the
+                  operator-recorded classifier notes.
                 </p>
               </GlassCard>
             </AnimatedContainer>

@@ -42,7 +42,7 @@ import { apiRequest } from "@/lib/queryClient";
 
 import GlassCard from "@/components/GlassCard";
 import PageHeader from "@/components/PageHeader";
-import type { Classifier } from "@shared/schema";
+import type { Classifier, LoadedModel } from "@shared/schema";
 
 /**
  * Where a measured accuracy stops being a good number.
@@ -209,6 +209,19 @@ export default function CVEClassifier() {
     queryKey: ["/api/classifiers"],
   });
 
+  // The engine's measured model inventory -- what this deployment has actually
+  // loaded. null (not []) when the engine could not be asked, so the section
+  // below says "unavailable" rather than "none"; a failed read is its own state
+  // and is never read as an empty inventory, and never as the records below.
+  const {
+    data: loadedModels,
+    isLoading: modelsLoading,
+    isError: modelsFailed,
+    error: modelsError,
+  } = useQuery<LoadedModel[] | null>({
+    queryKey: ["/api/loaded-models"],
+  });
+
   const active = useMemo(
     () => classifiers.filter((one) => one.status === "active"),
     [classifiers],
@@ -231,12 +244,66 @@ export default function CVEClassifier() {
         <PageHeader
           title="Classifiers"
           icon={<Boxes className="w-8 h-8 text-primary" />}
-          description="Every model this deployment has loaded, with the accuracy somebody measured and the set they measured it on."
+          description="What the engine reports as loaded, measured from its extension inventory, kept beside the operator-recorded classifier notes."
         />
+
+        <GlassCard data-testid="card-loaded-models">
+          <div className="athena-label mb-3 flex items-center gap-2">
+            <Boxes className="w-3.5 h-3.5" />
+            Loaded models
+          </div>
+          {modelsFailed ? (
+            // A failed read is not an empty inventory.
+            <p className="text-sm text-muted-foreground" data-testid="text-loaded-models-failed">
+              Could not read the engine's loaded-model inventory: {errorMessage(modelsError)}
+            </p>
+          ) : modelsLoading ? (
+            <p className="text-sm text-muted-foreground">…</p>
+          ) : loadedModels == null ? (
+            // null, not []: the engine could not be asked. Unavailable, never
+            // "none", and never a fallback to the hand-typed records below.
+            <p className="text-sm text-muted-foreground" data-testid="text-loaded-models-unavailable">
+              The engine's model inventory is unavailable, so what is loaded is not known.
+            </p>
+          ) : loadedModels.length === 0 ? (
+            <p className="text-sm text-muted-foreground" data-testid="text-loaded-models-empty">
+              The engine reports no models loaded.
+            </p>
+          ) : (
+            <div className="space-y-2" data-testid="list-loaded-models">
+              {loadedModels.map((model) => (
+                <div
+                  key={model.name}
+                  className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+                  style={{ borderColor: "hsl(var(--border))" }}
+                  data-testid={`loaded-model-${model.name}`}
+                >
+                  <span className="font-medium">{model.name}</span>
+                  <span className="athena-mono text-xs text-muted-foreground">{model.kind}</span>
+                  {!model.enabled && (
+                    <span className="athena-label" style={{ color: "hsl(var(--sev-info))" }}>
+                      present but not running
+                    </span>
+                  )}
+                  {model.digest && (
+                    <span className="athena-mono text-xs text-muted-foreground truncate">
+                      {model.digest}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-muted-foreground">
+            Measured from the engine's extension inventory. The classifier
+            records below are entered by hand, are not measured, and are not read
+            from the engine.
+          </p>
+        </GlassCard>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <GlassCard>
-            <div className="athena-label">Active models</div>
+            <div className="athena-label">Active classifier records</div>
             <div className="athena-figure text-4xl mt-1" data-testid="text-active-count">
               {classifiersFailed ? "—" : isLoading ? "…" : active.length}
             </div>
@@ -246,7 +313,7 @@ export default function CVEClassifier() {
           </GlassCard>
 
           <GlassCard className="md:col-span-2">
-            <div className="athena-label">Accuracy, weighted by training set</div>
+            <div className="athena-label">Recorded accuracy, weighted by training set</div>
             {classifiersFailed ? (
               <p className="text-sm text-muted-foreground mt-2">
                 Could not load classifiers, so there is no figure to give.
@@ -292,11 +359,11 @@ export default function CVEClassifier() {
             <div className="flex gap-3 items-start">
               <CircleSlash className="w-5 h-5 mt-0.5 athena-gold shrink-0" />
               <div className="space-y-1">
-                <div className="athena-label">No classifiers recorded</div>
+                <div className="athena-label">No classifier records yet</div>
                 <p className="text-sm text-muted-foreground">
-                  Nothing has been registered yet. This page shows what is
-                  loaded rather than what could be, so it stays empty until
-                  something is.
+                  No operator has recorded a classifier note. These are
+                  hand-entered notes, not the engine's loaded models, which are
+                  shown above.
                 </p>
               </div>
             </div>
@@ -305,6 +372,9 @@ export default function CVEClassifier() {
 
         {classifiers.length > 0 && (
           <div className="space-y-3" data-testid="list-classifiers">
+            <div className="athena-label" data-testid="label-operator-records">
+              Operator-recorded classifiers — entered by hand, not measured, and not read from the engine.
+            </div>
             {classifiers.map((one) => (
               <GlassCard key={one.id}>
                 <div className="flex flex-wrap items-start justify-between gap-4">

@@ -249,14 +249,18 @@ export async function measure(): Promise<InsertAIHealthMetric> {
   const failed = tests.filter((test) => test.status === "failed").length;
   const finished = completed + failed;
 
-  const classifiers = await storage.getAllClassifiers();
-  const loaded = classifiers.filter((one) => one.status === "active");
-  // The most recent training date anybody recorded, not "now" and not null
-  // when one exists.
-  const trained = loaded
-    .map((one) => one.lastTrainedAt)
-    .filter((date): date is Date => date instanceof Date)
-    .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+  // "Models loaded" is the engine's measured inventory, not the operator-typed
+  // `classifiers` records. A name and an accuracy somebody keyed in say nothing
+  // about what this deployment actually loaded, and reading them here dressed
+  // hand-entered notes as measured deployment state. loadedModels reads the
+  // same GET /api/extensions inventory loadedScanners does and returns its
+  // model/detector rows: null (never []) when the engine could not be asked, so
+  // the screen can say "unavailable" rather than "none", and the enabled rows
+  // are the ones actually running. No silent fallback to the hand-typed records.
+  const inventory = await engine.loadedModels();
+  const modelsLoaded = inventory === null
+    ? null
+    : inventory.filter((one) => one.enabled).map((one) => one.name);
 
   // The engine's boot canary: how many detection guards answered and how many
   // failed. This is the one real statement about detection either side of the
@@ -284,8 +288,12 @@ export async function measure(): Promise<InsertAIHealthMetric> {
     totalScansToday: today,
     successRate: finished > 0 ? Math.round((completed / finished) * 100) : null,
     averageResponseTime: takeAverageResponseTime(),
-    modelsLoaded: loaded.map((one) => one.name),
-    lastTrainingDate: trained,
+    modelsLoaded,
+    // The engine's extension inventory carries no training timestamp, so there
+    // is no measured "most recently trained" date to report. Left absent rather
+    // than sourced from the operator-typed records, which would dress a
+    // hand-keyed date as a measurement.
+    lastTrainingDate: null,
     // Deliberately absent. See the note at the top of this file.
     detectionAccuracy: null,
     falsePositiveRate: null,
