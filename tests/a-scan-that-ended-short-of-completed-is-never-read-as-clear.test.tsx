@@ -13,11 +13,12 @@
  * exactly what it drew: the opposite of what happened.
  *
  * Now `completed` alone keeps that rendering, unchanged. Aborted, failed and
- * refused draw "Not assessed", say which way the scan ended and that no result
- * or band is derived from it, and show the engine's own `reason` and
- * `result.error` when it sent them -- which `runState` now reads, as
- * `retestRun` already did. The Retest panel stays, with a sentence saying what
- * a retest of a scan that did not complete can and cannot say.
+ * refused draw "Not assessed" with no shield, say "The scan did not finish:
+ * <engine reason>." in the engine's own words -- its `reason`, or the
+ * `result.error` it stored, which `runState` now reads as `retestRun` already
+ * did -- and that nothing here is a result. The Retest panel stays, with a
+ * sentence saying what a retest of a scan that did not finish can and cannot
+ * say.
  *
  * These drive each screen against the real routes, served over HTTP and signed
  * in, with an engine each test tells what to answer.
@@ -151,9 +152,13 @@ async function startAScan(state: string) {
 
 const text = () => document.body.textContent ?? "";
 const shieldCheck = () => document.querySelector("svg.lucide-shield-check");
-const NO_FINDINGS_BEFORE_END =
-  "No findings came back before it ended. That is not a result about the target, and nothing is derived from it.";
+const notFinishedText = () => screen.getByTestId("text-not-completed").textContent;
+const NOT_ASSESSED_BASIS = "The scan did not finish, so no result and no band is derived from it.";
+const NOTHING_HERE = "Nothing here is a result.";
 const FINISHED_AND_RETURNED_NONE = "The scan finished and returned no findings. That is a result, not an absence of one.";
+const RETEST_AFTER_ENDED =
+  "This scan did not finish. A retest here looks again only at a finding it returned before it ended, " +
+  "and says nothing about checks that did not run.";
 
 /** Neither word of a result over a scan that returned none: no "Clear", no shield, no "finished and returned no findings". */
 function expectNoVerdict() {
@@ -173,33 +178,37 @@ describe("Athena: a scan that ended short of completed, with nothing gradable on
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Not assessed");
     // Muted, as "Not read" and "Not rated" are: not Clear's colour.
     expect(screen.getByTestId("text-risk-band").getAttribute("style")).toMatch(/--muted-foreground/);
-    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
-      "The scan was stopped before it finished, so no result and no band is derived from it.",
-    );
-    expect(screen.getByTestId("text-not-completed").textContent).toContain("This scan was stopped before it finished.");
-    expect(screen.getByTestId("text-not-completed").textContent).toContain(NO_FINDINGS_BEFORE_END);
-    expect(screen.getByTestId("text-engine-reason").textContent).toBe(`Engine reason: ${STOP_REASON}`);
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(NOT_ASSESSED_BASIS);
+    expect(notFinishedText()).toBe(`The scan did not finish: ${STOP_REASON}. ${NOTHING_HERE}`);
     expect(screen.queryByTestId("text-engine-error")).toBeNull();
     // The counts are a reading of what came back (nothing), and are still drawn as such.
     expect(screen.getByTestId("text-total").textContent).toBe("0");
     expectNoVerdict();
   });
 
-  it("failed (the work raised): Not assessed, the engine's error, and never Clear", async () => {
+  it("failed (the work raised): Not assessed, the engine's error in the sentence, and never Clear", async () => {
     endsOnPoll(FAILED_ON_RAISE);
     realRoutes();
     render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
     await startAScan("failed");
     await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Not assessed");
-    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
-      "The scan did not complete: the engine reported an error, so no result and no band is derived from it.",
-    );
-    expect(screen.getByTestId("text-not-completed").textContent).toContain(
-      "This scan did not complete: the engine reported an error.",
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(NOT_ASSESSED_BASIS);
+    expect(notFinishedText()).toBe(`The scan did not finish: ${RAISED}. ${NOTHING_HERE}`);
+    expect(screen.queryByTestId("text-engine-error")).toBeNull();
+    expectNoVerdict();
+  });
+
+  it("failed with both a reason and a stored error: the reason in the sentence, the error on its own line", async () => {
+    endsOnPoll({ state: "failed", reason: "the worker was recycled", done: true, result: { error: RAISED } });
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("failed");
+    await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
+    expect(notFinishedText()).toBe(
+      `The scan did not finish: the worker was recycled. ${NOTHING_HERE}Engine error: ${RAISED}`,
     );
     expect(screen.getByTestId("text-engine-error").textContent).toBe(`Engine error: ${RAISED}`);
-    expect(screen.queryByTestId("text-engine-reason")).toBeNull();
     expectNoVerdict();
   });
 
@@ -210,11 +219,18 @@ describe("Athena: a scan that ended short of completed, with nothing gradable on
     await startAScan("refused");
     await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Not assessed");
-    expect(screen.getByTestId("text-risk-basis").textContent).toBe(
-      "The engine refused the scan at preflight, so no result and no band is derived from it.",
-    );
-    expect(screen.getByTestId("text-not-completed").textContent).toContain("The engine refused this scan at preflight.");
-    expect(screen.getByTestId("text-engine-reason").textContent).toBe(`Engine reason: ${REFUSAL}`);
+    expect(screen.getByTestId("text-risk-basis").textContent).toBe(NOT_ASSESSED_BASIS);
+    expect(notFinishedText()).toBe(`The scan did not finish: ${REFUSAL}. ${NOTHING_HERE}`);
+    expectNoVerdict();
+  });
+
+  it("stopped with no reason sent: says how it ended in the page's words", async () => {
+    endsOnPoll({ state: "aborted", reason: null, done: true, result: null });
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
+    await startAScan("aborted");
+    await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
+    expect(notFinishedText()).toBe(`The scan did not finish: it was stopped before it finished. ${NOTHING_HERE}`);
     expectNoVerdict();
   });
 
@@ -226,10 +242,9 @@ describe("Athena: a scan that ended short of completed, with nothing gradable on
     await waitFor(() => expect(screen.getByTestId("text-count-high").textContent).toBe("1"));
     expect(screen.getByTestId("text-risk-band").textContent).toBe("Elevated");
     expect(screen.getByTestId("text-risk-basis").textContent).toBe("Derived from the worst severity found — not a score.");
-    expect(screen.getByTestId("text-not-completed").textContent).toContain(
-      "The findings listed are what came back before it ended, not a complete assessment of the target.",
+    expect(notFinishedText()).toBe(
+      `The scan did not finish: ${STOP_REASON}. The findings listed came back before it ended; nothing here is a complete result.`,
     );
-    expect(screen.getByTestId("text-not-completed").textContent).not.toContain(NO_FINDINGS_BEFORE_END);
     expect(screen.getByTestId("list-findings")).toBeTruthy();
     expect(text()).not.toMatch(/Not assessed|Clear/);
   });
@@ -245,7 +260,7 @@ describe("Athena: a scan that ended short of completed, with nothing gradable on
     expect(text()).toContain(FINISHED_AND_RETURNED_NONE);
     expect(shieldCheck()).not.toBeNull();
     expect(screen.queryByTestId("text-not-completed")).toBeNull();
-    expect(text()).not.toMatch(/Not assessed/);
+    expect(text()).not.toMatch(/Not assessed|did not finish/);
   });
 });
 
@@ -256,17 +271,12 @@ describe("Penetration testing: a scan that ended short of completed, with nothin
     render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
     await startAScan("aborted");
     await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
-    expect(screen.getByTestId("text-not-completed").textContent).toContain("This scan was stopped before it finished.");
-    expect(screen.getByTestId("text-not-completed").textContent).toContain(NO_FINDINGS_BEFORE_END);
-    expect(screen.getByTestId("text-engine-reason").textContent).toBe(`Engine reason: ${STOP_REASON}`);
+    expect(notFinishedText()).toBe(`The scan did not finish: ${STOP_REASON}. ${NOTHING_HERE}`);
     expect(text()).not.toContain(FINISHED_AND_RETURNED_NONE);
     expect(text()).not.toMatch(/returned no (gradable )?findings/);
     expect(shieldCheck()).toBeNull();
-    // The Retest panel stays, and says what a retest of a scan that did not complete can say.
-    expect(screen.getByTestId("text-retest-after-ended").textContent).toBe(
-      "This scan did not complete. A retest here looks again only at a finding it returned before it ended, " +
-      "and says nothing about checks that did not run.",
-    );
+    // The Retest panel stays, and says what a retest of a scan that did not finish can say.
+    expect(screen.getByTestId("text-retest-after-ended").textContent).toBe(RETEST_AFTER_ENDED);
   });
 
   it("failed: says so with the engine's error", async () => {
@@ -275,10 +285,7 @@ describe("Penetration testing: a scan that ended short of completed, with nothin
     render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
     await startAScan("failed");
     await waitFor(() => expect(screen.getByTestId("text-not-completed")).toBeTruthy());
-    expect(screen.getByTestId("text-not-completed").textContent).toContain(
-      "This scan did not complete: the engine reported an error.",
-    );
-    expect(screen.getByTestId("text-engine-error").textContent).toBe(`Engine error: ${RAISED}`);
+    expect(notFinishedText()).toBe(`The scan did not finish: ${RAISED}. ${NOTHING_HERE}`);
     expect(text()).not.toContain(FINISHED_AND_RETURNED_NONE);
     expect(shieldCheck()).toBeNull();
   });
@@ -292,6 +299,7 @@ describe("Penetration testing: a scan that ended short of completed, with nothin
     expect(shieldCheck()).not.toBeNull();
     expect(screen.queryByTestId("text-not-completed")).toBeNull();
     expect(screen.queryByTestId("text-retest-after-ended")).toBeNull();
+    expect(text()).not.toMatch(/did not finish/);
   });
 });
 

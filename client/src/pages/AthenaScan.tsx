@@ -40,8 +40,8 @@ import { outcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
 import {
-  ENDED_SENTENCE, ENGINE_ERROR_LABEL, ENGINE_REASON_LABEL, FINDINGS_BEFORE_END, NOT_ASSESSED, NOT_ASSESSED_BASIS,
-  NO_FINDINGS_BEFORE_END, endedState,
+  ENGINE_ERROR_LABEL, FINDINGS_BEFORE_END, NOTHING_HERE_IS_A_RESULT, NOT_ASSESSED, NOT_ASSESSED_BASIS, endedState,
+  notFinished,
 } from "@/lib/scanSummaryCopy";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
@@ -608,7 +608,7 @@ export default function AthenaScan() {
                     ? finished
                       ? ended !== null
                         // A run that ended short of completed: no result is derived from it.
-                        ? NOT_ASSESSED_BASIS[ended]
+                        ? NOT_ASSESSED_BASIS
                         : "The scan returned no gradable findings."
                       : returned === null
                         // Not "No gradable findings yet." beside "The findings could not be read".
@@ -662,11 +662,12 @@ export default function AthenaScan() {
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
                 <div className="space-y-1 text-[13px] text-muted-foreground">
                   <p>
-                    {ENDED_SENTENCE[ended]}
-                    {returned !== null && ` ${findings.length === 0 ? NO_FINDINGS_BEFORE_END : FINDINGS_BEFORE_END}`}
+                    {notFinished(ended, engineReason ?? engineError)}
+                    {returned !== null && ` ${findings.length === 0 ? NOTHING_HERE_IS_A_RESULT : FINDINGS_BEFORE_END}`}
                   </p>
-                  {engineReason !== null && <p data-testid="text-engine-reason">{ENGINE_REASON_LABEL}: {engineReason}</p>}
-                  {engineError !== null && <p data-testid="text-engine-error">{ENGINE_ERROR_LABEL}: {engineError}</p>}
+                  {engineReason !== null && engineError !== null && (
+                    <p data-testid="text-engine-error">{ENGINE_ERROR_LABEL}: {engineError}</p>
+                  )}
                 </div>
               </div>
             )}

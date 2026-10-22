@@ -12,11 +12,16 @@
  * (shared/persona-lint.ts): state language only, never a word about the
  * target.
  *
+ * The form is the one pinned for the interim labelling: "The scan did not
+ * finish: <engine reason>." followed by what the page holds -- no band, no
+ * shield. The lint forbids the word "clean" on a finding surface, so the second
+ * sentence says "Nothing here is a result." rather than "a clean result".
+ *
  * Not the LIGHT microcopy registry (shared/persona-microcopy.ts): that is
  * empty / progress / error copy, and by the charter a finding surface's state
  * and verdict words are not sourced from it. These are plain, fixed and linted.
- * The engine's own `reason` and `error` are shown beside them verbatim, and are
- * not authored here.
+ * The engine's own `reason` and `error` are shown verbatim, and are not
+ * authored here.
  */
 
 /** The engine's terminal states short of completed: nothing is derived from a run in one. */
@@ -32,46 +37,49 @@ export function endedState(state: string | undefined | null): EndedState | null 
 /** The Risk band's word for such a run, in the muted tone "Not read" and "Not rated" use: never "Clear". */
 export const NOT_ASSESSED = "Not assessed";
 
-/** The Risk band's basis beneath it, by how the run ended. */
-export const NOT_ASSESSED_BASIS: Record<EndedState, string> = {
-  aborted: "The scan was stopped before it finished, so no result and no band is derived from it.",
-  failed: "The scan did not complete: the engine reported an error, so no result and no band is derived from it.",
-  refused: "The engine refused the scan at preflight, so no result and no band is derived from it.",
+/** The Risk band's basis beneath it. */
+export const NOT_ASSESSED_BASIS = "The scan did not finish, so no result and no band is derived from it.";
+
+/** How the run ended, in the page's words, for when the engine gave no reason or error of its own. */
+export const ENDED_HOW: Record<EndedState, string> = {
+  aborted: "it was stopped before it finished",
+  failed: "the engine reported an error",
+  refused: "the engine refused it at preflight",
 };
 
-/** The first sentence of the Findings card's notice, by how the run ended. */
-export const ENDED_SENTENCE: Record<EndedState, string> = {
-  aborted: "This scan was stopped before it finished.",
-  failed: "This scan did not complete: the engine reported an error.",
-  refused: "The engine refused this scan at preflight.",
-};
+/**
+ * "The scan did not finish: <engine reason>." -- `said` is the engine's own
+ * reason or error, verbatim, when it sent one; else how the run ended by state.
+ */
+export function notFinished(state: EndedState, said: string | null): string {
+  return `The scan did not finish: ${said ?? ENDED_HOW[state]}.`;
+}
 
-/** The second sentence when the run's results were read and hold no finding. */
-export const NO_FINDINGS_BEFORE_END =
-  "No findings came back before it ended. That is not a result about the target, and nothing is derived from it.";
+/** After it, when the run's results were read and hold no finding. */
+export const NOTHING_HERE_IS_A_RESULT = "Nothing here is a result.";
 
-/** The second sentence when the run's results were read and hold findings: a partial list, said to be one. */
-export const FINDINGS_BEFORE_END =
-  "The findings listed are what came back before it ended, not a complete assessment of the target.";
+/** After it, when the run's results were read and hold findings: a partial list, said to be one. */
+export const FINDINGS_BEFORE_END = "The findings listed came back before it ended; nothing here is a complete result.";
 
-/** Labels for the engine's own words, shown verbatim after each. */
-export const ENGINE_REASON_LABEL = "Engine reason";
+/** Label for the engine's stored error, shown verbatim after it, when its `reason` already stands in the sentence. */
 export const ENGINE_ERROR_LABEL = "Engine error";
 
 /** Beside the Retest panel of a run that ended short of completed. */
 export const RETEST_AFTER_ENDED =
-  "This scan did not complete. A retest here looks again only at a finding it returned before it ended, " +
+  "This scan did not finish. A retest here looks again only at a finding it returned before it ended, " +
   "and says nothing about checks that did not run.";
 
 /** Every authored string above, for the lint test (tests/scan-summary-copy-lints-clean.test.ts). */
 export function allScanSummaryStrings(): string[] {
   return [
     NOT_ASSESSED,
-    ...Object.values(NOT_ASSESSED_BASIS),
-    ...Object.values(ENDED_SENTENCE),
-    NO_FINDINGS_BEFORE_END,
+    NOT_ASSESSED_BASIS,
+    ...Object.values(ENDED_HOW),
+    notFinished("aborted", null),
+    notFinished("failed", null),
+    notFinished("refused", null),
+    NOTHING_HERE_IS_A_RESULT,
     FINDINGS_BEFORE_END,
-    ENGINE_REASON_LABEL,
     ENGINE_ERROR_LABEL,
     RETEST_AFTER_ENDED,
   ];
