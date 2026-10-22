@@ -32,6 +32,7 @@ import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
+import ScanCoverage from "@/components/ScanCoverage";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient, scanStartFailureTitle } from "@/lib/queryClient";
@@ -39,6 +40,11 @@ import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { outcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
+import {
+  ENGINE_ERROR_LABEL, FINDINGS_BEFORE_END, NOTHING_HERE_IS_A_RESULT, NOT_ASSESSED, NOT_ASSESSED_BASIS, endedState,
+  notFinished,
+} from "@/lib/scanSummaryCopy";
+import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
   SCAN_STAGES,
@@ -87,7 +93,15 @@ interface ScanView {
   detail?: string;
   /** "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel). */
   stop?: "failsafe";
-  engine: { findings?: EngineFinding[]; detail?: string } | null;
+  /** The engine's coverage manifest for this run, as recorded (shared/scan-coverage.ts); null when none was. */
+  coverage?: unknown;
+  engine: {
+    findings?: EngineFinding[];
+    /** The engine's `reason` for how the run ended (a stop's), when it sent one. */
+    detail?: string;
+    /** The engine's stored error for a run that ended short of completed (server/engine.ts runState). */
+    error?: string | null;
+  } | null;
 }
 
 /** States the engine reports for a run that has stopped moving. */
@@ -253,6 +267,20 @@ export default function AthenaScan() {
   const failsafeOnly = testId !== null
     && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
   const finished = scan !== undefined && FINISHED.has(scan.state);
+  // How the run ended, when it ended short of completed (lib/scanSummaryCopy.ts
+  // endedState): aborted, failed or refused. Nothing is derived from such a run:
+  // its findings, if any, are what came back before it ended, and a run with
+  // none on record is "Not assessed", never "Clear". `completed` alone keeps the
+  // honest-clean rendering: a completed scan with no gradable finding is a
+  // result. FINISHED itself is untouched: it is what the polling and the Stop
+  // read, and a Stop is offered for the same scans it always was.
+  const ended = scan !== undefined ? endedState(scan.state) : null;
+  // The engine's own words for how it ended -- its `reason` (the stop's), and
+  // the error it stored (server/engine.ts runState) -- shown verbatim, when sent.
+  const engineReason = ended !== null && typeof scan?.engine?.detail === "string" && scan.engine.detail.trim() !== ""
+    ? scan.engine.detail : null;
+  const engineError = ended !== null && typeof scan?.engine?.error === "string" && scan.engine.error.trim() !== ""
+    ? scan.engine.error : null;
 
   const counts: SeverityCounts = {
     critical: Number(scan?.test.criticalCount ?? 0),
@@ -293,6 +321,9 @@ export default function AthenaScan() {
   // anything else is "Not read".
   const clearOverUnread = finished && !countsUnread && !notRated && band === "Clear" && returned === null;
   const infoOverUnread = clearOverUnread && reading !== null && reading.severity === "info";
+  // A run that ended short of completed with nothing gradable on record: not
+  // "Clear". No result is derived from a scan that did not complete.
+  const notAssessed = finished && !countsUnread && !notRated && !clearOverUnread && band === "Clear" && ended !== null;
   const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
@@ -538,6 +569,9 @@ export default function AthenaScan() {
               </div>
               <h2 className="mt-3 break-all text-xl font-semibold text-foreground">{target || "—"}</h2>
               <p className="mt-1 text-[13px] text-muted-foreground">{clientName}</p>
+              {/* Where this scan is recorded (lib/sourceLabels.ts): here, from the
+                  engine; no backend verdict, claim or report applies to it. */}
+              <p className="mt-2 text-[11px] text-muted-foreground" data-testid="text-scan-source">{DASHBOARD_DIRECT}.</p>
               {scan.detail && <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{scan.detail}</p>}
               <div className="mt-4 border-t border-border/40 pt-4">
                 <p className="athena-label">Started</p>
@@ -553,14 +587,16 @@ export default function AthenaScan() {
               <div className="mt-2 flex items-baseline gap-3">
                 <span
                   className="whitespace-nowrap text-2xl font-semibold"
-                  style={{ color: `hsl(var(--${countsUnread || notRated || clearOverUnread ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
+                  style={{ color: `hsl(var(--${countsUnread || notRated || clearOverUnread || notAssessed ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
                   data-testid="text-risk-band"
                 >
                   {countsUnread
                     ? returned === null ? "Not read" : "Not recorded"
                     : notRated ? "Not rated"
                     : clearOverUnread ? infoOverUnread ? "Informational" : "Not read"
-                    : band === "Clear" && !finished ? "Assessing…" : band}
+                    : band === "Clear" && !finished ? "Assessing…"
+                    : notAssessed ? NOT_ASSESSED
+                    : band}
                 </span>
               </div>
               <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="text-risk-basis">
@@ -577,7 +613,10 @@ export default function AthenaScan() {
                       : "The findings could not be read, so no band is derived from them."
                   : band === "Clear"
                     ? finished
-                      ? "The scan returned no gradable findings."
+                      ? ended !== null
+                        // A run that ended short of completed: no result is derived from it.
+                        ? NOT_ASSESSED_BASIS
+                        : "The scan returned no gradable findings."
                       : returned === null
                         // Not "No gradable findings yet." beside "The findings could not be read".
                         ? "The findings could not be read, so this reads only the counts recorded so far: none " +
@@ -622,7 +661,24 @@ export default function AthenaScan() {
                 The findings could not be read, so none are listed here. That is not the same as none found.
               </p>
             )}
-            {returned !== null && findings.length === 0 && finished && (
+            {ended !== null && (
+              // A run that ended short of completed: how, in the engine's own
+              // words where it gave them, and that nothing is derived from it.
+              // No shield, and never "finished and returned no findings".
+              <div className="mt-3 flex items-start gap-3" data-testid="text-not-completed">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+                <div className="space-y-1 text-[13px] text-muted-foreground">
+                  <p>
+                    {notFinished(ended, engineReason ?? engineError)}
+                    {returned !== null && ` ${findings.length === 0 ? NOTHING_HERE_IS_A_RESULT : FINDINGS_BEFORE_END}`}
+                  </p>
+                  {engineReason !== null && engineError !== null && (
+                    <p data-testid="text-engine-error">{ENGINE_ERROR_LABEL}: {engineError}</p>
+                  )}
+                </div>
+              </div>
+            )}
+            {returned !== null && findings.length === 0 && finished && ended === null && (
               <div className="mt-3 flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                 <p className="text-[13px] text-muted-foreground">
@@ -677,6 +733,13 @@ export default function AthenaScan() {
                 View all findings <ChevronRight className="h-3.5 w-3.5" />
               </a>
             )}
+          </GlassCard>
+
+          {/* What this scan checked and what it did not: the engine's own
+              manifest for this run (shared/scan-coverage.ts), written when the
+              run ends, and said to be pending until then. */}
+          <GlassCard hover={false} glow={false} className="mt-5">
+            <ScanCoverage coverage={scan.coverage} running={running} />
           </GlassCard>
         </>
       )}

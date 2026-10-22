@@ -475,6 +475,15 @@ starts again. Tests:
 
 ## Known gaps
 
+- Scans started from the Athena and Penetration Testing pages go to the engine
+  directly and are recorded by this dashboard from the engine's own answers;
+  they are not in the Athena-Backend record the Assurance page reads, and no
+  backend verdict, claim or report applies to them. Each surface says which
+  record it shows (the Overview's headline tiles, both scan pages and the
+  Assurance page), a scan that did not finish is drawn as not assessed and
+  never as a result, and each scan's coverage manifest -- what the engine
+  checked and what it did not -- is read directly from the engine for that run.
+  Routing dashboard scans through Athena-Backend is planned separately.
 - A retest pressed again after its first retest has finished starts a second
   retest. The engine reads the key only on `POST /api/scan` so far, and the held
   slot covers a retest only while it may be running.
