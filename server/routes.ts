@@ -6495,7 +6495,22 @@ export function registerRoutes(app: Express): void {
     res.json({ success: true });
   }));
 
+  // ==== ENGINE MODEL INVENTORY ====
+  // What the engine has actually loaded, measured from GET /api/extensions
+  // (the same inventory loadedScanners reads). This is what "models loaded"
+  // means on the AI Health and CVE screens: the engine's real model/detector
+  // rows, not the operator-typed `classifiers` records below. The array (or
+  // null when the engine could not be asked -- never []) goes straight to the
+  // client, exactly as scannersLoaded does, so the screen tells "unavailable"
+  // from "none". Behind the /api requireAuth gate like every route here.
+  app.get("/api/loaded-models", asyncHandler(async (_req, res) => {
+    res.json(await engine.loadedModels());
+  }));
+
   // ==== CLASSIFIERS ====
+  // Operator-recorded notes, entered by hand and never read from the engine.
+  // They are NOT the deployment's loaded models -- that is /api/loaded-models,
+  // above -- and the screens no longer present them as such.
   app.get("/api/classifiers", asyncHandler(async (_req, res) => {
     res.json(await storage.getAllClassifiers());
   }));

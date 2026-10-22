@@ -364,6 +364,25 @@ export const aiHealthMetrics = sqliteTable("ai_health_metrics", {
 });
 
 /**
+ * One row of the engine's measured model and detector inventory, as
+ * GET /api/extensions reports it: what this deployment has actually loaded,
+ * read from the engine rather than typed in. It is distinct from the
+ * operator-recorded `classifiers` table, which is hand-entered notes and is
+ * never a statement about what the engine loaded.
+ *
+ * `enabled` tells a model present on disk from one the engine is actually
+ * running; `digest` is the artifact's content fingerprint when the engine
+ * reports one, and null when it does not. Read by the BFF's `loadedModels()`
+ * beside `loadedScanners`, and shown as "Models loaded".
+ */
+export interface LoadedModel {
+  name: string;
+  kind: string;
+  enabled: boolean;
+  digest: string | null;
+}
+
+/**
  * One of the engine benchmark's pairs: the share of attack cases caught
  * (security retained, the recall) and the share of legitimate cases let
  * through (utility retained, 1 - the false-positive rate), each with the

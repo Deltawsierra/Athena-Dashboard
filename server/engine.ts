@@ -21,6 +21,7 @@ import * as settings from "./settings";
 import * as dnsCache from "./dns-cache";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
+import type { LoadedModel } from "@shared/schema";
 
 /**
  * Node loads its HTTP client (fetch, undici) the first time it is used, and
@@ -2217,4 +2218,58 @@ export async function loadedScanners(): Promise<string[] | null> {
     .filter((one) => one.kind === "scanner" && one.enabled === true)
     .map((one) => String(one.name))
     .sort();
+}
+
+/**
+ * The models and detectors this engine has loaded, measured from the same
+ * GET /api/extensions inventory loadedScanners reads -- its non-scanner rows
+ * (ml_threat_classifier, cve_classifier, ml_threat_model and the rest). This
+ * is what "Models loaded" means: what the engine reports, not the operator's
+ * hand-typed `classifiers` records, which are notes and never a statement
+ * about what the engine loaded.
+ *
+ * Returns null when the engine could not be asked -- the same rule as
+ * loadedScanners, and the distinction the screens depend on. Null is not an
+ * empty list: an empty list says the engine reports no models loaded, and null
+ * says we do not know. Conflating them, or falling back to the hand-typed
+ * records when the engine is silent, would dress one state as the other.
+ *
+ * Each row carries its measured fields as the engine sends them: `enabled`
+ * (present on disk versus actually running) and `digest` (the artifact's
+ * fingerprint, or null when the engine reports none). ml_severity, the
+ * explanation text and other finding-level keys are headless by design and are
+ * not surfaced here.
+ */
+export async function loadedModels(): Promise<LoadedModel[] | null> {
+  let response;
+  try {
+    response = await call("/api/extensions");
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+
+  // Not known is null, never an empty list: a body that stalls or is not an object is not known.
+  let payload: Record<string, unknown>;
+  try {
+    payload = objectOrUnread(await jsonWithin(response, "the list of extensions"), "the list of extensions");
+  } catch {
+    return null;
+  }
+  const listed = Array.isArray(payload.extensions) ? payload.extensions : [];
+  return listed
+    .map((one) => one as Record<string, unknown>)
+    // Everything the inventory lists that is not a scanner: the model and
+    // detector rows loadedScanners drops. A row with no kind, or no name, is
+    // malformed and left out rather than shown as a model of unknown kind.
+    .filter((one) => typeof one.kind === "string" && one.kind !== "scanner" && typeof one.name === "string")
+    .map((one) => ({
+      name: String(one.name),
+      kind: String(one.kind),
+      // `enabled` is the engine's own flag; anything but an explicit true is
+      // read as not running, never defaulted to true.
+      enabled: one.enabled === true,
+      digest: typeof one.digest === "string" ? one.digest : null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
