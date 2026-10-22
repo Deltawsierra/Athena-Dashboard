@@ -41,6 +41,7 @@ import { Divider, Corners } from "@/components/mythos/Ornament";
 import { SEV_LABEL, SeverityPill, StatusPill, severityFrom, type Severity, type StatusTone } from "@/components/mythos/atoms";
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
+import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { isOpenStatus, untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
@@ -354,6 +355,9 @@ export default function Risks() {
             <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
               <p className="athena-label">Risk Register <span className="text-muted-foreground">({ready ? `${view.length}${filtersActive ? ` of ${findings.length}` : ""}` : count(() => 0)})</span></p>
             </div>
+            {/* Where these findings are recorded (lib/sourceLabels.ts): here, from
+                the engine; no backend verdict, claim or report applies to them. */}
+            <p className="px-5 pt-3 text-[11px] text-muted-foreground" data-testid="text-risks-source">{DASHBOARD_DIRECT}.</p>
             {!ready ? (
               <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{unavailable}</p>
             ) : empty ? (

@@ -12,7 +12,8 @@
  * this), each surface is labelled by SOURCE -- never by era or "world"
  * (client/src/lib/sourceLabels.ts): beneath the Overview's headline tiles,
  * which record each counting tile counts; on both scan pages, where this scan
- * is recorded; on the Assurance page, which record it reads. No plumbing, no
+ * is recorded; at the top of the Risks page's register, where its findings are
+ * recorded; on the Assurance page, which record it reads. No plumbing, no
  * mapping: words only, each held to the persona lint.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -25,6 +26,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 
 import Overview from "@/pages/Overview";
 import Assurance from "@/pages/Assurance";
+import Risks from "@/pages/Risks";
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
@@ -137,18 +139,55 @@ function realRoutes() {
   });
 }
 
+const EMPTY_SUMMARY = () => summarizeFindings({ clients: [], sites: [], findings: [] });
+const COMMON_SEED: Array<[unknown[], unknown]> = [
+  [["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 }],
+  [["/api/auth/check"], { authenticated: true, user: null }],
+];
+
 describe("Overview", () => {
   it("says beneath the headline tiles which record each counting tile counts", () => {
     mountSeeded(<Overview />, [
       [["/api/clients"], []], [["/api/sites"], []], [["/api/tests"], []], [["/api/assurance/deployments"], []],
-      [["/api/findings/summary"], summarizeFindings({ clients: [], sites: [], findings: [] })],
-      [["/api/sample-data"], { clients: 0, sites: 0, tests: 0, documents: 0, findings: 0 }],
-      [["/api/auth/check"], { authenticated: true, user: null }],
+      [["/api/findings/summary"], EMPTY_SUMMARY()],
+      ...COMMON_SEED,
     ]);
     expect(screen.getByTestId("text-overview-sources").textContent).toBe(OVERVIEW_SOURCES);
     // The two tiles it names are the two tiles on the page.
     expect(screen.getByTestId("overview-metric-findings").textContent).toContain("Open Findings");
     expect(screen.getByTestId("overview-metric-decisions").textContent).toContain("Assurance Decisions");
+  });
+});
+
+describe("Risks", () => {
+  const CLIENT = { id: "c1", name: "Acme", company: "Acme", status: "active", lastTestDate: null, notes: null };
+  const FINDING = {
+    id: "f1", clientId: "c1", siteId: null, type: "sql_injection", severity: "high", message: "SQL error with crafted payload",
+    status: "open", firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), target: "https://app.example",
+    endpoint: "https://app.example/login", ownerId: null, sightings: [], checks: [],
+  };
+
+  it("says at the top of its register where the findings are recorded", () => {
+    mountSeeded(<Risks />, [
+      [["/api/clients"], [CLIENT]], [["/api/tests"], []], [["/api/sites"], []], [["/api/users/assignable"], []],
+      [["/api/assurance/deployments"], []],
+      [["/api/findings/summary"], summarizeFindings({ clients: [CLIENT], sites: [], findings: [FINDING] as never })],
+      [["/api/findings", { clientId: "c1" }], { findings: [FINDING], counts: { open: 1, acknowledged: 0, accepted: 0, fixed: 0 } }],
+      ...COMMON_SEED,
+    ]);
+    expect(screen.getByTestId("text-risks-source").textContent).toBe(`${DASHBOARD_DIRECT}.`);
+    // The register it heads is on the page, with the finding in it.
+    expect(document.body.textContent ?? "").toContain("Risk Register");
+    expect(document.body.textContent ?? "").toContain("SQL error with crafted payload");
+  });
+
+  it("says so with no engagement on record too", () => {
+    mountSeeded(<Risks />, [
+      [["/api/clients"], []], [["/api/tests"], []], [["/api/sites"], []], [["/api/users/assignable"], []],
+      [["/api/assurance/deployments"], []], [["/api/findings/summary"], EMPTY_SUMMARY()],
+      ...COMMON_SEED,
+    ]);
+    expect(screen.getByTestId("text-risks-source").textContent).toBe(`${DASHBOARD_DIRECT}.`);
   });
 });
 
