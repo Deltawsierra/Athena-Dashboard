@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
-import { DuplicateRetestCheck, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
+import { DuplicateRetestCheck, type CollectWatchEnd, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 import type {
@@ -14,7 +14,7 @@ import type {
   Site, InsertSite,
   Test, InsertTest,
   Finding, InsertFinding,
-  FindingSighting, FindingCheck, RetestWatch,
+  FindingSighting, FindingCheck, RetestWatch, CollectWatch,
   Document, InsertDocument,
   ActivityLog, InsertActivityLog,
   AIHealthMetric, InsertAIHealthMetric, BenchmarkReading,
@@ -162,6 +162,9 @@ export class SqliteStorage implements IStorage {
       notes: null,
       lastTestDate: null,
       isSample: false,
+      backendEngagementId: null,
+      testingWindowStart: null,
+      testingWindowEnd: null,
       ...client,
       id: crypto.randomUUID(),
       createdAt: new Date(),
@@ -451,6 +454,35 @@ export class SqliteStorage implements IStorage {
       return true;
     });
     return run.immediate();
+  }
+
+  async createCollectWatch(watch: CollectWatch): Promise<CollectWatch> {
+    db.insert(schema.collectWatches).values(watch).run();
+    return watch;
+  }
+  async getCollectWatch(backendScanId: string): Promise<CollectWatch | undefined> {
+    return db.select().from(schema.collectWatches).where(eq(schema.collectWatches.backendScanId, backendScanId)).get();
+  }
+  async getCollectWatchByTest(testId: string): Promise<CollectWatch | undefined> {
+    return db.select().from(schema.collectWatches).where(eq(schema.collectWatches.testId, testId)).get();
+  }
+  async getOpenCollectWatches(): Promise<CollectWatch[]> {
+    return db.select().from(schema.collectWatches).where(eq(schema.collectWatches.state, "running")).all();
+  }
+  async updateRunningCollectWatch(
+    backendScanId: string, patch: Partial<Omit<CollectWatch, "backendScanId" | "state">>,
+  ): Promise<boolean> {
+    if (definedKeys(patch).length === 0) return (await this.getCollectWatch(backendScanId))?.state === "running";
+    return db.update(schema.collectWatches).set(patch)
+      .where(and(eq(schema.collectWatches.backendScanId, backendScanId), eq(schema.collectWatches.state, "running")))
+      .run().changes === 1;
+  }
+  async endCollectWatch(backendScanId: string, end: CollectWatchEnd): Promise<boolean> {
+    // The claim: the UPDATE that moves the watch off `running` takes the write
+    // lock; a second dashboard on this file finds it ended and files nothing.
+    return db.update(schema.collectWatches).set(end)
+      .where(and(eq(schema.collectWatches.backendScanId, backendScanId), eq(schema.collectWatches.state, "running")))
+      .run().changes === 1;
   }
 
   async updateFinding(id: string, patch: Partial<Finding>): Promise<Finding | undefined> {

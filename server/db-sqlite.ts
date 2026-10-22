@@ -245,7 +245,10 @@ function createSchema(handle: DatabaseType): void {
       created_at INTEGER NOT NULL,
       last_test_date INTEGER,
       notes TEXT,
-      is_sample INTEGER NOT NULL DEFAULT 0
+      is_sample INTEGER NOT NULL DEFAULT 0,
+      backend_engagement_id INTEGER,
+      testing_window_start INTEGER,
+      testing_window_end INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS sites (
@@ -379,6 +382,25 @@ function createSchema(handle: DatabaseType): void {
     );
     CREATE INDEX IF NOT EXISTS idx_retest_watches_state ON retest_watches(state);
     CREATE INDEX IF NOT EXISTS idx_tests_site_id ON tests(site_id);
+
+    -- A scan started through Athena-Backend whose run has ended, watched until
+    -- the backend has collected its record. On disk, so a restart resumes it
+    -- (server/collect-watch.ts).
+    CREATE TABLE IF NOT EXISTS collect_watches (
+      backend_scan_id TEXT PRIMARY KEY,
+      test_id TEXT NOT NULL,
+      engine_run_id TEXT,
+      started_at INTEGER NOT NULL,
+      deadline_at INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      last_answer TEXT,
+      last_read_at INTEGER,
+      last_read_error TEXT,
+      ended_at INTEGER,
+      record TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_collect_watches_state ON collect_watches(state);
+    CREATE INDEX IF NOT EXISTS idx_collect_watches_test ON collect_watches(test_id);
 
     CREATE TABLE IF NOT EXISTS documents (
       id TEXT PRIMARY KEY,
@@ -552,6 +574,10 @@ function addMissingColumns(handle: DatabaseType): void {
     ["finding_checks", "requested_at", "INTEGER"],
     ["retest_watches", "stop_unread_at", "INTEGER"],
     ["users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"],
+    // The Option 1 hybrid: the client's backend engagement and testing window.
+    ["clients", "backend_engagement_id", "INTEGER"],
+    ["clients", "testing_window_start", "INTEGER"],
+    ["clients", "testing_window_end", "INTEGER"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

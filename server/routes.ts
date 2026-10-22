@@ -23,7 +23,7 @@ import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
-import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+import { BACKEND_RECORD_KEYS, engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
@@ -93,7 +93,10 @@ function completionStamp(
  * "not real", or dress invented ones up as measured. It is stripped from
  * every schema the API parses; the seeder is the only writer.
  */
-const createClientSchema = insertClientSchema.omit({ isSample: true });
+// The backend engagement id is the scan route's to write (shared/schema.ts
+// clients.backendEngagementId): a caller may not supply or change it. The
+// testing window stays a person's to set and renew.
+const createClientSchema = insertClientSchema.omit({ isSample: true, backendEngagementId: true });
 const createSiteSchema = insertSiteSchema.omit({ isSample: true });
 
 // What a scan needs before the engine is asked anything: a target, and the
@@ -1154,10 +1157,14 @@ const HUMAN_FINDINGS_KEY = "details";
  * started: a run id, a target and results are what makes a row an engine scan
  * to every other part of the app (shared/engine-record.ts), and `coverage` --
  * the engine's manifest of what the run checked and what it did not
- * (shared/scan-coverage.ts) -- is the run's as much as its results are. A
- * person may supply none of them.
+ * (shared/scan-coverage.ts) -- is the run's as much as its results are. With
+ * them, the keys of the Athena-Backend record a hybrid scan carries
+ * (shared/engine-record.ts BACKEND_RECORD_KEYS): the backend scan and
+ * engagement ids, the collected record, a stop's mirror reading, and the mark
+ * that only the backend's Stop reaches the run. A person may supply none of
+ * them.
  */
-const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage"] as const;
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS] as const;
 
 /**
  * Refuse a person's test whose findings carry a run's keys, on create as on
