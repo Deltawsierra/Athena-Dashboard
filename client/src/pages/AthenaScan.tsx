@@ -44,6 +44,7 @@ import {
   ENGINE_ERROR_LABEL, FINDINGS_BEFORE_END, NOTHING_HERE_IS_A_RESULT, NOT_ASSESSED, NOT_ASSESSED_BASIS, endedState,
   notFinished,
 } from "@/lib/scanSummaryCopy";
+import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
   SCAN_STAGES,
@@ -568,6 +569,9 @@ export default function AthenaScan() {
               </div>
               <h2 className="mt-3 break-all text-xl font-semibold text-foreground">{target || "—"}</h2>
               <p className="mt-1 text-[13px] text-muted-foreground">{clientName}</p>
+              {/* Where this scan is recorded (lib/sourceLabels.ts): here, from the
+                  engine; no backend verdict, claim or report applies to it. */}
+              <p className="mt-2 text-[11px] text-muted-foreground" data-testid="text-scan-source">{DASHBOARD_DIRECT}.</p>
               {scan.detail && <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{scan.detail}</p>}
               <div className="mt-4 border-t border-border/40 pt-4">
                 <p className="athena-label">Started</p>

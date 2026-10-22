@@ -20,7 +20,20 @@ export const DASHBOARD_DIRECT = "Recorded by this dashboard directly from the en
 /** The coverage panel's one source line: where this scan's manifest was read from. Swap here, not in the layout. */
 export const COVERAGE_SOURCE = `Read directly from the engine for this run. ${DASHBOARD_DIRECT}.`;
 
+/** What the Assurance page reads: the backend's record of the assessments the backend launched. */
+export const BACKEND_RECORD = "From the Athena-Backend record";
+
+/** Beneath the Overview's headline tiles: which record each of the two counting tiles counts. */
+export const OVERVIEW_SOURCES =
+  `Open Findings — ${DASHBOARD_DIRECT}. Assurance Decisions — ${BACKEND_RECORD}. ` +
+  "The two tiles count separate populations and are not reconciled here.";
+
+/** Beneath the Assurance page's hero, under BACKEND_RECORD. */
+export const ASSURANCE_SCOPE =
+  "This page describes assessments launched through Athena-Backend. A scan started from this dashboard's " +
+  "Athena or Penetration Testing page is not in that record; it is recorded by this dashboard directly from the engine.";
+
 /** Every label above, for the lint test (tests/scan-summary-copy-lints-clean.test.ts). */
 export function allSourceLabelStrings(): string[] {
-  return [DASHBOARD_DIRECT, COVERAGE_SOURCE];
+  return [DASHBOARD_DIRECT, COVERAGE_SOURCE, BACKEND_RECORD, OVERVIEW_SOURCES, ASSURANCE_SCOPE];
 }

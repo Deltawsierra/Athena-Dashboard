@@ -74,6 +74,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { isKeyBug, saysOutcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { ASSURANCE_SCOPE, BACKEND_RECORD } from "@/lib/sourceLabels";
 
 interface AssuranceStatus {
   configured: boolean;
@@ -8396,6 +8397,17 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
         background="astrolabe"
         verbs={["Scan", "Analyze", "Evidence", "Deploy"]}
       />
+
+      {/* Which record this page reads (lib/sourceLabels.ts): the backend's. A
+          scan the dashboard dispatched itself is not in it, and is said so. */}
+      <GlassCard hover={false} glow={false} bodyClassName="p-4">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground" data-testid="text-assurance-source">
+          {BACKEND_RECORD}
+        </p>
+        <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground" data-testid="text-assurance-scope">
+          {ASSURANCE_SCOPE}
+        </p>
+      </GlassCard>
 
       {/* Still checking: never a bare hero with no explanation. */}
       {statusLoading && !statusError && (

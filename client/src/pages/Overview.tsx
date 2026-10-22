@@ -70,6 +70,7 @@ import mythosGlyph from "@assets/mythos/mark-glyph.webp";
 import PageHero from "@/components/mythos/PageHero";
 import { Divider, RingFrame } from "@/components/mythos/Ornament";
 import StatCard from "@/components/mythos/StatCard";
+import { OVERVIEW_SOURCES } from "@/lib/sourceLabels";
 import { Label, SeverityPill, severityFrom, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
@@ -583,6 +584,12 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
           />
         ))}
       </div>
+      {/* Which record each counting tile counts (lib/sourceLabels.ts): scans
+          this dashboard dispatched itself, and the backend's assessments, are
+          two populations, labelled by source and not reconciled here. */}
+      <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground" data-testid="text-overview-sources">
+        {OVERVIEW_SOURCES}
+      </p>
 
       {/* posture / trend / env */}
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)_360px]">
