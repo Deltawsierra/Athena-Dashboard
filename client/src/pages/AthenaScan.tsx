@@ -32,6 +32,7 @@ import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import NoStopPanel from "@/components/NoStopPanel";
 import RunningScans from "@/components/RunningScans";
+import ScanCoverage from "@/components/ScanCoverage";
 import { Divider } from "@/components/mythos/Ornament";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient, scanStartFailureTitle } from "@/lib/queryClient";
@@ -91,6 +92,8 @@ interface ScanView {
   detail?: string;
   /** "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel). */
   stop?: "failsafe";
+  /** The engine's coverage manifest for this run, as recorded (shared/scan-coverage.ts); null when none was. */
+  coverage?: unknown;
   engine: {
     findings?: EngineFinding[];
     /** The engine's `reason` for how the run ended (a stop's), when it sent one. */
@@ -726,6 +729,13 @@ export default function AthenaScan() {
                 View all findings <ChevronRight className="h-3.5 w-3.5" />
               </a>
             )}
+          </GlassCard>
+
+          {/* What this scan checked and what it did not: the engine's own
+              manifest for this run (shared/scan-coverage.ts), written when the
+              run ends, and said to be pending until then. */}
+          <GlassCard hover={false} glow={false} className="mt-5">
+            <ScanCoverage coverage={scan.coverage} running={running} />
           </GlassCard>
         </>
       )}

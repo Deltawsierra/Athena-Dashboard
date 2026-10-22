@@ -26,6 +26,7 @@ import { isEngineInternal } from "@shared/engine-internal";
 import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
+import { coverageOf } from "@shared/scan-coverage";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
@@ -1150,10 +1151,13 @@ const HUMAN_FINDINGS_KEY = "details";
 
 /**
  * The keys of `findings` that only the scan route writes, from the run it
- * started: they are what makes a row an engine scan to every other part of
- * the app.
+ * started: a run id, a target and results are what makes a row an engine scan
+ * to every other part of the app (shared/engine-record.ts), and `coverage` --
+ * the engine's manifest of what the run checked and what it did not
+ * (shared/scan-coverage.ts) -- is the run's as much as its results are. A
+ * person may supply none of them.
  */
-const ENGINE_FINDINGS_KEYS = ["runId", "target", "results"] as const;
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage"] as const;
 
 /**
  * Refuse a person's test whose findings carry a run's keys, on create as on
@@ -3135,7 +3139,13 @@ export function registerRoutes(app: Express): void {
         // The id as a stop can address it (stopIdFrom): the run id, or a
         // non-empty id blank after trimming. The screens read the latter as no
         // run id (runIdFrom); the kill switch still sends it its stop.
-        findings: { runId: started.stopId ?? started.runId, target: data.target, results: started.findings },
+        findings: {
+          runId: started.stopId ?? started.runId, target: data.target, results: started.findings,
+          // The engine's coverage manifest, for a run it finished inline
+          // (shared/scan-coverage.ts): none is recorded for a run still going,
+          // and none is ever made up.
+          ...(started.coverage ? { coverage: started.coverage } : {}),
+        },
         // Results the engine sent that could not be read (null) count as
         // nothing here; the status route answers them as unread, never as none.
         ...(completedInline
@@ -3317,6 +3327,10 @@ export function registerRoutes(app: Express): void {
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
     const runId = runIdOf(test);
+    // The engine's coverage manifest the record carries (shared/scan-coverage.ts
+    // coverageOf): what the run checked and what it did not. null when none was
+    // recorded -- which is not "every check ran", and the screens say so.
+    const carried = coverageOf(recorded.coverage);
     // A test no engine run stands behind -- a person's, or a sample row -- has
     // no findings of a run's to answer, completed or not. Decided by the one
     // rule the edit guard and the Tests screen use (shared/engine-record.ts):
@@ -3324,6 +3338,7 @@ export function registerRoutes(app: Express): void {
     if (!isEngineRecord(test.findings)) {
       return void res.json({
         test, state: test.status, engine: null, detail: "this test has no engine run recorded against it",
+        coverage: null,
       });
     }
     if (test.status === "completed") {
@@ -3339,12 +3354,13 @@ export function registerRoutes(app: Express): void {
         return void res.json({
           test, state: test.status, engine: null,
           detail: "the findings recorded for this scan could not be read",
+          coverage: carried,
         });
       }
       const answered: engine.EngineScan = {
         runId, state: test.status, findings: results, detail: "the findings recorded when the run completed",
       };
-      return void res.json({ test, state: test.status, engine: answered });
+      return void res.json({ test, state: test.status, engine: answered, coverage: carried });
     }
     if (!runId) {
       // An engine scan the engine accepted without a run id, not recorded as
@@ -3352,7 +3368,7 @@ export function registerRoutes(app: Express): void {
       // has no engine run. No Stop can reach it either: every read says so, so
       // the screens show what stops it in place of a Stop.
       return void res.json({
-        test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK,
+        test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK, coverage: carried,
         ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
       });
     }
@@ -3365,7 +3381,7 @@ export function registerRoutes(app: Express): void {
         // The record stands even when the engine has gone. Saying so beats
         // reporting the row's last known status as if it were current.
         return void res.status(200).json({
-          test, state: test.status, engine: null, detail: cause.message,
+          test, state: test.status, engine: null, detail: cause.message, coverage: carried,
         });
       }
       throw cause;
@@ -3387,7 +3403,9 @@ export function registerRoutes(app: Express): void {
     const updated = await storage.updateTest(test.id, {
       status: current.state,
       completedAt: finished ? new Date() : null,
-      findings: { ...recorded, results: current.findings },
+      // The engine's coverage manifest rides with the run's end
+      // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
+      findings: { ...recorded, results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}) },
       ...counts,
     });
 
@@ -3417,9 +3435,10 @@ export function registerRoutes(app: Express): void {
       return void res.json({
         test: updated ?? test, state: current.state, engine: null, filed,
         detail: "the findings the engine sent for this run could not be read",
+        coverage: current.coverage ?? carried,
       });
     }
-    res.json({ test: updated ?? test, state: current.state, engine: current, filed });
+    res.json({ test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried });
   }));
 
   // ==== RETEST ====

@@ -21,6 +21,7 @@ import * as settings from "./settings";
 import * as dnsCache from "./dns-cache";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
+import { coverageOf } from "@shared/scan-coverage";
 import type { LoadedModel } from "@shared/schema";
 
 /**
@@ -119,6 +120,15 @@ export interface EngineScan {
   error?: string | null;
   /** Set by runState: the engine's `done` -- whether it says the run has ended -- when it sent a boolean. */
   done?: boolean;
+  /**
+   * The engine's coverage manifest for the run -- `result.coverage`
+   * (athena-engine engine/core.py run(); shape engine/coverage.py resolve) --
+   * as it sent it, when it sent an object; null when it sent none, or not an
+   * object. What the run checked and what it did not: carried whole into the
+   * record (server/routes.ts) and read on the screens (shared/scan-coverage.ts).
+   * Set by runState, and by startScan for a run the engine finished inline.
+   */
+  coverage?: Record<string, unknown> | null;
   /**
    * The id a stop can address this run by exactly (shared/engine-record.ts
    * stopIdFrom): `runId`, or a non-empty id that is blank after trimming, which
@@ -1170,6 +1180,8 @@ export async function startScan(request: ScanRequest, key?: string): Promise<Eng
     state: (payload.state as string) ?? "running",
     findings: !final ? [] : inline.results !== undefined ? resultsOf(inline.results) : resultsOf(payload.results),
     detail: "the engine accepted the scan",
+    // The manifest comes with the run's end: only a 200 carries one (shared/scan-coverage.ts).
+    coverage: final ? coverageOf(inline.coverage) : null,
     final,
     ...(replayed ? { replayed: true } : {}),
     // A run it may still be running with no id a stop can name: kept as it
@@ -1511,6 +1523,8 @@ export async function runState(runId: string): Promise<EngineScan> {
     state,
     findings: resultsOf(result.results),
     detail: (payload.reason as string) ?? "",
+    // The engine's coverage manifest, from the same answer (shared/scan-coverage.ts).
+    coverage: coverageOf(result.coverage),
     // Read from the one answer this bounded read (jsonWithin) already holds, as
     // retestRun reads a run that failed: no further request, and nothing on any
     // stop path. A run that completed carries no error.
