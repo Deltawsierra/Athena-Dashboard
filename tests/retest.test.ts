@@ -3,7 +3,8 @@ import type { Express } from "express";
 import type { Server } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * Retest: the engine goes back to the target and says whether the finding is
@@ -22,6 +23,7 @@ import { makeApp, signIn } from "./helpers";
  * precisely because it used to derive a scope from the twin's recorded target,
  * which is a check whose only possible answer is yes.
  */
+let hybrid: HybridBackendStandIn | null = null;
 describe("retesting a finding", () => {
   let app: Express;
   let agent: Awaited<ReturnType<typeof signIn>>;
@@ -60,12 +62,18 @@ describe("retesting a finding", () => {
     const port = (server.address() as AddressInfo).port;
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
   });
 
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((r) => server.close(() => r()));
@@ -83,7 +91,7 @@ describe("retesting a finding", () => {
     }
     scanReply = { run_id: "run-1", state: "completed", result: { results: [] } };
     const started = await agent.post("/api/scans")
-      .send({ clientId: client.body.id, siteId, target: "https://retested.example" });
+      .send({ consent: true, clientId: client.body.id, siteId, target: "https://retested.example" });
     return { clientId: client.body.id as string, siteId, testId: started.body.test.id as string };
   }
 

@@ -211,7 +211,7 @@ describe("a launch", () => {
   it("goes as the person with consent, wait_seconds 0 and the press key, and a 202 is pending, never done", async () => {
     const answer = await launch();
     expect(answer).toEqual({
-      answer: "pending", scanId: SCAN, engineRunId: "run-1", detail: "the engine named the run",
+      answer: "pending", scanId: SCAN, engineRunId: "run-1", stopId: "run-1", detail: "the engine named the run",
       statusUrl: `/api/pentest/scans/${SCAN}/`, collectUrl: `/api/pentest/scans/${SCAN}/collect/`, replayed: false,
     });
     const sent = backend.seen.find((one) => one.path === "/api/pentest/scan/")!;

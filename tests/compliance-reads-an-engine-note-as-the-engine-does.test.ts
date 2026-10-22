@@ -14,8 +14,10 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -46,10 +48,16 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -61,7 +69,7 @@ async function mappedAfterScanning(name: string, rows: unknown[]) {
   const host = `${name.toLowerCase()}.example`;
   await agent.post("/api/sites").send({ clientId, name: `${name} shop`, url: `https://${host}` });
   results = rows;
-  const started = await agent.post("/api/scans").send({ clientId, target: `https://${host}/` });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: `https://${host}/` });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   const map = await agent.get(`/api/compliance/${clientId}`);
   expect(map.status, JSON.stringify(map.body)).toBe(200);

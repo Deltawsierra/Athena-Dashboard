@@ -342,7 +342,7 @@ describe("a launch with wait_seconds 0", () => {
     engine.control.refuseLaunch = { status: 409, body: { detail: "the target is a loopback address" } };
     const answer = await launch(admin, { url: "https://acme.example/", consent: true, engagement_id: engagementId, wait_seconds: 0 });
     expect(answer.status).toBe(502);
-    expect(answer.body).toMatchObject({ status: "failed", error: "Scan refused: the target is a loopback address", engine_run_id: null });
+    expect(answer.body).toMatchObject({ status: "failed", error: "Engine error: the target is a loopback address", engine_run_id: null });
     expect((await call("GET", `/api/pentest/scans/${answer.body.scan_id}/`, { token: admin })).body.status).toBe("failed");
   });
 

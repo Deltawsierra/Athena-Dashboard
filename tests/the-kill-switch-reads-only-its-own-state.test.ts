@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * #325(e): the kill switch's own decisions -- whether it is engaged, and the
@@ -19,6 +20,7 @@ import { makeApp, signIn } from "./helpers";
  * and a resume's signature refused while it is engaged
  * (killSwitchRefusesCommand / killSwitchEngagedNow).
  */
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -140,9 +142,12 @@ it("a start caught by another dashboard's press is gated by the narrow state rea
   await new Promise<void>((r) => scanEngine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(scanEngine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   const admin = await signIn(app);
+  await signInToBackend(admin);
   const storage = (await import("../server/storage-unified")).storage;
 
   const clientId = (await admin.post("/api/clients").send({ name: "Elsewhere", company: "Elsewhere", email: "e@e.test" })).body.id;
@@ -163,7 +168,7 @@ it("a start caught by another dashboard's press is gated by the narrow state rea
       : { killSwitchEnabled: true, systemStatus: "shutdown" };
   });
 
-  const started = await admin.post("/api/scans").send({ clientId, target: "https://elsewhere.example/" });
+  const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://elsewhere.example/" });
 
   // Refused as caught by the kill switch (markIfEngagedElsewhere), not as a
   // switch already engaged at the gate.

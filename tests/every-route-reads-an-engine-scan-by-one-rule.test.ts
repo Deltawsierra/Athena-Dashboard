@@ -34,8 +34,10 @@ import type { AddressInfo } from "net";
 import { engineRunIdOf, isEngineRecord, runIdFrom } from "@shared/engine-record";
 import { unfinishedRunOf } from "@/lib/engineRuns";
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const HIGH = { type: "reflected_xss", severity: "high", message: "Reflected input on /search", confidence: 0.65 };
 const NO_RUN = "this test has no engine run recorded against it";
 const NO_RUN_ID_TO_ASK = "the engine accepted this scan without a run id, so the engine cannot be asked about it";
@@ -76,20 +78,26 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "One rule", company: "One rule", email: "o@o.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://one.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
 });
 
 async function startScan() {
-  const started = await agent.post("/api/scans").send({ clientId, target: "https://one.example/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://one.example/" });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   return started.body as { test: { id: string }; runId: string | null };
 }
@@ -196,7 +204,7 @@ describe("a running scan the engine accepted without a run id", () => {
     active = [{ target: "https://one.example/", state: "running" }];
     try {
       expect((await agent.patch("/api/ai-control").send({ maxConcurrentTests: 1 })).status).toBe(200);
-      const refused = await agent.post("/api/scans").send({ clientId, target: "https://one.example/" });
+      const refused = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://one.example/" });
       expect(refused.status, JSON.stringify(refused.body)).toBe(409);
       expect(refused.body).toMatchObject({ reason: "concurrency_limit", running: 1, counted: "engine", limit: 1 });
     } finally {

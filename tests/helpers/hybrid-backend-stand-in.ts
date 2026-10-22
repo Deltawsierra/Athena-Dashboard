@@ -110,7 +110,8 @@ export interface HybridScan {
   verdict: string | null;
   created_at: string;
   collected_at: string | null;
-  engine_run_id: string | null;
+  /** As the engine named it (text, a number, or nothing): the backend records it as sent; the dashboard reads it by its one rule. */
+  engine_run_id: string | number | null;
   engine_response: Record<string, unknown> | null;
   error_message: string | null;
   /** Never served. */
@@ -206,11 +207,23 @@ function hostOf(url: unknown): string {
   }
 }
 
-/** A run id as the dashboard reads one (shared/engine-record.ts runIdFrom): text as sent, a whole number as its digits. */
-function runIdOf(value: unknown): string | null {
-  if (typeof value === "string" && value.trim() !== "") return value;
-  if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+/** The run id as the engine named it: text or a whole number as sent (the backend records it as it is), else none. */
+function runIdOf(value: unknown): string | number | null {
+  if (typeof value === "string" && value !== "") return value;
+  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   return null;
+}
+
+/** The run id as one path segment of the engine's routes, for the stand-in's own reads of the run. */
+function runSegment(value: string | number): string {
+  return encodeURIComponent(String(value));
+}
+
+/** Whether a run id the engine named can be read back as exactly one path segment (shared/engine-record.ts stopIdFrom's rule). */
+function addressable(value: string | number | null): boolean {
+  if (value === null) return false;
+  const text = String(value);
+  return text !== "" && text !== "." && text !== ".." && !text.includes("/") && !text.includes("\\");
 }
 
 export async function hybridBackendStandIn(opts: HybridStandInOptions) {
@@ -247,6 +260,8 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     /** The engine is treated as unreachable by collect (503) while true. */
     engineUnreachable: false,
     stopAbortsEngine: opts.stopAbortsEngine === true,
+    /** A launch's answer is sent this many ms after the launch is done: the row exists, the run is named, the answer is late. */
+    answerDelayMs: 0,
   };
   const heldLaunches: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
@@ -337,7 +352,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
   /** Read the run once and record its end if it has one. What the collect route answers. */
   async function collectOnce(scan: HybridScan): Promise<{ status: number; body: unknown }> {
     if (controls.engineUnreachable) return { status: 503, body: { detail: "the engine could not be reached, so the record was left as it was: still pending" } };
-    const read = await engine("GET", `/api/scans/${encodeURIComponent(scan.engine_run_id!)}`);
+    const read = await engine("GET", `/api/scans/${runSegment(scan.engine_run_id!)}`);
     if (!read.ok) return { status: 503, body: { detail: `${read.detail}; the record was left as it was: still pending` } };
     if (read.status === 404) {
       scan.status = "failed";
@@ -395,19 +410,43 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       return { status: 502, body: { scan_id: scan.uuid, status: "failed", error, engine_run_id: scan.engine_run_id } };
     };
     if (!sent.ok) {
-      scan.status = "unknown";
-      scan.error_message = sent.detail;
-      return { status: 202, body: { scan_id: scan.uuid, status: "unknown", detail: `the launch's answer was lost: ${sent.detail}`, reconcile: `/api/pentest/scans/${scan.uuid}/reconcile/` } };
+      // The engine could not be reached, or its answer was not read: the backend
+      // records the scan failed in its own words (views.py: EngineError ->
+      // mark_failed("Engine error: ...")), naming no run.
+      return failed(`Engine error: ${sent.detail}`);
     }
     const payload = sent.body ?? {};
     scan.engine_run_id = runIdOf(payload.run_id);
-    if (sent.status === 200) {
+    // A 200 is the run's end only when its `state` says so: completed is the
+    // finished run; aborted or failed is a run that ended short of completed
+    // inside the launch, recorded failed (the backend's existing behaviour); a
+    // 200 that names a run still going is read as the engine's 202 is -- as
+    // the dashboard's own reader always read it.
+    if (sent.status === 200 && payload.state === "completed") {
       const result = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result) ? (payload.result as Record<string, unknown>) : payload;
       complete(scan, result);
       return { status: 200, body: { scan_id: scan.uuid, result } };
     }
-    if (sent.status === 202) {
-      if (scan.engine_run_id === null) return failed("Scan failed: the engine accepted the launch without naming a run");
+    if (sent.status === 200 && (payload.state === "aborted" || payload.state === "failed")) {
+      const said = payload.state === "aborted"
+        ? `Scan aborted: Stopped on the engine: ${typeof payload.reason === "string" ? payload.reason : "stopped"}`
+        : `Scan failed: ${typeof payload.error === "string" ? payload.error : "failed on the engine"}`;
+      return failed(said);
+    }
+    if (sent.status === 202 || sent.status === 200) {
+      if (!addressable(scan.engine_run_id)) {
+        // The engine took the launch and named no run -- or one no route can
+        // address as one segment: the backend's row is pending, recorded with
+        // what the engine said, and nothing is read for it. Its 202 says so.
+        return {
+          status: 202,
+          body: {
+            scan_id: scan.uuid, status: "pending", engine_run_id: scan.engine_run_id,
+            detail: "the engine accepted the launch without naming a run this backend can read; nothing is read or collected for it",
+            status_url: `/api/pentest/scans/${scan.uuid}/`, collect_url: `/api/pentest/scans/${scan.uuid}/collect/`,
+          },
+        };
+      }
       // wait_seconds: 0 is exactly one bounded read; a longer wait reads until the run ends or the wait is up.
       const deadline = Date.now() + (waitSeconds ?? collectSeconds) * 1000;
       for (;;) {
@@ -435,9 +474,12 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
         },
       };
     }
+    // Any other answer (a 4xx refusal, a 5xx, a 429): an EngineError at the
+    // backend, recorded failed with the engine's words -- and with the run the
+    // engine named, kept "whatever else went wrong" (views.py run_pentest_scan).
     const said = sent.body && typeof sent.body.detail === "string" ? sent.body.detail
       : sent.body && typeof sent.body.error === "string" ? sent.body.error : `the engine answered ${sent.status}`;
-    return failed(`Scan refused: ${said}`);
+    return failed(`Engine error: ${said}`);
   }
 
   const server = http.createServer((req, res) => {
@@ -464,13 +506,21 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
           bearer, serviceToken: presented, idempotencyKey: header("idempotency-key") ?? null, status: 0, replayed: false,
         };
         // Recorded on arrival (status 0 until answered), so a test can wait for a
-        // request the stand-in is holding; the entry is filled in as it is answered.
+        // request the stand-in is holding; the entry is filled in as it is answered,
+        // and the waiters are asked again then, so a wait for an answer's status is met.
+        const notify = () => {
+          const ready = waiters.filter((w) => w.match(entry));
+          waiters = waiters.filter((w) => !w.match(entry));
+          for (const w of ready) w.resolve(entry);
+        };
         seen.push(entry);
-        const ready = waiters.filter((w) => w.match(entry));
-        waiters = waiters.filter((w) => !w.match(entry));
-        for (const w of ready) w.resolve(entry);
-        const answer = (status: number, payload: unknown, headers: Record<string, string> = {}) => {
+        notify();
+        const answeredWith = (status: number) => {
           entry.status = status;
+          notify();
+        };
+        const answer = (status: number, payload: unknown, headers: Record<string, string> = {}) => {
+          answeredWith(status);
           res.writeHead(status, { "Content-Type": "application/json", ...headers });
           res.end(payload === undefined ? "" : JSON.stringify(payload));
         };
@@ -488,7 +538,13 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             });
             const text = await upstream.text();
             entry.status = upstream.status;
-            res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json" });
+            // Relayed with the headers a caller reads: the key layer's replay mark and a refusal's Retry-After.
+            const relayed: Record<string, string> = { "Content-Type": upstream.headers.get("content-type") ?? "application/json" };
+            for (const name of ["idempotent-replayed", "retry-after"]) {
+              const value = upstream.headers.get(name);
+              if (value !== null) relayed[name] = value;
+            }
+            res.writeHead(upstream.status, relayed);
             res.end(text);
             return { status: upstream.status, json: parse(text) };
           } catch (cause) {
@@ -680,10 +736,18 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             return record(409, { error: `This engine is not the deployment that was approved: ${controls.preflightRefusal}`, assurance: { verdict: "refused" } });
           }
           if (controls.holdLaunches) {
+            // Held past the dashboard's deadline, the launch still goes ahead once released, as the backend's does
+            // for a caller that has gone: the engine is asked, the row records, and the key's answer is kept for a replay.
             await new Promise<void>((release) => { heldLaunches.push(release); held.push(res); });
-            if (res.destroyed) return;
           }
           const answered = await launch(who, body, engagement);
+          if (controls.answerDelayMs > 0) await new Promise((r) => setTimeout(r, controls.answerDelayMs));
+          if (res.destroyed) {
+            // The dashboard gave up waiting: the answer is recorded for a replay all the same, and noted as answered.
+            if (keyedAs !== null) keyed.set(keyedAs, { request: raw, answer: { status: answered.status, body: answered.body } });
+            answeredWith(answered.status);
+            return;
+          }
           return record(answered.status, answered.body);
         }
 
@@ -705,7 +769,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             const at = new Date().toISOString();
             scan.stop_requested_at = at;
             if (controls.stopAbortsEngine && scan.engine_run_id !== null) {
-              const sent = await engine("POST", `/api/scans/${encodeURIComponent(scan.engine_run_id)}/abort`);
+              const sent = await engine("POST", `/api/scans/${runSegment(scan.engine_run_id)}/abort`);
               scan.stop_delivered_at = sent.ok ? at : null;
               scan.stop_detail = sent.ok ? `the engine answered ${sent.status}` : `owed: ${sent.detail}`;
             } else if (scan.engine_run_id !== null) {
@@ -722,7 +786,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             if (scan.status !== "completed") {
               return answer(409, { error: `This scan is ${scan.status}, so there is no report to render.`, detail: scan.error_message });
             }
-            entry.status = 200;
+            answeredWith(200);
             res.writeHead(200, { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="pentest_${scan.uuid}.pdf"` });
             res.end(`%PDF-1.4 stand-in report for ${scan.uuid}`);
             return;

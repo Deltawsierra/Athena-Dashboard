@@ -6,8 +6,10 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+let hybrid: HybridBackendStandIn | null = null;
 const madeDirs: string[] = [];
 function tempDir(prefix: string): string {
   const dir = fs.mkdtempSync(prefix);
@@ -66,8 +68,13 @@ beforeAll(async () => {
   });
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
 });
-afterAll(() => {
+afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   process.env.ATHENA_STORAGE = "memory";
@@ -200,7 +207,7 @@ describe("no start passes a pressed kill switch", () => {
       expect(await arrived("POST /api/scans/mine-run-r5/abort", 3_000)).toBeDefined();
       await sleep(100);
       const began = Date.now();
-      const start = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+      const start = await agent.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
       expect(Date.now() - began).toBeLessThan(250);
       expect(start.status).toBe(503);
       expect(start.body.message).toMatch(/kill switch is engaged/i);
@@ -218,7 +225,7 @@ describe("no start passes a pressed kill switch", () => {
       expect(calls.some((c) => c.line === "POST /api/scan")).toBe(false);
       // Switched off, and stored: a start goes again.
       expect((await agent.patch("/api/ai-control").send({ killSwitchEnabled: false, systemStatus: "active" })).status).toBe(200);
-      const again = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+      const again = await agent.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
       expect(again.status).toBe(201);
       expect(calls.some((c) => c.line === "POST /api/scan")).toBe(true);
     } finally {

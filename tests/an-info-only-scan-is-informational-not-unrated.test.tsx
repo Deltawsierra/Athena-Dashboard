@@ -3,7 +3,8 @@ import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from "vitest
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup, within } from "@testing-library/react";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import Deployments from "@/pages/Deployments";
 import { summarizeFindings } from "../server/findings-summary";
 
@@ -21,6 +22,7 @@ import { summarizeFindings } from "../server/findings-summary";
  * finishes the run inline. Adapted from the round-5 reproducer
  * r5-j-info-only-scan-read-as-not-rated.
  */
+let hybrid: HybridBackendStandIn | null = null;
 let server: import("http").Server;
 let written: Record<string, unknown> | undefined;
 
@@ -44,15 +46,21 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(server.address() as import("net").AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   const clientId = (await agent.post("/api/clients").send({ name: "Acme App", company: "Acme", email: "a@a.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "App", url: "https://a.example" });
-  const started = await agent.post("/api/scans").send({ clientId, target: "https://a.example/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://a.example/" });
   expect(started.status).toBe(201);
   written = ((await agent.get("/api/tests")).body as Array<Record<string, unknown>>).find((one) => one.clientId === clientId);
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((resolve) => server.close(() => resolve()));

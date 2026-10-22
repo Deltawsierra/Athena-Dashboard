@@ -3,7 +3,8 @@ import type { Express } from "express";
 import type { Server } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * SAFETY: the Tests screen's Edit dialog (routed at /tests) pre-filled the
@@ -24,6 +25,7 @@ import { makeApp, signIn } from "./helpers";
  * decided -- status, severity, counts, the engagement -- and refuses to give a
  * person's test an engine run it never had.
  */
+let hybrid: HybridBackendStandIn | null = null;
 describe("editing an engine test on the Tests screen", () => {
   let app: Express;
   let admin: Awaited<ReturnType<typeof signIn>>;
@@ -50,11 +52,17 @@ describe("editing an engine test on the Tests screen", () => {
     await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     admin = await signIn(app);
+    await signInToBackend(admin);
   });
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL; delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((r) => engine.close(() => r()));
   });
@@ -76,7 +84,7 @@ describe("editing an engine test on the Tests screen", () => {
   it("a running scan keeps its Stop after its summary is edited", async () => {
     state = "running";
     const clientId = await engagement("Running");
-    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     const edited = await admin.patch(`/api/tests/${started.body.test.id}`).send(editBody(started.body.test, "typo fixed"));
     expect(edited.status).toBe(200);
     expect(edited.body.summary).toBe("typo fixed");
@@ -90,23 +98,25 @@ describe("editing an engine test on the Tests screen", () => {
   it("a person's notes are kept beside the run, not over it", async () => {
     state = "running";
     const clientId = await engagement("Notes");
-    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     const id = started.body.test.id;
     // What the Tests screen now sends for an engine test.
     const noted = await admin.patch(`/api/tests/${id}`).send({ summary: "s", testType: "vulnerability-scan", findings: { details: "seen by Ann" } });
     expect(noted.status).toBe(200);
-    expect(noted.body.findings).toEqual({ runId: started.body.runId, target: "https://acme.example/", results: [], details: "seen by Ann" });
+    // The run's keys stay as recorded -- the backend record's among them (shared/engine-record.ts BACKEND_RECORD_KEYS) -- beside the notes.
+    expect(noted.body.findings).toMatchObject({ runId: started.body.runId, target: "https://acme.example/", results: [], details: "seen by Ann" });
     expect(noted.body.testType).toBe("vulnerability-scan");
     // Clearing the notes clears only the notes.
     const cleared = await admin.patch(`/api/tests/${id}`).send({ findings: null });
     expect(cleared.status).toBe(200);
-    expect(cleared.body.findings).toEqual({ runId: started.body.runId, target: "https://acme.example/", results: [] });
+    expect(cleared.body.findings).toMatchObject({ runId: started.body.runId, target: "https://acme.example/", results: [] });
+    expect(cleared.body.findings).not.toHaveProperty("details");
   });
 
   it("what the engine decided may be sent back unchanged: a whole record round-trips", async () => {
     state = "running";
     const clientId = await engagement("RoundTrip");
-    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     const id = started.body.test.id;
     const held = (await admin.get(`/api/tests/${id}`)).body;
     // Everything as read -- dates as the JSON strings they arrive as, the run's
@@ -134,7 +144,7 @@ describe("editing an engine test on the Tests screen", () => {
     state = "running";
     const clientId = await engagement("Owned");
     const other = await engagement("Other");
-    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     const id = started.body.test.id;
     for (const [body, named] of [
       [{ status: "completed" }, "status"],
@@ -172,7 +182,7 @@ describe("editing an engine test on the Tests screen", () => {
   it("a completed scan that filed everything it found is not flagged after its summary is edited", async () => {
     state = "running";
     const clientId = await engagement("Completed");
-    const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     state = "completed";
     const done = await admin.get(`/api/scans/${started.body.test.id}`); // files the findings
     expect(done.body.test.criticalCount).toBe(2);

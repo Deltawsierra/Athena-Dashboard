@@ -8,6 +8,7 @@ import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { recordLegacyScan } from "./helpers";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -152,14 +153,18 @@ async function aRetestAnswered202(first: Instance, fx: Fixture) {
   n += 1;
   const client = await first.agent.post("/api/clients").send({ name: `Restart ${n}`, company: "R", email: `r${n}@r.test` });
   const site = await first.agent.post("/api/sites").send({ clientId: client.body.id, name: "Main", url: "https://offline.invalid" });
-  const started = await first.agent.post("/api/scans")
-    .send({ clientId: client.body.id, siteId: site.body.id, target: fx.exchanges[0].body.target });
-  expect(started.status).toBe(201);
-  const twinId = fx.exchanges[1].body.decisions[0].id as number;
-  const res = await first.agent.post(`/api/tests/${started.body.test.id}/retest`).send({ twinId });
-  expect(res.status).toBe(202);
+  // The fixture's setup scan, recorded and filed as this dashboard's own (tests/helpers.ts recordLegacyScan): the scan that
+  // found the finding the retest is about. A scan started through Athena-Backend is recorded there, never filed here.
   const me = await first.agent.get("/api/auth/check");
-  return { clientId: client.body.id as string, testId: started.body.test.id as string, runId: res.body.engineRunId as string,
+  const setup = fx.exchanges[0].body as { run_id: string; target: string; result: { results: unknown[] } };
+  const { test } = await recordLegacyScan(first.storage, {
+    clientId: client.body.id, siteId: site.body.id, target: setup.target, runId: setup.run_id, results: setup.result.results,
+    executedBy: me.body.user?.id as string,
+  });
+  const twinId = fx.exchanges[1].body.decisions[0].id as number;
+  const res = await first.agent.post(`/api/tests/${test.id}/retest`).send({ twinId });
+  expect(res.status).toBe(202);
+  return { clientId: client.body.id as string, testId: test.id, runId: res.body.engineRunId as string,
     requester: me.body.user?.id as string };
 }
 

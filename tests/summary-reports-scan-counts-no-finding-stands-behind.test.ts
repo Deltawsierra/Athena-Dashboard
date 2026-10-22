@@ -3,7 +3,8 @@ import type { Express } from "express";
 import type { Server } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import type { IStorage } from "../server/storage";
 import { summarizeFindings } from "../server/findings-summary";
 
@@ -27,6 +28,7 @@ import { summarizeFindings } from "../server/findings-summary";
  * the old payload (untracked counts invisible).
  */
 
+let hybrid: HybridBackendStandIn | null = null;
 describe("a completed scan's counts that no finding stands behind are reported", () => {
   let app: Express;
   let storage: IStorage;
@@ -263,6 +265,13 @@ describe("what a test filed at critical and high, on the SQLite backend", () => 
  * results as findings, the summary tracks them there and reports nothing
  * untracked.
  */
+/** What the engine returned inline: two findings and one of its own notes. */
+const INLINE_RESULTS = [
+  { type: "sql_injection", severity: "critical", evidence: { endpoint: "https://inline.example/login" } },
+  { type: "xss", severity: "high", evidence: { endpoint: "https://inline.example/search" } },
+  { type: "error", internal: true, details: "noise" },
+];
+
 describe("an engine scan that finished inline", () => {
   let app: Express;
   let agent: Awaited<ReturnType<typeof signIn>>;
@@ -275,25 +284,24 @@ describe("an engine scan that finished inline", () => {
       req.on("end", () => {
         res.writeHead(200, { "Content-Type": "application/json" });
         if (req.url === "/health") return res.end(JSON.stringify({ status: "ok" }));
-        res.end(JSON.stringify({
-          run_id: "run-inline", state: "completed",
-          result: { results: [
-            { type: "sql_injection", severity: "critical", evidence: { endpoint: "https://inline.example/login" } },
-            { type: "xss", severity: "high", evidence: { endpoint: "https://inline.example/search" } },
-            { type: "error", internal: true, details: "noise" },
-          ] },
-        }));
+        res.end(JSON.stringify({ run_id: "run-inline", state: "completed", result: { results: INLINE_RESULTS } }));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
   });
 
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -302,12 +310,16 @@ describe("an engine scan that finished inline", () => {
   it("records what came back on the test, and the summary tracks it as findings", async () => {
     const client = (await agent.post("/api/clients").send({ name: "Inline", company: "Inline", email: "i@example.test" })).body;
     const site = (await agent.post("/api/sites").send({ clientId: client.id, name: "Main", url: "https://inline.example" })).body;
-    const started = await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://inline.example" });
-    expect(started.status).toBe(201);
-    expect(started.body.test).toMatchObject({
+    // Recorded and filed as this dashboard's own scan (tests/helpers.ts recordLegacyScan): what the engine returned
+    // inline, counted as the scan route counts it. A scan started through Athena-Backend is recorded there, never filed here.
+    const storage = (await import("../server/storage-unified")).storage;
+    const { test } = await recordLegacyScan(storage, {
+      clientId: client.id, siteId: site.id, target: "https://inline.example", runId: "run-inline", results: INLINE_RESULTS,
+    });
+    expect(test).toMatchObject({
       status: "completed", vulnerabilitiesFound: 2, criticalCount: 1, highCount: 1, severity: "critical",
     });
-    expect(started.body.test.completedAt).toBeTruthy();
+    expect(test.completedAt).toBeTruthy();
 
     const summary = (await agent.get("/api/findings/summary")).body;
     const mine = summary.byClient.find((one: { clientId: string }) => one.clientId === client.id);

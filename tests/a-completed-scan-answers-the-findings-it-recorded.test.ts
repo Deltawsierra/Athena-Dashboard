@@ -4,7 +4,8 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * A scan recorded as completed answers the findings it recorded, as the engine
@@ -22,6 +23,7 @@ import { makeApp, signIn } from "./helpers";
  */
 
 /** mythos-core `evidence.BASIS`, as the engine sends it on every finding it scores. */
+let hybrid: HybridBackendStandIn | null = null;
 const BASIS =
   "ordinal: derived from the number of independent signals in the evidence. " +
   "Not a probability that this finding is real.";
@@ -66,20 +68,26 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "Recorded", company: "Recorded", email: "r@r.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://recorded.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
 });
 
 async function start(): Promise<{ id: string; runId: string }> {
-  const started = await agent.post("/api/scans").send({ clientId, target: "https://recorded.example/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://recorded.example/" });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   return { id: started.body.test.id, runId: started.body.runId };
 }

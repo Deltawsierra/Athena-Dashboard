@@ -42,7 +42,7 @@ import {
   call, body, ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnanswered, ControlPlaneUnavailable,
 } from "./control-plane";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf } from "@shared/idempotency";
-import { runIdFrom } from "@shared/engine-record";
+import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import { coverageOf } from "@shared/scan-coverage";
 
 /** How long a launch may take, headers and body. Tests shorten it. Not a stop path. */
@@ -322,10 +322,14 @@ export interface LaunchInput {
 }
 
 export type LaunchAnswer =
-  /** 202: the backend created the scan and the engine named its run; the run goes on, and this is never "done". */
-  | { answer: "pending"; scanId: string; engineRunId: string | null; detail: string; statusUrl: string | null; collectUrl: string | null; replayed: boolean }
+  /**
+   * 202: the backend created the scan and the engine named its run; the run goes
+   * on, and this is never "done". `engineRunId` is the run as the screens read
+   * it (shared/engine-record.ts runIdFrom), `stopId` as a stop addresses it.
+   */
+  | { answer: "pending"; scanId: string; engineRunId: string | null; stopId: string | null; detail: string; statusUrl: string | null; collectUrl: string | null; replayed: boolean }
   /** 200: the engine finished the run inside the backend's one bounded read; `result` is the engine's response, as the backend stored it. */
-  | { answer: "completed"; scanId: string; result: Record<string, unknown> | null; engineRunId: string | null; replayed: boolean }
+  | { answer: "completed"; scanId: string; result: Record<string, unknown>; engineRunId: string | null; stopId: string | null; replayed: boolean }
   /** 502: the engine refused the launch, or the run ended short of completed before the backend's read; the backend's record is `failed`. */
   | { answer: "failed"; scanId: string | null; error: string; engineRunId: string | null; replayed: boolean }
   /** 4xx: the backend refused the launch -- consent, bounds, the engagement, preflight -- in its own words. */
@@ -371,6 +375,7 @@ export async function launchScan(input: LaunchInput): Promise<LaunchAnswer> {
       answer: "pending",
       scanId,
       engineRunId: runIdFrom(object.engine_run_id),
+      stopId: stopIdFrom(object.engine_run_id),
       detail: textOf(object.detail) ?? "",
       statusUrl: textOf(object.status_url),
       collectUrl: textOf(object.collect_url),
@@ -391,6 +396,7 @@ export async function launchScan(input: LaunchInput): Promise<LaunchAnswer> {
       scanId,
       result,
       engineRunId: runIdFrom(object.engine_run_id) ?? runIdFrom(result.run_id),
+      stopId: stopIdFrom(object.engine_run_id) ?? stopIdFrom(result.run_id),
       replayed,
     };
   }
@@ -398,7 +404,8 @@ export async function launchScan(input: LaunchInput): Promise<LaunchAnswer> {
     return {
       answer: "failed",
       scanId: textOf(object.scan_id),
-      error: textOf(object.error) ?? refusalWords(object, text),
+      // The backend's words, quoted by their first 500 characters as every error body is: a run's error can be as long as its trace.
+      error: (textOf(object.error) ?? refusalWords(object, text)).slice(0, 500),
       engineRunId: runIdFrom(object.engine_run_id),
       replayed,
     };

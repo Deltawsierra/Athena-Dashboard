@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * R5-C. The round-4 test "when the audit log cannot be written, the stops
@@ -29,6 +30,7 @@ import { makeApp, signIn } from "./helpers";
  * to, and the writes after a stop are best-effort.
  */
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -101,23 +103,28 @@ beforeAll(async () => {
   cp = stubControlPlane();
   process.env.ATHENA_ENGINE_URL = await listen(engine.server);
   process.env.ATHENA_ENGINE_KEY = "k";
-  process.env.ATHENA_FAILSAFE_URL = await listen(cp.server);
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY }, upstream: await listen(cp.server) });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   process.env.ATHENA_FAILSAFE_USER = "svc";
   process.env.ATHENA_FAILSAFE_PASSWORD = "svc";
   vi.resetModules();
   admin = await signIn(await makeApp());
+  await signInToBackend(admin);
   clientId = (await admin.post("/api/clients").send({ name: "W", company: "W", email: "w@w.test" })).body.id;
   await admin.post("/api/sites").send({ clientId, name: "W", url: "https://acme.example" });
 });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   for (const k of ["ATHENA_ENGINE_URL", "ATHENA_ENGINE_KEY", "ATHENA_FAILSAFE_URL", "ATHENA_FAILSAFE_USER", "ATHENA_FAILSAFE_PASSWORD"]) delete process.env[k];
   await new Promise<void>((r) => engine.server.close(() => r()));
   await new Promise<void>((r) => cp.server.close(() => r()));
 });
 
 async function runningScan() {
-  const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+  const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
   expect(started.status).toBe(201);
   return { testId: started.body.test.id as string, runId: started.body.runId as string };
 }
@@ -202,7 +209,7 @@ describe("a failed write never holds back or hides a stop", () => {
     vi.spyOn(storage, "createTest").mockRejectedValue(new Error("SQLITE_FULL: database or disk is full"));
     const runId = engine.nextRun();
     engine.calls.length = 0;
-    const start = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const start = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     expect(engine.calls).toContain("POST /api/scan"); // the engine is scanning
     expect(start.status).toBe(500);
     expect(start.body).toMatchObject({ runId, stopped: true });
@@ -219,7 +226,7 @@ describe("a failed write never holds back or hides a stop", () => {
     vi.spyOn(storage, "createTest").mockRejectedValue(new Error("SQLITE_FULL: database or disk is full"));
     const nextRun = engine.nextRun();
     engine.refuse.add(nextRun);
-    const start = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const start = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     engine.refuse.clear();
     expect(start.status).toBe(500);
     expect(start.body).toMatchObject({ runId: nextRun, stopped: false });
@@ -233,7 +240,7 @@ describe("a failed write never holds back or hides a stop", () => {
   it("once the row is written, a log write that failed does not answer 'the start failed'", async () => {
     const { storage } = await import("../server/storage-unified");
     vi.spyOn(storage, "createActivityLog").mockRejectedValue(new Error("SQLITE_FULL: database or disk is full"));
-    const start = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+    const start = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
     expect(start.status).toBe(201);
     expect(typeof start.body.test.id).toBe("string");
     vi.restoreAllMocks();

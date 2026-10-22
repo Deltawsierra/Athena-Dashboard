@@ -25,10 +25,12 @@ import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /** mythos-core `evidence.BASIS`, as the engine sends it on every finding it scores. */
+let hybrid: HybridBackendStandIn | null = null;
 const BASIS =
   "ordinal: derived from the number of independent signals in the evidence. " +
   "Not a probability that this finding is real.";
@@ -79,9 +81,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   agent = await signIn(app);
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -97,6 +102,9 @@ beforeAll(async () => {
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://inline.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -136,6 +144,7 @@ async function startAScan() {
   await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
   fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
   fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://inline.example/" } });
+  fireEvent.click(screen.getByTestId("checkbox-consent"));
   await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByTestId("button-start-scan"));
   // The record's counts, counted from the findings the engine returned.

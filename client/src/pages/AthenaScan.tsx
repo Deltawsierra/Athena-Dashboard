@@ -21,6 +21,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronRight, Play, Plug, ShieldCheck, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -132,6 +133,9 @@ export default function AthenaScan() {
   const [clientId, setClientId] = useState("");
   const [siteId, setSiteId] = useState("");
   const [target, setTarget] = useState("");
+  // Athena-Backend records the owner's consent with the scan and refuses a
+  // start without it; the box is ticked by the person, never pre-ticked.
+  const [consent, setConsent] = useState(false);
   const [testId, setTestId] = useState<string | null>(null);
 
   // Polled, like the scan below. React Query keeps the last answer after a
@@ -188,7 +192,7 @@ export default function AthenaScan() {
   const press = useKeyedPress();
   const start = useMutation({
     mutationFn: async () => {
-      const request = { clientId, siteId: siteId || undefined, target: target.trim() };
+      const request = { clientId, siteId: siteId || undefined, target: target.trim(), consent };
       const response = await apiRequest("POST", "/api/scans", request, press.headersFor(request));
       return (await response.json()) as {
         test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string; replayed?: boolean;
@@ -239,7 +243,7 @@ export default function AthenaScan() {
   // wrong key answers it happily. `null` (an engine too old to be asked) is
   // allowed through rather than grounding a working deployment.
   const engineReady = Boolean(engine?.configured && engine?.reachable) && engine?.authorized !== false;
-  const engagementReady = clientId !== "" && target.trim() !== "";
+  const engagementReady = clientId !== "" && target.trim() !== "" && consent;
   const canScan = engineReady && engagementReady;
 
   // What the run returned. Null when this read carries none: the engine could
@@ -488,6 +492,19 @@ export default function AthenaScan() {
             The engine checks the target against its own egress policy and refuses
             anything it may not reach; its reason is shown here unchanged.
           </p>
+
+          <div className="flex items-start gap-3" data-testid="field-consent">
+            <Checkbox
+              id="consent"
+              data-testid="checkbox-consent"
+              checked={consent}
+              onCheckedChange={(checked) => setConsent(checked === true)}
+            />
+            <Label htmlFor="consent" className="cursor-pointer text-[12px] font-normal leading-5 text-muted-foreground">
+              The owner of this target has agreed to this test. Athena-Backend records
+              that consent with the scan and refuses a start without it.
+            </Label>
+          </div>
 
           <div className="flex items-center gap-3">
             <Button type="submit" data-testid="button-start-scan" disabled={!canScan || start.isPending || mayBeRunning}>

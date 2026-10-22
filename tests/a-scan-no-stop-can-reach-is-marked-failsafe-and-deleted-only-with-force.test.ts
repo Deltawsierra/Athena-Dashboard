@@ -36,8 +36,10 @@ import type { AddressInfo } from "net";
 
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -67,13 +69,19 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "No stop", company: "No stop", email: "n@n.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://nostop.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -90,7 +98,7 @@ afterEach(async () => {
 
 async function start(body: Record<string, unknown>) {
   startBody = body;
-  const started = await agent.post("/api/scans").send({ clientId, target: TARGET });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: TARGET });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   return started.body as { test: { id: string }; runId: string | null; stop?: string };
 }
@@ -226,9 +234,9 @@ describe("deleting a scan no Stop can reach", () => {
     const other = (await agent.post("/api/clients").send({ name: "Cascade", company: "Cascade", email: "c@c.test" })).body.id as string;
     await agent.post("/api/sites").send({ clientId: other, name: "Shop", url: "https://cascade.example" });
     startBody = { state: "running" };
-    const unnamed = await agent.post("/api/scans").send({ clientId: other, target: "https://cascade.example/" });
+    const unnamed = await agent.post("/api/scans").send({ consent: true, clientId: other, target: "https://cascade.example/" });
     startBody = { run_id: "run-cascade", state: "running" };
-    const named = await agent.post("/api/scans").send({ clientId: other, target: "https://cascade.example/" });
+    const named = await agent.post("/api/scans").send({ consent: true, clientId: other, target: "https://cascade.example/" });
     expect([unnamed.status, named.status]).toEqual([201, 201]);
     const refused = await agent.delete(`/api/clients/${other}`);
     expect(refused.status).toBe(409);

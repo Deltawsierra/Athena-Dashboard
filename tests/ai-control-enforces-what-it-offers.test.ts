@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * R5-H. The AI Control page offered, beside the kill switch, "Active Systems"
@@ -28,6 +29,7 @@ import { makeApp, signIn } from "./helpers";
  * and a write that sets one is refused. The kill switch and every Stop stay
  * ungated by all of it.
  */
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -63,12 +65,18 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "k";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   admin = await signIn(await makeApp());
+  await signInToBackend(admin);
   clientId = (await admin.post("/api/clients").send({ name: "H", company: "H", email: "h@h.test" })).body.id;
   await admin.post("/api/sites").send({ clientId, name: "H", url: "https://h.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -76,7 +84,7 @@ afterAll(async () => {
 
 const ALL = ["penetration-testing", "vulnerability-scanner"];
 const scan = (testType?: string) =>
-  admin.post("/api/scans").send({ clientId, target: "https://h.example/", ...(testType ? { testType } : {}) });
+  admin.post("/api/scans").send({ consent: true, clientId, target: "https://h.example/", ...(testType ? { testType } : {}) });
 const set = async (body: Record<string, unknown>) => expect((await admin.patch("/api/ai-control").send(body)).status).toBe(200);
 /** Stop a scan, and let the status route record that it stopped. */
 async function stopped(testId: string) {

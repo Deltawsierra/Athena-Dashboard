@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * Only engaging the kill switch sends stops, and an ordinary settings change
@@ -21,6 +22,7 @@ import { makeApp, signIn } from "./helpers";
  * and Auto-Shutdown Threshold are refused, see
  * ai-control-enforces-what-it-offers.test.ts.)
  */
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -41,14 +43,20 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "k";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   admin = await signIn(await makeApp());
+  await signInToBackend(admin);
   const clientId = (await admin.post("/api/clients").send({ name: "S", company: "S", email: "s@s.test" })).body.id;
   await admin.post("/api/sites").send({ clientId, name: "S", url: "https://s.example" });
-  expect((await admin.post("/api/scans").send({ clientId, target: "https://s.example/" })).status).toBe(201);
+  expect((await admin.post("/api/scans").send({ consent: true, clientId, target: "https://s.example/" })).status).toBe(201);
 });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));

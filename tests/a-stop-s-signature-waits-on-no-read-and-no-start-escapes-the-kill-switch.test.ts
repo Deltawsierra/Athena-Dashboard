@@ -8,7 +8,8 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
-import { signInToBackend } from "./helpers";
+import { recordLegacyScan, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * SAFETY, round five of PR #56 (the round-four review's findings), on the
@@ -33,6 +34,7 @@ import { signInToBackend } from "./helpers";
 
 type Exchange = { request: { method: string; path: string; body?: Record<string, unknown> }; status: number; body: any };
 type Fixture = { engine: { contract: string }; exchanges: Exchange[] };
+let hybrid: HybridBackendStandIn | null = null;
 const FIX = path.resolve(__dirname, "fixtures", "engine-retest");
 const load = (dir: string, name: string): Fixture => JSON.parse(fs.readFileSync(path.join(FIX, dir, `${name}.json`), "utf8"));
 const PR71 = "pr71-f4610ae";
@@ -165,6 +167,8 @@ beforeAll(async () => {
   await new Promise<void>((r) => engineServer.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engineServer.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const { createApp } = await import("../server/app");
   const { initializeDefaultData } = await import("../server/init-data");
@@ -190,6 +194,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   watcher.halt();
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
@@ -229,6 +236,9 @@ beforeEach(async () => {
   });
   Object.assign(timeouts(), TIMEOUTS);
   Object.assign(slots(), SLOTS);
+  // Every scan start goes through the stand-in Athena-Backend as the admin: signed in to it afresh, since a case's own
+  // control-plane stub (plane()) takes the admin's backend sign-in while it stands.
+  if (hybrid && process.env.ATHENA_FAILSAFE_URL === hybrid.url) await signInToBackend(admin);
 });
 
 let n = 0;
@@ -237,10 +247,15 @@ async function scanned(fx: Fixture, as = admin) {
   n += 1;
   const client = await admin.post("/api/clients").send({ name: `Round3 ${n}`, company: "R", email: `r3-${n}@r.test` });
   const site = await admin.post("/api/sites").send({ clientId: client.body.id, name: "Main", url: "https://offline.invalid" });
-  const started = await as.post("/api/scans").send({ clientId: client.body.id, siteId: site.body.id, target: fx.exchanges[0].body.target });
-  expect(started.status).toBe(201);
+  // The fixture's setup scan, recorded and filed as this dashboard's own (tests/helpers.ts recordLegacyScan), run by `as`:
+  // the scan that found the finding a retest is about. A scan started through Athena-Backend is recorded there, never filed here.
+  const setup = fx.exchanges[0].body as { run_id: string; target: string; result: { results: unknown[] } };
+  const executedBy = (await as.get("/api/auth/check")).body.user.id as string;
+  const { test } = await recordLegacyScan(storage, {
+    clientId: client.body.id, siteId: site.body.id, target: setup.target, runId: setup.run_id, results: setup.result.results, executedBy,
+  });
   const findings = await storage.getFindingsByClient(client.body.id);
-  return { testId: started.body.test.id as string, finding: findings[0], runId: started.body.runId as string };
+  return { testId: test.id, finding: findings[0], runId: setup.run_id };
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(read: () => Promise<T>, ok: (value: T) => boolean, ms = 4_000): Promise<T> {
@@ -332,6 +347,8 @@ async function plane(opts: {
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  // While this plane stands in for the control plane, no scan start goes through to a backend: the one start sent
+  // under it is refused at the kill switch's gate, before anything is sent anywhere.
   process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   process.env.ATHENA_FAILSAFE_USER = "svc";
   process.env.ATHENA_FAILSAFE_PASSWORD = "pw";
@@ -343,7 +360,9 @@ async function plane(opts: {
     statusOf: (uuid: string) => statuses.get(uuid) ?? "pending",
     tokens: () => seen.filter((one) => one.line === "POST /api/token/").length,
     close: async () => {
-      delete process.env.ATHENA_FAILSAFE_URL; delete process.env.ATHENA_FAILSAFE_USER; delete process.env.ATHENA_FAILSAFE_PASSWORD;
+      // Back to the file's stand-in Athena-Backend (every scan start goes through it), with no service account named.
+      delete process.env.ATHENA_FAILSAFE_USER; delete process.env.ATHENA_FAILSAFE_PASSWORD;
+      if (hybrid) process.env.ATHENA_FAILSAFE_URL = hybrid.url; else delete process.env.ATHENA_FAILSAFE_URL;
       server.closeAllConnections?.();
       await new Promise<void>((r) => server.close(() => r()));
     },
@@ -818,7 +837,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
       expect((await admin.get("/api/ai-control")).body.killSwitchEnabled).toBe(true);
       const write = await admin.post("/api/clients").send({ name: "Refused", company: "R", email: "refused@r.test" });
       expect(write.status).toBe(503);
-      const started = await admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+      const started = await admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
       expect(started.status).toBe(503);
       expect(calls.some((c) => c.line === "POST /api/scan")).toBe(false);
       const resume = await relay(p, resumeUuid);
@@ -846,7 +865,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
     scanReply = runningAnswer(fx, `r5-inflight-${Date.now()}`);
     activeHoldMs = 400;
     calls.length = 0;
-    const start = admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
+    const start = admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
     await sleep(100);
     const kill = await admin.patch("/api/ai-control").send({ killSwitchEnabled: true });
     const started = await start;
@@ -867,7 +886,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
     let letGo!: () => void;
     scanHold = new Promise<void>((r) => { letGo = r; });
     calls.length = 0;
-    const start = admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
+    const start = admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
     await until(async () => calls.some((c) => c.line === "POST /api/scan"), (sent) => sent, 2_000);
     const kill = await admin.patch("/api/ai-control").send({ killSwitchEnabled: true });
     expect(kill.status).toBe(200);
@@ -899,7 +918,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
     scanReply = runningAnswer(fx, `r5-elsewhere-a-${Date.now()}`);
     activeHoldMs = 300;
     calls.length = 0;
-    const first = admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
+    const first = admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
     await sleep(100);
     await storage.updateAIControlSettings({ killSwitchEnabled: true, systemStatus: "shutdown" });
     const refused = await first;
@@ -914,7 +933,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
     scanReply = runningAnswer(fx, runId);
     let letGo!: () => void;
     scanHold = new Promise<void>((r) => { letGo = r; });
-    const second = admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
+    const second = admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
     await until(async () => calls.some((c) => c.line === "POST /api/scan"), (sent) => sent, 2_000);
     await storage.updateAIControlSettings({ killSwitchEnabled: true, systemStatus: "shutdown" });
     letGo();
@@ -933,7 +952,7 @@ describe("the kill switch holds from the instant it is pressed", () => {
     let letGo!: () => void;
     scanHold = new Promise<void>((r) => { letGo = r; });
     calls.length = 0;
-    const start = admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
+    const start = admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" }).then((r) => r);
     await until(async () => calls.some((c) => c.line === "POST /api/scan"), (sent) => sent, 2_000);
     expect((await admin.patch("/api/ai-control").send({ killSwitchEnabled: true })).status).toBe(200);
     vi.spyOn(storage, "createTest").mockRejectedValue(new Error("SQLITE_FULL: database or disk is full"));
@@ -1220,7 +1239,7 @@ describe("the branches the round-four review found untested", () => {
     scanReply = runningAnswer(fx, runId);
     stallAbortFor.add(runId);
     vi.spyOn(storage, "createTest").mockRejectedValue(new Error("disk I/O error"));
-    const started = await admin.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
     expect(started.status).toBe(500);
     expect(started.body.error).toMatch(/the run was sent a stop, and the engine answered it 2xx, but the rest of its answer was not read \(stop sent, answer unread\): whether it is stopping is not known/);
   });

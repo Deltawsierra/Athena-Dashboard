@@ -265,6 +265,7 @@ describe("the other stops are not held back by a read that has not answered", ()
       )));
       fireEvent.change(document.querySelectorAll("select")[0], { target: { value: "c1" } });
       fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://acme.test" } });
+      fireEvent.click(screen.getByTestId("checkbox-consent"));
       expect(screen.queryByTestId("button-stop-scan")).toBeNull();
       fireEvent.click(screen.getByTestId("button-start-scan"));
       await waitFor(() => expect(screen.getByTestId("button-stop-scan")).toBeTruthy());
@@ -285,6 +286,7 @@ describe("the other stops are not held back by a read that has not answered", ()
       )));
       fireEvent.change(document.querySelectorAll("select")[0], { target: { value: "c1" } });
       fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://acme.test" } });
+      fireEvent.click(screen.getByTestId("checkbox-consent"));
       fireEvent.click(screen.getByTestId("button-start-scan"));
       await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
       expect(screen.queryByTestId("button-stop-scan")).toBeNull();

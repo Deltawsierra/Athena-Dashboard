@@ -4,7 +4,8 @@ import type { Server } from "http";
 import type { AddressInfo } from "net";
 import request from "supertest";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * The lifecycle over HTTP.
@@ -15,6 +16,7 @@ import { makeApp, signIn } from "./helpers";
  * "fixed" without evidence is the same defect as a compliance control that
  * renders green because nothing tested it.
  */
+let hybrid: HybridBackendStandIn | null = null;
 describe("owning and closing findings", () => {
   let app: Express;
   let agent: Awaited<ReturnType<typeof signIn>>;
@@ -42,27 +44,47 @@ describe("owning and closing findings", () => {
     const port = (server.address() as AddressInfo).port;
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
   });
 
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((r) => server.close(() => r()));
   });
 
+  let scans = 0;
+  /**
+   * A scan recorded and filed as this dashboard's own (tests/helpers.ts
+   * recordLegacyScan): the ledger these routes own and close is the legacy rows'.
+   * A scan started through Athena-Backend is recorded there, and never filed here.
+   */
   async function aScannedEngagement(results: unknown[]) {
     scanResults = results;
+    scans += 1;
     const client = await agent.post("/api/clients")
       .send({ name: "Lifecycle", company: "Lifecycle Ltd", email: "l@example.test" });
     const site = await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "Main", url: "https://life.example" });
-    const started = await agent.post("/api/scans").send({
-      clientId: client.body.id, siteId: site.body.id, target: "https://life.example",
+    const { storage } = await import("../server/storage-unified");
+    const { test, filed } = await recordLegacyScan(storage, {
+      clientId: client.body.id, siteId: site.body.id, target: "https://life.example", runId: `run-${scans}`, results,
     });
-    return { clientId: client.body.id as string, started };
+    return { clientId: client.body.id as string, test, filed };
+  }
+  /** The same host scanned again for the same client, as this dashboard's own scan, without naming the site. */
+  async function rescanned(clientId: string, results: unknown[]) {
+    scans += 1;
+    const { storage } = await import("../server/storage-unified");
+    return recordLegacyScan(storage, { clientId, siteId: null, target: "https://life.example", runId: `run-${scans}`, results });
   }
 
   const twoIssuesFourResults = [
@@ -73,9 +95,9 @@ describe("owning and closing findings", () => {
   ];
 
   it("files a scan's results as deduplicated findings and says what it did", async () => {
-    const { clientId, started } = await aScannedEngagement(twoIssuesFourResults);
+    const { clientId, filed } = await aScannedEngagement(twoIssuesFourResults);
     // Counted, not asserted: four results, one of them internal, two issues.
-    expect(started.body.filed).toMatchObject({ raw: 4, distinct: 2, created: 2, updated: 0 });
+    expect(filed).toMatchObject({ raw: 4, distinct: 2, created: 2, updated: 0 });
 
     const listed = await agent.get(`/api/findings?clientId=${clientId}`);
     expect(listed.status).toBe(200);
@@ -143,7 +165,7 @@ describe("owning and closing findings", () => {
     // site this time. That produces a different engagement string for the
     // same customer, and identity is scoped to the customer precisely so this
     // does not file everything twice.
-    await agent.post("/api/scans").send({ clientId, target: "https://life.example" });
+    await rescanned(clientId, twoIssuesFourResults);
     const after = await agent.get(`/api/findings?clientId=${clientId}`);
 
     expect(after.body.findings.length).toBe(before.body.findings.length);

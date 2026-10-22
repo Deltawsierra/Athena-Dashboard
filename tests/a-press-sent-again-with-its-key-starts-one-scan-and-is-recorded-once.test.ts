@@ -6,7 +6,8 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * A press sent again with its Idempotency-Key starts one scan, files one
@@ -25,6 +26,13 @@ import { makeApp, signIn } from "./helpers";
  * answers are #58's recordings (tests/fixtures/engine-retest). The backend's
  * connector push is stood in by the contract athena-backend #113 gives it
  * (idempotency/layer.py): no recording of it exists.
+ *
+ * Since every scan starts through Athena-Backend (decision 11), the press's key
+ * goes to the backend, whose idempotency layer (#113, the same one the push
+ * meets) answers a press it has already answered from its record, marked
+ * `Idempotent-Replayed`, and launches nothing: one run at the engine, one row
+ * here, one Stop. The backend is stood in by tests/helpers/hybrid-backend-stand-in.ts;
+ * the engine's recorded answers are what the backend's launch meets at the engine.
  */
 
 type Exchange = {
@@ -41,6 +49,7 @@ type Fixture = {
   exchanges: Exchange[];
 };
 
+let hybrid: HybridBackendStandIn | null = null;
 const KEYED = path.resolve(__dirname, "fixtures", "engine-idempotency", "main-79ba4af");
 const RETEST = path.resolve(__dirname, "fixtures", "engine-retest");
 const KEYED_SHA = "79ba4af99bfa22822c0de2e03f27b11a5231b296";
@@ -114,7 +123,7 @@ beforeAll(async () => {
       const retest = engineState.retest;
       if (req.method === "POST" && url === "/api/scan") {
         // The retest cases' own scan (sent with no key) is their recording's setup scan.
-        if (retest && keyOf(req) === null) return reply(retest.exchanges.find((one) => one.note.startsWith("setup") && one.request.path === "/api/scan")!);
+        if (retest) return reply(retest.exchanges.find((one) => one.note.startsWith("setup") && one.request.path === "/api/scan")!);
         sentLaunches.push({ key: keyOf(req), body });
         if (engineState.model) {
           const key = keyOf(req);
@@ -140,6 +149,10 @@ beforeAll(async () => {
           await held;
         }
         return reply(next);
+      }
+      if (req.method === "GET" && /^\/api\/scans\/[^/]+$/.test(url)) {
+        // The run the backend launched is still going: the backend's one read at launch, and the dashboard's polls, read it so.
+        return json(res, 200, { run_id: decodeURIComponent(url.split("/")[3]), state: "running", result: null });
       }
       if (req.method === "POST" && /^\/api\/scans\/[^/]+\/abort$/.test(url)) {
         sentStops.push({ url, key: keyOf(req) });
@@ -198,17 +211,22 @@ beforeAll(async () => {
 
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
-  process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${(controlPlane.address() as AddressInfo).port}`;
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY }, upstream: `http://127.0.0.1:${(controlPlane.address() as AddressInfo).port}` });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   process.env.ATHENA_FAILSAFE_USER = "svc-operator";
   process.env.ATHENA_FAILSAFE_PASSWORD = "svc-secret";
   vi.resetModules();
   theApp = await makeApp();
   locals = theApp.locals;
   agent = await signIn(theApp);
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
 });
 
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   delete process.env.ATHENA_FAILSAFE_URL;
@@ -236,6 +254,8 @@ beforeEach(() => {
   backend.lose = false;
   locals.retestWatcher?.reset();
   (locals.retestsHeld as Map<string, unknown> | undefined)?.clear();
+  hybrid!.releaseLaunches();
+  hybrid!.controls.failNextLaunch = null;
 });
 
 let clientCount = 0;
@@ -294,19 +314,23 @@ describe("the recordings are what the engine sent under a key, at the commit the
 });
 
 describe("a scan start sent again with its key", () => {
-  it("a press whose answer was lost, pressed again, starts one scan and is recorded once", async () => {
-    engineState.model = keyed("launch-then-repeat");
-    const { clientId, siteId } = await aClientAndSite();
-    const press = { clientId, siteId, target: "https://offline.invalid/" };
+  /** This dashboard's launches at the backend, by arrival. */
+  const launches = () => hybrid!.launches();
+  const clientRowsOf = (clientId: string) => async () => (await storage.getAllTests()).filter((one) => one.clientId === clientId);
 
-    // The first send: the engine's answer is held, the page stops waiting (its
+  it("a press whose answer was lost, pressed again, starts one scan and is recorded once: the backend answers the second send from its record", async () => {
+    engineState.launches = [keyed("launch-then-repeat").exchanges[0]];
+    const { clientId, siteId } = await aClientAndSite();
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
+
+    // The first send: the backend's answer is held, the page stops waiting (its
     // answer is lost), and this server goes on recording the scan all the same.
-    let release!: () => void;
-    engineState.hold = new Promise<void>((r) => { release = r; });
+    hybrid!.holdLaunches();
     const lost = agent.post("/api/scans").set("Idempotency-Key", "press-1").send(press).timeout(300);
     await expect(lost).rejects.toThrow(/timeout/i);
-    release();
-    const clientRows = async () => (await storage.getAllTests()).filter((one) => one.clientId === clientId);
+    hybrid!.releaseLaunches();
+    const clientRows = clientRowsOf(clientId);
     const recorded = await until(clientRows, (rows) => rows.length > 0);
     expect(recorded, "the first send recorded its scan after the page stopped waiting").toHaveLength(1);
     const runId = (recorded[0].findings as { runId: string }).runId;
@@ -314,13 +338,15 @@ describe("a scan start sent again with its key", () => {
     // The same press again, with its key.
     const again = await agent.post("/api/scans").set("Idempotency-Key", "press-1").send(press);
 
-    expect(engineState.started, `one press sent twice started ${engineState.started} scans at the engine`).toBe(1);
+    expect(sentLaunches, `one press sent twice started ${sentLaunches.length} scans at the engine`).toHaveLength(1);
     const rows = await clientRows();
     expect(rows.length, `one press sent twice made ${rows.length} rows`).toBe(1);
-    expect(sentLaunches, "the engine was asked twice, with one key").toHaveLength(2);
-    expect(sentLaunches[0].key).not.toBeNull();
-    expect(sentLaunches[1].key, "the second send carried the first's key").toBe(sentLaunches[0].key);
-    expect(sentLaunches[0].key, "the page's key is passed on scoped to its account, never as sent").not.toBe("press-1");
+    const sent = launches().slice(from);
+    expect(sent, "the backend was asked twice, with one key").toHaveLength(2);
+    expect(sent[0].idempotencyKey).not.toBeNull();
+    expect(sent[1].idempotencyKey, "the second send carried the first's key").toBe(sent[0].idempotencyKey);
+    expect(sent[0].idempotencyKey, "the page's key is passed on scoped to its account, never as sent").not.toBe("press-1");
+    expect(sent[1].replayed, "the backend answered the second send from its record of the first").toBe(true);
     expect(again.status, JSON.stringify(again.body)).toBe(201);
     expect(again.body.replayed).toBe(true);
     expect(again.body.test.id).toBe(rows[0].id);
@@ -329,114 +355,149 @@ describe("a scan start sent again with its key", () => {
   });
 
   it("the same press while its first send is still being answered here sends nothing, and is told so", async () => {
-    const fx = keyed("launch-then-repeat");
-    engineState.launches = [fx.exchanges[0]];
-    const runId = fx.exchanges[0].body.run_id as string;
+    engineState.launches = [keyed("launch-then-repeat").exchanges[0]];
     const { clientId, siteId } = await aClientAndSite();
-    const press = { clientId, siteId, target: "https://offline.invalid/" };
-    let release!: () => void;
-    engineState.hold = new Promise<void>((r) => { release = r; });
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
+    hybrid!.holdLaunches();
 
     const first = agent.post("/api/scans").set("Idempotency-Key", "press-2").send(press).then((one) => one);
-    await until(async () => sentLaunches.length, (n) => n === 1);
+    await until(async () => launches().length, (n) => n === from + 1);
     const meanwhile = await agent.post("/api/scans").set("Idempotency-Key", "press-2").send(press);
-    release();
+    hybrid!.releaseLaunches();
     const answered = await first;
 
     expect(meanwhile.status, JSON.stringify(meanwhile.body)).toBe(409);
     expect(meanwhile.body.reason).toBe("idempotency_in_flight");
     expect(meanwhile.body.idempotency).toEqual({ state: "in_flight" });
     expect(meanwhile.body.error).toMatch(/not known yet/);
-    expect(sentLaunches, "the second send reached the engine").toHaveLength(1);
-    expect(answered.status).toBe(201);
-    expect(await rowsFor(runId, clientId)).toHaveLength(1);
+    expect(launches().slice(from), "the second send reached the backend").toHaveLength(1);
+    expect(answered.status, JSON.stringify(answered.body)).toBe(201);
+    expect(await clientRowsOf(clientId)()).toHaveLength(1);
 
-    // Once the first has answered, its key is free: the same press is read from the engine's record.
-    engineState.launches = [fx.exchanges[1]];
+    // Once the first has answered, its key is free: the same press is read from the backend's record.
     const later = await agent.post("/api/scans").set("Idempotency-Key", "press-2").send(press);
-    expect(later.status).toBe(201);
+    expect(later.status, JSON.stringify(later.body)).toBe(201);
+    expect(later.body.replayed).toBe(true);
     expect(later.body.test.id).toBe(answered.body.test.id);
-    expect(await rowsFor(runId, clientId)).toHaveLength(1);
+    expect(launches().slice(from).map((one) => one.replayed)).toEqual([false, true]);
+    expect(sentLaunches, "the engine was asked once").toHaveLength(1);
+    expect(await clientRowsOf(clientId)()).toHaveLength(1);
   });
 
-  it("a first send the engine has no answer for is said to be unknown: never refused, never recorded, never re-keyed", async () => {
-    const fx = keyed("raised-then-repeat");
-    engineState.launches = [...fx.exchanges];
+  it("a first send the backend answered 500 to is unknown: never refused, never recorded, never re-keyed -- and the same press again is that answer replayed, never a new scan", async () => {
+    hybrid!.controls.failNextLaunch = { status: 500, body: { detail: "the backend raised before it recorded an answer" } };
     const { clientId, siteId } = await aClientAndSite();
-    const press = { clientId, siteId, target: "https://offline.invalid/" };
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
     const before = (await storage.getAllTests()).length;
 
     const first = await agent.post("/api/scans").set("Idempotency-Key", "press-3").send(press);
     const again = await agent.post("/api/scans").set("Idempotency-Key", "press-3").send(press);
 
-    // The engine's 500 that names no run: may have started (as it always was).
-    expect(first.status).toBe(503);
-    expect(first.body.mayStillBeRunning).toBe(true);
-    expect(again.status, JSON.stringify(again.body)).toBe(409);
-    expect(again.body.reason).toBe("scan_outcome_unknown");
-    expect(again.body.idempotency).toEqual({ state: "unknown" });
-    expect(again.body.mayStillBeRunning).toBe(true);
-    expect(again.body.error).toMatch(/^We don't know whether this scan started/);
-    expect(again.body.error).not.toMatch(/refused/);
-    expect(sentLaunches.map((one) => one.key)).toEqual([sentLaunches[0].key, sentLaunches[0].key]);
+    for (const [label, res] of [["first", first], ["again", again]] as const) {
+      expect(res.status, `${label}: ${JSON.stringify(res.body)}`).toBe(409);
+      expect(res.body.reason, label).toBe("scan_outcome_unknown");
+      expect(res.body.mayStillBeRunning, label).toBe(true);
+      expect(res.body.error, label).toMatch(/^We don't know whether this scan started/);
+      expect(res.body.error, label).not.toMatch(/refused/);
+    }
+    const sent = launches().slice(from);
+    expect(sent.map((one) => one.idempotencyKey)).toEqual([sent[0].idempotencyKey, sent[0].idempotencyKey]);
+    expect(sent.map((one) => [one.status, one.replayed])).toEqual([[500, false], [500, true]]);
+    expect(sentLaunches, "the engine was never asked").toEqual([]);
     expect((await storage.getAllTests()).length - before, "nothing recorded from either").toBe(0);
   });
 
-  it("while the first start is still answering at the engine, the same press is unknown and starts nothing", async () => {
-    const fx = keyed("in-flight");
-    engineState.launches = [fx.exchanges[0]];
+  it("while the first send is still being answered at the backend, the same press is unknown and starts nothing; once answered, it is that scan, recorded once", async () => {
+    const backendScans = await import("../server/backend-scans");
+    const was = backendScans.launchTimeouts.launchMs;
+    backendScans.launchTimeouts.launchMs = 300;
+    engineState.launches = [keyed("launch-then-repeat").exchanges[0]];
     const { clientId, siteId } = await aClientAndSite();
-    const before = (await storage.getAllTests()).length;
-    const res = await agent.post("/api/scans").set("Idempotency-Key", "press-4")
-      .send({ clientId, siteId, target: "https://offline.invalid/" });
-    expect(res.status, JSON.stringify(res.body)).toBe(409);
-    expect(res.body.reason).toBe("scan_outcome_unknown");
-    expect(res.body.idempotency).toEqual({ state: "in_flight" });
-    expect((await storage.getAllTests()).length - before).toBe(0);
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
+    try {
+      // The backend holds the first send past this dashboard's launch deadline: its outcome is not known here.
+      hybrid!.holdLaunches();
+      const first = await agent.post("/api/scans").set("Idempotency-Key", "press-4").send(press);
+      expect(first.status, JSON.stringify(first.body)).toBe(409);
+      expect(first.body.reason).toBe("scan_outcome_unknown");
+      expect(first.body.mayStillBeRunning).toBe(true);
+      // The same press, while the backend is still answering the first: the backend says so, and this dashboard passes it on.
+      const meanwhile = await agent.post("/api/scans").set("Idempotency-Key", "press-4").send(press);
+      expect(meanwhile.status, JSON.stringify(meanwhile.body)).toBe(409);
+      expect(meanwhile.body.reason).toBe("scan_outcome_unknown");
+      expect(meanwhile.body.idempotency).toEqual({ state: "in_flight" });
+      expect(await clientRowsOf(clientId)()).toEqual([]);
+      expect(sentLaunches, "nothing started a second time at the engine").toHaveLength(0);
+      // The backend finishes answering the first send -- to nobody, and records that answer for the key.
+      hybrid!.releaseLaunches();
+      await until(async () => launches()[from].status, (status) => status === 202);
+      expect(sentLaunches, "the first send started one scan at the engine").toHaveLength(1);
+      // The same press once more: the first send's answer, replayed, recorded here now, once.
+      const later = await agent.post("/api/scans").set("Idempotency-Key", "press-4").send(press);
+      expect(later.status, JSON.stringify(later.body)).toBe(201);
+      expect(later.body.replayed).toBe(true);
+      expect(later.body.runId).toBe(keyed("launch-then-repeat").exchanges[0].body.run_id);
+      expect(await clientRowsOf(clientId)()).toHaveLength(1);
+      expect(sentLaunches).toHaveLength(1);
+    } finally {
+      backendScans.launchTimeouts.launchMs = was;
+    }
   });
 
-  it("a stood-down engine's refusal of the same press is its refusal, not an unknown and not a replay", async () => {
-    const fx = keyed("stood-down-repeat");
-    engineState.launches = [...fx.exchanges];
-    const runId = fx.exchanges[0].body.run_id as string;
+  it("a stood-down engine's refusal is the backend's record of a failed scan, in the engine's words; the same press again is that record, not a new scan", async () => {
+    // The engine's recorded refusal (stood-down-repeat): what the backend's launch meets at a stood-down engine.
+    engineState.launches = [keyed("stood-down-repeat").exchanges[1]];
     const { clientId, siteId } = await aClientAndSite();
-    const press = { clientId, siteId, target: "https://offline.invalid/" };
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
+    const before = (await storage.getAllTests()).length;
 
-    const first = await agent.post("/api/scans").set("Idempotency-Key", "press-5").send(press);
     const refused = await agent.post("/api/scans").set("Idempotency-Key", "press-5").send(press);
-    const resumed = await agent.post("/api/scans").set("Idempotency-Key", "press-5").send(press);
+    const again = await agent.post("/api/scans").set("Idempotency-Key", "press-5").send(press);
 
-    expect(first.status).toBe(201);
-    expect(refused.status).toBe(409);
-    expect(refused.body.error).toBe("the engine refused this scan");
-    expect(refused.body.detail).toContain("stood_down");
-    expect(refused.body.reason).toBeUndefined();
-    expect(refused.body.replayed).toBeUndefined();
-    expect(resumed.status).toBe(201);
-    expect(resumed.body.replayed).toBe(true);
-    expect(resumed.body.test.id).toBe(first.body.test.id);
-    expect(await rowsFor(runId, clientId)).toHaveLength(1);
+    for (const [label, res] of [["refused", refused], ["again", again]] as const) {
+      expect(res.status, `${label}: ${JSON.stringify(res.body)}`).toBe(409);
+      expect(res.body.reason, label).toBe("launch_failed");
+      expect(res.body.detail, label).toBe("Engine error: the engine is stood_down; not accepting new work");
+      expect(res.body.error, label).toContain("stood_down");
+      expect(res.body.error, label).toContain("Athena-Backend recorded this scan as failed");
+      expect(res.body.mayStillBeRunning, label).toBeUndefined();
+      expect(res.body.backendScanId, label).toEqual(expect.any(String));
+    }
+    expect(again.body.backendScanId, "the same record, not a second failed scan").toBe(refused.body.backendScanId);
+    expect(launches().slice(from).map((one) => [one.status, one.replayed])).toEqual([[502, false], [502, true]]);
+    expect(sentLaunches, "the engine was asked once").toHaveLength(1);
+    expect(sentLaunches[0].key, "the backend's own key to the engine, never the page's").not.toBeNull();
+    expect((await storage.getAllTests()).length - before, "nothing recorded from either").toBe(0);
   });
 
   it("the same key with another request is a bug here, said as one, and starts nothing", async () => {
-    const fx = keyed("other-request");
-    engineState.launches = [...fx.exchanges];
+    engineState.launches = [keyed("other-request").exchanges[0]];
     const { clientId, siteId } = await aClientAndSite();
-    await agent.post("/api/scans").set("Idempotency-Key", "press-6").send({ clientId, siteId, target: "https://offline.invalid/" });
+    const from = launches().length;
+    const first = await agent.post("/api/scans").set("Idempotency-Key", "press-6").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
     const other = await agent.post("/api/scans").set("Idempotency-Key", "press-6")
-      .send({ clientId, siteId, target: "https://offline.invalid/other" });
+      .send({ consent: true, clientId, siteId, target: "https://offline.invalid/other" });
     expect(other.status, JSON.stringify(other.body)).toBe(500);
     expect(other.body.reason).toBe("idempotency_bug");
     expect(other.body.error).toMatch(/a bug in this dashboard/);
+    expect(launches().slice(from).map((one) => one.status)).toEqual([202, 422]);
+    expect(sentLaunches, "the engine was asked once").toHaveLength(1);
   });
 
   it("a key that is not one is refused here, and nothing is sent", async () => {
     const { clientId, siteId } = await aClientAndSite();
+    const from = launches().length;
     for (const bad of ["", "x".repeat(256), "café"]) {
-      const res = await agent.post("/api/scans").set("Idempotency-Key", bad).send({ clientId, siteId, target: "https://offline.invalid/" });
+      const res = await agent.post("/api/scans").set("Idempotency-Key", bad).send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
       expect(res.status, JSON.stringify({ bad, body: res.body })).toBe(400);
       expect(res.body.reason).toBe("idempotency_key_invalid");
     }
+    expect(launches().slice(from)).toEqual([]);
     expect(sentLaunches).toHaveLength(0);
   });
 
@@ -444,16 +505,18 @@ describe("a scan start sent again with its key", () => {
     const fx = keyed("without-a-key");
     engineState.launches = [...fx.exchanges];
     const { clientId, siteId } = await aClientAndSite();
-    const press = { clientId, siteId, target: "https://offline.invalid/" };
+    const press = { consent: true, clientId, siteId, target: "https://offline.invalid/" };
+    const from = launches().length;
     const one = await agent.post("/api/scans").send(press);
     const two = await agent.post("/api/scans").send(press);
-    expect(one.status).toBe(201);
-    expect(two.status).toBe(201);
+    expect(one.status, JSON.stringify(one.body)).toBe(201);
+    expect(two.status, JSON.stringify(two.body)).toBe(201);
     expect(two.body.test.id).not.toBe(one.body.test.id);
-    expect(sentLaunches.map((sent) => sent.key)).toEqual([null, null]);
+    expect(launches().slice(from).map((sent) => sent.idempotencyKey)).toEqual([null, null]);
+    expect(sentLaunches, "two scans at the engine").toHaveLength(2);
   });
 
-  it("one page key from two accounts is two keys at the engine", async () => {
+  it("one page key from two accounts is two keys at the backend", async () => {
     const { forwardedKey } = await import("../server/idempotency");
     expect(forwardedKey("account-1", "press")).toBe(forwardedKey("account-1", "press"));
     expect(forwardedKey("account-1", "press")).not.toBe(forwardedKey("account-2", "press"));
@@ -465,10 +528,13 @@ describe("a retest press carries its key, and its held slot is unchanged", () =>
   async function retestOnce(fx: Fixture, key: string) {
     engineState.retest = fx;
     const { clientId, siteId } = await aClientAndSite();
-    const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
-    expect(started.status, JSON.stringify(started.body)).toBe(201);
+    // The scan that found the finding (the recording's setup scan), recorded and filed as this dashboard's own
+    // (tests/helpers.ts recordLegacyScan): a scan started through Athena-Backend is recorded there, never filed here.
+    const setup = fx.exchanges.find((one) => one.note.startsWith("setup") && one.request.path === "/api/scan")!.body as
+      { run_id: string; target: string; result: { results: unknown[] } };
+    const { test } = await recordLegacyScan(storage, { clientId, siteId, target: setup.target, runId: setup.run_id, results: setup.result.results });
     const twin = fx.exchanges.find((one) => one.note.startsWith("setup") && one.request.path.startsWith("/api/decisions?"))!.body.decisions[0];
-    return agent.post(`/api/tests/${started.body.test.id}/retest`).set("Idempotency-Key", key).send({ twinId: twin.id });
+    return agent.post(`/api/tests/${test.id}/retest`).set("Idempotency-Key", key).send({ twinId: twin.id });
   }
 
   it("the retest is asked with the press's key, scoped to the account", async () => {
@@ -528,7 +594,7 @@ describe("a stop never carries a key", () => {
     const fx = keyed("launch-then-repeat");
     engineState.launches = [fx.exchanges[0]];
     const { clientId, siteId } = await aClientAndSite();
-    const started = await agent.post("/api/scans").set("Idempotency-Key", "press-7").send({ clientId, siteId, target: "https://offline.invalid/" });
+    const started = await agent.post("/api/scans").set("Idempotency-Key", "press-7").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
     expect(started.status).toBe(201);
     const stop = await agent.post(`/api/scans/${started.body.test.id}/abort`).set("Idempotency-Key", "stop-press").send();
     expect(stop.status, JSON.stringify(stop.body)).toBe(200);
@@ -554,5 +620,8 @@ describe("a stop never carries a key", () => {
     // server/assurance.ts: the header is sent by the push alone.
     const assurance = read("server/assurance.ts").split(/\nexport async function /).slice(1);
     expect(assurance.filter((one) => one.includes("[IDEMPOTENCY_HEADER]")).map((one) => one.slice(0, one.indexOf("(")))).toEqual(["pushConnector"]);
+    // server/backend-scans.ts: the header is sent by the launch alone -- never by a stop's mirror, a collect or a read.
+    const backendScans = read("server/backend-scans.ts").split(/\nexport async function /).slice(1);
+    expect(backendScans.filter((one) => one.includes("[IDEMPOTENCY_HEADER]")).map((one) => one.slice(0, one.indexOf("(")))).toEqual(["launchScan"]);
   });
 });
