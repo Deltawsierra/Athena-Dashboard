@@ -106,7 +106,7 @@ describe("the ASVS edition and what the mapping is", () => {
     mount(view(false));
     expect(document.body.textContent).not.toMatch(/breach/i);
     expect(
-      screen.getByText("No mapped requirement is failing in the tests considered. Requirements not run or not covered were not checked."),
+      screen.getByText("No requirement has a finding mapped to it in the tests considered. Requirements not run or not covered were not checked."),
     ).toBeTruthy();
   });
 });

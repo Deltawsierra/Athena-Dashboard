@@ -445,7 +445,7 @@ export default function Teams() {
     <div className="mx-auto max-w-[1600px] px-4 py-6 md:px-8">
       <PageHero
         title="Teams"
-        subtitle="People power a safer tomorrow. Assign, review, and approve with clarity."
+        subtitle="Assign, review, and approve with clarity."
         background="council"
         verbs={["People", "Ownership", "Collaboration", "Trust"]}
       />

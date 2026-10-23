@@ -63,7 +63,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               
               <h1 className="text-4xl font-bold">Something went wrong</h1>
               <p className="text-muted-foreground text-lg">
-                The application encountered an unexpected error. Your data is safe and the issue has been logged.
+                The application encountered an unexpected error. The error was written to the browser console, and its details are shown below.
               </p>
             </div>
 

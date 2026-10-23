@@ -1,7 +1,7 @@
 /**
  * The banner every Mythos page opens with: a serif title and a one-line creed
  * over a warm temple ground, with a right-hand rail of the four verbs and the
- * "greater clarity / safer AI" sign-off.
+ * "greater clarity" sign-off.
  *
  * The temple is a real plate now -- a bank of lit marble halls in gold on
  * obsidian, one per page mood -- sat behind the copy and scrimmed on the left
@@ -42,7 +42,7 @@ interface PageHeroProps {
   background?: HeroBackground;
   /** The vertical verb rail, e.g. ["Scan","Analyze","Evidence","Deploy"]. */
   verbs?: string[];
-  /** The gold sign-off lines, default "Greater / Clarity" + muted "Safer AI". */
+  /** The gold sign-off lines, default "Greater / Clarity" + muted "Athena". */
   signoff?: { gold: string[]; muted: string };
   children?: ReactNode;
 }
@@ -52,7 +52,7 @@ export default function PageHero({
   subtitle,
   background = "vista",
   verbs,
-  signoff = { gold: ["Greater", "Clarity"], muted: "Safer AI" },
+  signoff = { gold: ["Greater", "Clarity"], muted: "Athena" },
   children,
 }: PageHeroProps) {
   return (

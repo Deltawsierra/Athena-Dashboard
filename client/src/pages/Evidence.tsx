@@ -222,8 +222,8 @@ export default function Evidence() {
             <div className="flex items-center gap-4">
               <span className="flex h-10 w-10 items-center justify-center rounded-full border border-gold-dim/40 text-gold"><Landmark className="h-5 w-5" /></span>
               <div>
-                <p className="font-serif text-[18px] text-foreground">From evidence to confidence.</p>
-                <p className="text-[13px] text-muted-foreground">Clear documentation. Measurable progress. Safer AI for what's next.</p>
+                <p className="font-serif text-[18px] text-foreground">Documents on record.</p>
+                <p className="text-[13px] text-muted-foreground">Each entry&apos;s title, type, owner and date are read from the record.</p>
               </div>
             </div>
             <button className="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-gold">Turn evidence into opportunity <ChevronRight className="h-4 w-4" /></button>

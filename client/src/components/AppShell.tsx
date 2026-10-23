@@ -212,7 +212,7 @@ export default function AppShell({ children, onLogout, isAdmin, username }: AppS
           <div className="relative flex flex-col gap-1 text-[10px] uppercase tracking-[0.22em] text-muted-foreground/60">
             <span>Wisdom</span>
             <span>finds</span>
-            <span className="text-gold-dim">a safer path.</span>
+            <span className="text-gold-dim">a way.</span>
           </div>
         </div>
       </aside>

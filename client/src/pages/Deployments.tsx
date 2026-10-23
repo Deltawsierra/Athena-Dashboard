@@ -514,8 +514,8 @@ export default function Deployments() {
         <div className="flex items-center gap-4">
           <Emblem kind="markMedallion" size={40} />
           <div>
-            <p className="text-[11px] uppercase tracking-[0.28em] text-gold">Control today. A safer tomorrow.</p>
-            <p className="mt-1 text-[13px] text-muted-foreground">Deploy AI with confidence, backed by evidence, governed by people.</p>
+            <p className="text-[11px] uppercase tracking-[0.28em] text-gold">Systems under assessment.</p>
+            <p className="mt-1 text-[13px] text-muted-foreground">A system&apos;s findings are those of the latest completed test of each of its sites.</p>
           </div>
         </div>
         <button onClick={() => navigate("/athena")} className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-gold-dim to-gold px-4 py-2 text-[13px] font-semibold text-background hover:brightness-110">
