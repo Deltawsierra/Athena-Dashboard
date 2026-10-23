@@ -59,6 +59,7 @@ import {
   Wrench,
   Zap,
 } from "lucide-react";
+import { useSearch } from "wouter";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
 import { Divider } from "@/components/mythos/Ornament";
@@ -8045,9 +8046,18 @@ export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
 
 export default function Assurance({ admin = false }: { admin?: boolean }) {
   const { toast } = useToast();
-  const [view, setView] = useState<ViewMode>("graph");
+  // The deployment a link names (?deployment=<uuid>, from the Engagements page):
+  // the page opens on the List view narrowed to it.
+  const linkedDeployment = new URLSearchParams(useSearch()).get("deployment");
+  const [view, setView] = useState<ViewMode>(linkedDeployment ? "list" : "graph");
   // List view: the deployment a reader has narrowed the flat tables to.
-  const [selected, setSelected] = useState<string | "">("");
+  const [selected, setSelected] = useState<string | "">(linkedDeployment ?? "");
+  useEffect(() => {
+    if (linkedDeployment) {
+      setView("list");
+      setSelected(linkedDeployment);
+    }
+  }, [linkedDeployment]);
   // Graph view: which deployments a reader has collapsed. Each deployment's
   // heavy panels (route map, AI-BOM, capabilities, data boundary) self-fetch
   // only while its card is expanded, so we start every deployment collapsed

@@ -14,6 +14,8 @@ import { lintMicrocopy } from "@shared/persona-lint";
 import {
   COLLECTING, NOT_YET_IN_RECORD, NO_VERDICT_DID_NOT_FINISH, MIRRORED, NOT_MIRRORED, RECORD_PENDING_PILL, allBackendRecordStrings,
   engagementLine, recordPill,
+  ADOPTED_FROM_RECORD, LAUNCH_ANSWER_AWAITED, NOT_LINKED_TO_CLIENT, NO_SCANS_RECORDED, RECORD_COULD_NOT_BE_READ, RECORD_NEEDS_SIGN_IN,
+  SCANS_COULD_NOT_BE_READ, WINDOW_ENDED, adoptedLine, failedOnEngine, scanCountsLine, stoppedOnEngine, windowRemaining,
 } from "@/lib/backendRecordCopy";
 import {
   COVERAGE_RECORD_PENDING, COVERAGE_SOURCE, HYBRID_SOURCE, allSourceLabelStrings, coverageSourceFor, coverageSourceFromRecord,
@@ -23,7 +25,7 @@ describe("backend record copy: every authored string lints clean", () => {
   const strings = allBackendRecordStrings();
 
   it("has every string of the module on the list", () => {
-    expect(strings.length).toBeGreaterThanOrEqual(20);
+    expect(strings.length).toBeGreaterThanOrEqual(70);
     expect(new Set(strings).size).toBe(strings.length);
   });
 
@@ -49,6 +51,29 @@ describe("backend record copy: every authored string lints clean", () => {
     expect(RECORD_PENDING_PILL).toBe("Backend record: pending");
     expect(recordPill("Ready")).toBe("Backend record: Ready");
     expect(recordPill("stopped")).toBe("Backend record: stopped");
+  });
+
+  it("says what the Engagements page says in the pinned words: a count from rows, an unread list as unread, never none", () => {
+    expect(NO_SCANS_RECORDED).toBe("No scans recorded for this engagement.");
+    expect(SCANS_COULD_NOT_BE_READ).toBe("The record's scans could not be read");
+    expect(RECORD_COULD_NOT_BE_READ).toBe("The record could not be read");
+    expect(RECORD_NEEDS_SIGN_IN).toMatch(/^Sign in to Athena-Backend to read its record/);
+    expect(scanCountsLine(3, [["pending", 2], ["completed", 1]])).toBe("3 scans in the record · pending 2 · completed 1");
+    expect(scanCountsLine(1, [["completed", 1]])).toBe("1 scan in the record · completed 1");
+    expect(WINDOW_ENDED).toBe("Window ended");
+    expect(windowRemaining(1)).toBe("1 day remaining");
+    expect(windowRemaining(30)).toBe("30 days remaining");
+    expect(LAUNCH_ANSWER_AWAITED).toBe("The launch's answer is still awaited: the engine has not named this scan's run.");
+    expect(stoppedOnEngine("stopped by an operator")).toBe("Stopped on the engine: stopped by an operator");
+    expect(failedOnEngine(null)).toBe("Failed on the engine: no detail recorded");
+    expect(adoptedLine(2, 0)).toBe("Adopted 2 scans from the record into this dashboard.");
+    expect(adoptedLine(0, 0)).toBe("Every scan the record lists has its row in this dashboard.");
+    expect(adoptedLine(25, 3)).toBe("Adopted 25 scans from the record into this dashboard. 3 more await the next sync.");
+    // By source, never "legacy": a row this dashboard made is said to be recorded by it directly from the engine, and an
+    // adopted row to be adopted from the record; an engagement no client here names is said to be not linked, not nothing.
+    expect(NOT_LINKED_TO_CLIENT).toBe("Not linked to a dashboard client");
+    expect(ADOPTED_FROM_RECORD).toBe("Adopted from the Athena-Backend record; not started from this dashboard");
+    for (const text of strings) expect(text).not.toMatch(/\bnone\b.*could not be read|could not be read.*\bnone\b/i);
   });
 
   it("names the engagement as the plan pins it: id, deployment name, host", () => {
