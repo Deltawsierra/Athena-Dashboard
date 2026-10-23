@@ -83,6 +83,94 @@ describe("adding a column to a database that already exists", () => {
     expect((await storage.getClient("c1"))?.name).toBe("Existing Client");
   });
 
+  it("relaxes tests.client_id so a scan adopted from the backend record can name no client, keeps the rows, and records one row per backend scan", async () => {
+    process.env.ATHENA_DB_PATH = oldShapedDatabase();
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    const { openReport } = await import("../server/db-sqlite");
+
+    // The old row came through the rebuild, is_sample and all.
+    const kept = await storage.getTest("t1");
+    expect(kept?.criticalCount).toBe(2);
+    expect(kept?.clientId).toBe("c1");
+    expect(kept?.isSample).toBe(false);
+    expect((await storage.getTestsByClient("c1")).map((one) => one.id)).toEqual(["t1"]);
+
+    // The rebuilt table keeps both of its indexes (the backend-scan index is created after it, below).
+    const indexes = (new Database(process.env.ATHENA_DB_PATH!, { readonly: true }).prepare("PRAGMA index_list(tests)").all() as Array<{ name: string }>).map((one) => one.name).sort();
+    expect(indexes).toEqual(expect.arrayContaining(["idx_tests_client_id", "idx_tests_site_id"]));
+
+    // A row with no client, which the old shape refused outright.
+    const adopted = await storage.createTest({
+      clientId: null, testType: "penetration_test", status: "running",
+      findings: { runId: "run-9", target: "https://x.example/", results: [], backendScanId: "scan-9", backendEngagementId: 9, source: "backend" },
+    });
+    expect(adopted.clientId).toBeNull();
+    expect((await storage.getTest(adopted.id))?.clientId).toBeNull();
+
+    // One row per backend scan: the index was created, and refuses a second.
+    expect(openReport.duplicateBackendScanIds).toEqual([]);
+    expect(openReport.backendScanIndexNotCreated).toBeNull();
+    await expect(storage.createTest({
+      clientId: "c1", testType: "penetration_test", status: "running",
+      findings: { runId: "run-10", target: "https://x.example/", results: [], backendScanId: "scan-9" },
+    })).rejects.toThrow("a test already names backend scan scan-9");
+    // A person's test names no backend scan, and is not refused by it.
+    expect((await storage.createTest({ clientId: "c1", testType: "manual", status: "pending", findings: { details: "by hand" } })).id).toBeTruthy();
+  });
+
+  it("leaves the backend-scan index off, and says so, when a database already holds two rows for one backend scan", async () => {
+    const file = oldShapedDatabase();
+    const handle = new Database(file);
+    handle.exec(`
+      INSERT INTO tests (id, client_id, test_type, started_at, findings)
+        VALUES ('d1', 'c1', 'penetration_test', 1000, '{"runId":"run-1","backendScanId":"scan-twice"}'),
+               ('d2', 'c1', 'penetration_test', 1001, '{"runId":"run-2","backendScanId":"scan-twice"}');
+    `);
+    handle.close();
+    process.env.ATHENA_DB_PATH = file;
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    const { openReport } = await import("../server/db-sqlite");
+    // The database opens, both rows stand, and the duplicate is reported rather than the open failing.
+    expect((await storage.getTestsByClient("c1")).map((one) => one.id).sort()).toEqual(["d1", "d2", "t1"]);
+    expect(openReport.duplicateBackendScanIds).toEqual(["scan-twice"]);
+  });
+
+  it("labels every finding and sighting written before the source column existed as this dashboard's own, directly from the engine", async () => {
+    const file = oldShapedDatabase();
+    const handle = new Database(file);
+    // findings and finding_sightings exactly as they were before `source` existed, with a row each.
+    handle.exec(`
+      CREATE TABLE findings (
+        id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, client_id TEXT NOT NULL, site_id TEXT, engagement_ref TEXT NOT NULL,
+        type TEXT NOT NULL, severity TEXT, message TEXT, target TEXT, endpoint TEXT, header TEXT,
+        status TEXT NOT NULL DEFAULT 'open', owner_id TEXT, status_note TEXT, status_changed_by TEXT, status_changed_at INTEGER,
+        first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, times_seen INTEGER NOT NULL DEFAULT 1,
+        last_test_id TEXT, last_run_id TEXT, fixed_at INTEGER, fixed_by_run_id TEXT, fixed_verdict TEXT, reopened_at INTEGER,
+        is_sample INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE finding_sightings (
+        id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, run_id TEXT, test_id TEXT, seen INTEGER NOT NULL, observed_at INTEGER NOT NULL
+      );
+      INSERT INTO findings (id, fingerprint, client_id, engagement_ref, type, severity, first_seen_at, last_seen_at)
+        VALUES ('f-old', 'fp-old', 'c1', 'existing.example', 'sql_injection', 'high', 1000, 1000);
+      INSERT INTO finding_sightings (id, finding_id, run_id, test_id, seen, observed_at) VALUES ('s-old', 'f-old', 'run-old', 't1', 1, 1000);
+    `);
+    handle.close();
+    process.env.ATHENA_DB_PATH = file;
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    // The old rows read as what they are: filed by this dashboard directly from the engine, before the label existed.
+    expect((await storage.getFindingsByClient("c1")).map((one) => [one.id, one.source])).toEqual([["f-old", "dashboard-direct"]]);
+    expect((await storage.getSightings("f-old")).map((one) => one.source)).toEqual(["dashboard-direct"]);
+    // And a new row carries the label without being told to.
+    const made = await storage.createFinding({ fingerprint: "fp-new", clientId: "c1", engagementRef: "existing.example", type: "xss", status: "open" });
+    expect(made.source).toBe("dashboard-direct");
+    await storage.recordSighting(made.id, "run-new", "t1", true);
+    expect((await storage.getSightings(made.id)).map((one) => one.source)).toEqual(["dashboard-direct"]);
+  });
+
   it("relaxes the health columns that have no source, keeping the rows", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-health-"));
     const file = path.join(dir, "athena.db");

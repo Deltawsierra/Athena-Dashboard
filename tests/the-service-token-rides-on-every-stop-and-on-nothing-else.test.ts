@@ -77,16 +77,30 @@ function captureLogs(): string[] {
 }
 
 /**
- * Every backend route the server's code can call: each /api/assurance/ and
- * /api/failsafe/ path it names (server/assurance.ts reaches the backend
- * through server/control-plane.ts, server/failsafe.ts through its own
- * client; nothing else in server/ does), as a pattern for the path sent.
+ * Every backend route the server's code can call that this walk reaches: each
+ * /api/assurance/ and /api/failsafe/ path it names (server/assurance.ts reaches
+ * the backend through server/control-plane.ts, server/failsafe.ts through its
+ * own client), and, of server/backend-scans.ts's /api/pentest/ paths, the two
+ * list reads -- the engagements and the scans -- which the record routes read
+ * with no id (the Option 1 hybrid). The walk's requests name no scan, client or
+ * engagement that exists and start none, so the launch and every read, collect,
+ * stop mirror, creation, renewal and withdrawal of ONE record by its id are a
+ * scan's lifecycle the walk does not drive; their token rule is held where
+ * that lifecycle is (every-scan-starts-through-the-backend-and-its-stop-stays-
+ * direct, a-stop-is-mirrored-to-the-backend-record-after-its-answer,
+ * a-finished-hybrid-scan-is-collected-into-its-backend-record). As a pattern
+ * for the path sent.
  */
 function backendRoutesNamedInSource(): Array<{ literal: string; pattern: RegExp }> {
   const found = new Set<string>();
   for (const file of ["server/assurance.ts", "server/failsafe.ts"]) {
     const source = fs.readFileSync(path.join(ROOT, file), "utf8");
     for (const match of source.matchAll(/[`"](\/api\/(?:assurance|failsafe)\/[^`"\s]*)[`"]/g)) found.add(match[1]);
+  }
+  const scans = fs.readFileSync(path.join(ROOT, "server/backend-scans.ts"), "utf8");
+  for (const match of scans.matchAll(/[`"](\/api\/pentest\/[^`"\s]*)[`"]/g)) {
+    // The list reads alone: a path with an id in it addresses one record, and /api/pentest/scan/ starts one.
+    if (!match[1].includes("${") && match[1] !== "/api/pentest/scan/") found.add(match[1]);
   }
   return [...found].map((literal) => {
     const parts = literal.replace(/\$\{query\}$/, "").split(/\$\{[^}]*\}/);

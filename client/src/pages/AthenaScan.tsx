@@ -18,6 +18,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useSearch } from "wouter";
 import { AlertTriangle, ChevronRight, Play, Plug, ShieldCheck, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -148,7 +149,14 @@ export default function AthenaScan() {
   // in (decision 10); unticked and blank by default, never defaulted.
   const [emailOptIn, setEmailOptIn] = useState(false);
   const [recipientEmail, setRecipientEmail] = useState("");
-  const [testId, setTestId] = useState<string | null>(null);
+  // The scan a link names (?test=<id>, from the Engagements page's record of a
+  // scan adopted into this dashboard): shown as the scan of this page, polled
+  // and stopped as one started here. Nothing is started by opening it.
+  const linkedTestId = new URLSearchParams(useSearch()).get("test");
+  const [testId, setTestId] = useState<string | null>(linkedTestId);
+  useEffect(() => {
+    if (linkedTestId !== null) setTestId(linkedTestId);
+  }, [linkedTestId]);
 
   // Polled, like the scan below. React Query keeps the last answer after a
   // poll fails, and read raw that answer went on saying "engine at <url>"

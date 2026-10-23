@@ -33,10 +33,12 @@ import DeletionManagement from "@/pages/DeletionManagement";
 import Classifiers from "@/pages/Classifiers";
 import Failsafe from "@/pages/Failsafe";
 import Assurance from "@/pages/Assurance";
+import Engagements from "@/pages/Engagements";
 import Economics from "@/pages/Economics";
 import NotFound from "@/pages/not-found";
 import { checkAuth, logout as apiLogout, isAdmin, mustChangePassword } from "@/utils/auth";
 import { applyStoredTheme } from "@/lib/theme";
+import { useRecordAdoption } from "@/hooks/useRecordAdoption";
 import type { PublicUser } from "@shared/schema";
 
 const AmbientField = lazy(() => import("@/components/three/AmbientField"));
@@ -62,6 +64,7 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route path="/pentest" component={PentestScan} />
       <Route path="/findings" component={Risks} />
       <Route path="/assurance">{() => <Assurance admin={admin} />}</Route>
+      <Route path="/engagements" component={Engagements} />
       <Route path="/economics" component={Economics} />
       <Route path="/compliance" component={Compliance} />
       <Route path="/classify-cve" component={CVEClassifier} />
@@ -81,6 +84,18 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route component={NotFound} />
     </Switch>
   );
+}
+
+/**
+ * Once per sign-in: every scan Athena-Backend lists for the person that this
+ * dashboard has no row for gets one (hooks/useRecordAdoption.ts), so the
+ * Tests screen, each row's Stop and the kill switch cover it from the first
+ * screen on. Renders nothing; the Engagements page asks again on its own load
+ * and shows the outcome.
+ */
+function RecordAdoptionOnSignIn() {
+  useRecordAdoption();
+  return null;
 }
 
 function App() {
@@ -180,6 +195,7 @@ function App() {
   } else {
     content = (
       <AppShell onLogout={handleLogout} isAdmin={isAdmin(user)} username={user.username}>
+        <RecordAdoptionOnSignIn />
         <AppRoutes admin={isAdmin(user)} />
       </AppShell>
     );

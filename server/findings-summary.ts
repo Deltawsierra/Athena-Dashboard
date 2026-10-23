@@ -142,8 +142,11 @@ export function reportedSerious(test: SummaryTest): SeriousReading {
   });
   const recorded = (test.findings ?? {}) as Record<string, unknown>;
   const results = Array.isArray(recorded.results) ? (recorded.results as unknown[]) : null;
+  // A scan with no client here (one adopted from the backend record under an
+  // engagement no client names) is a backend scan, which the summary skips; the
+  // fold's scope is the client, so an empty scope stands in for the type alone.
   const folded = results
-    ? foldResults(results, test.clientId, typeof recorded.target === "string" ? recorded.target : null)
+    ? foldResults(results, test.clientId ?? "", typeof recorded.target === "string" ? recorded.target : null)
     : null;
   if (folded && read.countsNotRecorded) {
     const distinct = Array.from(folded.distinct.values());
@@ -295,6 +298,10 @@ export function summarizeFindings(input: {
     // ledger (shared/engine-record.ts backendScanIdOf): its counts stand behind
     // the backend's record, so they are never read as "filed nothing here".
     if (backendScanIdOf(scan.findings ?? null) !== null) continue;
+    // Only a backend scan's row names no client (adoption), and it was skipped
+    // above: said for the type, and so that no scan is ever counted under no client.
+    const clientId = scan.clientId;
+    if (clientId === null) continue;
     const reported = reportedSerious(scan);
     const sighted = filed.get(scan.id) ?? { critical: 0, high: 0 };
     const critical = Math.max(0, reported.critical - sighted.critical);
@@ -303,11 +310,11 @@ export function summarizeFindings(input: {
     // as tracked: how many critical or high results stand behind it is not
     // on record, so no filed finding can be shown to cover them.
     if (!flagsSerious({ ...reported, critical, high })) continue;
-    const sum = untrackedOf.get(scan.clientId);
-    const newest = newestOf.get(scan.clientId);
+    const sum = untrackedOf.get(clientId);
+    const newest = newestOf.get(clientId);
     const lead = !newest || completedTime(scan) > completedTime(newest) ? scan : newest;
-    newestOf.set(scan.clientId, lead);
-    untrackedOf.set(scan.clientId, {
+    newestOf.set(clientId, lead);
+    untrackedOf.set(clientId, {
       testId: lead.id,
       completedAt: isoOf(lead.completedAt) || null,
       critical: (sum?.critical ?? 0) + critical,

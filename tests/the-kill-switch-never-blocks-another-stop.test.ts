@@ -6,6 +6,7 @@ import type { AddressInfo } from "net";
 
 import { makeApp, signIn, signInToBackend } from "./helpers";
 import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /**
  * SAFETY: engaging the AI Control kill switch blocked every other stop.
@@ -144,6 +145,31 @@ async function startScan(admin: Agent, clientId: string): Promise<{ testId: stri
   return { testId: started.body.test.id, runId: started.body.runId };
 }
 
+/**
+ * A scan started at the backend by someone other than this dashboard, under the
+ * client's engagement, then ADOPTED here from the backend's list (POST
+ * /api/record/adopt; server/backend-adoption.ts): a row this dashboard did not
+ * make, whose run the kill switch must stop like any other.
+ */
+async function adoptedScan(admin: Agent): Promise<{ testId: string; runId: string }> {
+  const engagementId = Array.from(hybrid!.engagements.values())[0].id;
+  const signedIn = await fetch(`${hybrid!.url}/api/token/`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
+  });
+  const { access } = (await signedIn.json()) as { access: string };
+  const launched = await fetch(`${hybrid!.url}/api/pentest/scan/`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+    body: JSON.stringify({ url: "https://acme.example/", consent: true, engagement_id: engagementId, wait_seconds: 0 }),
+  });
+  expect(launched.status).toBe(202);
+  const { scan_id: scanId } = (await launched.json()) as { scan_id: string };
+  const synced = await admin.post("/api/record/adopt");
+  expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+  const adopted = (synced.body.adopted as Array<{ testId: string; backendScanId: string; engineRunId: string }>).find((one) => one.backendScanId === scanId);
+  expect(adopted).toBeDefined();
+  return { testId: adopted!.testId, runId: adopted!.engineRunId };
+}
+
 // Exactly what the AI Control page sends.
 const KILL = { killSwitchEnabled: true, systemStatus: "shutdown", activeSystems: [] };
 
@@ -152,6 +178,7 @@ describe("engaging the kill switch stops what is running, and says what it stopp
   const cp = stubControlPlane();
   let admin: Agent;
   let running: Array<{ testId: string; runId: string }> = [];
+  let adopted: { testId: string; runId: string };
   let finishedTest = "";
   let manualTest = "";
   let kill: { status: number; body: any };
@@ -159,7 +186,10 @@ describe("engaging the kill switch stops what is running, and says what it stopp
   beforeAll(async () => {
     ({ admin } = await bootWith(await listen(engine.server), await listen(cp.server)));
     const clientId = await engagement(admin, "Acme");
+    // Two scans started here, and one adopted from the backend's record: all running.
     running = [await startScan(admin, clientId), await startScan(admin, clientId)];
+    adopted = await adoptedScan(admin);
+    running.push(adopted);
     // A finished engine scan, and a person's record that says "running" with
     // no engine run behind it: neither is sent a stop.
     const done = await startScan(admin, clientId);
@@ -195,6 +225,11 @@ describe("engaging the kill switch stops what is running, and says what it stopp
       expect(logs.some((log) => log.action === "aborted" && log.entityId === one.testId
         && log.details?.via === "kill_switch" && log.details?.runId === one.runId)).toBe(true);
     }
+  });
+
+  it("stops a scan adopted from the backend record as it stops every other", () => {
+    const scans = kill.body.stops.scans as Array<{ testId: string; runId: string; stopped: boolean }>;
+    expect(scans.find((one) => one.testId === adopted.testId)).toMatchObject({ runId: adopted.runId, stopped: true });
   });
 
   describe("while it is engaged", () => {

@@ -24,6 +24,7 @@ import {
 } from "./control-plane";
 import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
+import { runIdFrom } from "@shared/engine-record";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
 
@@ -108,6 +109,17 @@ export interface AssuranceFinding {
    * "verified".
    */
   closure: AssuranceClosure | null;
+  /**
+   * The scan this finding was ingested from (athena-backend #188,
+   * FindingSerializer `scan_uuid` and `engine_run_id` via `Finding.scan`): the
+   * backend's scan uuid -- what this dashboard's rows name as `backendScanId`
+   * -- and the engine run it names, read by the one rule every run id is
+   * (shared/engine-record.ts runIdFrom). Null when the backend served none: a
+   * finding filed another way, or an older backend. That is "not said", never
+   * "no scan".
+   */
+  scanUuid: string | null;
+  engineRunId: string | null;
 }
 
 /** The closure standings the backend serves, closed. Anything else reads "unknown". */
@@ -401,6 +413,13 @@ export interface AssuranceDeployment {
   findingCount: number;
   createdAt: string | null;
   updatedAt: string | null;
+  /**
+   * The backend engagement this deployment was ingested under (athena-backend
+   * #188, DeploymentSerializer `engagement_id`): what a dashboard client's
+   * `backendEngagementId` names, so a client's deployments are read by it. Null
+   * when the backend served none.
+   */
+  engagementId: number | null;
 }
 
 export interface AssuranceAsset {
@@ -1477,6 +1496,8 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     assignee: raw.assignee == null ? null : String(raw.assignee),
     remediationState: str(raw.remediation_state),
     closure: closure(raw.closure),
+    scanUuid: strOrNull(raw.scan_uuid),
+    engineRunId: runIdFrom(raw.engine_run_id),
   };
 }
 
@@ -2397,6 +2418,7 @@ function deployment(raw: Record<string, unknown>): AssuranceDeployment {
     findingCount: num(raw.finding_count, 0),
     createdAt: strOrNull(raw.created_at),
     updatedAt: strOrNull(raw.updated_at),
+    engagementId: numOrNull(raw.engagement_id),
   };
 }
 

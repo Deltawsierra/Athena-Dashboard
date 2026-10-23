@@ -32,8 +32,9 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import NoStopPanel from "@/components/NoStopPanel";
-import { failsafeOnly, unfinishedRunOf } from "@/lib/engineRuns";
+import { backendOnly, failsafeOnly, unfinishedRunOf } from "@/lib/engineRuns";
 import { loaded } from "@/lib/loaded";
+import { NOT_LINKED_TO_CLIENT } from "@/lib/backendRecordCopy";
 import type { Client, Test } from "@shared/schema";
 
 /** One run on the engine's live list (server/engine.ts ActiveRun). */
@@ -156,8 +157,10 @@ export default function RunningScans({ exclude, className }: { exclude: string |
     (test) => test.id !== exclude && (unfinishedRunOf(test) !== null || failsafeOnly(test)),
   );
   if (running.length === 0 && retests.length === 0) return null;
-  const clientName = (id: string) =>
-    (clients$.state === "ready" ? clients$.data.find((one) => one.id === id)?.name : undefined) ?? "an engagement";
+  // A scan adopted from the backend record under an engagement no client here names has none (shared/schema.ts tests.clientId).
+  const clientName = (id: string | null) =>
+    id === null ? NOT_LINKED_TO_CLIENT
+      : (clients$.state === "ready" ? clients$.data.find((one) => one.id === id)?.name : undefined) ?? "an engagement";
 
   return (
     <GlassCard className={className} data-testid="list-running-scans">
@@ -194,17 +197,22 @@ export default function RunningScans({ exclude, className }: { exclude: string |
                   {new Date(test.startedAt).toLocaleString()}
                 </p>
               </div>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                onClick={() => stop.mutate(test.id)}
-                disabled={stop.isPending && stop.variables === test.id}
-                data-testid={`button-stop-scan-${test.id}`}
-              >
-                <Square className="mr-2 h-4 w-4" />
-                {stop.isPending && stop.variables === test.id ? "Stopping…" : "Stop"}
-              </Button>
+              {backendOnly(test) ? (
+                // Only the backend's Stop reaches this run until a direct read of it succeeds (decision 7).
+                <NoStopPanel variant="backend" testId={test.id} className="max-w-md" />
+              ) : (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => stop.mutate(test.id)}
+                  disabled={stop.isPending && stop.variables === test.id}
+                  data-testid={`button-stop-scan-${test.id}`}
+                >
+                  <Square className="mr-2 h-4 w-4" />
+                  {stop.isPending && stop.variables === test.id ? "Stopping…" : "Stop"}
+                </Button>
+              )}
             </li>
           );
         })}

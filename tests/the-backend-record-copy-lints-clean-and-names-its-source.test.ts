@@ -14,6 +14,8 @@ import { lintMicrocopy } from "@shared/persona-lint";
 import {
   COLLECTING, NOT_YET_IN_RECORD, NO_VERDICT_DID_NOT_FINISH, MIRRORED, NOT_MIRRORED, RECORD_PENDING_PILL, allBackendRecordStrings,
   engagementLine, recordPill,
+  ADOPTED_FROM_RECORD, LAUNCH_ANSWER_AWAITED, NOT_LINKED_TO_CLIENT, NO_SCANS_RECORDED, RECORD_COULD_NOT_BE_READ, RECORD_NEEDS_SIGN_IN,
+  SCANS_COULD_NOT_BE_READ, WINDOW_ENDED, adoptionOutcomeLine, failedOnEngine, scanCountsLine, stoppedOnEngine, windowRemaining,
 } from "@/lib/backendRecordCopy";
 import {
   COVERAGE_RECORD_PENDING, COVERAGE_SOURCE, HYBRID_SOURCE, allSourceLabelStrings, coverageSourceFor, coverageSourceFromRecord,
@@ -49,6 +51,38 @@ describe("backend record copy: every authored string lints clean", () => {
     expect(RECORD_PENDING_PILL).toBe("Backend record: pending");
     expect(recordPill("Ready")).toBe("Backend record: Ready");
     expect(recordPill("stopped")).toBe("Backend record: stopped");
+  });
+
+  it("says what the Engagements page says in the pinned words: a count from rows, an unread list as unread, never none", () => {
+    expect(NO_SCANS_RECORDED).toBe("No scans recorded for this engagement.");
+    expect(SCANS_COULD_NOT_BE_READ).toBe("The record's scans could not be read");
+    expect(RECORD_COULD_NOT_BE_READ).toBe("The record could not be read");
+    expect(RECORD_NEEDS_SIGN_IN).toMatch(/^Sign in to Athena-Backend to read its record/);
+    expect(scanCountsLine(3, [["pending", 2], ["completed", 1]])).toBe("3 scans in the record · pending 2 · completed 1");
+    expect(scanCountsLine(1, [["completed", 1]])).toBe("1 scan in the record · completed 1");
+    expect(WINDOW_ENDED).toBe("Window ended");
+    expect(windowRemaining(1)).toBe("1 day remaining");
+    expect(windowRemaining(30)).toBe("30 days remaining");
+    expect(LAUNCH_ANSWER_AWAITED).toBe("The launch's answer is still awaited: the engine has not named this scan's run.");
+    expect(stoppedOnEngine("stopped by an operator")).toBe("Stopped on the engine: stopped by an operator");
+    expect(failedOnEngine(null)).toBe("Failed on the engine: no detail recorded");
+    // The sync's outcome, from its own fields: "every scan has its row" only when nothing is left without one.
+    const none = { adopted: 0, remaining: 0, awaitingRun: 0, detailUnread: 0, writeFailed: null };
+    expect(adoptionOutcomeLine(none)).toBe("Every scan the record lists has its row in this dashboard.");
+    expect(adoptionOutcomeLine({ ...none, adopted: 2 })).toBe("Adopted 2 scans from the record into this dashboard.");
+    expect(adoptionOutcomeLine({ ...none, adopted: 25, remaining: 3 })).toBe("Adopted 25 scans from the record into this dashboard. 3 more await the next sync.");
+    expect(adoptionOutcomeLine({ ...none, awaitingRun: 1 })).toBe("No scan was adopted this sync. 1 scan awaits the launch's answer and has no row here yet.");
+    expect(adoptionOutcomeLine({ ...none, detailUnread: 2 })).toBe("No scan was adopted this sync. 2 finished scans could not be read now; each is adopted whole on the next sync.");
+    expect(adoptionOutcomeLine({ ...none, writeFailed: "the database is locked" })).toBe("No scan was adopted this sync. A row could not be written: the database is locked; the scans after it wait for the next sync.");
+    expect(adoptionOutcomeLine({ adopted: 1, remaining: 2, awaitingRun: 1, detailUnread: 1, writeFailed: "disk full" })).toBe(
+      "Adopted 1 scan from the record into this dashboard. 1 scan awaits the launch's answer and has no row here yet. " +
+      "1 finished scan could not be read now; it is adopted whole on the next sync. A row could not be written: disk full; the scans after it wait for the next sync. 2 more await the next sync.",
+    );
+    // By source, never "legacy": a row this dashboard made is said to be recorded by it directly from the engine, and an
+    // adopted row to be adopted from the record; an engagement no client here names is said to be not linked, not nothing.
+    expect(NOT_LINKED_TO_CLIENT).toBe("Not linked to a dashboard client");
+    expect(ADOPTED_FROM_RECORD).toBe("Adopted from the Athena-Backend record; not started from this dashboard");
+    for (const text of strings) expect(text).not.toMatch(/\bnone\b.*could not be read|could not be read.*\bnone\b/i);
   });
 
   it("names the engagement as the plan pins it: id, deployment name, host", () => {

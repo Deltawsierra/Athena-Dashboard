@@ -143,6 +143,8 @@ server/          Express API
   storage.ts     IStorage contract + in-memory backend
   storage-sqlite.ts   SQLite backend (Drizzle)
   db-sqlite.ts   connection and schema creation
+  backend-scans.ts    Athena-Backend's scans and engagements, read as the person
+  backend-adoption.ts the backend's scans adopted into tests (the record is the source)
 shared/schema.ts Drizzle sqlite-core tables and Zod insert schemas
 tests/           Vitest suites
 electron-main.cjs  Electron main process
@@ -355,7 +357,8 @@ its headers exactly as before.
   A scan started through the backend is never filed into this dashboard's own
   findings ledger (`findings`, `findingSightings`): the backend's record is its
   record. Rows this dashboard dispatched to the engine itself, before the
-  hybrid, keep their ledger and their labels.
+  hybrid, keep their ledger and their labels, by source (see
+  [The record is the source](#the-record-is-the-source-engagements-adoption-the-ledger-by-source)).
 - **The stop mirror** (decision 6). A Stop sent from here -- the scan's own,
   the kill switch's, a delete's -- is mirrored into the backend's record of the
   scan (`POST /api/pentest/scans/<uuid>/stop/`) AFTER the engine's answer went
@@ -407,6 +410,86 @@ Tests: `tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.te
 `tests/the-backend-record-panel-shows-three-states-and-never-a-verdict-from-silence.test.tsx`;
 the stand-in backend they drive is `tests/helpers/hybrid-backend-stand-in.ts`,
 pinned by `tests/the-hybrid-backend-stand-in-answers-the-pinned-shapes.test.ts`.
+
+## The record is the source (Engagements, adoption, the ledger by source)
+
+Athena-Backend is the record of every scan started through it -- from this
+dashboard or from anywhere else -- and of the findings and deployments its
+ingest made of them (owner decisions 1 and 4). This dashboard reads that record
+as the signed-in person and shows it as it stands; it never derives a figure
+from silence, never files a backend finding into its own ledger, and never adds
+the backend's population to its own.
+
+- **The record, read as the person** (`server/backend-scans.ts`,
+  `server/assurance.ts`). `GET /api/record/engagements` reads the engagements
+  the person can see, every page of the backend's scans list (DRF `next`
+  followed, up to a bound) and the deployments with the engagement each was
+  ingested under; `GET /api/record/clients/:id/findings` reads a client's
+  findings in the record -- those of every deployment under the client's
+  engagement, each with the scan it came from (`scan_uuid`, `engine_run_id`)
+  and the row here for that scan. Every read is bounded by the read deadline
+  and on no stop's path. A part that could not be read is answered as unread,
+  with the reason: an empty list is a measurement, an unreadable one is not.
+- **Adoption** (`server/backend-adoption.ts`, `POST /api/record/adopt`). Every
+  scan the backend lists for the person that this dashboard has no row for --
+  started from another dashboard, from the backend's own console, or by a
+  launch whose answer was lost -- gets one row, from the record alone: the run
+  id the record names (never one a person supplies), the target, the backend
+  scan and engagement ids, `source: "backend"` and when it was adopted. A
+  pending record reads running until the engine's live word; a finished one
+  (completed, stopped, failed) is adopted with the detail's results and
+  coverage, its counts and the record's snapshot, so the scan page answers it
+  from the record and asks the engine nothing. One row per backend scan (a
+  unique index on `findings.backendScanId`; a database that already holds
+  duplicates opens and reports them). No client or site is ever made up: the
+  client is the one whose `backendEngagementId` names the engagement, and a
+  scan under an engagement no client here names has `tests.client_id` null and
+  reads "Not linked to a dashboard client". An adopted running scan takes the
+  hybrid's rule before any direct Stop: marked `stop: "backend"` until the first
+  direct read of its run by this dashboard's key succeeds, sent after the
+  sync's answer and never awaited by it; from then its Stop is the engine's
+  abort, and the kill switch stops it as it stops every other. The sync is
+  asked once per sign-in from the app's shell and again when the Engagements
+  page loads, is throttled per session on the server, adopts at most 25 rows
+  per sync (the rest wait for the next), and is never on a stop's path: a Stop
+  and the kill switch are each answered while a sync is held at the backend's
+  list. Nothing is filed into this dashboard's own findings ledger by it.
+- **The Engagements page** (`/engagements`, beside Assurance). Each engagement
+  the person can see, with the dashboard client it is linked to or the plain
+  word that it is linked to none (its own heading), the backend's client name,
+  scope hosts, status word and testing window ("Window ended" once it has
+  passed), its scans counted by the backend's status words and verdict labels
+  from the list's rows -- "no scans recorded" only of a list read whole, the
+  reason and no count where the list could not be read -- and the deployments
+  ingested under it with their decision, findings count and coverage manifest
+  state. Each scan's outcome is the backend's: the verdict label of a completed
+  one, "Stopped on the engine: …" and "Failed on the engine: …" from the
+  record's error message, "The launch's answer is still awaited" for a pending
+  scan the engine has not named a run for. An adopted row opens the scan page
+  (`/athena?test=<id>`), its report through the row's relay; a deployment opens
+  the Assurance page narrowed to it (`/assurance?deployment=<uuid>`). A person
+  with no backend sign-in is told to sign in and shown no list.
+- **The ledger by source** (decision 1). `findings` and `finding_sightings`
+  carry `source`, `"dashboard-direct"` for every row this dashboard filed
+  directly from the engine -- the rows written before the column existed read
+  so too. Those rows stay: read-only, labelled by their source on every surface
+  ("recorded by this dashboard directly from the engine"), and never counted
+  as the backend's record. The Risks page shows the client's findings in the
+  Athena-Backend record in their own section (severity, title, status label,
+  deployment, engine run, the scan each came from) above its own register,
+  which stays under its own label; the Overview's record tiles count the
+  backend's findings from its deployments, this dashboard's own ledger's open
+  findings and the engine's live runs on three tiles from three sources, never
+  one sum; the Tests page filters its rows by source and says of an adopted
+  row where it came from.
+
+Tests: `tests/the-record-is-read-as-the-person-and-never-as-empty.test.ts`,
+`tests/backend-launched-scans-are-adopted-into-the-record-index.test.ts`,
+`tests/the-engagements-page-shows-the-record-and-counts-no-silence.test.tsx`,
+`tests/the-ledger-is-labelled-by-source-and-never-summed.test.tsx`; the
+run-id gate `tests/a-test-is-given-an-engine-run-only-by-the-scan-that-started-it.test.ts`
+says adoption writes only a run id the backend record names, and the
+kill-switch gate stops an adopted scan as it stops every other.
 
 ## Relay reads never hold a stop
 
@@ -575,13 +658,19 @@ starts again. Tests:
 
 - Scans started from the Athena and Penetration Testing pages start through
   Athena-Backend and are in its record (see
-  [Scans start through Athena-Backend](#scans-start-through-athena-backend-the-hybrid)).
-  Rows recorded before that, by this dashboard directly from the engine, keep
-  their record and their labels, and no backend verdict, claim or report
-  applies to them; each surface says which record it shows. A retest of a scan
-  started through the backend shows its verdict but files it into neither
-  record. Authenticated scanning cannot start through the backend yet
-  (`auth_not_carried_by_backend`).
+  [Scans start through Athena-Backend](#scans-start-through-athena-backend-the-hybrid)),
+  and every scan the backend lists that this dashboard has no row for is
+  adopted into one (see
+  [The record is the source](#the-record-is-the-source-engagements-adoption-the-ledger-by-source)).
+  Rows recorded before that, by this dashboard directly from the engine, stay:
+  read-only, labelled by their source (`source: "dashboard-direct"`) on every
+  surface, never counted as the backend's record, and no backend verdict, claim
+  or report applies to them. The two populations are not reconciled here. A
+  retest of a scan started through the backend shows its verdict but files it
+  into neither record, and no retest is authorised from here for an adopted
+  scan whose engagement no dashboard client names. The backend's
+  `retest_checks` on a finding are read but not yet shown. Authenticated
+  scanning cannot start through the backend yet (`auth_not_carried_by_backend`).
 - A retest pressed again after its first retest has finished starts a second
   retest. The engine reads the key only on `POST /api/scan` so far, and the held
   slot covers a retest only while it may be running.

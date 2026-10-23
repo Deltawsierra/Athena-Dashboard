@@ -2,7 +2,7 @@ import {
   type User, type InsertUser,
   type Client, type InsertClient,
   type Site, type InsertSite,
-  type Test, type InsertTest,
+  type Test, type InsertTest, type NewTest,
   type Finding, type InsertFinding,
   type FindingSighting, type FindingCheck, type RetestWatch, type CollectWatch,
   type Document, type InsertDocument,
@@ -14,10 +14,12 @@ import {
   type ConnectionSetting, type UpdateConnectionSettings,
   type SampleDataCounts,
   type ApiKey,
+  LEDGER_SOURCE_DASHBOARD_DIRECT,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
+import { backendScanIdOf } from "@shared/engine-record";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 
@@ -66,7 +68,13 @@ export interface IStorage {
   getAllTests(): Promise<Test[]>;
   getTestsByClient(clientId: string): Promise<Test[]>;
   getTestsBySite(siteId: string): Promise<Test[]>;
-  createTest(test: InsertTest): Promise<Test>;
+  /**
+   * A new row. One row per backend scan: a test whose findings name a
+   * `backendScanId` another row already names is refused (DuplicateBackendScan;
+   * SQLite's unique index), so a scan started through the backend is recorded
+   * or adopted once however many dashboards share the file.
+   */
+  createTest(test: NewTest): Promise<Test>;
   updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined>;
   deleteTest(id: string): Promise<boolean>;
 
@@ -230,6 +238,9 @@ export interface RetestFiling {
 
 /** Raised when a check for an engine run that already has one is filed: one retest, one check. */
 export class DuplicateRetestCheck extends Error {}
+
+/** A second test row naming a backend scan another row already names: refused, so a backend scan is recorded or adopted once. */
+export class DuplicateBackendScan extends Error {}
 
 /** How a collect watch ended (CollectWatch fields). */
 export type CollectWatchEnd = Pick<CollectWatch, "state" | "endedAt" | "record"> &
@@ -464,6 +475,7 @@ export class MemStorage implements IStorage {
       statusNote: null, statusChangedBy: null, statusChangedAt: null,
       timesSeen: 1, lastTestId: null, lastRunId: null,
       fixedAt: null, fixedByRunId: null, fixedVerdict: null, reopenedAt: null,
+      source: LEDGER_SOURCE_DASHBOARD_DIRECT,
       isSample: false,
       ...insert,
       id: randomUUID(),
@@ -492,7 +504,7 @@ export class MemStorage implements IStorage {
     );
     if (already) { already.seen = seen; return; }
     this.sightings.push({
-      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(),
+      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(), source: LEDGER_SOURCE_DASHBOARD_DIRECT,
     });
   }
   async getSightings(findingId: string) {
@@ -599,7 +611,12 @@ export class MemStorage implements IStorage {
     return true;
   }
 
-  async createTest(insertTest: InsertTest): Promise<Test> {
+  async createTest(insertTest: NewTest): Promise<Test> {
+    // As SQLite's unique index idx_tests_backend_scan: one row per backend scan.
+    const scanId = backendScanIdOf(insertTest.findings);
+    if (scanId !== null && Array.from(this.tests.values()).some((one) => backendScanIdOf(one.findings) === scanId)) {
+      throw new DuplicateBackendScan(`a test already names backend scan ${scanId}`);
+    }
     const test: Test = {
       status: "pending",
       siteId: null,

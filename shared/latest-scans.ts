@@ -22,7 +22,8 @@ import { isEngineRecord } from "./engine-record";
 
 /** The fields of a test these rules read. */
 export interface ScopedTest {
-  clientId: string;
+  /** Null only for a scan adopted from the backend's record whose engagement no client here names (shared/schema.ts tests.clientId). */
+  clientId: string | null;
   siteId?: string | null;
   status: string;
   startedAt: Date | string | number | null;

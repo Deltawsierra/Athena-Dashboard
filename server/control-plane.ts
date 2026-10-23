@@ -326,6 +326,25 @@ export function readSignalFor(init: CallInit): AbortSignal | undefined {
  * caller's to interpret — a 403 is a real "you may not do this", not
  * something to retry.
  */
+/**
+ * A signal aborted when either of two is: the read's own timeout and the read
+ * deadline it is served under. AbortSignal.any where the runtime has it (Node
+ * 20.3+, Electron's Node); composed by hand where the global is another
+ * runtime's (a page test's jsdom globals stand in for Node's).
+ */
+function eitherSignal(first: AbortSignal, second: AbortSignal): AbortSignal {
+  const any = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (typeof any === "function") return any([first, second]);
+  const either = new AbortController();
+  const relay = (from: AbortSignal) => {
+    if (from.aborted) either.abort(from.reason);
+    else from.addEventListener("abort", () => either.abort(from.reason), { once: true });
+  };
+  relay(first);
+  relay(second);
+  return either.signal;
+}
+
 export async function call(path: string, init: CallInit = {}, retryAuth = true): Promise<Response> {
   const base = baseUrl();
   if (!base) {
@@ -357,7 +376,7 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
         ...(request.headers ?? {}),
         ...(presented !== null ? { [SERVICE_TOKEN_HEADER]: presented } : {}),
       },
-      signal: read ? AbortSignal.any([controller.signal, read]) : controller.signal,
+      signal: read ? eitherSignal(controller.signal, read) : controller.signal,
     });
   } catch (cause) {
     const why = cause instanceof Error ? cause.message : String(cause);

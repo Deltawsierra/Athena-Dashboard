@@ -40,14 +40,16 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import NoStopPanel from "@/components/NoStopPanel";
-import { failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns";
+import { backendOnly, failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
-import { backendScanIdOf, engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { adoptedFromRecord, backendScanIdOf, engineRunIdOf, isEngineRecord } from "@shared/engine-record";
 import { StatusPill, type StatusTone } from "@/components/mythos/atoms";
-import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
-import { RECORD_PENDING_PILL, recordPill } from "@/lib/backendRecordCopy";
+import {
+  DASHBOARD_DIRECT, SOURCE_FILTER_ALL, SOURCE_FILTER_BACKEND, SOURCE_FILTER_DIRECT, SOURCE_FILTER_LABEL, SOURCE_FILTER_NONE,
+} from "@/lib/sourceLabels";
+import { ADOPTED_FROM_RECORD, NOT_LINKED_TO_CLIENT, RECORD_PENDING_PILL, recordPill } from "@/lib/backendRecordCopy";
 
 /**
  * The row's pill for where a scan's record is (lib/sourceLabels.ts,
@@ -124,6 +126,8 @@ export default function Tests() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [clientFilter, setClientFilter] = useState<string>("all");
+  // By source (lib/sourceLabels.ts): the backend's record, this dashboard's direct record, or no engine run at all.
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingTest, setEditingTest] = useState<Test | null>(null);
@@ -284,8 +288,9 @@ export default function Tests() {
                          test.testType.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesStatus = statusFilter === "all" || test.status === statusFilter;
     const matchesClient = clientFilter === "all" || test.clientId === clientFilter;
-    
-    return matchesSearch && matchesStatus && matchesClient;
+    const matchesSource = sourceFilter === "all" || (recordSourcePill(test)?.source ?? "none") === sourceFilter;
+
+    return matchesSearch && matchesStatus && matchesClient && matchesSource;
   });
 
   const getStatusColor = (status: string) => {
@@ -592,6 +597,22 @@ export default function Tests() {
                   ))}
                 </SelectContent>
               </Select>
+              {/* By source (lib/sourceLabels.ts), as the Risks page filters: a plain select. */}
+              <label className="flex flex-col gap-1 md:w-64">
+                <span className="sr-only">{SOURCE_FILTER_LABEL}</span>
+                <select
+                  value={sourceFilter}
+                  onChange={(e) => setSourceFilter(e.target.value)}
+                  aria-label={SOURCE_FILTER_LABEL}
+                  className="rounded-lg border border-border/60 bg-surface-1/50 px-3 py-2 text-[13px] text-foreground"
+                  data-testid="select-filter-source"
+                >
+                  <option value="all">{SOURCE_FILTER_ALL}</option>
+                  <option value="backend">{SOURCE_FILTER_BACKEND}</option>
+                  <option value="direct">{SOURCE_FILTER_DIRECT}</option>
+                  <option value="none">{SOURCE_FILTER_NONE}</option>
+                </select>
+              </label>
             </div>
           </GlassCard>
         </AnimatedContainer>
@@ -614,7 +635,7 @@ export default function Tests() {
                   <Shield className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
                   <h3 className="text-lg font-semibold mb-2">No Tests Found</h3>
                   <p className="text-muted-foreground mb-4">
-                    {searchQuery || statusFilter !== "all" || clientFilter !== "all"
+                    {searchQuery || statusFilter !== "all" || clientFilter !== "all" || sourceFilter !== "all"
                       ? "Try adjusting your filters"
                       : "Create your first security test to get started"}
                   </p>
@@ -661,9 +682,13 @@ export default function Tests() {
                                 {test.summary}
                               </p>
                             )}
+                            {/* Adopted from the record (server/backend-adoption.ts): said by source, beside the row. */}
+                            {adoptedFromRecord(test.findings) && (
+                              <p className="text-[12px] text-muted-foreground" data-testid={`text-adopted-${test.id}`}>{ADOPTED_FROM_RECORD}</p>
+                            )}
                           </div>
                           <div className="flex gap-2">
-                            {unfinishedRunOf(test) && (
+                            {unfinishedRunOf(test) && !backendOnly(test) && (
                               <Button
                                 size="sm"
                                 variant="destructive"
@@ -729,6 +754,10 @@ export default function Tests() {
                           </div>
                         </div>
 
+                        {/* Only the backend's Stop reaches this run until a direct read of
+                            it succeeds (decision 7): no Stop here, and what stops it said. */}
+                        {backendOnly(test) && <NoStopPanel variant="backend" testId={test.id} />}
+
                         {/* The engine gave this scan no run id a stop can name: no
                             Stop here, and what stops it said in its place. */}
                         {failsafeOnly(test) && (
@@ -751,14 +780,20 @@ export default function Tests() {
                               {format(new Date(test.startedAt), "MMM dd, yyyy")}
                             </span>
                           </div>
-                          {client && (
+                          {client ? (
                             <div className="flex items-center gap-2 text-sm">
                               <span className="text-muted-foreground">Client:</span>
                               <span className="font-medium" data-testid={`text-client-${test.id}`}>
                                 {client.name}
                               </span>
                             </div>
-                          )}
+                          ) : test.clientId === null ? (
+                            // A scan adopted from the backend record under an engagement no client here names: no client is made up for it.
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="text-muted-foreground">Client:</span>
+                              <span className="text-muted-foreground" data-testid={`text-client-${test.id}`}>{NOT_LINKED_TO_CLIENT}</span>
+                            </div>
+                          ) : null}
                           {site && (
                             <div className="flex items-center gap-2 text-sm">
                               <MapPin className="w-4 h-4 text-muted-foreground" />

@@ -5,6 +5,7 @@ import type { AddressInfo } from "net";
 
 import { makeApp, signIn, signInToBackend } from "./helpers";
 import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
+import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 /**
  * R5-A. Round 4 stated the rule "a run id is recorded by the scan route that
@@ -24,6 +25,12 @@ import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybri
  * Now a person's test -- created or edited -- whose findings carry any of the
  * run's keys (runId, target, results) is refused with 400, naming the keys.
  * Only the scan route writes them. A key sent as null supplies nothing.
+ *
+ * The ONE other writer of a run id is the adoption of a scan the backend lists
+ * and no row here names (server/backend-adoption.ts, the Option 1 hybrid):
+ * it writes only the run id the BACKEND'S RECORD names, never one a person
+ * supplies -- the request's body is not read -- and a person's test carrying
+ * an adoption key (source, adoptedAt) is refused like one carrying a run's.
  */
 
 let hybrid: HybridBackendStandIn | null = null;
@@ -34,6 +41,7 @@ const json = (res: ServerResponse, code: number, body: unknown) => {
 
 function stubEngine() {
   const calls: string[] = [];
+  let runs = 0;
   const server = http.createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = req.url ?? "";
     calls.push(`${req.method} ${url}`);
@@ -45,7 +53,8 @@ function stubEngine() {
           evidence: { endpoint: "https://a.example/login" }, message: "SQLi in login" }] },
       });
     }
-    return json(res, 202, { run_id: "run-1", state: "running" });
+    runs += 1;
+    return json(res, 202, { run_id: `run-${runs}`, state: "running" });
   });
   return { server, calls };
 }
@@ -135,5 +144,43 @@ describe("a person's test is never given an engine run", () => {
     });
     expect(created.status).toBe(201);
     expect(created.body.findings).toMatchObject({ details: "by hand" });
+  });
+
+  it("adoption writes only a run id the backend record names, never one a person supplies", async () => {
+    // A scan started at the backend by someone other than this dashboard, under
+    // client A's engagement: the backend lists it, and no row here names it.
+    const engagementId = Array.from(hybrid!.engagements.values())[0].id;
+    const signedIn = await fetch(`${hybrid!.url}/api/token/`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "admin", password: TEST_ADMIN_PASSWORD }),
+    });
+    const { access } = (await signedIn.json()) as { access: string };
+    const launched = await fetch(`${hybrid!.url}/api/pentest/scan/`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${access}` },
+      body: JSON.stringify({ url: "https://a.example/elsewhere", consent: true, engagement_id: engagementId, wait_seconds: 0 }),
+    });
+    expect([200, 202]).toContain(launched.status);
+    const { scan_id: scanId } = (await launched.json()) as { scan_id: string };
+    const recorded = String(hybrid!.scans.get(scanId)!.engine_run_id);
+
+    // The sync is asked with a body naming another run: the body is not read.
+    const synced = await admin.post("/api/record/adopt").send({ runId: "forged-by-a-person", findings: { runId: "forged-by-a-person" } });
+    expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+    const adopted = (synced.body.adopted as Array<{ testId: string; backendScanId: string; engineRunId: string }>).find((one) => one.backendScanId === scanId);
+    expect(adopted).toBeDefined();
+    expect(adopted!.engineRunId).toBe(recorded);
+    const row = (await admin.get(`/api/tests/${adopted!.testId}`)).body;
+    expect(row.findings).toMatchObject({ runId: recorded, backendScanId: scanId, source: "backend" });
+    const all = (await admin.get("/api/tests")).body as Array<{ findings: { runId?: unknown } | null }>;
+    expect(all.some((one) => one.findings?.runId === "forged-by-a-person")).toBe(false);
+
+    // And a person's test carrying an adoption key is refused, naming it.
+    for (const [findings, named] of [
+      [{ source: "backend" }, "findings.source"],
+      [{ adoptedAt: new Date().toISOString() }, "findings.adoptedAt"],
+    ] as Array<[Record<string, unknown>, string]>) {
+      const forged = await admin.post("/api/tests").send({ clientId: clientB, testType: "manual", status: "pending", findings });
+      expect(forged.status, named).toBe(400);
+      expect(forged.body.message).toContain(named);
+    }
   });
 });
