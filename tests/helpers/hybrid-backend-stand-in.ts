@@ -260,11 +260,16 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     /** The engine is treated as unreachable by collect (503) while true. */
     engineUnreachable: false,
     stopAbortsEngine: opts.stopAbortsEngine === true,
+    /** Stops held unanswered until releaseStops(). */
+    holdStops: false,
+    /** Each stop POST takes the next of these as its answer, before anything is recorded; empty for the stand-in's own. */
+    stopAnswers: [] as Array<{ status: number; body: unknown }>,
     /** A launch's answer is sent this many ms after the launch is done: the row exists, the run is named, the answer is late. */
     answerDelayMs: 0,
   };
   const heldLaunches: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
+  const heldStops: Array<() => void> = [];
   /** The scans a collect is reading the engine for right now: a second collector meanwhile is told the record is claimed (409). */
   const collecting = new Set<string>();
 
@@ -768,6 +773,12 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
           if (leaf === undefined && method === "GET") return answer(200, detailOf(scan));
           if (leaf === "status/") return answer(501, { detail: "Not implemented." });
           if (leaf === "stop/" && method === "POST") {
+            if (controls.holdStops) {
+              await new Promise<void>((release) => { heldStops.push(release); held.push(res); });
+              if (res.destroyed) return;
+            }
+            const queued = controls.stopAnswers.shift();
+            if (queued) return answer(queued.status, queued.body);
             const at = new Date().toISOString();
             scan.stop_requested_at = at;
             if (controls.stopAbortsEngine && scan.engine_run_id !== null) {
@@ -864,6 +875,11 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       controls.holdCollects = false;
       heldCollects.splice(0).forEach((release) => release());
     },
+    holdStops(): void { controls.holdStops = true; },
+    releaseStops(): void {
+      controls.holdStops = false;
+      heldStops.splice(0).forEach((release) => release());
+    },
     /** Requests of one kind seen so far. */
     launches: () => seen.filter((one) => one.method === "POST" && one.path === "/api/pentest/scan/"),
     collects: () => seen.filter((one) => one.method === "POST" && one.path.endsWith("/collect/")),
@@ -879,6 +895,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       waiters = [];
       heldLaunches.splice(0).forEach((release) => release());
       heldCollects.splice(0).forEach((release) => release());
+      heldStops.splice(0).forEach((release) => release());
       for (const res of held) res.destroy();
       server.closeAllConnections?.();
       await new Promise<void>((done) => server.close(() => done()));

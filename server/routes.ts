@@ -679,6 +679,99 @@ async function sendStop(
 }
 
 /**
+ * Mirror a Stop this dashboard sent the engine into Athena-Backend's record of
+ * a hybrid scan (server/backend-scans.ts mirrorStop; decision 6), then record
+ * what came of it on the row (`findings.backendMirror`, shared/schema.ts
+ * BackendMirrorReading) and in the log (`abort_mirrored` / `abort_mirror_failed`).
+ *
+ * SAFETY: only ever called AFTER the stop was sent to the engine and its
+ * answer went out, and never awaited by anything that answers a stop: a
+ * mirror that fails, or takes its full bound, changes no stop's answer and
+ * delays none. It presents the failsafe service token and waits on no
+ * sign-in, and only when that attempt fails is it sent once more as the
+ * person. Nothing is mirrored for a row that names no backend scan (a scan
+ * this dashboard dispatched itself), and nothing for a run the engine said
+ * had already ended or did not know: nothing was stopped, and the backend's
+ * own collector records the run's end. A stop the engine refused IS
+ * mirrored: the backend's own stop may reach the run. Never throws.
+ */
+async function mirrorStopToBackend(
+  who: Who, test: { id: string; findings: unknown }, outcome: StopOutcome, via: "stop" | "kill_switch" | "delete",
+): Promise<void> {
+  const backendScanId = backendScanIdOf(test.findings);
+  if (backendScanId === null || outcome.alreadyFinished === true || outcome.unknownRun === true) return;
+  const pressed = via === "stop" ? "the scan's own Stop on the Athena dashboard"
+    : via === "kill_switch" ? "the Athena dashboard's kill switch"
+      : "the scan's deletion on the Athena dashboard, which stops its run first";
+  const answered = acceptedStop(outcome) ? "the engine accepted the stop"
+    : outcome.answerUnread ? "the engine answered the stop 2xx and the rest of its answer was not read"
+      : `the engine did not accept the stop (${outcome.detail})`;
+  const reason = `${pressed}: ${answered}`;
+  const mirror = await backendScans.mirrorStop(backendScanId, reason);
+  const reading: BackendMirrorReading = { at: new Date().toISOString(), mirrored: mirror.mirrored, via: mirror.via, detail: mirror.detail };
+  try {
+    // The row as it is now -- the live poll writes it too; a row deleted since keeps no reading.
+    const current = await storage.getTest(test.id);
+    if (current) {
+      await storage.updateTest(test.id, { findings: { ...((current.findings ?? {}) as Record<string, unknown>), backendMirror: reading } });
+    }
+  } catch (cause) {
+    console.error(logLine(`[abort] the reading of the stop mirror for backend scan ${backendScanId} could not be written: ${causeOf(cause)}`));
+  }
+  try {
+    await storage.createActivityLog({
+      action: mirror.mirrored ? "abort_mirrored" : "abort_mirror_failed",
+      entityType: "test",
+      entityId: test.id,
+      details: {
+        backendScanId, via, reason, mirrored: mirror.mirrored, credential: mirror.via, status: mirror.status,
+        ...(mirror.detail ? { detail: mirror.detail } : {}),
+      },
+      ...who,
+    });
+  } catch (cause) {
+    console.error(logLine(`[abort] the log of the stop mirror for backend scan ${backendScanId} could not be written: ${causeOf(cause)}`));
+  }
+  if (!mirror.mirrored) console.error(logLine(`[abort] the stop of backend scan ${backendScanId} was not mirrored to its record: ${mirror.detail}`));
+}
+
+/**
+ * Mirror the stops the kill switch or a delete sent, one row each, after every
+ * stop's answer went out (afterAnswer). `rows` are the tests as the route held
+ * them -- a delete's rows are gone from storage by then. Never awaited by
+ * them; never throws.
+ */
+function mirrorStopsToBackend(who: Who, stops: ScanStop[], via: "kill_switch" | "delete", rows: Array<{ id: string; findings: unknown }> = []): void {
+  for (const stop of stops) {
+    void (async () => {
+      const test = rows.find((one) => one.id === stop.testId) ?? storage.peekTest(stop.testId) ?? (await storage.getTest(stop.testId));
+      if (test) await mirrorStopToBackend(who, test, stop, via);
+    })().catch((cause) => console.error(logLine(`[abort] the stop mirror for test ${stop.testId} could not be sent: ${causeOf(cause)}`)));
+  }
+}
+
+/**
+ * Run `fn` once this response has gone out (or its connection closed), and
+ * never before: for what follows a stop -- its mirror to the backend's record
+ * -- and must neither delay nor change the stop's answer, whichever way the
+ * route answers.
+ */
+function afterAnswer(res: Response, fn: () => void): void {
+  let ran = false;
+  const once = () => {
+    if (ran) return;
+    ran = true;
+    try {
+      fn();
+    } catch (cause) {
+      console.error(logLine(`[after-answer] ${causeOf(cause)}`));
+    }
+  };
+  res.once("finish", once);
+  res.once("close", once);
+}
+
+/**
  * Whether a run may still be going after its stop: the engine did not take it
  * (or its answer was not read), and did not say the run had ended, or that it
  * knows no such run -- where that is definite: a 404 to a stop for an id an
@@ -3078,6 +3171,8 @@ export function registerRoutes(app: Express): void {
     // Its tests' running engine runs are stopped first; nothing is deleted
     // while one of them could not be (stopBeforeDeleting).
     const stops = await stopBeforeDeleting(req, tests);
+    // Decision 6: each stop's record at the backend, once this answer has gone out, whichever way it goes.
+    afterAnswer(res, () => mirrorStopsToBackend(actor(req), stops, "delete", tests));
     if (refuseUnstoppedDelete(res, "the client", stops)) return;
     if (refuseUnforcedDeleteWithoutStop(req, res, "the client", tests, stops)) return;
     const withoutStop = tests.filter(unfinishedWithoutRunId).map((one) => one.id);
@@ -3227,6 +3322,8 @@ export function registerRoutes(app: Express): void {
     // A running engine scan is stopped first, and deleted only once the engine
     // accepted the stop (stopBeforeDeleting): its row is its Stop.
     const stops = await stopBeforeDeleting(req, [test]);
+    // Decision 6: the stop's record at the backend, once this answer has gone out, whichever way it goes.
+    afterAnswer(res, () => mirrorStopsToBackend(actor(req), stops, "delete", [test]));
     if (refuseUnstoppedDelete(res, "the test", stops)) return;
     if (refuseUnforcedDeleteWithoutStop(req, res, "the test", [test], stops)) return;
     const withoutStop = unfinishedWithoutRunId(test);
@@ -3869,7 +3966,12 @@ export function registerRoutes(app: Express): void {
       outcome = await engine.abortRun(runId);
     } catch (cause) {
       if (cause instanceof engine.EngineUnavailable) {
-        return void res.status(503).json({ error: cause.message });
+        res.status(503).json({ error: cause.message });
+        // Decision 6, after the answer and never awaited by it: the backend's
+        // record of the stop asked for -- and the backend's own stop, which
+        // may reach a run this dashboard could not.
+        void mirrorStopToBackend(who, test, { stopped: false, detail: cause.message }, "stop");
+        return;
       }
       throw cause;
     }
@@ -3879,9 +3981,12 @@ export function registerRoutes(app: Express): void {
     // it is still running against somebody's system -- and a run that had
     // already ended was not aborted by this either.
     if (!outcome.accepted && !outcome.alreadyFinished) {
-      return void res.status(502).json({
+      res.status(502).json({
         error: "the engine did not accept the stop; the scan may still be running",
       });
+      // As above: the record of a stop asked for, after the answer, never awaited by it.
+      void mirrorStopToBackend(who, test, outcomeOf(outcome), "stop");
+      return;
     }
     const stopOutcome = outcomeOf(outcome);
     res.json(outcome.alreadyFinished
@@ -3892,6 +3997,10 @@ export function registerRoutes(app: Express): void {
     // (a full disk, a locked database) neither unsends the stop nor delays it.
     const failed = await writeStopRecord(who, { runId, target: null, testId: test.id }, "stop", stopOutcome);
     if (failed) console.error(logLine(`[abort] ${failed}`));
+    // Decision 6: the stop's record at the backend -- after the engine's answer
+    // has gone out and the stop's own record is written; never awaited by this
+    // answer, which has already been sent, and never on the path of the next.
+    void mirrorStopToBackend(who, test, stopOutcome, "stop");
   }));
 
   app.get("/api/scans/:testId", asyncHandler(async (req, res) => {
@@ -4005,12 +4114,19 @@ export function registerRoutes(app: Express): void {
     // readable by this key after all, so its direct Stop is offered again.
     const { stop: _marked, ...unmarked } = recorded;
     const kept = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
+    // A Stop's mirror reading written to the row while the engine was being
+    // read (mirrorStopToBackend) is kept, not written over by this poll.
+    const latest = storage.peekTest(test.id);
+    const mirror = backendMirrorOf(((latest?.findings ?? {}) as Record<string, unknown>).backendMirror);
     const updated = await storage.updateTest(test.id, {
       status: current.state,
       completedAt: finished ? new Date() : null,
       // The engine's coverage manifest rides with the run's end
       // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
-      findings: { ...kept, results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}) },
+      findings: {
+        ...kept, ...(mirror ? { backendMirror: mirror } : {}),
+        results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}),
+      },
       ...counts,
     });
 
@@ -5006,6 +5122,12 @@ export function registerRoutes(app: Express): void {
       // Neither list failing is a 500: what the page must say is which list
       // could not be read -- not that nothing ran.
       ({ stops, engineRuns, writeFailures } = await sweep);
+      // Decision 6: each stopped hybrid scan's record at the backend, once THIS
+      // answer has gone out, whichever way it goes -- never before it, never
+      // awaited by it.
+      const stopped = stops.scans ?? [];
+      const whoPressed = actor(req);
+      afterAnswer(res, () => mirrorStopsToBackend(whoPressed, stopped, "kill_switch"));
     }
 
     // The other fields, now that every stop is answered.
