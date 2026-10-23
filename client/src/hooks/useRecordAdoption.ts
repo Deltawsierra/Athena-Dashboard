@@ -17,11 +17,53 @@
 import { useEffect, useRef, useState } from "react";
 import { apiFetch, queryClient } from "@/lib/queryClient";
 import { errorMessage } from "@/lib/loaded";
+import { syncAnswerMissing } from "@/lib/backendRecordCopy";
 
 export type RecordAdoption =
   | { state: "syncing" }
-  | { state: "done"; adopted: number; remaining: number; throttled: boolean }
+  | {
+    state: "done";
+    adopted: number;
+    /** Candidates left for the next sync (the server's per-sync cap). */
+    remaining: number;
+    /** Pending scans the engine has not named a run for: no row here until it does. */
+    awaitingRun: number;
+    /** Finished scans whose detail could not be read now, and the server's reasons: adopted whole next time. */
+    detailUnread: number;
+    detailUnreadReasons: string[];
+    /** A row that could not be written stopped the sync there, in the server's words; null when every row was written. */
+    writeFailed: string | null;
+    throttled: boolean;
+  }
   | { state: "unread"; message: string };
+
+/**
+ * The answer read by its fields (server/backend-adoption.ts AdoptionOutcome).
+ * A field the answer does not carry is the honest side -- unread, with which
+ * field -- never a zero that would read as "nothing awaits".
+ */
+export function readAdoptionAnswer(body: Record<string, unknown> | null): RecordAdoption {
+  const unread = (field: string): RecordAdoption => ({ state: "unread", message: syncAnswerMissing(field) });
+  if (body === null) return unread("anything this page reads");
+  if (!Array.isArray(body.adopted)) return unread("which scans were adopted");
+  if (typeof body.remaining !== "number") return unread("how many scans await the next sync");
+  if (typeof body.awaitingRun !== "number") return unread("how many scans await the launch's answer");
+  if (!Array.isArray(body.detailUnread)) return unread("how many finished scans could not be read");
+  if (body.writeFailed !== null && typeof body.writeFailed !== "string") return unread("whether a row could not be written");
+  if (typeof body.throttled !== "boolean") return unread("whether this answer is the last sync's");
+  return {
+    state: "done",
+    adopted: body.adopted.length,
+    remaining: body.remaining,
+    awaitingRun: body.awaitingRun,
+    detailUnread: body.detailUnread.length,
+    detailUnreadReasons: body.detailUnread
+      .map((one) => (one && typeof one === "object" ? (one as { reason?: unknown }).reason : undefined))
+      .filter((one): one is string => typeof one === "string"),
+    writeFailed: body.writeFailed,
+    throttled: body.throttled,
+  };
+}
 
 export function useRecordAdoption(): RecordAdoption {
   const [state, setState] = useState<RecordAdoption>({ state: "syncing" });
@@ -39,9 +81,8 @@ export function useRecordAdoption(): RecordAdoption {
           if (shown) setState({ state: "unread", message: said });
           return;
         }
-        const adopted = body && Array.isArray(body.adopted) ? body.adopted.length : 0;
-        const remaining = body && typeof body.remaining === "number" ? body.remaining : 0;
-        if (adopted > 0) {
+        const read = readAdoptionAnswer(body);
+        if (read.state === "done" && read.adopted > 0) {
           // The lists adopted rows appear in, refreshed now that they have.
           await Promise.all([
             queryClient.invalidateQueries({ queryKey: ["/api/tests"] }),
@@ -49,7 +90,7 @@ export function useRecordAdoption(): RecordAdoption {
             queryClient.invalidateQueries({ queryKey: ["/api/findings/summary"] }),
           ]);
         }
-        if (shown) setState({ state: "done", adopted, remaining, throttled: body?.throttled === true });
+        if (shown) setState(read);
       } catch (cause) {
         if (shown) setState({ state: "unread", message: errorMessage(cause) });
       }

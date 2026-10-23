@@ -41,7 +41,7 @@ import {
   DEPLOYMENTS_SECTION, LINKED_SECTION, NOT_LINKED_TO_CLIENT, NO_DEPLOYMENTS, NO_ENGAGEMENTS, NO_REASON_GIVEN, NO_SCANS_RECORDED,
   NO_VERDICT_SERVED, OPEN_DEPLOYMENT, OPEN_SCAN, PDF_LINK, RECORD_COULD_NOT_BE_READ, RECORD_NEEDS_SIGN_IN, RECORD_READING,
   REPORT_AFTER_ADOPTION, RUNNING_NOW_LABEL, RUNNING_NOW_SUBLABEL, SCANS_COULD_NOT_BE_READ, SCANS_SECTION, SCANS_UNDER_NO_ENGAGEMENT_SHOWN,
-  SCOPE_LABEL, SCOPE_NONE, SHOW_DETAIL, WINDOW_ENDED, WINDOW_LABEL, WINDOW_NOT_RECORDED, adoptedLine, collectedLine, engagementRef,
+  SCOPE_LABEL, SCOPE_NONE, SHOW_DETAIL, WINDOW_ENDED, WINDOW_LABEL, WINDOW_NOT_RECORDED, adoptionOutcomeLine, collectedLine, engagementRef,
   engineRunRef, failedOnEngine, findingsInRecord, manifestLine, readAtLine, scanCountsLine, stopAskedReading, stoppedOnEngine,
   verdictCountsLine, windowRemaining,
 } from "@/lib/backendRecordCopy";
@@ -394,7 +394,7 @@ export default function Engagements() {
               ? `${ADOPTION_COULD_NOT_BE_READ}: ${adoption.message}`
               : adoption.throttled
                 ? ADOPTION_RECENT
-                : adoptedLine(adoption.adopted, adoption.remaining)}
+                : adoptionOutcomeLine(adoption)}
         </p>
       </PageHero>
 

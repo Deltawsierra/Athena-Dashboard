@@ -341,6 +341,8 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     failNextScansList: null as { status: number; body: unknown } | null,
     /** Scans list reads held unanswered until releaseScansLists(): a sync in flight that no stop waits on. */
     holdScansLists: false,
+    /** The next scan detail read is answered with this instead of the record (a finished scan the sync cannot read now). */
+    failNextScanDetail: null as { status: number; body: unknown } | null,
   };
   const heldLaunches: Array<() => void> = [];
   const heldScansLists: Array<() => void> = [];
@@ -897,7 +899,14 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
           const scan = scansVisibleTo(who).find((one) => one.uuid === scanPath[1]);
           if (!scan) return answer(404, { error: "Scan not found" });
           const leaf = scanPath[2];
-          if (leaf === undefined && method === "GET") return answer(200, detailOf(scan));
+          if (leaf === undefined && method === "GET") {
+            if (controls.failNextScanDetail !== null) {
+              const fault = controls.failNextScanDetail;
+              controls.failNextScanDetail = null;
+              return answer(fault.status, fault.body);
+            }
+            return answer(200, detailOf(scan));
+          }
           if (leaf === "status/") return answer(501, { detail: "Not implemented." });
           if (leaf === "stop/" && method === "POST") {
             if (controls.holdStops) {

@@ -147,12 +147,55 @@ export const REPORT_AFTER_ADOPTION = "Report in the record; its link appears onc
 export const LINKED_CLIENT = "Dashboard client";
 /** Scans the list carries under an engagement the engagements list does not show. */
 export const SCANS_UNDER_NO_ENGAGEMENT_SHOWN = "Scans the record lists under no engagement shown here";
-/** The adoption sync's outcome on this load (POST /api/record/adopt). */
-export function adoptedLine(adopted: number, remaining: number): string {
-  const first = adopted === 0
-    ? "Every scan the record lists has its row in this dashboard."
-    : `Adopted ${adopted} scan${adopted === 1 ? "" : "s"} from the record into this dashboard.`;
-  return remaining > 0 ? `${first} ${remaining} more await the next sync.` : first;
+/**
+ * The adoption sync's outcome on this load (POST /api/record/adopt), said from
+ * the answer's own fields and never from silence: a scan the record lists that
+ * has no row here yet -- awaiting the launch's answer, a finished scan whose
+ * detail could not be read now, the scans after a row that could not be
+ * written, the candidates left for the next sync -- is said as such, and
+ * "every scan has its row" only when none of those stands.
+ */
+export interface AdoptionOutcomeView {
+  adopted: number;
+  remaining: number;
+  awaitingRun: number;
+  detailUnread: number;
+  writeFailed: string | null;
+}
+export const ADOPTION_EVERY_ROW = "Every scan the record lists has its row in this dashboard.";
+export const ADOPTION_NONE_THIS_SYNC = "No scan was adopted this sync.";
+export function adoptedCountLine(adopted: number): string {
+  return `Adopted ${adopted} scan${adopted === 1 ? "" : "s"} from the record into this dashboard.`;
+}
+export function awaitingRunLine(count: number): string {
+  return count === 1
+    ? "1 scan awaits the launch's answer and has no row here yet."
+    : `${count} scans await the launch's answer and have no row here yet.`;
+}
+export function detailUnreadLine(count: number): string {
+  return count === 1
+    ? "1 finished scan could not be read now; it is adopted whole on the next sync."
+    : `${count} finished scans could not be read now; each is adopted whole on the next sync.`;
+}
+export function writeFailedLine(reason: string): string {
+  return `A row could not be written: ${reason}; the scans after it wait for the next sync.`;
+}
+export function remainingLine(count: number): string {
+  return `${count} more await the next sync.`;
+}
+export function adoptionOutcomeLine(outcome: AdoptionOutcomeView): string {
+  const { adopted, remaining, awaitingRun, detailUnread, writeFailed } = outcome;
+  if (adopted === 0 && remaining === 0 && awaitingRun === 0 && detailUnread === 0 && writeFailed === null) return ADOPTION_EVERY_ROW;
+  const parts = [adopted > 0 ? adoptedCountLine(adopted) : ADOPTION_NONE_THIS_SYNC];
+  if (awaitingRun > 0) parts.push(awaitingRunLine(awaitingRun));
+  if (detailUnread > 0) parts.push(detailUnreadLine(detailUnread));
+  if (writeFailed !== null) parts.push(writeFailedLine(writeFailed));
+  if (remaining > 0) parts.push(remainingLine(remaining));
+  return parts.join(" ");
+}
+/** The sync's answer did not carry a field this page reads: said as unread, never read as zero. */
+export function syncAnswerMissing(field: string): string {
+  return `the sync's answer did not say ${field}`;
 }
 export const ADOPTION_COULD_NOT_BE_READ = "The adoption sync could not be read";
 export const ADOPTION_SYNCING = "Adopting the record's scans into this dashboard…";
@@ -253,9 +296,19 @@ export function allBackendRecordStrings(): string[] {
     REPORT_AFTER_ADOPTION,
     LINKED_CLIENT,
     SCANS_UNDER_NO_ENGAGEMENT_SHOWN,
-    adoptedLine(0, 0),
-    adoptedLine(1, 0),
-    adoptedLine(3, 2),
+    ADOPTION_EVERY_ROW,
+    ADOPTION_NONE_THIS_SYNC,
+    adoptedCountLine(1),
+    adoptedCountLine(3),
+    awaitingRunLine(1),
+    awaitingRunLine(2),
+    detailUnreadLine(1),
+    detailUnreadLine(4),
+    writeFailedLine("the database is locked"),
+    remainingLine(3),
+    adoptionOutcomeLine({ adopted: 2, remaining: 3, awaitingRun: 1, detailUnread: 1, writeFailed: "the database is locked" }),
+    adoptionOutcomeLine({ adopted: 0, remaining: 0, awaitingRun: 1, detailUnread: 0, writeFailed: null }),
+    syncAnswerMissing("how many scans await the launch's answer"),
     ADOPTION_COULD_NOT_BE_READ,
     ADOPTION_SYNCING,
     ADOPTION_RECENT,

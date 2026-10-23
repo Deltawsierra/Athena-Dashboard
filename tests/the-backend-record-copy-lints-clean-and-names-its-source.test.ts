@@ -15,7 +15,7 @@ import {
   COLLECTING, NOT_YET_IN_RECORD, NO_VERDICT_DID_NOT_FINISH, MIRRORED, NOT_MIRRORED, RECORD_PENDING_PILL, allBackendRecordStrings,
   engagementLine, recordPill,
   ADOPTED_FROM_RECORD, LAUNCH_ANSWER_AWAITED, NOT_LINKED_TO_CLIENT, NO_SCANS_RECORDED, RECORD_COULD_NOT_BE_READ, RECORD_NEEDS_SIGN_IN,
-  SCANS_COULD_NOT_BE_READ, WINDOW_ENDED, adoptedLine, failedOnEngine, scanCountsLine, stoppedOnEngine, windowRemaining,
+  SCANS_COULD_NOT_BE_READ, WINDOW_ENDED, adoptionOutcomeLine, failedOnEngine, scanCountsLine, stoppedOnEngine, windowRemaining,
 } from "@/lib/backendRecordCopy";
 import {
   COVERAGE_RECORD_PENDING, COVERAGE_SOURCE, HYBRID_SOURCE, allSourceLabelStrings, coverageSourceFor, coverageSourceFromRecord,
@@ -66,9 +66,18 @@ describe("backend record copy: every authored string lints clean", () => {
     expect(LAUNCH_ANSWER_AWAITED).toBe("The launch's answer is still awaited: the engine has not named this scan's run.");
     expect(stoppedOnEngine("stopped by an operator")).toBe("Stopped on the engine: stopped by an operator");
     expect(failedOnEngine(null)).toBe("Failed on the engine: no detail recorded");
-    expect(adoptedLine(2, 0)).toBe("Adopted 2 scans from the record into this dashboard.");
-    expect(adoptedLine(0, 0)).toBe("Every scan the record lists has its row in this dashboard.");
-    expect(adoptedLine(25, 3)).toBe("Adopted 25 scans from the record into this dashboard. 3 more await the next sync.");
+    // The sync's outcome, from its own fields: "every scan has its row" only when nothing is left without one.
+    const none = { adopted: 0, remaining: 0, awaitingRun: 0, detailUnread: 0, writeFailed: null };
+    expect(adoptionOutcomeLine(none)).toBe("Every scan the record lists has its row in this dashboard.");
+    expect(adoptionOutcomeLine({ ...none, adopted: 2 })).toBe("Adopted 2 scans from the record into this dashboard.");
+    expect(adoptionOutcomeLine({ ...none, adopted: 25, remaining: 3 })).toBe("Adopted 25 scans from the record into this dashboard. 3 more await the next sync.");
+    expect(adoptionOutcomeLine({ ...none, awaitingRun: 1 })).toBe("No scan was adopted this sync. 1 scan awaits the launch's answer and has no row here yet.");
+    expect(adoptionOutcomeLine({ ...none, detailUnread: 2 })).toBe("No scan was adopted this sync. 2 finished scans could not be read now; each is adopted whole on the next sync.");
+    expect(adoptionOutcomeLine({ ...none, writeFailed: "the database is locked" })).toBe("No scan was adopted this sync. A row could not be written: the database is locked; the scans after it wait for the next sync.");
+    expect(adoptionOutcomeLine({ adopted: 1, remaining: 2, awaitingRun: 1, detailUnread: 1, writeFailed: "disk full" })).toBe(
+      "Adopted 1 scan from the record into this dashboard. 1 scan awaits the launch's answer and has no row here yet. " +
+      "1 finished scan could not be read now; it is adopted whole on the next sync. A row could not be written: disk full; the scans after it wait for the next sync. 2 more await the next sync.",
+    );
     // By source, never "legacy": a row this dashboard made is said to be recorded by it directly from the engine, and an
     // adopted row to be adopted from the record; an engagement no client here names is said to be not linked, not nothing.
     expect(NOT_LINKED_TO_CLIENT).toBe("Not linked to a dashboard client");

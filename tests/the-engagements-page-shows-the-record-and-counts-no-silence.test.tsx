@@ -150,6 +150,9 @@ afterEach(async () => {
   queryClient.clear();
   window.history.pushState({}, "", "/");
   hybrid.controls.failNextScansList = null;
+  hybrid.controls.failNextScanDetail = null;
+  // Every run a case left live in the engine stub ends, so the next case's launches stay under Max Concurrent Tests.
+  for (const [, run] of engine.runs) if (run.state === "running") run.state = "aborted";
   engine.control.completeNext = false;
   engine.control.nameNoRunNext = false;
   adoption.adoption.minIntervalMs = 0;
@@ -190,6 +193,7 @@ function realRoutes(): string[] {
 }
 
 const page = () => render(<QueryClientProvider client={queryClient}><Engagements /></QueryClientProvider>);
+const rowsNaming = async (scanId: string) => (await agent.get("/api/tests")).body.filter((one: { findings: { backendScanId?: unknown } | null }) => one.findings?.backendScanId === scanId);
 
 async function aClient(host: string) {
   clientCount += 1;
@@ -251,7 +255,9 @@ describe("the Engagements page reads the record as the person", () => {
     page();
     const card = await screen.findByTestId(`engagement-${engagementId}`);
     // The sync was asked on load, and adopted the two scans the record names a run for; the third awaits the launch's answer.
-    await waitFor(() => expect(screen.getByTestId("text-adoption-outcome").textContent).toMatch(/^Adopted 2 scans from the record into this dashboard\.$/));
+    await waitFor(() => expect(screen.getByTestId("text-adoption-outcome").textContent).toBe(
+      "Adopted 2 scans from the record into this dashboard. 1 scan awaits the launch's answer and has no row here yet.",
+    ));
     expect(sent.filter((one) => one === "POST /api/record/adopt")).toHaveLength(1);
 
     // The client it is linked to, its status word and its window, from the record.
@@ -302,7 +308,7 @@ describe("the Engagements page reads the record as the person", () => {
     realRoutes();
     page();
     const card = await screen.findByTestId(`engagement-${bareId}`);
-    await waitFor(() => expect(screen.getByTestId("text-adoption-outcome").textContent).toMatch(/dashboard\.$/));
+    await waitFor(() => expect(screen.getByTestId("text-adoption-outcome").textContent).not.toMatch(/^Adopting/));
     expect(screen.getByTestId("section-unlinked").textContent).toContain(NOT_LINKED_TO_CLIENT);
     expect(within(card).getByTestId("text-engagement-client").textContent).toBe(NOT_LINKED_TO_CLIENT);
     expect(within(card).getByTestId("text-engagement-window").textContent).toBe(WINDOW_ENDED);
@@ -385,5 +391,49 @@ describe("the record's links", () => {
     await waitFor(() => expect(screen.getByTestId("text-state").textContent).toMatch(/running/i));
     expect(sent).toContain(`GET /api/scans/${adopted!.testId}`);
     expect(sent.filter((one) => one.startsWith("POST /api/scans") && !one.endsWith("/abort"))).toEqual([]);
+  });
+});
+
+describe("the adoption outcome line is said from the answer's fields, never from silence", () => {
+  const EVERY_ROW = "Every scan the record lists has its row in this dashboard.";
+  const settled = async () => {
+    await waitFor(() => expect(screen.getByTestId("text-adoption-outcome").textContent).not.toMatch(/^Adopting/));
+    return screen.getByTestId("text-adoption-outcome").textContent ?? "";
+  };
+
+  it("a scan that awaits the launch's answer has no row yet, and the line says so rather than that every scan has its row", async () => {
+    const { engagementId } = await anEngagedClient("awaiting.example");
+    engine.control.nameNoRunNext = true;
+    const unnamed = await aScanStartedElsewhere(engagementId, "https://awaiting.example/queued");
+    expect(unnamed.runId).toBeNull();
+    realRoutes();
+    page();
+    const line = await settled();
+    expect(line).not.toContain(EVERY_ROW);
+    expect(line).toMatch(/\b\d+ scans? awaits? the launch's answer and ha(s|ve) no row here yet\./);
+    expect(line).toMatch(/^No scan was adopted this sync\./);
+  });
+
+  it("a finished scan whose detail could not be read now is said so, with its count, and is adopted whole on the next sync", async () => {
+    const { engagementId } = await anEngagedClient("unreadable.example");
+    engine.control.completeNext = true;
+    const completed = await aScanStartedElsewhere(engagementId, "https://unreadable.example/done");
+    expect(hybrid.scans.get(completed.uuid)!.status).toBe("completed");
+    hybrid.controls.failNextScanDetail = { status: 503, body: { detail: "the record is being rebuilt" } };
+    realRoutes();
+    page();
+    const line = await settled();
+    expect(line).not.toContain(EVERY_ROW);
+    expect(line).toContain("1 finished scan could not be read now; it is adopted whole on the next sync.");
+    expect(await rowsNaming(completed.uuid)).toEqual([]);
+    // The next load reads it, and adopts it.
+    cleanup();
+    queryClient.clear();
+    realRoutes();
+    page();
+    const again = await settled();
+    expect(again).toMatch(/^Adopted 1 scan from the record into this dashboard\./);
+    expect(again).not.toContain("could not be read now");
+    await waitFor(async () => expect(await rowsNaming(completed.uuid)).toHaveLength(1));
   });
 });
