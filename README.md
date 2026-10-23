@@ -398,9 +398,97 @@ is refused with `auth_not_carried_by_backend`, since the backend's launch
 carries no login block and the scan would run anonymously; nothing is sent.
 The report's recipient e-mail goes to the backend only when the person opted
 in on the start form and gave an address. A retest of a scan started through
-the backend runs and shows its verdict, but files it into neither record: the
-backend's record does not take one yet, and a scan started through the backend
-has no finding in this dashboard's ledger to file it on (planned separately).
+the backend runs and shows its verdict as every retest does; its verdict is
+then recorded in the backend as a retest check (see
+[Retest checks](#retest-checks-a-retests-verdict-in-the-backends-record-as-what-it-is)),
+never into this dashboard's own ledger, which has no finding of a backend scan
+to file it on.
+
+### Retest checks: a retest's verdict in the backend's record, as what it is
+
+A retest asks the engine whether a finding is still there, and the engine
+answers `closed`, `still_open` or `inconclusive` -- "an absence on a retest that
+looked, not proof of a fix", in its own words. That verdict is a CHECK, and
+Athena-Backend records it as exactly that: a `RetestCheck` against the finding
+the record holds (athena-backend #189, owner decision 8), PULLED from the
+engine by the backend with its own operator key -- never typed in by this
+dashboard or anyone else -- so "the backend read it from the engine" is true of
+every row.
+
+- **When, and who asks** (`server/retest-check-watch.ts`). Only after this
+  dashboard's own retest watch has ended with a verdict and filed what it files
+  itself (`server/retests.ts`; `finding_checks` stays the dashboard's own
+  filing), and only for a retest of a scan that names a backend scan, a
+  bounded watch asks the backend to record the verdict, as the person who
+  pressed Retest -- their own backend sign-in, lent in memory at the 202 and on
+  every signed-in read of the retest, never the service account. The backend
+  finding is found from the record itself: the deployments under the scan's
+  backend engagement, their findings, the one whose `scan_uuid` is the scan's
+  (or whose `engine_run_id` is the scan run the retested twin was listed
+  under) and whose `finding_type` is the verdict's. Then
+  `POST /api/assurance/findings/<uuid>/retest-checks/collect/` with
+  `{run_id, twin_run_id}` -- the retest run, and the scan run the twin was
+  listed under. The backend reads the engine itself and decides identity
+  itself; where several findings of the type stand, its 409 with the
+  candidates is the word, never a guess here.
+- **What comes back, and where it is kept.** The outcome is filed on the retest
+  watch's row (`retest_watches.result.backend`), and the retest views say it in
+  four states and never a fifth: `recorded` -- the backend answered 201, or 200
+  with the row it already held -- "Recorded in the Athena-Backend as a retest
+  check (not closure evidence)"; `not_in_record` -- 404 (the engine has no run
+  the backend's key can read: a run of another tenant, decision 7; or no scan
+  of the record ran under that twin run), 409 or 422 (an identity that does not
+  hold), in the backend's own words, asked once and never retried -- "Not in the
+  Athena-Backend record: <the backend's reason>"; `asking` -- 202 (the backend
+  reads the run as still going), 503 (it could not read the engine), a 403, a
+  person with no backend sign-in, or a finding the record does not list yet:
+  asked again at a bounded interval for a bounded total, "Athena-Backend is
+  being asked to record this retest check", and never read as recorded from
+  silence; `unwatched` -- the deadline reached: "stopped asking", where it
+  stood and never an outcome. A retest of a scan this dashboard recorded
+  directly from the engine has no backend record to be in: nothing is sent, and
+  the views say "Not in the Athena-Backend record: the scan it looked again at
+  was recorded by this dashboard directly from the engine, …". Logged as
+  `retest_check_recorded`, `retest_check_not_in_record` or
+  `retest_check_unwatched`, filed by the watch, never as a person's act. A
+  dashboard that restarts resumes every asking still open, as nobody until a
+  person reads the retest.
+- **What it is NOT.** A retest check is not closure evidence and closes
+  nothing. It never changes the backend finding's status, `last_seen`, retest
+  flag, remediation state or closure standing -- `closure` on the finding is
+  what a closure stands on, and no check moves it; the backend's
+  `finding-closure-evidence` route stays the engine service's, for Minotaur's
+  replay documents. On this side, nothing is filed into `findings` or
+  `finding_checks` from the backend's answer, and no verdict is derived here:
+  the backend's check is shown as the backend served it. A verdict the engine
+  answered the Retest press itself with (no 202, so no watch) is not asked into
+  the backend's record by this dashboard yet, and its panel says nothing of the
+  backend for it -- not "recorded", not "not in the record".
+- **Where it is shown.** The retest panel, under the verdict, reading the run
+  again while the backend is asked; the Findings page's run-by-run list, beside
+  each check a watch filed; and the Risks page's Backend record section, whose
+  "Retest checks" column lists the backend finding's own `retest_checks` (the
+  serializer's latest ten, newest first: the verdict word, whether the record
+  knows it, the run's state -- `aborted` for a run stopped after its check was
+  recorded -- and when the engine checked) under the same label, "None
+  recorded" for a finding with none. Every word lives in
+  `client/src/lib/backendRecordCopy.ts` and lints clean against the persona
+  fence.
+- **SAFETY.** Nothing here is on a stop's path. The retest's Stop
+  (`POST /api/retests/:runId/abort`) authorises from memory, sends the
+  engine's abort and writes after, exactly as before; the kill switch stops
+  every known run by id without reading. The asking starts after the retest
+  watch has ended, off every request path; no stop, no 202 and no kill switch
+  awaits a collect, and a collect that fails is recorded on the row and asked
+  again -- never anything else.
+
+Tests: `tests/a-retest-check-collect-is-read-by-its-answer-field.test.ts` (the
+stand-in's route and the client's reading of each answer),
+`tests/a-retest-of-a-hybrid-scan-is-recorded-in-the-backend-as-a-retest-check.test.ts`
+(the watch, end to end, and the kill switch while a collect is held) and
+`tests/a-retest-check-is-labelled-as-what-it-is-on-every-screen.test.tsx` (the
+labels); the hard gates `tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts`
+and `tests/a-running-retest-keeps-its-stop-on-every-screen.test.tsx` stand unchanged.
 
 Tests: `tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts`,
 `tests/a-finished-hybrid-scan-is-collected-into-its-backend-record.test.ts`,
