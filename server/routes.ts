@@ -40,7 +40,8 @@ import type { RetestFiling } from "./storage";
 import type {
   AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test,
 } from "@shared/schema";
-import type { BackendRecordView } from "@shared/backend-record";
+import type { BackendRecordView, RetestCheckRecordView } from "@shared/backend-record";
+import { RetestCheckWatcher, backendStandingOf, type RetestCheckHooks } from "./retest-check-watch";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -2137,6 +2138,8 @@ function destroySession(req: Request): Promise<void> {
 interface RetestAsker {
   userId: string | null;
   actor: { userId: string | null; ipAddress: string | null };
+  /** The signed-in session, lent to the retest-check asking (server/retest-check-watch.ts adopt); null for no person. */
+  sessionId: string | null;
 }
 
 interface RetestContext {
@@ -2291,6 +2294,100 @@ async function fileRetestVerdict(
  * check, a sentence on the finding, and a `retest_collected` log entry
  * naming the requester and when they asked.
  */
+/**
+ * After the dashboard's own filing: a verdict's recording at Athena-Backend as a
+ * RETEST CHECK (owner decision 8; server/retest-check-watch.ts). Only for a
+ * watch that ENDED with a verdict -- endRetestWatch has filed what this dashboard
+ * files -- and only where the retested scan names a backend scan; a retest of a
+ * scan this dashboard recorded directly from the engine is noted as not in the
+ * backend record, and nothing is sent for it. Called from the watch hook's
+ * recordEnd, off every request path: no stop, no 202 and no kill switch awaits
+ * it, and a failure here changes nothing about the verdict already filed.
+ */
+async function askBackendToRecordCheck(checks: RetestCheckWatcher, watch: RetestWatch): Promise<void> {
+  if (watch.state !== "verdict") return;
+  const test = await storage.getTest(watch.testId);
+  if (!test) return;
+  const twinRunId = runIdOf(test);
+  const backendScanId = backendScanIdOf(test.findings);
+  if (backendScanId === null) {
+    await checks.noteDashboardDirect(watch, twinRunId);
+    return;
+  }
+  if (twinRunId === null) {
+    // No run to name as the twin's: the backend cannot tell the finding. Said on the row as not in the record, nothing sent.
+    await storage.noteRetestCheckBackend(watch.engineRunId, {
+      state: "not_in_record", recorded: false, reason: null, status: null, findingUuid: null, checkId: null, check: null,
+      lastAnswer: null, lastAskedAt: null, lastReadError: null, startedAt: new Date().toISOString(), deadlineAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(), twinRunId: null, backendScanId,
+      detail: "the scan this retest looked again at names no engine run, so no scan run can be named to Athena-Backend as the twin's; nothing was sent",
+    } satisfies RetestCheckRecordView).catch((cause) => console.error(logLine(`[retest-check] ${causeOf(cause)}`)));
+    return;
+  }
+  const result = watch.result as { findingType?: unknown } | null;
+  checks.start({
+    engineRunId: watch.engineRunId, testId: watch.testId, twinRunId, backendScanId,
+    backendEngagementId: backendEngagementIdOf(test.findings),
+    findingType: typeof result?.findingType === "string" ? result.findingType : null,
+    sessionId: null,
+  }, watch);
+}
+
+/** How a retest-check asking records its end: a log line naming what the backend said, filed by the asking, never as a person's act now. */
+const retestCheckHooks: RetestCheckHooks = {
+  async recordEnd(watch, backend) {
+    await storage.createActivityLog({
+      action: backend.state === "recorded" ? "retest_check_recorded" : backend.state === "not_in_record" ? "retest_check_not_in_record" : "retest_check_unwatched",
+      entityType: "test",
+      entityId: watch.testId,
+      details: {
+        engineRunId: watch.engineRunId,
+        twinId: watch.twinId,
+        twinRunId: backend.twinRunId,
+        backendScanId: backend.backendScanId,
+        findingUuid: backend.findingUuid,
+        checkId: backend.checkId,
+        status: backend.status,
+        lastAnswer: backend.lastAnswer,
+        detail: backend.detail,
+        // Asked by the dashboard, as the requester, after the engine finished: not an act of theirs at this moment.
+        filedBy: "retest_check_watch",
+        requestedBy: watch.requestedBy,
+        // A retest check, never closure evidence: the backend's closure standing is untouched by it.
+        closureEvidence: false,
+      },
+      userId: null,
+      ipAddress: null,
+    });
+  },
+};
+
+/**
+ * How a watch (server/retests.ts) finds a finding, files a verdict and
+ * records its end. A verdict is filed as the user who pressed Retest --
+ * `checkedBy` on the check, `statusChangedBy` on the finding -- and says
+ * it was collected: `filedVia: "retest_watch"` and `requestedAt` on the
+ * check, a sentence on the finding, and a `retest_collected` log entry
+ * naming the requester and when they asked. After that record -- and only
+ * after endRetestWatch has filed -- the backend is asked to record the
+ * verdict as a retest check (askBackendToRecordCheck).
+ */
+const retestWatchHooksFor = (checks: RetestCheckWatcher): retests.WatchHooks => ({
+  ...retestWatchHooks,
+  async recordEnd(watch) {
+    try {
+      await retestWatchHooks.recordEnd(watch);
+    } finally {
+      // Nothing above waits on this, and nothing here can undo the filing above.
+      try {
+        await askBackendToRecordCheck(checks, watch);
+      } catch (cause) {
+        console.error(logLine(`[retest-check] retest run ${watch.engineRunId}: the backend could not be asked to record its check: ${causeOf(cause)}`));
+      }
+    }
+  },
+});
+
 const retestWatchHooks: retests.WatchHooks = {
   async resolveFinding(watch) {
     const test = await storage.getTest(watch.testId);
@@ -2655,6 +2752,7 @@ function retestPhaseSentence(
 async function answerRetestStatus(
   res: Response,
   watcher: retests.RetestWatcher,
+  checks: RetestCheckWatcher,
   ctx: RetestContext & { engagementRef: string },
   status: engine.RetestStatus,
 ): Promise<void> {
@@ -2694,6 +2792,9 @@ async function answerRetestStatus(
         engineRunId: status.engineRunId, testId: test.id, clientId: client.id, twinId, engagementRef,
         requestedBy: who.userId, requestedFrom: who.actor.ipAddress, engineState: status.state,
       });
+      // The requester's session, lent in memory to the retest-check asking that
+      // may follow the verdict (server/retest-check-watch.ts): synchronous, reads nothing.
+      checks.adopt(status.engineRunId, who.sessionId);
     }
     res.status(202).json({
       answer: "status", phase: "running", engineRunId: status.engineRunId, testId: test.id, twinId, state: status.state,
@@ -2736,11 +2837,17 @@ export const ASSISTANT_RELAY_READS = ["/api/assistant/status"];
 export function registerRoutes(app: Express): void {
   // This app's retest watches, resumed from the record in the background:
   // a restart loses no verdict, and holds up no start-up and no stop.
-  const watcher = new retests.RetestWatcher(storage, retestWatchHooks);
+  // The retest-check askings (server/retest-check-watch.ts): after a watch has
+  // ended with a verdict, Athena-Backend is asked to record it as a retest check.
+  // Resumed from the record in the background; on no stop's path.
+  const checks = new RetestCheckWatcher(storage, retestCheckHooks);
+  app.locals.retestCheckWatcher = checks;
+  const watcher = new retests.RetestWatcher(storage, retestWatchHooksFor(checks));
   app.locals.retestWatcher = watcher;
   // For tests that reuse one engine run id across cases (as retestWatcher.reset()).
   app.locals.unreadRunHandles = unreadRunHandles;
   watcher.resume();
+  checks.resume();
   // This app's collect watches (server/collect-watch.ts): every scan started
   // through Athena-Backend whose run has ended, asked about until the backend
   // has its record. Resumed from the record in the background; on no stop's path.
@@ -4735,7 +4842,7 @@ export function registerRoutes(app: Express): void {
     retestsInFlight.delete(key);
     console.log(`[retest] the in-flight slot of retest ${key} is free at once: the engine answered with a ${answered.answer}.`);
 
-    const who = { userId: req.session.userId ?? null, actor: actor(req) };
+    const who: RetestAsker = { userId: req.session.userId ?? null, actor: actor(req), sessionId: req.session?.userId ? req.sessionID : null };
 
     // The kill switch pressed while the engine was being asked, and the
     // engine answered with a retest still running: it is watched (its verdict,
@@ -4750,6 +4857,7 @@ export function registerRoutes(app: Express): void {
         engineRunId: runId, testId: test.id, clientId: client.id, twinId: data.twinId, engagementRef,
         requestedBy: who.userId, requestedFrom: who.actor.ipAddress, engineState: status.state,
       });
+      checks.adopt(runId, who.sessionId);
       ticket.stopped ??= stopForPress(ticket.press, runId);
       const stop = await ticket.stopped;
       res.status(409).json({
@@ -4771,7 +4879,7 @@ export function registerRoutes(app: Express): void {
     // finding is changed, and nothing is called fixed or inconclusive from it
     // (athena-engine #71). Read before anything reads a verdict.
     if (answered.answer === "status") {
-      return void (await answerRetestStatus(res, watcher, { test, client, twinId: data.twinId, engagementRef, who }, answered.status));
+      return void (await answerRetestStatus(res, watcher, checks, { test, client, twinId: data.twinId, engagementRef, who }, answered.status));
     }
     const result = answered.result;
 
@@ -4830,6 +4938,8 @@ export function registerRoutes(app: Express): void {
         });
       }
     }
+    // A signed-in person read the retest: a retest-check asking for its run goes as them from now on (in memory; reads nothing).
+    checks.adopt(req.params.runId, req.session?.userId ? req.sessionID : null);
     return void res.json(watched ? retestView(watched) : unreadRunView(handles[0]));
   }));
 
@@ -7329,8 +7439,17 @@ export function registerRoutes(app: Express): void {
       ownerName: one.ownerId ? nameOf.get(one.ownerId) ?? null : null,
       sightings: (await storage.getSightings(one.id))
         .sort((a, b) => Number(a.observedAt) - Number(b.observedAt)),
-      checks: (await storage.getChecks(one.id))
-        .sort((a, b) => Number(a.checkedAt) - Number(b.checkedAt)),
+      // Each check with where its recording at Athena-Backend stands (server/retest-
+      // check-watch.ts), from the retest watch's row: a check filed by the watch
+      // names its run; one the engine answered inline, or filed before this was
+      // recorded, has none, and says nothing of the backend.
+      checks: await Promise.all((await storage.getChecks(one.id))
+        .sort((a, b) => Number(a.checkedAt) - Number(b.checkedAt))
+        .map(async (check) => ({
+          ...check,
+          backend: check.engineRunId === null ? null
+            : backendStandingOf((await storage.getRetestWatch(check.engineRunId).catch(() => undefined))?.result),
+        }))),
     })));
 
     res.json({

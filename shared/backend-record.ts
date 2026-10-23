@@ -128,4 +128,7 @@ export interface RetestCheckRecordView {
   startedAt: string;
   deadlineAt: string;
   endedAt: string | null;
+  /** What was asked with: the scan run the twin was listed under (`twin_run_id`) and the scan's backend id; null when nothing was sent. */
+  twinRunId: string | null;
+  backendScanId: string | null;
 }
