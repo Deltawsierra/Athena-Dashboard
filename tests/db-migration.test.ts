@@ -96,6 +96,10 @@ describe("adding a column to a database that already exists", () => {
     expect(kept?.isSample).toBe(false);
     expect((await storage.getTestsByClient("c1")).map((one) => one.id)).toEqual(["t1"]);
 
+    // The rebuilt table keeps both of its indexes (the backend-scan index is created after it, below).
+    const indexes = (new Database(process.env.ATHENA_DB_PATH!, { readonly: true }).prepare("PRAGMA index_list(tests)").all() as Array<{ name: string }>).map((one) => one.name).sort();
+    expect(indexes).toEqual(expect.arrayContaining(["idx_tests_client_id", "idx_tests_site_id"]));
+
     // A row with no client, which the old shape refused outright.
     const adopted = await storage.createTest({
       clientId: null, testType: "penetration_test", status: "running",

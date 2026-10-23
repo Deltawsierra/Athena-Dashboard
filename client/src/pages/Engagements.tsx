@@ -125,13 +125,12 @@ function scanTone(status: string): StatusTone {
 }
 
 /** The window as the record dates it: ended, days remaining, or not recorded. */
-export function windowReading(start: string | null, end: string | null, now: number): { text: string; ended: boolean } {
+export function windowReading(end: string | null, now: number): { text: string; ended: boolean } {
   if (end === null) return { text: WINDOW_NOT_RECORDED, ended: false };
   const endsAt = Date.parse(end);
   if (Number.isNaN(endsAt)) return { text: WINDOW_NOT_RECORDED, ended: false };
   if (endsAt < now) return { text: WINDOW_ENDED, ended: true };
   const days = Math.max(1, Math.ceil((endsAt - now) / DAY_MS));
-  void start;
   return { text: windowRemaining(days), ended: false };
 }
 
@@ -240,7 +239,7 @@ function EngagementCard({
   now: number;
 }) {
   const [expanded, setExpanded] = useState(open);
-  const window = windowReading(engagement.testingWindowStart, engagement.testingWindowEnd, now);
+  const window = windowReading(engagement.testingWindowEnd, now);
   const byStatus = scans === null ? [] : countBy(scans, (row) => row.status);
   const byVerdict = scans === null ? [] : countBy(scans, (row) => (row.status === "completed" ? row.verdictLabel ?? NO_VERDICT_SERVED : null));
   return (

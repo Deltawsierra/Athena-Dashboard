@@ -617,6 +617,7 @@ function relaxTestsClientColumn(handle: DatabaseType): void {
       DROP TABLE tests;
       ALTER TABLE tests_rebuilt RENAME TO tests;
       CREATE INDEX IF NOT EXISTS idx_tests_client_id ON tests(client_id);
+      CREATE INDEX IF NOT EXISTS idx_tests_site_id ON tests(site_id);
     `);
   })();
   console.log("[db] tests rebuilt: client_id accepts null (a scan adopted from the backend record whose engagement no client here names)");
