@@ -558,6 +558,130 @@ export async function listScans(): Promise<BackendScanListRow[]> {
   return out;
 }
 
+// ==== The record's list, whole ====
+
+/**
+ * One row of `GET /api/pentest/scans/` as the backend lists it (the detail
+ * serializer without `engine_response`; athena-backend #188): the RECORD of a
+ * scan, for the Engagements page and for adopting the scans this dashboard has
+ * no row for (server/backend-adoption.ts). The run's results live on the detail
+ * alone (readScan). Read by field, never guessed from a shape: a status word the
+ * backend did not send reads "unknown", never "completed".
+ */
+export interface BackendScanRow {
+  uuid: string;
+  targetUrl: string | null;
+  /** The backend's status word: pending | completed | stopped | failed | unknown. */
+  status: string;
+  verdict: string | null;
+  verdictLabel: string | null;
+  createdAt: string | null;
+  collectedAt: string | null;
+  /** The run as the screens read it (shared/engine-record.ts runIdFrom), and as a stop addresses it (stopIdFrom). */
+  engineRunId: string | null;
+  stopId: string | null;
+  /** The backend's reading of a Stop asked for this scan, as served. */
+  stop: Record<string, unknown> | null;
+  pdfUrl: string | null;
+  emailSent: boolean | null;
+  errorMessage: string | null;
+  engagement: { id: number | null; name: string | null; clientName: string | null; status: string | null } | null;
+}
+
+/** A list row as the backend serves it. Null when it is not a row. */
+export function readScanRow(raw: unknown): BackendScanRow | null {
+  const object = objectOf(raw);
+  const uuid = textOf(object?.uuid);
+  if (object === null || uuid === null) return null;
+  const engagement = objectOf(object.engagement);
+  return {
+    uuid,
+    targetUrl: textOf(object.target_url),
+    status: textOf(object.status) ?? "unknown",
+    verdict: textOf(object.verdict),
+    verdictLabel: textOf(object.verdict_label),
+    createdAt: textOf(object.created_at),
+    collectedAt: textOf(object.collected_at),
+    engineRunId: runIdFrom(object.engine_run_id),
+    stopId: stopIdFrom(object.engine_run_id),
+    stop: objectOf(object.stop),
+    pdfUrl: textOf(object.pdf_url),
+    emailSent: typeof object.email_sent === "boolean" ? object.email_sent : null,
+    errorMessage: textOf(object.error_message),
+    engagement: engagement === null ? null : {
+      id: numberOf(engagement.id),
+      name: textOf(engagement.name),
+      clientName: textOf(engagement.client_name),
+      status: textOf(engagement.status),
+    },
+  };
+}
+
+/** How many pages of the backend's list are followed before the read is refused as unbounded. */
+export const MAX_LIST_PAGES = 100;
+
+/** The path, relative to the backend's base, of a DRF page's `next` link; null when the page is the last. */
+function nextPathOf(page: Record<string, unknown>): string | null {
+  const next = page.next;
+  if (typeof next !== "string" || next === "") return null;
+  try {
+    const url = new URL(next);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return next.startsWith("/") ? next : `/${next}`;
+  }
+}
+
+/**
+ * Every scan the backend lists for the person, following each page's `next`
+ * (DRF pagination) up to MAX_LIST_PAGES: a list read WHOLE, or refused -- never
+ * a first page read as the whole, and never an unreadable list read as an empty
+ * one. Bounded: the control plane's TIMEOUT_MS per page and, when served under
+ * the read deadline (server/read-deadline.ts), cancelled with it. A read, on no
+ * stop's path. `listScans` (above) stays the first-page read the launch route
+ * adopts a lost answer from.
+ */
+export async function listScanRows(): Promise<BackendScanRow[]> {
+  const rows: BackendScanRow[] = [];
+  let path: string | null = "/api/pentest/scans/";
+  for (let page = 0; path !== null; page += 1) {
+    if (page >= MAX_LIST_PAGES) {
+      throw new ControlPlaneUnavailable(`Athena-Backend lists more than ${MAX_LIST_PAGES} pages of scans; the list was not read whole`);
+    }
+    const response = await call(path);
+    if (!response.ok) throw await refused(response, "the scans list");
+    const text = await textWithin(response);
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      parsed = null;
+    }
+    if (Array.isArray(parsed)) {
+      // A bare list is not paginated: as the first answer it is the whole list;
+      // behind a page's next link it is neither that list's next page nor the whole.
+      if (page > 0) {
+        throw new ControlPlaneUnavailable("Athena-Backend answered a later page of the scans list with a bare list, not a page; the list was not read whole");
+      }
+      for (const row of parsed) {
+        const one = readScanRow(row);
+        if (one !== null) rows.push(one);
+      }
+      return rows;
+    }
+    const pageOf = objectOf(parsed);
+    if (pageOf === null || !Array.isArray(pageOf.results)) {
+      throw new ControlPlaneUnavailable("Athena-Backend answered the scans list with something that is not a list");
+    }
+    for (const row of pageOf.results) {
+      const one = readScanRow(row);
+      if (one !== null) rows.push(one);
+    }
+    path = nextPathOf(pageOf);
+  }
+  return rows;
+}
+
 // ==== Collect ====
 
 export type CollectAnswer =

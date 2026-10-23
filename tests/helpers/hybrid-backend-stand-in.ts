@@ -122,9 +122,75 @@ export interface HybridScan {
   stop_detail: string | null;
 }
 
+/** A deployment as the assurance record lists it (DeploymentSerializer, with #188's `engagement_id`). */
+export interface HybridDeployment {
+  uuid: string;
+  name: string;
+  environment: string;
+  decision: string | null;
+  decision_label: string;
+  description: string;
+  finding_count: number;
+  engagement_id: number | null;
+  created_at: string;
+  updated_at: string;
+  /** The account that owns it: visible to it and to an admin (visible_deployments). */
+  owner: string;
+}
+
+/** A finding as the assurance record lists it (FindingSerializer, with #188's `scan_uuid`, `engine_run_id` and #189's `retest_checks`). */
+export interface HybridFinding {
+  uuid: string;
+  deployment_uuid: string;
+  finding_type: string;
+  title: string;
+  severity: string;
+  confidence: number | null;
+  status: string;
+  status_label: string;
+  status_must_not_imply: string | null;
+  owner: string | null;
+  impact: string;
+  business_impact: string;
+  recommendation: string;
+  location: string;
+  retest_required: boolean;
+  evidence_class: string;
+  evidence: unknown[];
+  asset_uuid: string | null;
+  asset_name: string | null;
+  change_status: string;
+  change_label: string;
+  age_days: number | null;
+  stale: boolean;
+  receipt: { algorithm: string; digest: string; evidence_count: number };
+  first_seen: string | null;
+  last_seen: string | null;
+  assignee: string | null;
+  remediation_state: string;
+  closure: unknown;
+  /** The scan this finding was ingested from, and the run it names; null for one filed another way. */
+  scan_uuid: string | null;
+  engine_run_id: string | number | null;
+  retest_checks: unknown[];
+}
+
 export interface HybridStandInOptions {
   /** The test's own engine stub: where every launch goes, as the real backend launches with its own key. */
   engine: { url: string; key?: string };
+  /**
+   * Serve the assurance record's two lists -- `GET /api/assurance/deployments/`
+   * and `GET /api/assurance/findings/` (`?deployment=` filter) -- from this
+   * stand-in's own stores (addDeployment, addFinding), as the backend serves them
+   * after #188, instead of forwarding them to the upstream or answering 404.
+   */
+  assurance?: boolean;
+  /**
+   * Page every list (the scans, the deployments, the findings) this many rows
+   * at a time, with DRF's absolute `next` and `previous` links and `?page=N`;
+   * absent, each list is one page with `next: null`, as before.
+   */
+  pageSize?: number;
   /** The accounts that may sign in; the default is the console's admin, an admin here too. */
   accounts?: Record<string, HybridAccount>;
   /** FAILSAFE_SERVICE_TOKEN; null or absent for none. */
@@ -240,6 +306,9 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
   const blacklisted = new Set<string>();
   const engagements = new Map<number, HybridEngagement>();
   const scans = new Map<string, HybridScan>();
+  /** The assurance record's deployments and findings, served when opts.assurance is set. */
+  const deployments = new Map<string, HybridDeployment>();
+  const findings = new Map<string, HybridFinding>();
   /** The Idempotency-Key layer: per account and route, the first request and its answer. */
   const keyed = new Map<string, { request: string; answer: { status: number; body: unknown } | null }>();
   const engineCalls: Array<{ method: string; path: string; body: Record<string, unknown> | null; key: string | null }> = [];
@@ -266,6 +335,10 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     stopAnswers: [] as Array<{ status: number; body: unknown }>,
     /** A launch's answer is sent this many ms after the launch is done: the row exists, the run is named, the answer is late. */
     answerDelayMs: 0,
+    /** The next assurance list read (deployments or findings) is answered with this instead of the store. */
+    failNextAssurance: null as { status: number; body: unknown } | null,
+    /** The next scans list read is answered with this instead of the list. */
+    failNextScansList: null as { status: number; body: unknown } | null,
   };
   const heldLaunches: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
@@ -319,6 +392,27 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     const { engine_response: _omitted, ...row } = detailOf(scan);
     return row;
   };
+  /**
+   * A list as DRF's PageNumberPagination serves it: one page holding every row
+   * when no page size is set; else `?page=N` of pageSize rows, with absolute
+   * `next` and `previous` links on this stand-in's own address.
+   */
+  const pageOf = (rows: unknown[], path: string, query: URLSearchParams) => {
+    const size = opts.pageSize;
+    if (size === undefined) return { count: rows.length, next: null, previous: null, results: rows };
+    const page = Math.max(1, Number.parseInt(query.get("page") ?? "1", 10) || 1);
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${path}`;
+    const link = (n: number) => `${base}?${new URLSearchParams({ ...Object.fromEntries(query), page: String(n) }).toString()}`;
+    const last = Math.max(1, Math.ceil(rows.length / size));
+    return {
+      count: rows.length,
+      next: page < last ? link(page + 1) : null,
+      previous: page > 1 ? link(page - 1) : null,
+      results: rows.slice((page - 1) * size, page * size),
+    };
+  };
+  const deploymentsVisibleTo = (account: string) =>
+    Array.from(deployments.values()).filter((one) => isAdmin(account) || one.owner === account);
 
   /** One call to the engine stub, bounded by engineTimeoutMs. */
   async function engine(method: string, path: string, body?: Record<string, unknown>, key?: string): Promise<
@@ -559,8 +653,10 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             return { status: 502, json: null };
           }
         };
+        const assuranceList = opts.assurance === true && method === "GET"
+          && (path === "/api/assurance/deployments/" || path === "/api/assurance/findings/");
         const servedHere = path.startsWith("/api/pentest/") || path === "/api/accounts/users/me/"
-          || path === "/api/token/" || path === "/api/token/refresh/" || path === "/api/token/revoke/";
+          || path === "/api/token/" || path === "/api/token/refresh/" || path === "/api/token/revoke/" || assuranceList;
         if (!servedHere && opts.upstream) return void (await forward());
 
         if (path === "/api/token/" && method === "POST") {
@@ -629,6 +725,25 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
 
         if (path === "/api/accounts/users/me/" && method === "GET") {
           return answer(200, { id: Array.from(accounts.keys()).indexOf(who) + 1, username: who, email: `${who}@example.test`, role });
+        }
+
+        // ---- the assurance record's lists (opts.assurance) ----
+        if (assuranceList) {
+          if (controls.failNextAssurance !== null) {
+            const fault = controls.failNextAssurance;
+            controls.failNextAssurance = null;
+            return answer(fault.status, fault.body);
+          }
+          const visible = deploymentsVisibleTo(who);
+          if (path === "/api/assurance/deployments/") {
+            const rows = visible.map(({ owner: _owner, ...one }) => one);
+            return answer(200, pageOf(rows, path, url.searchParams));
+          }
+          const wanted = url.searchParams.get("deployment");
+          const uuids = new Set(visible.map((one) => one.uuid));
+          const rows = Array.from(findings.values())
+            .filter((one) => uuids.has(one.deployment_uuid) && (wanted === null || one.deployment_uuid === wanted));
+          return answer(200, pageOf(rows, path, url.searchParams));
         }
 
         // ---- engagements ----
@@ -760,8 +875,13 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
 
         // ---- the scans ----
         if (path === "/api/pentest/scans/" && method === "GET") {
+          if (controls.failNextScansList !== null) {
+            const fault = controls.failNextScansList;
+            controls.failNextScansList = null;
+            return answer(fault.status, fault.body);
+          }
           const rows = scansVisibleTo(who).sort((a, b) => b.created_at.localeCompare(a.created_at)).map(listRowOf);
-          return answer(200, { count: rows.length, next: null, previous: null, results: rows });
+          return answer(200, pageOf(rows, path, url.searchParams));
         }
         const scanPath = /^\/api\/pentest\/scans\/([^/]+)\/(collect\/|stop\/|pdf\/|status\/)?$/.exec(path);
         if (scanPath) {
@@ -847,6 +967,33 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     engagements,
     /** The scans it holds, by uuid. */
     scans,
+    /** The assurance record's deployments and findings it holds (served when opts.assurance is set). */
+    deployments,
+    findings,
+    /** A deployment in the assurance record, as the backend's ingest would have made one under an engagement. */
+    addDeployment(input: Partial<HybridDeployment> & { uuid: string; name: string }): HybridDeployment {
+      const now = new Date().toISOString();
+      const made: HybridDeployment = {
+        environment: "production", decision: null, decision_label: "Not assessed", description: "", finding_count: 0,
+        engagement_id: null, created_at: now, updated_at: now, owner: "admin", ...input,
+      };
+      deployments.set(made.uuid, made);
+      return made;
+    },
+    /** A finding in the assurance record, ingested from a scan (scan_uuid, engine_run_id) or filed another way (null). */
+    addFinding(input: Partial<HybridFinding> & { uuid: string; deployment_uuid: string }): HybridFinding {
+      const made: HybridFinding = {
+        finding_type: "prompt_injection", title: "a finding", severity: "medium", confidence: null, status: "open", status_label: "Open",
+        status_must_not_imply: null, owner: null, impact: "", business_impact: "", recommendation: "", location: "", retest_required: false,
+        evidence_class: "technically_verified", evidence: [], asset_uuid: null, asset_name: null, change_status: "new", change_label: "New",
+        age_days: null, stale: false, receipt: { algorithm: "sha256", digest: "0".repeat(64), evidence_count: 0 }, first_seen: null, last_seen: null,
+        assignee: null, remediation_state: "open", closure: null, scan_uuid: null, engine_run_id: null, retest_checks: [], ...input,
+      };
+      findings.set(made.uuid, made);
+      const deployment = deployments.get(made.deployment_uuid);
+      if (deployment) deployment.finding_count = Array.from(findings.values()).filter((one) => one.deployment_uuid === deployment.uuid).length;
+      return made;
+    },
     /** An engagement made directly, as the Django admin would make one: visible to its creator and to admins. */
     addEngagement(input: Partial<HybridEngagement> & { name: string; scope_hosts: string[] }): HybridEngagement {
       nextEngagement += 1;
