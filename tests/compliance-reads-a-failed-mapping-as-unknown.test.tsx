@@ -17,7 +17,7 @@ import Compliance from "@/pages/Compliance";
 afterEach(cleanup);
 
 const CLIENTS = [{ id: "c1", name: "Payments API", status: "active" }];
-const NO_FAILING = /No mapped requirement is failing/;
+const NO_FAILING = /No requirement has a finding mapped to it/;
 
 function mount(seed: Array<[unknown[], unknown]>, mapping: "rejects" | "never resolves" = "rejects") {
   const client = new QueryClient({

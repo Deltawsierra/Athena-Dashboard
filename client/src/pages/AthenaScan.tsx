@@ -389,7 +389,7 @@ export default function AthenaScan() {
               Athena
             </h1>
             <p className="mt-2 text-[15px] text-muted-foreground">
-              See the system. Understand the risks. Deploy with confidence.
+              See the system. Understand the risks.
             </p>
           </div>
           <div className="flex items-start gap-10 pt-2">
@@ -401,7 +401,7 @@ export default function AthenaScan() {
             <div className="space-y-1 border-l border-border/50 pl-10 text-[10px] uppercase tracking-[0.24em]">
               <p className="text-gold">Greater</p>
               <p className="text-gold">Clarity</p>
-              <p className="mt-2 text-muted-foreground/70">Safer AI</p>
+              <p className="mt-2 text-muted-foreground/70">Athena</p>
             </div>
           </div>
         </div>

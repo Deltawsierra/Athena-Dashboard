@@ -39,9 +39,11 @@ interface Summary { version: string; failing: number; tested: number; notRun: nu
 interface ComplianceView { client: { id: string; name: string }; testsConsidered: number; scannersLoaded: number | null; rows: ControlRow[]; summary: Summary }
 interface ApiClient { id: string; name: string; status: string }
 
+// `failing` is the mapping's own name for a requirement with a finding mapped to it. The page labels
+// it "Finding mapped": "Failing" is a verdict word about the target (shared/persona-lint.ts).
 const STATE_META: Record<ControlState, { label: string; cls: string; dot: string }> = {
   tested: { label: "Tested", cls: "text-emerald-400 border-emerald-500/30 bg-emerald-500/10", dot: "bg-emerald-400" },
-  failing: { label: "Failing", cls: "text-sev-high border-sev-high/30 bg-sev-high/10", dot: "bg-sev-high" },
+  failing: { label: "Finding mapped", cls: "text-sev-high border-sev-high/30 bg-sev-high/10", dot: "bg-sev-high" },
   not_run: { label: "Not Run", cls: "text-sky-400 border-sky-500/30 bg-sky-500/10", dot: "bg-sky-400" },
   not_covered: { label: "Not Covered", cls: "text-muted-foreground/60 border-border/50", dot: "bg-muted-foreground/40" },
 };
@@ -139,7 +141,7 @@ export default function Compliance() {
 
   const legend = [
     { label: "Tested", value: count((v) => v.summary.tested), cls: "bg-emerald-400" },
-    { label: "Failing", value: count((v) => v.summary.failing), cls: "bg-sev-high" },
+    { label: "Finding mapped", value: count((v) => v.summary.failing), cls: "bg-sev-high" },
     { label: "Not Run", value: count((v) => v.summary.notRun), cls: "bg-sky-400" },
     { label: "Not Covered", value: count((v) => v.summary.notCovered), cls: "bg-muted-foreground/50" },
   ];
@@ -269,7 +271,7 @@ export default function Compliance() {
             {!ready ? (
               <p className="text-[12px] text-muted-foreground">{unavailable}</p>
             ) : gaps.length === 0 ? (
-              <p className="text-[12px] text-muted-foreground">No mapped requirement is failing in the tests considered. Requirements not run or not covered were not checked.</p>
+              <p className="text-[12px] text-muted-foreground">No requirement has a finding mapped to it in the tests considered. Requirements not run or not covered were not checked.</p>
             ) : (
               <ul className="space-y-2.5">
                 {gaps.map((g) => (

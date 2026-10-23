@@ -3019,7 +3019,7 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
         <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
           No approved data boundary has been declared for this deployment. Until one is, every data
           flow below reads as an <span className="text-amber-400">unknown</span> — a gap to close,
-          never a pass.
+          never read as within the boundary.
         </p>
       )}
 
@@ -3768,8 +3768,8 @@ export function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: stri
         with a copy obtained independently, or with one covered by a signature you have verified;
         checked against themselves they attest nothing. The JSON downloaded here is this page's
         rendering, not the bytes the backend hashed, so the digests cannot be recomputed from it.
-        None of this says the system is secure or its conclusions are true, and the result below
-        is shown at its true strength.
+        None of this is an all-clear for the system or a sign its conclusions are true, and the
+        result below is shown at its true strength.
       </p>
       <SignatureStatus signed={data.signed} reason={data.unsignedReason} />
 
@@ -3924,7 +3924,7 @@ function PostureBandChip({ band }: { band: string | null }) {
         "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
         look.cls,
       )}
-      title="An ordinal posture band derived from the vendor's weakest evidence — a concern signal, never a grade or a claim the vendor is secure"
+      title="An ordinal posture band derived from the vendor's weakest evidence — a concern signal, never a grade or an all-clear for the vendor"
     >
       {look.label}
     </span>
@@ -3955,7 +3955,7 @@ function MaturityChip({ maturity }: { maturity: string }) {
         "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium",
         look.cls,
       )}
-      title="How well-evidenced the assurance picture is — a coverage read, never a claim the system is secure"
+      title="How well-evidenced the assurance picture is — a coverage read, never an all-clear for the system"
     >
       {look.label}
     </span>
@@ -4022,7 +4022,7 @@ function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
             A <span className="text-foreground">vendor-asserted</span> claim reads as the vendor&apos;s
             own word — a gap until independently evidenced. The posture band is an ordinal concern
-            signal from the weakest evidence, never a claim the vendor is secure.
+            signal from the weakest evidence, never an all-clear for the vendor.
           </p>
 
           {/* The scoreboard: vendors, independently-evidenced vs vendor-asserted
@@ -4942,8 +4942,8 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
         <>
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
             Every path is <span className="text-foreground">evidenced</span> — a reach is claimed only
-            where a declared edge attests each hop. This never says least privilege is satisfied or an
-            identity is secure; it surfaces powers, transitive reach, and gaps.
+            where a declared edge attests each hop. This never says least privilege is satisfied, and is never an
+            all-clear for an identity; it surfaces powers, transitive reach, and gaps.
           </p>
 
           {/* Sits directly under the evidenced-paths claim because it qualifies
@@ -5258,11 +5258,11 @@ function PostureStatusChip({ status }: { status: string }) {
     status === "gap"
       ? { cls: "border-sev-high/40 bg-sev-high/10 text-sev-high", label: "Gap", title: "A gap was observed in the data read" }
       : status === "unknown"
-        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Unknown", title: "No data to judge — never read as a pass" }
+        ? { cls: "border-amber-500/40 bg-amber-500/10 text-amber-400", label: "Unknown", title: "No data to judge — never read as the absence of a gap" }
         : {
             cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
             label: "No gap observed",
-            title: "The observed absence of THIS gap — not a claim the system is secure",
+            title: "The observed absence of THIS gap — not an all-clear for the system",
           };
   return (
     <span
@@ -5321,7 +5321,7 @@ function PostureDomainCard({
       <>
         <span
           className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400"
-          title="No credentials are configured for this domain, so nothing was read — this is not a clean bill"
+          title="No credentials are configured for this domain, so nothing was read — this is not an all-clear"
         >
           <ShieldQuestion className="h-3 w-3" /> Not connected — no credentials configured
         </span>
@@ -5759,7 +5759,7 @@ function ReusePostureChip({ posture, verified }: { posture: string; verified: bo
   return (
     <span
       className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-medium text-amber-400"
-      title="No policy declared — reuse cannot be ruled out, never 'safe'"
+      title="No policy declared — reuse cannot be ruled out, never an all-clear"
     >
       Unknown
     </span>
@@ -5820,7 +5820,7 @@ function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
             A <span className="text-foreground">vendor-asserted</span> &quot;we don&apos;t train on your
             data&quot; reads as the vendor&apos;s own word, never verified. An unstated policy is a gap —
-            reuse cannot be ruled out, never &quot;safe&quot;.
+            reuse cannot be ruled out, never an all-clear.
           </p>
 
           <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
@@ -6885,8 +6885,8 @@ export function InvalidationPanel({ deploymentUuid, admin }: { deploymentUuid: s
       </div>
       <p className="text-[12px] leading-relaxed text-muted-foreground">
         Re-derives which current claims a change has invalidated: it opens an attributed retest obligation for
-        each drifted claim and moves it off a pass, and resolves any obligation a rebinding re-derivation has
-        satisfied. {admin ? "" : "An admin runs it."}
+        each drifted claim and moves it off a supported or verified status, and resolves any obligation a rebinding
+        re-derivation has satisfied. {admin ? "" : "An admin runs it."}
       </p>
       {last && (
         <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
@@ -7029,7 +7029,7 @@ function OperationalRiskPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </div>
             {!c.observed ? (
               <p className="mt-1 text-[11px] text-muted-foreground">
-                Unmapped — no basis in the stored graph. {c.runtimeSignal}. Read as a gap, never a clean pass.
+                Unmapped — no basis in the stored graph. {c.runtimeSignal}. Read as a gap, never an all-clear.
               </p>
             ) : (
               c.signals.length > 0 && (
@@ -7101,7 +7101,7 @@ function DriftBody({ drift }: { drift: BomDrift }) {
     return (
       <p className="text-[12px] leading-relaxed text-muted-foreground">
         No declared architecture: drift cannot be computed. Declare the expected components to assess whether the
-        observed BOM matches — an absent declaration is <span className="text-amber-400">not</span> a clean bill of
+        observed BOM matches — an absent declaration is <span className="text-amber-400">not</span> an all-clear on the bill of
         materials.
       </p>
     );
@@ -7642,7 +7642,7 @@ function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: 
       ) : data.declared.length === 0 ? (
         <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
           No architecture declared. Until one is, BOM drift cannot be computed and the observed supply chain reads
-          as an <span className="text-amber-400">unassessed gap</span>, never a clean bill.
+          as an <span className="text-amber-400">unassessed gap</span>, never an all-clear.
         </p>
       ) : (
         <ul className="mb-3 space-y-1">
@@ -8659,7 +8659,7 @@ export default function Assurance({ admin = false }: { admin?: boolean }) {
                           <SectionHeading
                             icon={ReceiptText}
                             title="Continuous assurance"
-                            blurb="The version-bound assurance claims, the decision they cap and why, the minimal revalidation a change forces, the outstanding retest obligations, the invalidation engine, and the narrow operational-risk register. A pass stands only while its claims stay current; an unassessed or unmapped state reads honestly, never green-by-default."
+                            blurb="The version-bound assurance claims, the decision they cap and why, the minimal revalidation a change forces, the outstanding retest obligations, the invalidation engine, and the narrow operational-risk register. A supported or verified reading stands only while its claims stay current; an unassessed or unmapped state reads honestly, never green-by-default."
                           />
                           <ClaimsPanel deploymentUuid={d.uuid} admin={admin} />
                           <DecisionSupportPanel deploymentUuid={d.uuid} />
