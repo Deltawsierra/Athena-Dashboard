@@ -15,6 +15,7 @@ import * as settings from "./settings";
 import * as engine from "./engine";
 import * as backendScans from "./backend-scans";
 import * as retests from "./retests";
+import { CollectWatcher, type CollectHooks } from "./collect-watch";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
@@ -25,7 +26,8 @@ import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
 import {
-  BACKEND_RECORD_KEYS, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom, stopIdFrom,
+  BACKEND_RECORD_KEYS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom, stopIdFrom,
+  stoppedOnlyAtBackend,
 } from "@shared/engine-record";
 import { ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnavailable } from "./control-plane";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
@@ -34,7 +36,9 @@ import { coverageOf } from "@shared/scan-coverage";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
-import type { AIControlSetting, Finding, RetestWatch, Test } from "@shared/schema";
+import type {
+  AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test,
+} from "@shared/schema";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -2198,6 +2202,246 @@ const retestWatchHooks: retests.WatchHooks = {
   },
 };
 
+// ==== The backend's record of a hybrid scan (server/collect-watch.ts) ====
+
+/** A row's `findings.backend`, when it is a snapshot (shared/schema.ts BackendRecordSnapshot). */
+function backendSnapshotOf(value: unknown): BackendRecordSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const one = value as Record<string, unknown>;
+  return typeof one.status === "string" ? (one as unknown as BackendRecordSnapshot) : null;
+}
+
+/** A row's `findings.backendMirror`, when it is a reading (shared/schema.ts BackendMirrorReading). */
+function backendMirrorOf(value: unknown): BackendMirrorReading | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const one = value as Record<string, unknown>;
+  return typeof one.mirrored === "boolean" ? (one as unknown as BackendMirrorReading) : null;
+}
+
+/** An ISO 8601 text of a stored time, which storage hands back as a Date or as text; null for none. */
+function isoOf(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/**
+ * The snapshot a collected record leaves on the scan's row (`findings.backend`),
+ * beside the record's own results and coverage. `direct` is what this
+ * dashboard's own poll recorded for the run, to say whether the record's
+ * bytes differ from it.
+ */
+function snapshotOfRecord(record: backendScans.BackendScanRecord, direct: { results: unknown; coverage: unknown }): BackendRecordSnapshot {
+  const results = backendScans.recordResults(record);
+  const coverage = backendScans.recordCoverage(record);
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  return {
+    status: record.status,
+    verdict: record.verdict,
+    verdictLabel: record.verdictLabel,
+    collectedAt: record.collectedAt,
+    detail: record.errorMessage ?? "",
+    pdfUrl: record.pdfUrl,
+    engagement: record.engagement,
+    engineRunId: record.engineRunId,
+    differsFromDirect: {
+      results: results === null || direct.results == null ? null : !same(results, direct.results),
+      coverage: coverage === null || direct.coverage == null ? null : !same(coverage, direct.coverage),
+    },
+  };
+}
+
+/**
+ * How a collect watch files the backend's record into the scan's row, and
+ * records its end. Filed once, by the dashboard whose claim on the watch
+ * succeeded (server/collect-watch.ts). The row then holds the RECORD's results
+ * and coverage -- the backend's record is the record of a hybrid scan -- with
+ * the counts recounted from them, and the snapshot the list screens read. A
+ * hybrid scan is never filed into this dashboard's own findings ledger.
+ */
+const collectWatchHooks: CollectHooks = {
+  async fileRecord(watch, record) {
+    const test = await storage.getTest(watch.testId);
+    if (!test) return;
+    const recorded = (test.findings ?? {}) as Record<string, unknown>;
+    const results = backendScans.recordResults(record);
+    const coverage = backendScans.recordCoverage(record);
+    const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
+    await storage.updateTest(test.id, {
+      findings: {
+        ...recorded,
+        backend: snapshot,
+        ...(results !== null ? { results } : {}),
+        ...(coverage !== null ? { coverage } : {}),
+      },
+      ...(results !== null ? countSeverities(results) : {}),
+    });
+  },
+  async recordEnd(watch) {
+    const record = backendScans.readRecord(watch.record);
+    await storage.createActivityLog({
+      action: watch.state === "collected" ? "backend_record_collected" : "backend_record_unwatched",
+      entityType: "test",
+      entityId: watch.testId,
+      details: {
+        backendScanId: watch.backendScanId,
+        engineRunId: watch.engineRunId,
+        // Filed by the dashboard when the backend had the record: not an act of any person at this moment.
+        filedBy: "collect_watch",
+        startedAt: isoOf(watch.startedAt),
+        endedAt: isoOf(watch.endedAt),
+        lastAnswer: watch.lastAnswer,
+        lastReadError: watch.lastReadError,
+        ...(record ? { status: record.status, verdict: record.verdict, collectedAt: record.collectedAt, errorMessage: record.errorMessage } : {}),
+      },
+      userId: null,
+      ipAddress: null,
+    });
+  },
+};
+
+/**
+ * A hybrid scan's `backend` in the status answer (GET /api/scans/:testId): the
+ * backend's record of the scan as this dashboard holds it. Three states, and
+ * never a fourth guessed:
+ *   collected: null  -- not asked yet: no collect watch exists for the row;
+ *   collected: false -- the watch is asking the backend, as the person
+ *                       (`watch: "running"`), or stopped asking at its deadline
+ *                       (`watch: "unwatched"`): no status, no verdict, nothing;
+ *   collected: true  -- the record: its status word, verdict and label, when it
+ *                       was collected, its error message, its engagement, and
+ *                       the PDF through this dashboard's relay when it has one.
+ * `lastAnswer` and `lastReadError` say where the asking stands, in the
+ * backend's words. `mirror` is what a Stop's mirror to the record came to.
+ */
+export interface BackendRecordView {
+  scanId: string;
+  engagementId: number | null;
+  collected: boolean | null;
+  watch: "running" | "collected" | "unwatched" | null;
+  /** The backend's status word; `pending` while it is asked; null when not asked yet. */
+  status: string | null;
+  verdict: string | null;
+  verdictLabel: string | null;
+  /** The record's error_message once collected ("" for none); before that, where the asking stands, in words. */
+  detail: string;
+  collectedAt: string | null;
+  /** This dashboard's relay of the record's PDF (GET /api/scans/:testId/backend-pdf), only when the record has one. */
+  pdfUrl: string | null;
+  engagement: { id: number | null; name: string | null; clientName: string | null; status: string | null } | null;
+  engineRunId: string | null;
+  differsFromDirect: { results: boolean | null; coverage: boolean | null } | null;
+  mirror: BackendMirrorReading | null;
+  lastAnswer: string | null;
+  lastReadAt: string | null;
+  lastReadError: string | null;
+}
+
+const NOT_ASKED_YET = "Athena-Backend has not been asked to collect this run's record yet: it is asked when the run ends";
+
+/** Where a running collect watch stands, from its last answer, in words. */
+function collectingSentence(watch: CollectWatch): string {
+  const why = watch.lastReadError ? ` (${watch.lastReadError})` : "";
+  switch (watch.lastAnswer) {
+    case null: return "Athena-Backend is being asked to collect this run's record";
+    case "pending": return "Athena-Backend read the run and it was not over yet; it is asked again";
+    case "conflict": return `Athena-Backend says the record already stands; it is being read${why}`;
+    case "unavailable": return `Athena-Backend could not collect the record yet${why}; it is asked again`;
+    case "refused": return `Athena-Backend refused the collect for the person asking${why}; it is asked again on the next read by a person it allows`;
+    case "sign_in_required": return `the collect waits on a person signed in to Athena-Backend reading this scan${why}`;
+    default: return `Athena-Backend last answered ${watch.lastAnswer}${why}; it is asked again`;
+  }
+}
+
+/** The view of a collected record, from the row's snapshot. */
+function collectedView(
+  test: { id: string },
+  base: { scanId: string; engagementId: number | null; mirror: BackendMirrorReading | null },
+  snapshot: BackendRecordSnapshot,
+): BackendRecordView {
+  return {
+    ...base,
+    collected: true,
+    watch: "collected",
+    status: snapshot.status,
+    verdict: snapshot.verdict,
+    verdictLabel: snapshot.verdictLabel,
+    detail: snapshot.detail,
+    collectedAt: snapshot.collectedAt,
+    pdfUrl: snapshot.pdfUrl ? `/api/scans/${encodeURIComponent(test.id)}/backend-pdf` : null,
+    engagement: snapshot.engagement ?? null,
+    engineRunId: snapshot.engineRunId ?? null,
+    differsFromDirect: snapshot.differsFromDirect ?? null,
+    lastAnswer: "collected",
+    lastReadAt: null,
+    lastReadError: null,
+  };
+}
+
+/**
+ * The `backend` of a status answer for a row naming backend scan `scanId`, from
+ * the app's collect watcher (server/collect-watch.ts). Reads storage only -- no
+ * backend call is made on a page read's path. When `start` is given, this read
+ * saw the run finished: the collect watch is started if none exists, asking as
+ * the person of `sessionId` (null for no person: the watch then waits for a
+ * signed-in read). Every signed-in read while the watch runs lends it its
+ * person. A record the watch collected but could not file into the row is filed
+ * here, from the watch's record.
+ */
+async function backendRecordView(
+  collectWatcher: CollectWatcher, test: Test, scanId: string, sessionId: string | null, start: { engineRunId: string | null } | null,
+): Promise<BackendRecordView> {
+  const findings = (test.findings ?? {}) as Record<string, unknown>;
+  const base = { scanId, engagementId: backendEngagementIdOf(findings), mirror: backendMirrorOf(findings.backendMirror) };
+  const snapshot = backendSnapshotOf(findings.backend);
+  if (snapshot !== null) return collectedView(test, base, snapshot);
+
+  let watch = await collectWatcher.view(scanId);
+  if (!watch) {
+    if (start === null) {
+      return {
+        ...base, collected: null, watch: null, status: null, verdict: null, verdictLabel: null, detail: NOT_ASKED_YET,
+        collectedAt: null, pdfUrl: null, engagement: null, engineRunId: null, differsFromDirect: null,
+        lastAnswer: null, lastReadAt: null, lastReadError: null,
+      };
+    }
+    watch = collectWatcher.start({ backendScanId: scanId, testId: test.id, engineRunId: start.engineRunId, sessionId });
+  } else if (watch.state === "running") {
+    collectWatcher.adopt(scanId, sessionId);
+  }
+
+  if (watch.state === "collected") {
+    const record = backendScans.readRecord(watch.record);
+    const filed = record === null
+      ? { status: "unknown", verdict: null, verdictLabel: null, collectedAt: isoOf(watch.endedAt), detail: "the record the watch collected could not be read here" }
+      : snapshotOfRecord(record, { results: findings.results, coverage: findings.coverage });
+    // Claimed and collected, but not on the row yet (a write that did not land): filed now.
+    if (record !== null) await collectWatchHooks.fileRecord(watch, record).catch(() => undefined);
+    return collectedView(test, base, filed);
+  }
+
+  const running = watch.state === "running";
+  return {
+    ...base,
+    collected: false,
+    watch: running ? "running" : "unwatched",
+    status: "pending",
+    verdict: null,
+    verdictLabel: null,
+    detail: running
+      ? collectingSentence(watch)
+      : `this dashboard stopped asking Athena-Backend to collect the record at ${isoOf(watch.endedAt) ?? "its deadline"}` +
+        `${watch.lastReadError ? ` (${watch.lastReadError})` : ""}; the backend's own collector records the run's end, and the record is read there`,
+    collectedAt: null,
+    pdfUrl: null,
+    engagement: null,
+    engineRunId: watch.engineRunId,
+    differsFromDirect: null,
+    lastAnswer: watch.lastAnswer,
+    lastReadAt: isoOf(watch.lastReadAt),
+    lastReadError: watch.lastReadError,
+  };
+}
+
 /** Engine run states in which a retest is still doing something to the target. */
 const LIVE_RETEST_STATES = new Set(["queued", "running", "aborting"]);
 
@@ -2394,6 +2638,12 @@ export function registerRoutes(app: Express): void {
   // For tests that reuse one engine run id across cases (as retestWatcher.reset()).
   app.locals.unreadRunHandles = unreadRunHandles;
   watcher.resume();
+  // This app's collect watches (server/collect-watch.ts): every scan started
+  // through Athena-Backend whose run has ended, asked about until the backend
+  // has its record. Resumed from the record in the background; on no stop's path.
+  const collectWatcher = new CollectWatcher(storage, collectWatchHooks);
+  app.locals.collectWatcher = collectWatcher;
+  collectWatcher.resume();
   // The tests, read once in the background so a Stop finds its run in memory
   // (storage.peekTest) without asking the database. Holds up nothing.
   setImmediate(() => void storage.getAllTests().catch(() => undefined));
@@ -3654,6 +3904,25 @@ export function registerRoutes(app: Express): void {
     // coverageOf): what the run checked and what it did not. null when none was
     // recorded -- which is not "every check ran", and the screens say so.
     const carried = coverageOf(recorded.coverage);
+    // The backend scan this row names: a scan started through Athena-Backend
+    // (the hybrid), whose record the backend collects when the run ends. null
+    // for a scan this dashboard dispatched to the engine itself, which keeps
+    // today's answer to the letter.
+    const backendScanId = backendScanIdOf(test.findings);
+    const sessionId = req.session?.userId ? req.sessionID : null;
+    /**
+     * The answer, with the row's backend record beside it (`backend`: null for a
+     * row that names none) and the mark of a run no direct Stop reaches
+     * (`stop: "backend"`). `finished` says this read saw the run's end: the
+     * first such read starts the collect watch, which asks the backend as this
+     * person, off the request's path (backendRecordView).
+     */
+    const answer = async (row: Test, payload: Record<string, unknown>, finished: boolean) => {
+      const backend = backendScanId === null ? null
+        : await backendRecordView(collectWatcher, row, backendScanId, sessionId, finished ? { engineRunId: runId } : null);
+      res.json({ ...payload, backend, ...(stoppedOnlyAtBackend(row.findings) ? { stop: "backend" as const } : {}) });
+    };
+
     // A test no engine run stands behind -- a person's, or a sample row -- has
     // no findings of a run's to answer, completed or not. Decided by the one
     // rule the edit guard and the Tests screen use (shared/engine-record.ts):
@@ -3664,7 +3933,12 @@ export function registerRoutes(app: Express): void {
         coverage: null,
       });
     }
-    if (test.status === "completed") {
+    // A hybrid scan whose record the backend has collected is read from that
+    // record, whatever state the engine ended the run in: the record's results
+    // and coverage were filed into the row (collectWatchHooks.fileRecord), and
+    // the engine is not asked about it again.
+    const collected = backendScanId !== null && backendSnapshotOf(recorded.backend) !== null;
+    if (test.status === "completed" || collected) {
       // The engine is not asked again about a run recorded as completed, so what
       // it returned is what was recorded then: the last poll's findings, or the
       // start's for a run the engine finished inline. They are answered in the
@@ -3674,26 +3948,29 @@ export function registerRoutes(app: Express): void {
       // cannot be read are said to be unread, never answered as none.
       const results = readableResults(recorded.results);
       if (results === null) {
-        return void res.json({
+        return answer(test, {
           test, state: test.status, engine: null,
-          detail: "the findings recorded for this scan could not be read",
+          detail: collected
+            ? "the findings in the Athena-Backend record of this scan could not be read"
+            : "the findings recorded for this scan could not be read",
           coverage: carried,
-        });
+        }, true);
       }
       const answered: engine.EngineScan = {
-        runId, state: test.status, findings: results, detail: "the findings recorded when the run completed",
+        runId, state: test.status, findings: results,
+        detail: collected ? "the findings in the Athena-Backend record of this scan" : "the findings recorded when the run completed",
       };
-      return void res.json({ test, state: test.status, engine: answered, coverage: carried });
+      return answer(test, { test, state: test.status, engine: answered, coverage: carried }, true);
     }
     if (!runId) {
       // An engine scan the engine accepted without a run id, not recorded as
       // completed: the engine cannot be asked about it, and it is never told it
       // has no engine run. No Stop can reach it either: every read says so, so
       // the screens show what stops it in place of a Stop.
-      return void res.json({
+      return answer(test, {
         test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK, coverage: carried,
         ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
-      });
+      }, false);
     }
 
     let current;
@@ -3703,9 +3980,9 @@ export function registerRoutes(app: Express): void {
       if (cause instanceof engine.EngineUnavailable) {
         // The record stands even when the engine has gone. Saying so beats
         // reporting the row's last known status as if it were current.
-        return void res.status(200).json({
+        return answer(test, {
           test, state: test.status, engine: null, detail: cause.message, coverage: carried,
-        });
+        }, false);
       }
       throw cause;
     }
@@ -3723,12 +4000,17 @@ export function registerRoutes(app: Express): void {
       ? countSeverities(current.findings)
       : finished ? UNREAD_COUNTS : {};
 
+    // A direct read that succeeded clears the mark of a run this dashboard's
+    // engine key could not read on the first try (decision 7): the run is
+    // readable by this key after all, so its direct Stop is offered again.
+    const { stop: _marked, ...unmarked } = recorded;
+    const kept = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
     const updated = await storage.updateTest(test.id, {
       status: current.state,
       completedAt: finished ? new Date() : null,
       // The engine's coverage manifest rides with the run's end
       // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
-      findings: { ...recorded, results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}) },
+      findings: { ...kept, results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}) },
       ...counts,
     });
 
@@ -3742,7 +4024,7 @@ export function registerRoutes(app: Express): void {
     // recorded by the backend, which collects the run when it ends; the same
     // run filed into this ledger as well would be counted twice.
     let filed: lifecycle.IngestResult | null = null;
-    if (finished && current.findings !== null && backendScanIdOf(recorded) === null) {
+    if (finished && current.findings !== null && backendScanId === null) {
       const client = await storage.getClient(test.clientId);
       const site = test.siteId ? await storage.getSite(test.siteId) : null;
       if (client) {
@@ -3761,13 +4043,66 @@ export function registerRoutes(app: Express): void {
     // and never answered as a list: not as none, and not as a row that blanks the
     // page. The same rule answers them once the run is recorded as completed.
     if (readableResults(current.findings) === null) {
-      return void res.json({
+      return answer(updated ?? test, {
         test: updated ?? test, state: current.state, engine: null, filed,
         detail: "the findings the engine sent for this run could not be read",
         coverage: current.coverage ?? carried,
+      }, finished);
+    }
+    return answer(updated ?? test, {
+      test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried,
+    }, finished);
+  }));
+
+  /**
+   * The backend's PDF report of a hybrid scan, relayed as the person: the
+   * backend's own visibility and role checks apply to them, and its answer is
+   * passed on as it is -- the bytes for a completed scan, or its refusal in
+   * its own words (a stopped or failed run has no report: 409). Bounded by the
+   * read deadline, headers and body. A scan this dashboard dispatched itself
+   * has no backend record, and so no report here.
+   */
+  app.get("/api/scans/:testId/backend-pdf", boundedRelayRead({ who: "Athena-Backend", what: "this report read" }), asyncHandler(async (req, res) => {
+    const test = await storage.getTest(req.params.testId);
+    if (!test) return notFound(res, "Test");
+    const scanId = backendScanIdOf(test.findings);
+    if (scanId === null) {
+      return void res.status(409).json({
+        error: "this scan has no Athena-Backend record: this dashboard dispatched it to the engine itself, and the backend holds no report of it",
+        reason: "no_backend_record",
       });
     }
-    res.json({ test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried });
+    let relayed: Awaited<ReturnType<typeof backendScans.fetchPdf>>;
+    try {
+      relayed = await backendScans.fetchPdf(scanId);
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "reading the report")) return;
+      throw cause;
+    }
+    if (!relayed.ok) {
+      const text = await relayed.text().catch(() => "");
+      let object: Record<string, unknown> | null = null;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        object = null;
+      }
+      // The backend's words, whole: the pdf route refuses with its `error` and the
+      // record's `error_message` as `detail` (a stopped or failed run has no report).
+      const said = object === null ? null : [object.error, object.detail].filter((one): one is string => typeof one === "string" && one.trim() !== "");
+      const words = said && said.length > 0 ? said.join(" ") : backendScans.refusalWords(object, text);
+      return void res.status(relayed.status).json({
+        error: `Athena-Backend answered ${relayed.status} to the report read: ${words}`,
+        reason: "backend_refused", backendStatus: relayed.status,
+      });
+    }
+    res.status(200);
+    res.setHeader("Content-Type", relayed.headers.get("content-type") ?? "application/pdf");
+    const disposition = relayed.headers.get("content-disposition");
+    if (disposition) res.setHeader("Content-Disposition", disposition);
+    // The report is read whole and sent: the read deadline bounds headers and body alike.
+    res.end(Buffer.from(await relayed.arrayBuffer()));
   }));
 
   // ==== RETEST ====

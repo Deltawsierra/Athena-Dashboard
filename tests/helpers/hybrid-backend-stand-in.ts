@@ -265,6 +265,8 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
   };
   const heldLaunches: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
+  /** The scans a collect is reading the engine for right now: a second collector meanwhile is told the record is claimed (409). */
+  const collecting = new Set<string>();
 
   const issue = (account: string) => {
     issued += 1;
@@ -798,15 +800,23 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
               controls.failNextCollect = null;
               return answer(fault.status, fault.body);
             }
-            if (scan.status !== "pending" || scan.engine_run_id === null) {
-              return answer(409, { detail: `the scan is ${scan.status}${scan.engine_run_id === null ? " and names no run" : ""}, so there is nothing to collect`, status: scan.status });
-            }
             if (controls.holdCollects) {
               await new Promise<void>((release) => { heldCollects.push(release); held.push(res); });
               if (res.destroyed) return;
             }
-            const collected = await collectOnce(scan);
-            return answer(collected.status, collected.body);
+            // The claim: a scan no longer pending -- collected by another collector while this one was held -- is 409,
+            // and so is one another collector is reading the engine for this moment (the row is claimed).
+            if (scan.status !== "pending" || scan.engine_run_id === null) {
+              return answer(409, { detail: `the scan is ${scan.status}${scan.engine_run_id === null ? " and names no run" : ""}, so there is nothing to collect`, status: scan.status });
+            }
+            if (collecting.has(scan.uuid)) return answer(409, { detail: "the scan is being collected already", status: scan.status });
+            collecting.add(scan.uuid);
+            try {
+              const collected = await collectOnce(scan);
+              return answer(collected.status, collected.body);
+            } finally {
+              collecting.delete(scan.uuid);
+            }
           }
           return answer(405, { detail: `Method "${method}" not allowed.` });
         }

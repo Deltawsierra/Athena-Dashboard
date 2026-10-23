@@ -74,7 +74,8 @@ beforeAll(async () => {
     }
     if (req.method === "GET" && url.startsWith("/api/scans/run-")) {
       if (firstRead(url)) return json(res, 200, STILL_RUNNING(url));
-      polls.push(url);
+      // The dashboard's own polls, by its key: the backend's launch read and its collect read go with the backend's key.
+      if (req.headers["x-api-key"] === "ce_op_test") polls.push(url);
       return json(res, 200, pollBody());
     }
     return json(res, 404, { detail: "not here" });
@@ -82,7 +83,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
-  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: "backend-key" } });
   process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());

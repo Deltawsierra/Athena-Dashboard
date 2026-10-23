@@ -332,7 +332,7 @@ export const collectWatches = sqliteTable("collect_watches", {
   deadlineAt: timestamp("deadline_at").notNull(),
   /** running | collected | unwatched */
   state: text("state").notNull(),
-  /** The backend's last answer to a collect: pending | collected | conflict | unavailable | sign_in_required; null before the first. */
+  /** The backend's last answer to a collect (server/collect-watch.ts CollectLastAnswer): pending | collected | conflict | unavailable | refused | sign_in_required; null before the first. */
   lastAnswer: text("last_answer"),
   lastReadAt: timestamp("last_read_at"),
   lastReadError: text("last_read_error"),
@@ -357,6 +357,19 @@ export interface BackendRecordSnapshot {
   collectedAt: string | null;
   /** The record's `error_message`, verbatim; "" when it has none. */
   detail: string;
+  /** The record's `pdf_url` as served -- the backend holds a report only for a completed scan; null otherwise. The page reads it through this dashboard's relay. */
+  pdfUrl?: string | null;
+  /** The engagement the record names, as served. */
+  engagement?: { id: number | null; name: string | null; clientName: string | null; status: string | null } | null;
+  /** The engine run the record names. */
+  engineRunId?: string | null;
+  /**
+   * Whether the record's results and coverage differ, byte for byte, from what
+   * this dashboard's own direct poll recorded for the run; null when one side
+   * recorded none to compare. The record's bytes are what the row holds once
+   * collected; the page says when they differed.
+   */
+  differsFromDirect?: { results: boolean | null; coverage: boolean | null };
 }
 
 /**
