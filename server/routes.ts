@@ -39,6 +39,7 @@ import type { RetestFiling } from "./storage";
 import type {
   AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test,
 } from "@shared/schema";
+import type { BackendRecordView } from "@shared/backend-record";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -105,6 +106,8 @@ function completionStamp(
 // clients.backendEngagementId): a caller may not supply or change it. The
 // testing window stays a person's to set and renew.
 const createClientSchema = insertClientSchema.omit({ isSample: true, backendEngagementId: true });
+/** A testing window's renewal (POST /api/clients/:id/testing-window/renew): how many days from now; 90 unless said. */
+const renewTestingWindowSchema = z.object({ days: z.number().int().min(1).max(365).optional() }).strict();
 const createSiteSchema = insertSiteSchema.omit({ isSample: true });
 
 // What a scan needs before the engine is asked anything: a target, and the
@@ -176,9 +179,10 @@ function engagementNameFor(client: { id: string; name: string; company: string }
  * answered. A 503 is a fact about the deployment, never a 401: a 401 would send
  * the browser to this console's sign-in screen, away from the kill switch.
  */
-function refuseForBackend(res: Response, cause: unknown, what: string): boolean {
+function refuseForBackend(res: Response, cause: unknown, what: string, launch = true): boolean {
+  const nothingStarted = launch ? " Nothing was started." : "";
   if (cause instanceof ControlPlaneSignInRequired) {
-    res.status(503).json({ error: `${what} needs your Athena-Backend sign-in: ${cause.message}. Nothing was started.`, reason: cause.code, code: cause.code });
+    res.status(503).json({ error: `${what} needs your Athena-Backend sign-in: ${cause.message}.${nothingStarted}`, reason: cause.code, code: cause.code });
     return true;
   }
   if (cause instanceof ControlPlaneRefused || cause instanceof backendScans.BackendRefused) {
@@ -189,7 +193,7 @@ function refuseForBackend(res: Response, cause: unknown, what: string): boolean 
   if (cause instanceof ControlPlaneUnavailable) {
     res.status(503).json({
       error: `${what} could not be done: Athena-Backend, the governance gate every scan starts through, could not be reached ` +
-        `(${cause.message}). Nothing was started.`,
+        `(${cause.message}).${nothingStarted}`,
       reason: "backend_unavailable",
     });
     return true;
@@ -699,7 +703,11 @@ async function mirrorStopToBackend(
   who: Who, test: { id: string; findings: unknown }, outcome: StopOutcome, via: "stop" | "kill_switch" | "delete",
 ): Promise<void> {
   const backendScanId = backendScanIdOf(test.findings);
-  if (backendScanId === null || outcome.alreadyFinished === true || outcome.unknownRun === true) return;
+  if (backendScanId === null || outcome.alreadyFinished === true) return;
+  // "No such scan run" is an end for a run this dashboard's key can read. For a
+  // row marked `stop: "backend"` -- the key could never read the run -- it is
+  // not: the backend's own stop is what reaches it, so the mirror goes.
+  if (outcome.unknownRun === true && !stoppedOnlyAtBackend(test.findings)) return;
   const pressed = via === "stop" ? "the scan's own Stop on the Athena dashboard"
     : via === "kill_switch" ? "the Athena dashboard's kill switch"
       : "the scan's deletion on the Athena dashboard, which stops its run first";
@@ -2392,42 +2400,7 @@ const collectWatchHooks: CollectHooks = {
   },
 };
 
-/**
- * A hybrid scan's `backend` in the status answer (GET /api/scans/:testId): the
- * backend's record of the scan as this dashboard holds it. Three states, and
- * never a fourth guessed:
- *   collected: null  -- not asked yet: no collect watch exists for the row;
- *   collected: false -- the watch is asking the backend, as the person
- *                       (`watch: "running"`), or stopped asking at its deadline
- *                       (`watch: "unwatched"`): no status, no verdict, nothing;
- *   collected: true  -- the record: its status word, verdict and label, when it
- *                       was collected, its error message, its engagement, and
- *                       the PDF through this dashboard's relay when it has one.
- * `lastAnswer` and `lastReadError` say where the asking stands, in the
- * backend's words. `mirror` is what a Stop's mirror to the record came to.
- */
-export interface BackendRecordView {
-  scanId: string;
-  engagementId: number | null;
-  collected: boolean | null;
-  watch: "running" | "collected" | "unwatched" | null;
-  /** The backend's status word; `pending` while it is asked; null when not asked yet. */
-  status: string | null;
-  verdict: string | null;
-  verdictLabel: string | null;
-  /** The record's error_message once collected ("" for none); before that, where the asking stands, in words. */
-  detail: string;
-  collectedAt: string | null;
-  /** This dashboard's relay of the record's PDF (GET /api/scans/:testId/backend-pdf), only when the record has one. */
-  pdfUrl: string | null;
-  engagement: { id: number | null; name: string | null; clientName: string | null; status: string | null } | null;
-  engineRunId: string | null;
-  differsFromDirect: { results: boolean | null; coverage: boolean | null } | null;
-  mirror: BackendMirrorReading | null;
-  lastAnswer: string | null;
-  lastReadAt: string | null;
-  lastReadError: string | null;
-}
+// The shape of `backend` in the status answer: shared/backend-record.ts BackendRecordView.
 
 const NOT_ASKED_YET = "Athena-Backend has not been asked to collect this run's record yet: it is asked when the run ends";
 
@@ -3153,6 +3126,69 @@ export function registerRoutes(app: Express): void {
       await storage.createActivityLog({ action: "updated", entityType: "client", entityId: client.id, details: null, ...actor(req) });
     }
     res.json(client);
+  }));
+
+  /**
+   * The client's backend engagement, read from Athena-Backend as the person
+   * when the client names one (decision 2): its name, status, scope and window
+   * as the backend holds them, beside what this dashboard recorded -- the id,
+   * the testing window, and the hosts of the client's sites (the scope the
+   * next launch widens the engagement to). Asked for, never on a page's load.
+   */
+  app.get("/api/clients/:id/backend-engagement", boundedRelayRead({ who: "Athena-Backend", what: "this engagement read" }), asyncHandler(async (req, res) => {
+    const client = await storage.getClient(req.params.id);
+    if (!client) return notFound(res, "Client");
+    const sites = await storage.getSitesByClient(client.id);
+    const recorded = {
+      backendEngagementId: client.backendEngagementId,
+      testingWindowStart: client.testingWindowStart,
+      testingWindowEnd: client.testingWindowEnd,
+      hosts: Array.from(new Set(sites.map((site) => hostOf(site.url)).filter((host): host is string => host !== null))),
+    };
+    if (client.backendEngagementId === null) return void res.json({ ...recorded, engagement: null });
+    try {
+      res.json({ ...recorded, engagement: await backendScans.getEngagement(client.backendEngagementId) });
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "reading the client's backend engagement", false)) return;
+      throw cause;
+    }
+  }));
+
+  /**
+   * Renew the client's testing window: from now, for `days` (90 unless said),
+   * on the client's backend engagement first -- re-dated as the person, so the
+   * backend's own refusal stands and the window here is never ahead of the
+   * authority there -- and then on the client's record. A person's act, pressed
+   * and confirmed on the Clients page; never done on its own (decision 2).
+   */
+  app.post("/api/clients/:id/testing-window/renew", asyncHandler(async (req, res) => {
+    const data = renewTestingWindowSchema.parse(req.body ?? {});
+    const client = await storage.getClient(req.params.id);
+    if (!client) return notFound(res, "Client");
+    const days = data.days ?? DEFAULT_TESTING_WINDOW_MS / (24 * 60 * 60_000);
+    const start = new Date();
+    const end = new Date(start.getTime() + days * 24 * 60 * 60_000);
+    let engagement: backendScans.BackendEngagement | null = null;
+    if (client.backendEngagementId !== null) {
+      try {
+        const current = await backendScans.getEngagement(client.backendEngagementId);
+        engagement = await backendScans.patchEngagement(current, { testingWindowStart: start, testingWindowEnd: end });
+      } catch (cause) {
+        if (refuseForBackend(res, cause, "renewing the testing window", false)) return;
+        throw cause;
+      }
+    }
+    const updated = await storage.updateClient(client.id, { testingWindowStart: start, testingWindowEnd: end });
+    if (!updated) return notFound(res, "Client");
+    await storage.createActivityLog({
+      action: "testing_window_renewed", entityType: "client", entityId: client.id,
+      details: {
+        days, testingWindowStart: start.toISOString(), testingWindowEnd: end.toISOString(),
+        backendEngagementId: client.backendEngagementId, ...(engagement === null ? { backendEngagementRedated: false } : { backendEngagementRedated: true }),
+      },
+      ...actor(req),
+    });
+    res.json({ client: updated, engagement, days });
   }));
 
   app.delete("/api/clients/:id", asyncHandler(async (req, res) => {

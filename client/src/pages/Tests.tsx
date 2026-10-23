@@ -44,7 +44,31 @@ import { failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
-import { engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { backendScanIdOf, engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import { StatusPill, type StatusTone } from "@/components/mythos/atoms";
+import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
+import { RECORD_PENDING_PILL, recordPill } from "@/lib/backendRecordCopy";
+
+/**
+ * The row's pill for where a scan's record is (lib/sourceLabels.ts,
+ * lib/backendRecordCopy.ts): Athena-Backend's record for a scan started through
+ * it -- its verdict label once collected, its status word for a run that did
+ * not finish, "pending" before -- and this dashboard's direct record for a scan
+ * it dispatched itself. None for a test no engine run stands behind.
+ */
+function recordSourcePill(test: Test): { tone: StatusTone; text: string; source: "backend" | "direct" } | null {
+  if (backendScanIdOf(test.findings) !== null) {
+    const snapshot = (test.findings as { backend?: { status?: unknown; verdict?: unknown; verdictLabel?: unknown } }).backend;
+    if (snapshot && typeof snapshot.status === "string") {
+      const label = typeof snapshot.verdictLabel === "string" ? snapshot.verdictLabel
+        : typeof snapshot.verdict === "string" ? snapshot.verdict : snapshot.status;
+      return { tone: typeof snapshot.verdict === "string" ? "complete" : "neutral", text: recordPill(label), source: "backend" };
+    }
+    return { tone: "progress", text: RECORD_PENDING_PILL, source: "backend" };
+  }
+  if (isEngineRecord(test.findings)) return { tone: "neutral", text: DASHBOARD_DIRECT, source: "direct" };
+  return null;
+}
 
 /**
  * Radix Select forbids an empty string as an item value, so optional fields use
@@ -600,6 +624,7 @@ export default function Tests() {
               filteredTests.map((test, index) => {
                 const client = clients.find((c) => c.id === test.clientId);
                 const site = sites.find((s) => s.id === test.siteId);
+                const recordPillFor = recordSourcePill(test);
 
                 return (
                   <motion.div
@@ -624,6 +649,11 @@ export default function Tests() {
                                 <Badge variant={getSeverityColor(test.severity)} data-testid={`badge-severity-${test.id}`}>
                                   {test.severity}
                                 </Badge>
+                              )}
+                              {recordPillFor && (
+                                <span data-testid={`pill-record-source-${test.id}`} data-source={recordPillFor.source}>
+                                  <StatusPill tone={recordPillFor.tone}>{recordPillFor.text}</StatusPill>
+                                </span>
                               )}
                             </div>
                             {test.summary && (

@@ -37,6 +37,9 @@ import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 let hybrid: HybridBackendStandIn | null = null;
 const DASHBOARD_DIRECT = "Recorded by this dashboard directly from the engine; not in the Athena-Backend record";
+/** A scan started through Athena-Backend (every scan the pages start now): the live view's source and the record's, each named. */
+const HYBRID_SOURCE =
+  "Started through Athena-Backend; the live view is read directly from the engine, and the record of this scan is Athena-Backend's";
 const BACKEND_RECORD = "From the Athena-Backend record";
 const OVERVIEW_SOURCES =
   `Open Findings — ${DASHBOARD_DIRECT}. Assurance Decisions — ${BACKEND_RECORD}. ` +
@@ -234,7 +237,7 @@ for (const [name, Screen] of [["Athena", AthenaScan], ["Penetration testing", Pe
       await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByTestId("button-start-scan"));
       await waitFor(() => expect(screen.getByTestId("text-state").textContent).toContain("running"), { timeout: 6_000 });
-      expect(screen.getByTestId("text-scan-source").textContent).toBe(`${DASHBOARD_DIRECT}.`);
+      expect(screen.getByTestId("text-scan-source").textContent).toBe(`${HYBRID_SOURCE}.`);
       // Said by source: never by era, never as a promise about the backend, never as the old phrase.
       expect(document.body.textContent ?? "").not.toMatch(/legacy|backend will record|deployment assurance/i);
       // The Stop is where it always was.

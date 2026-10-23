@@ -39,7 +39,7 @@ const TOKEN = "a1".repeat(32);
 function stubEngine() {
   const calls: Array<{ method: string; url: string }> = [];
   const runs = new Map<string, { state: string }>();
-  const control = { abortAnswer: null as null | { status: number; body: unknown } };
+  const control = { abortAnswer: null as null | { status: number; body: unknown }, tenantBound: false };
   let next = 0;
   const json = (res: ServerResponse, code: number, body: unknown) => {
     res.writeHead(code, { "Content-Type": "application/json" });
@@ -59,7 +59,8 @@ function stubEngine() {
       if (abort) {
         if (control.abortAnswer) return json(res, control.abortAnswer.status, control.abortAnswer.body);
         const run = runs.get(abort[1]);
-        if (!run) return json(res, 404, { detail: "No such scan run" });
+        // The engine scopes a run to the key that started it: the dashboard's key sees neither the run nor its abort.
+        if (!run || (control.tenantBound && req.headers["x-api-key"] === "dashboard-key")) return json(res, 404, { detail: "No such scan run" });
         // Both engines answer a run that has ended 2xx `{state, detail: "not running"}` (server/engine.ts abortRun).
         if (run.state !== "running") return json(res, 200, { run_id: abort[1], state: run.state, detail: "not running" });
         run.state = "aborted";
@@ -68,7 +69,7 @@ function stubEngine() {
       if (req.method === "GET" && url.startsWith("/api/scans/")) {
         const id = decodeURIComponent(url.slice("/api/scans/".length));
         const run = runs.get(id);
-        if (!run) return json(res, 404, { detail: "No such scan run" });
+        if (!run || (control.tenantBound && req.headers["x-api-key"] === "dashboard-key")) return json(res, 404, { detail: "No such scan run" });
         return json(res, 200, { run_id: id, state: run.state, done: run.state !== "running", result: run.state === "running" ? null : { results: [] } });
       }
       if (req.method === "POST" && url === "/api/scan") {
@@ -119,6 +120,7 @@ afterEach(async () => {
   hybrid.seen.length = 0;
   engine.calls.length = 0;
   engine.control.abortAnswer = null;
+  engine.control.tenantBound = false;
 });
 
 afterAll(async () => {
@@ -238,6 +240,22 @@ describe("the scan's own Stop", () => {
     expect(mirror.json).toMatchObject({ reason: expect.stringContaining("the engine did not accept the stop") });
     await until(() => mirrorReading(testId), (one) => one !== undefined);
     engine.control.abortAnswer = null;
+    expect((await admin.post(`/api/scans/${testId}/abort`)).status).toBe(200);
+  });
+
+  it("a run this dashboard's engine key cannot read (marked stop: backend): the engine's 404 to its stop is no end, and the stop is mirrored", async () => {
+    engine.control.tenantBound = true;
+    const { testId, scanId } = await aRunningScan();
+    expect((await storage.getTest(testId))!.findings).toMatchObject({ stop: "backend" });
+    hybrid.seen.length = 0;
+    const stopped = await admin.post(`/api/scans/${testId}/abort`);
+    expect(stopped.status).toBe(502);
+    const mirror = await hybrid.waitFor((one) => one.method === "POST" && one.path === `/api/pentest/scans/${scanId}/stop/`);
+    expect(mirror).toMatchObject({ stop: true, by: "service token" });
+    expect(mirror.json).toMatchObject({ reason: expect.stringContaining("the engine did not accept the stop") });
+    await until(() => mirrorReading(testId), (one) => one !== undefined);
+    expect((await mirrorLogs(scanId))[0]).toMatchObject({ action: "abort_mirrored", details: { via: "stop" } });
+    engine.control.tenantBound = false;
     expect((await admin.post(`/api/scans/${testId}/abort`)).status).toBe(200);
   });
 

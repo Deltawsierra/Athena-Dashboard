@@ -64,9 +64,13 @@ function Group({ heading, tone, rows, testId }: { heading: string; tone: string;
  * GET /api/scans/:testId); anything not an object is none. `running`: the run
  * has not ended, so no manifest exists yet.
  */
-export default function ScanCoverage({ coverage, running = false, className }: {
+export default function ScanCoverage({ coverage, running = false, source = COVERAGE_SOURCE, note = null, className }: {
   coverage: unknown;
   running?: boolean;
+  /** Where the manifest was read from (lib/sourceLabels.ts): the direct line unless the page says the record's. */
+  source?: string;
+  /** Beneath the source line (lib/sourceLabels.ts coverageSourceFor): that the record is not collected yet, when it is not. */
+  note?: string | null;
   className?: string;
 }) {
   const read = readCoverage(coverage);
@@ -77,7 +81,8 @@ export default function ScanCoverage({ coverage, running = false, className }: {
         <p className="athena-label">{COPY.heading}</p>
       </div>
       {/* The one source line: swap lib/sourceLabels.ts COVERAGE_SOURCE, not this layout. */}
-      <p className="mt-1 text-[11px] text-muted-foreground" data-testid="text-coverage-source">{COVERAGE_SOURCE}</p>
+      <p className="mt-1 text-[11px] text-muted-foreground" data-testid="text-coverage-source">{source}</p>
+      {note && <p className="text-[11px] text-muted-foreground" data-testid="text-coverage-record">{note}</p>}
 
       {running ? (
         <p className="mt-3 text-[13px] text-muted-foreground" data-testid="text-coverage-pending">{COPY.pending}</p>
