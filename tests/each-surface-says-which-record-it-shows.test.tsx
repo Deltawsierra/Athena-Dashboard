@@ -31,10 +31,15 @@ import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import { summarizeFindings } from "../server/findings-summary";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
+let hybrid: HybridBackendStandIn | null = null;
 const DASHBOARD_DIRECT = "Recorded by this dashboard directly from the engine; not in the Athena-Backend record";
+/** A scan started through Athena-Backend (every scan the pages start now): the live view's source and the record's, each named. */
+const HYBRID_SOURCE =
+  "Started through Athena-Backend; the live view is read directly from the engine, and the record of this scan is Athena-Backend's";
 const BACKEND_RECORD = "From the Athena-Backend record";
 const OVERVIEW_SOURCES =
   `Open Findings — ${DASHBOARD_DIRECT}. Assurance Decisions — ${BACKEND_RECORD}. ` +
@@ -78,9 +83,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   const agent = await signIn(app);
+  await signInToBackend(agent);
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -95,6 +103,9 @@ beforeAll(async () => {
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://labelled.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   // Every scan started here is recorded as ended, so none counts against another suite.
@@ -222,10 +233,11 @@ for (const [name, Screen] of [["Athena", AthenaScan], ["Penetration testing", Pe
       await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
       fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
       fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://labelled.example/" } });
+      fireEvent.click(screen.getByTestId("checkbox-consent"));
       await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByTestId("button-start-scan"));
       await waitFor(() => expect(screen.getByTestId("text-state").textContent).toContain("running"), { timeout: 6_000 });
-      expect(screen.getByTestId("text-scan-source").textContent).toBe(`${DASHBOARD_DIRECT}.`);
+      expect(screen.getByTestId("text-scan-source").textContent).toBe(`${HYBRID_SOURCE}.`);
       // Said by source: never by era, never as a promise about the backend, never as the old phrase.
       expect(document.body.textContent ?? "").not.toMatch(/legacy|backend will record|deployment assurance/i);
       // The Stop is where it always was.

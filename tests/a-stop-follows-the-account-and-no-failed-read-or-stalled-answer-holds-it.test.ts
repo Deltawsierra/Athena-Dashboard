@@ -8,6 +8,7 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { recordLegacyScan } from "./helpers";
 
 /**
  * SAFETY, round three of PR #56: nothing -- a stale session, a failed or slow
@@ -211,10 +212,15 @@ async function scanned(fx: Fixture, as = admin) {
   n += 1;
   const client = await admin.post("/api/clients").send({ name: `Round3 ${n}`, company: "R", email: `r3-${n}@r.test` });
   const site = await admin.post("/api/sites").send({ clientId: client.body.id, name: "Main", url: "https://offline.invalid" });
-  const started = await as.post("/api/scans").send({ clientId: client.body.id, siteId: site.body.id, target: fx.exchanges[0].body.target });
-  expect(started.status).toBe(201);
+  // The fixture's setup scan, recorded and filed as this dashboard's own (tests/helpers.ts recordLegacyScan), run by `as`:
+  // the scan that found the finding a retest is about. A scan started through Athena-Backend is recorded there, never filed here.
+  const setup = fx.exchanges[0].body as { run_id: string; target: string; result: { results: unknown[] } };
+  const executedBy = (await as.get("/api/auth/check")).body.user.id as string;
+  const { test } = await recordLegacyScan(storage, {
+    clientId: client.body.id, siteId: site.body.id, target: setup.target, runId: setup.run_id, results: setup.result.results, executedBy,
+  });
   const findings = await storage.getFindingsByClient(client.body.id);
-  return { testId: started.body.test.id as string, finding: findings[0], runId: started.body.runId as string };
+  return { testId: test.id, finding: findings[0], runId: setup.run_id };
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(read: () => Promise<T>, ok: (value: T) => boolean, ms = 4_000): Promise<T> {

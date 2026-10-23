@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Express } from "express";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { reportedSerious, summarizeFindings } from "../server/findings-summary";
 import { latestCompletedBySite } from "@shared/latest-scans";
 
@@ -25,6 +26,7 @@ import { latestCompletedBySite } from "@shared/latest-scans";
  *
  * Adapted from the adversarial reproducer r3-untracked-server.test.ts.
  */
+let hybrid: HybridBackendStandIn | null = null;
 let results: unknown[] = [];
 let runN = 0;
 describe("a latest completed scan's unfiled criticals are flagged, per site and per severity", () => {
@@ -47,11 +49,17 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(server.address() as import("net").AddressInfo).port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
   });
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((r) => server.close(() => r()));
@@ -61,6 +69,18 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     const client = (await agent.post("/api/clients").send({ name, company: name, email: `${name}@example.test` })).body;
     const site = (await agent.post("/api/sites").send({ clientId: client.id, name: "App", url })).body;
     return { client, site };
+  }
+  let scans = 0;
+  /**
+   * A scan recorded and filed as this dashboard's own (tests/helpers.ts
+   * recordLegacyScan), with `results`: the latest completed scan per site the
+   * summary reads against the ledger. A scan started through Athena-Backend is
+   * recorded there, never filed here, and never read as "filed nothing".
+   */
+  async function scanned(clientId: string, siteId: string, target: string) {
+    scans += 1;
+    const { storage } = await import("../server/storage-unified");
+    return (await recordLegacyScan(storage, { clientId, siteId, target, runId: `run-${scans}`, results })).test;
   }
   const mine = async (id: string) =>
     (await agent.get("/api/findings/summary")).body.byClient.find((one: { clientId: string }) => one.clientId === id);
@@ -74,10 +94,9 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
       { type: "sql_injection", severity: "medium", message: "SQL error with crafted payload", evidence: { endpoint: "https://app.example/login" } },
       { type: "sql_injection", severity: "critical", message: "Time-based SQL injection confirmed", evidence: { endpoint: "https://app.example/login" } },
     ];
-    const started = await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://app.example" });
-    expect(started.status).toBe(201);
-    expect(started.body.test.status).toBe("completed");
-    expect(started.body.test.criticalCount).toBe(1);
+    const test = await scanned(client.id, site.id, "https://app.example");
+    expect(test.status).toBe("completed");
+    expect(test.criticalCount).toBe(1);
     const own = await mine(client.id);
     expect(cleared(own)).not.toEqual(CLEARED);
     // Tracked, and so not reported again as untracked.
@@ -93,8 +112,8 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     results = [1, 2, 3].map((n) => ({
       type: "sql_injection", severity: "critical", evidence: { endpoint: "https://p.example/login", payload: n },
     }));
-    const started = await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://p.example" });
-    expect(started.body.test.criticalCount).toBe(3);
+    const test = await scanned(client.id, site.id, "https://p.example");
+    expect(test.criticalCount).toBe(3);
     expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: null });
 
     // An engine scan's counts are counted from its results, and since round 4
@@ -102,14 +121,14 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     // engine run; tests/an-edit-on-the-tests-screen-keeps-the-engine-run.test.ts).
     // This used to edit the count up through PATCH /api/tests/:id and expect
     // 200; the edit is refused now, and the summary is as it was.
-    const refused = await agent.patch(`/api/tests/${started.body.test.id}`).send({ criticalCount: 5 });
+    const refused = await agent.patch(`/api/tests/${test.id}`).send({ criticalCount: 5 });
     expect(refused.status).toBe(409);
     expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: null });
 
     // A record that says more than its ledger holds -- written before its
     // counts were the engine's alone -- is still untracked by the difference.
     const { storage } = await import("../server/storage-unified");
-    await storage.updateTest(started.body.test.id, { criticalCount: 5 });
+    await storage.updateTest(test.id, { criticalCount: 5 });
     expect(await mine(client.id)).toMatchObject({ critical: 1, untrackedScan: { critical: 2, high: 0 } });
   });
 
@@ -122,14 +141,14 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     }).expect(201)).body;
     expect((await mine(client.id)).untrackedScan).toMatchObject({ testId: pentest.id, critical: 3, high: 2, scans: 1 });
     results = [{ type: "missing_security_header", severity: "low", evidence: { header: "Referrer-Policy" } }];
-    await agent.post("/api/scans").send({ clientId: client.id, siteId: siteB.id, target: "https://b.example" }).expect(201);
+    await scanned(client.id, siteB.id, "https://b.example");
     const own = await mine(client.id);
     expect(cleared(own)).not.toEqual(CLEARED);
     expect(own.untrackedScan).toMatchObject({ testId: pentest.id, critical: 3, high: 2, scans: 1 });
 
     // A later scan of the SAME site that files a clean result does replace it.
     results = [];
-    await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://a.example" }).expect(201);
+    await scanned(client.id, site.id, "https://a.example");
     expect((await mine(client.id)).untrackedScan).toBeNull();
   });
 
@@ -158,7 +177,7 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
     expect(pentest.completedAt).toBeNull();
     await new Promise((r) => setTimeout(r, 5));
     results = [{ type: "missing_security_header", severity: "low", evidence: { header: "Referrer-Policy" } }];
-    await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://d.example" }).expect(201);
+    await scanned(client.id, site.id, "https://d.example");
     await new Promise((r) => setTimeout(r, 5));
     // Tests.tsx handleEditTest's body: no completedAt.
     const before = Date.now();
@@ -191,8 +210,8 @@ describe("a latest completed scan's unfiled criticals are flagged, per site and 
   it("C: the latest scan's filed critical, once acknowledged (in review), is still an open critical", async () => {
     const { client, site } = await clientWithSite("Acked", "https://c.example");
     results = [{ type: "rce", severity: "critical", message: "RCE", evidence: { endpoint: "https://c.example/run" } }];
-    const started = await agent.post("/api/scans").send({ clientId: client.id, siteId: site.id, target: "https://c.example" });
-    expect(started.body.test.criticalCount).toBe(1);
+    const test = await scanned(client.id, site.id, "https://c.example");
+    expect(test.criticalCount).toBe(1);
     const findings = (await agent.get(`/api/findings?clientId=${client.id}`)).body.findings;
     await agent.patch(`/api/findings/${findings[0].id}`).send({ status: "acknowledged" }).expect(200);
     const own = await mine(client.id);

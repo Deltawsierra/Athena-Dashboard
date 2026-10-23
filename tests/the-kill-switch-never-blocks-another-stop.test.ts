@@ -4,7 +4,8 @@ import type { Express } from "express";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * SAFETY: engaging the AI Control kill switch blocked every other stop.
@@ -29,6 +30,7 @@ import { makeApp, signIn } from "./helpers";
  * is inverted here: the engine is told.)
  */
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -108,16 +110,21 @@ async function listen(server: Server): Promise<string> {
 async function bootWith(engineUrl: string, cpUrl: string) {
   process.env.ATHENA_ENGINE_URL = engineUrl;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
-  process.env.ATHENA_FAILSAFE_URL = cpUrl;
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY }, upstream: cpUrl });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   process.env.ATHENA_FAILSAFE_USER = "svc";
   process.env.ATHENA_FAILSAFE_PASSWORD = "svc";
   process.env.ATHENA_FAILSAFE_ENGINE_ID = "athena-1";
   vi.resetModules();
   const app: Express = await makeApp();
-  return { app, admin: await signIn(app) };
+  const admin = await signIn(app);
+  await signInToBackend(admin);
+  return { app, admin };
 }
 
 async function close(...servers: Server[]) {
+  await hybrid?.close();
+  hybrid = null;
   for (const k of ENV) delete process.env[k];
   for (const server of servers) await new Promise<void>((r) => server.close(() => r()));
 }
@@ -132,7 +139,7 @@ async function engagement(admin: Agent, name: string): Promise<string> {
 }
 
 async function startScan(admin: Agent, clientId: string): Promise<{ testId: string; runId: string }> {
-  const started = await admin.post("/api/scans").send({ clientId, target: "https://acme.example/" });
+  const started = await admin.post("/api/scans").send({ consent: true, clientId, target: "https://acme.example/" });
   expect(started.status).toBe(201);
   return { testId: started.body.test.id, runId: started.body.runId };
 }

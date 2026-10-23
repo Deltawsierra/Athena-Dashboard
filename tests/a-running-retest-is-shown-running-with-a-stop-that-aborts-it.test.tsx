@@ -22,11 +22,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import RetestPanel from "@/components/RetestPanel";
 import RunningScans from "@/components/RunningScans";
 import { queryClient } from "@/lib/queryClient";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 type Exchange = { request: { method: string; path: string }; status: number; body: any; headers?: Record<string, string> };
 type Fixture = { exchanges: Exchange[] };
+let hybrid: HybridBackendStandIn | null = null;
 const load = (dir: string, name: string): Fixture =>
   JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures", "engine-retest", dir, `${name}.json`), "utf8"));
 const pick = (fx: Fixture, method: string, test: (p: string) => boolean) =>
@@ -91,11 +93,14 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   watcher = app.locals.retestWatcher;
   storageOf = (await import("../server/storage-unified")).storage;
   agent = await signIn(app);
+  await signInToBackend(agent);
   const retests = await import("../server/retests");
   retests.retestWatch.intervalMs = 25;
   server = http.createServer(app);
@@ -110,6 +115,9 @@ beforeAll(async () => {
   session = (login.headers.get("set-cookie") ?? "").split(";")[0];
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   engine.closeAllConnections?.();
@@ -153,7 +161,7 @@ async function aScannedTest(fx: Fixture) {
   const client = await agent.post("/api/clients").send({ name: `Panel ${n}`, company: "Panel", email: `p${n}@p.test` });
   const site = await agent.post("/api/sites").send({ clientId: client.body.id, name: "Main", url: "https://offline.invalid" });
   const started = await agent.post("/api/scans")
-    .send({ clientId: client.body.id, siteId: site.body.id, target: fx.exchanges[0].body.target });
+    .send({ consent: true, clientId: client.body.id, siteId: site.body.id, target: fx.exchanges[0].body.target });
   expect(started.status).toBe(201);
   return { testId: started.body.test.id as string, twinId: fx.exchanges[1].body.decisions[0].id as number };
 }

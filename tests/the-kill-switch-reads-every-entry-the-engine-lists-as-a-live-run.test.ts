@@ -32,8 +32,10 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -66,13 +68,19 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "Listed", company: "Listed", email: "k@k.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://listed.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -88,7 +96,7 @@ afterEach(async () => {
 });
 
 async function startScan() {
-  const started = await agent.post("/api/scans").send({ clientId, target: "https://listed.example/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://listed.example/" });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   return started.body as { test: { id: string }; runId: string | null };
 }
@@ -120,7 +128,7 @@ describe("an entry on the engine's list that is not an object", () => {
   it("counts toward Max Concurrent Tests, each of them", async () => {
     active = ["run-bare", 77, null];
     await agent.patch("/api/ai-control").send({ maxConcurrentTests: 3 });
-    const refused = await agent.post("/api/scans").send({ clientId, target: "https://listed.example/" });
+    const refused = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://listed.example/" });
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
     expect(refused.body).toMatchObject({ reason: "concurrency_limit", running: 3, unnamed: 1, counted: "engine", limit: 3 });
   });

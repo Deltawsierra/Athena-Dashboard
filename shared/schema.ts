@@ -82,6 +82,23 @@ export const clients = sqliteTable("clients", {
   lastTestDate: timestamp("last_test_date"),
   notes: text("notes"),
   isSample: sample(),
+  /**
+   * The Athena-Backend engagement this client's scans run under (the Option 1
+   * hybrid, decision 2): one per client, created as the launching person the
+   * first time a scan starts for the client, and kept. Written by the scan
+   * route only -- a person may not supply it (omitted from the create and
+   * update schemas), and it is never cleared by a person's edit.
+   */
+  backendEngagementId: integer("backend_engagement_id"),
+  /**
+   * The client's testing window: the authorised period the backend engagement
+   * is created with (both dates; an engagement with no window authorises no
+   * testing). A person's entry: set, renewed or widened only by a person's act
+   * in the client's settings, never automatically. When none is set, the first
+   * launch records the default -- 90 days from then -- here.
+   */
+  testingWindowStart: timestamp("testing_window_start"),
+  testingWindowEnd: timestamp("testing_window_end"),
 });
 
 export const sites = sqliteTable("sites", {
@@ -291,6 +308,81 @@ export const retestWatches = sqliteTable("retest_watches", {
   /** The verdict the watch collected, with what filing it came to. */
   result: json<Record<string, unknown>>("result"),
 });
+
+/**
+ * A scan started through Athena-Backend whose run the engine says has ended,
+ * watched until the backend has collected its record (server/collect-watch.ts,
+ * the Option 1 hybrid). Kept in the database, not in the process, so a
+ * dashboard that restarts resumes every unfinished watch; and so two
+ * dashboards on one database file the record into the row once: ending a
+ * watch is a claim that only succeeds while it is still `running`.
+ *
+ * Nothing here is on a stop's path: the engine's abort is the stop, sent
+ * directly; this only asks the backend to collect what the engine already
+ * holds, and reads the record back.
+ */
+export const collectWatches = sqliteTable("collect_watches", {
+  /** The backend's scan uuid: what is collected, and what a stop is mirrored to. */
+  backendScanId: text("backend_scan_id").primaryKey(),
+  testId: text("test_id").notNull(),
+  /** The engine run the backend named for the scan; what the live poll and the Stop address. */
+  engineRunId: text("engine_run_id"),
+  startedAt: timestamp("started_at").notNull(),
+  /** After this the watch stops asking and says it is no longer watched; the backend's own collector is the backstop. */
+  deadlineAt: timestamp("deadline_at").notNull(),
+  /** running | collected | unwatched */
+  state: text("state").notNull(),
+  /** The backend's last answer to a collect (server/collect-watch.ts CollectLastAnswer): pending | collected | conflict | unavailable | refused | sign_in_required; null before the first. */
+  lastAnswer: text("last_answer"),
+  lastReadAt: timestamp("last_read_at"),
+  lastReadError: text("last_read_error"),
+  endedAt: timestamp("ended_at"),
+  /** The backend's record of the scan, exactly as served, once collected. */
+  record: json<Record<string, unknown>>("record"),
+});
+
+/**
+ * What a scan's row keeps of its Athena-Backend record once collected
+ * (`findings.backend`), for the list screens: the backend's status word, its
+ * verdict and label (null for a run that did not finish: never "clean" from
+ * silence), when it was collected, and the record's own error message. Written
+ * by the collect watch only; a person may not supply it (shared/engine-record.ts).
+ */
+export interface BackendRecordSnapshot {
+  /** pending | completed | stopped | failed | unknown, as the backend says it. */
+  status: string;
+  verdict: string | null;
+  verdictLabel: string | null;
+  /** ISO 8601, as the backend served it; null when it served none. */
+  collectedAt: string | null;
+  /** The record's `error_message`, verbatim; "" when it has none. */
+  detail: string;
+  /** The record's `pdf_url` as served -- the backend holds a report only for a completed scan; null otherwise. The page reads it through this dashboard's relay. */
+  pdfUrl?: string | null;
+  /** The engagement the record names, as served. */
+  engagement?: { id: number | null; name: string | null; clientName: string | null; status: string | null } | null;
+  /** The engine run the record names. */
+  engineRunId?: string | null;
+  /**
+   * Whether the record's results and coverage differ, byte for byte, from what
+   * this dashboard's own direct poll recorded for the run; null when one side
+   * recorded none to compare. The record's bytes are what the row holds once
+   * collected; the page says when they differed.
+   */
+  differsFromDirect?: { results: boolean | null; coverage: boolean | null };
+}
+
+/**
+ * What a Stop this dashboard sent the engine came to at the backend's record
+ * (`findings.backendMirror`): whether the mirror was taken, on which credential,
+ * and why not. Written after the stop's answer, never awaited by it.
+ */
+export interface BackendMirrorReading {
+  at: string;
+  mirrored: boolean;
+  via: "stop credential" | "person" | null;
+  detail: string;
+}
 
 export const documents = sqliteTable("documents", {
   id: id(),
@@ -530,6 +622,11 @@ export const insertClientSchema = createInsertSchema(clients, {
   company: z.string().min(1).max(200),
   email: z.string().email().max(254),
   lastTestDate: optionalDate,
+  // A person's testing window, entered in the client's settings. The backend
+  // engagement id is the scan route's to write and is omitted from what a
+  // caller may send (server/routes.ts createClientSchema).
+  testingWindowStart: optionalDate,
+  testingWindowEnd: optionalDate,
 }).omit({ id: true, createdAt: true });
 
 export const insertSiteSchema = createInsertSchema(sites, {
@@ -652,6 +749,7 @@ export type InsertFinding = z.infer<typeof insertFindingSchema>;
 export type FindingSighting = typeof findingSightings.$inferSelect;
 export type FindingCheck = typeof findingChecks.$inferSelect;
 export type RetestWatch = typeof retestWatches.$inferSelect;
+export type CollectWatch = typeof collectWatches.$inferSelect;
 export type Finding = typeof findings.$inferSelect;
 
 /**

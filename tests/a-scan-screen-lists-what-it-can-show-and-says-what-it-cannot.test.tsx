@@ -30,9 +30,11 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
+let hybrid: HybridBackendStandIn | null = null;
 const HIGH = { type: "reflected_xss", severity: "high", message: "Reflected input on /search", confidence: 0.65 };
 const UNREAD = "The findings could not be read, so none are listed here. That is not the same as none found.";
 
@@ -52,6 +54,16 @@ let session: string;
 let clientId: string;
 let runs = 0;
 
+/**
+ * The backend's one bounded read of a fresh run at launch (tests/helpers/
+ * hybrid-backend-stand-in.ts, `wait_seconds`): the run is still going then,
+ * whatever a case's poll body says, so the dashboard's own polls are what read
+ * it -- as they were when the dashboard launched the run itself.
+ */
+const firstReads = new Set<string>();
+const firstRead = (url: string) => { if (firstReads.has(url)) return false; firstReads.add(url); return true; };
+const STILL_RUNNING = (url: string) => ({ run_id: url.slice(url.lastIndexOf("/") + 1), state: "running", done: false, result: null });
+
 beforeAll(async () => {
   globalThis.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} } as unknown as typeof ResizeObserver;
   globalThis.IntersectionObserver ??= class {
@@ -68,15 +80,21 @@ beforeAll(async () => {
       runs += 1;
       return json(res, 200, startBody(`run-${runs}`));
     }
-    if (req.method === "GET" && url.startsWith("/api/scans/run-")) return json(res, ...pollAnswer());
+    if (req.method === "GET" && url.startsWith("/api/scans/run-")) {
+      if (firstRead(url)) return json(res, 200, STILL_RUNNING(url));
+      return json(res, ...pollAnswer());
+    }
     return json(res, 404, { detail: "not here" });
   });
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   agent = await signIn(app);
+  await signInToBackend(agent);
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -91,6 +109,9 @@ beforeAll(async () => {
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://shown.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -126,6 +147,7 @@ async function startAScan(state: string) {
   await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
   fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
   fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://shown.example/" } });
+  fireEvent.click(screen.getByTestId("checkbox-consent"));
   await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByTestId("button-start-scan"));
   await waitFor(() => expect(screen.getByTestId("text-state").textContent).toContain(state));

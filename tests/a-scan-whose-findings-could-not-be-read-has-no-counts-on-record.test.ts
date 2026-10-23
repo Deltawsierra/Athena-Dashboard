@@ -25,8 +25,10 @@ import type { AddressInfo } from "net";
 
 import { countsNotRecorded, readScan } from "@shared/latest-scans";
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const HIGH = { type: "reflected_xss", severity: "high", message: "Reflected input on /search", confidence: 0.65 };
 const RECORDED_UNREAD = "the findings recorded for this scan could not be read";
 const SENT_UNREAD = "the findings the engine sent for this run could not be read";
@@ -45,6 +47,16 @@ let agent: Awaited<ReturnType<typeof signIn>>;
 let storage: IStorage;
 let clientId: string;
 
+/**
+ * The backend's one bounded read of a fresh run at launch (tests/helpers/
+ * hybrid-backend-stand-in.ts, `wait_seconds`): the run is still going then,
+ * whatever a case's poll body says, so the dashboard's own polls are what read
+ * it -- as they were when the dashboard launched the run itself.
+ */
+const firstReads = new Set<string>();
+const firstRead = (url: string) => { if (firstReads.has(url)) return false; firstReads.add(url); return true; };
+const STILL_RUNNING = (url: string) => ({ run_id: url.slice(url.lastIndexOf("/") + 1), state: "running", done: false, result: null });
+
 beforeAll(async () => {
   engine = http.createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = req.url ?? "";
@@ -55,26 +67,35 @@ beforeAll(async () => {
       runs += 1;
       return json(res, 200, startBody(`run-${runs}`));
     }
-    if (req.method === "GET" && url.startsWith("/api/scans/run-")) return json(res, 200, pollBody());
+    if (req.method === "GET" && url.startsWith("/api/scans/run-")) {
+      if (firstRead(url)) return json(res, 200, STILL_RUNNING(url));
+      return json(res, 200, pollBody());
+    }
     return json(res, 404, { detail: "not here" });
   });
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "Unread", company: "Unread", email: "u@u.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://unread.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
 });
 
 async function startScan() {
-  const started = await agent.post("/api/scans").send({ clientId, target: "https://unread.example/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://unread.example/" });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   return started.body as { test: { id: string } };
 }

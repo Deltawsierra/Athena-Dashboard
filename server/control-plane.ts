@@ -281,7 +281,16 @@ async function signIn(base: string): Promise<Tokens> {
  * or contradicted), so it presents the failsafe service token, when one is
  * configured, and waits on no sign-in. Never set on anything else.
  */
-export type CallInit = RequestInit & { stop?: boolean };
+export type CallInit = RequestInit & {
+  stop?: boolean;
+  /**
+   * How long this one call may take, headers and body, in place of TIMEOUT_MS:
+   * a scan launch (server/backend-scans.ts), which the backend answers only
+   * after its own target resolution, preflight and engine launch. Never set on
+   * a stop, and never longer than a launch needs; every call stays bounded.
+   */
+  timeoutMs?: number;
+};
 
 /**
  * The read deadline's signal a call is cancelled by (server/read-deadline.ts), or
@@ -324,7 +333,7 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
       `no Athena control plane is configured; set ${URL_ENV} to the backend's address`,
     );
   }
-  const { stop, ...request } = init;
+  const { stop, timeoutMs, ...request } = init;
   // SAFETY: a stop with the service token waits on no sign-in and no refresh --
   // failing, throttled, locked or hung -- so none of them holds it back or drops it.
   const presented = stop ? serviceToken() : null;
@@ -336,7 +345,8 @@ export async function call(path: string, init: CallInit = {}, retryAuth = true):
     ? (presented !== null ? cachedAccess : await accessToken(base))
     : await personAccess();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  // A stop is bounded by TIMEOUT_MS as it always was: a longer bound is only ever a launch's.
+  const timer = setTimeout(() => controller.abort(), !stop && timeoutMs !== undefined ? timeoutMs : TIMEOUT_MS);
   let response: Response;
   try {
     response = await fetch(`${base}${path}`, {

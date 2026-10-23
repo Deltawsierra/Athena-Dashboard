@@ -120,6 +120,8 @@ export function judgeStop(method: string, path: string, raw: string, actionOf: (
     const data = canonical(raw);
     return verb === "PUT" && fieldsOnly(data, ["enabled"]) && "enabled" in data && asBool(data.enabled) === false;
   }
+  // pentest:stop_pentest_scan is a stop for every POST (athena-backend safety/stops.py).
+  if (/^\/api\/pentest\/scans\/[^/]+\/stop\/$/.test(path)) return verb === "POST";
   if (/^\/api\/pentest\/engagements\/\d+\/$/.test(path)) {
     const data = canonical(raw);
     if (verb !== "PATCH" || !fieldsOnly(data, ["status", "scope_hosts", "testing_window_end"])) return false;

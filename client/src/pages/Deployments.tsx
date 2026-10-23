@@ -38,6 +38,7 @@ import { useLocation } from "wouter";
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import BackendEngagementBlock from "@/components/BackendEngagementBlock";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import { Divider, Emblem } from "@/components/mythos/Ornament";
 import { SeverityPill, StatusPill, Timeline, type StatusTone, type TimelineStep } from "@/components/mythos/atoms";
@@ -46,7 +47,11 @@ import { cn } from "@/lib/utils";
 import type { FindingsSummary } from "@shared/findings-summary";
 import { completedTime, latestCompletedBySite, readScan } from "@shared/latest-scans";
 
-interface ApiClient { id: string; name: string; company: string; status: string; lastTestDate: string | null; notes: string | null }
+interface ApiClient {
+  id: string; name: string; company: string; status: string; lastTestDate: string | null; notes: string | null;
+  /** The client's Athena-Backend engagement and testing window (shared/schema.ts clients); absent on an older record. */
+  backendEngagementId?: number | null; testingWindowStart?: string | null; testingWindowEnd?: string | null;
+}
 interface ApiTest {
   id: string; clientId: string; siteId?: string | null; testType: string; status: string; severity: string | null;
   completedAt: string | null; startedAt: string; vulnerabilitiesFound: number;
@@ -498,6 +503,11 @@ export default function Deployments() {
           </GlassCard>
         </div>
       </div>
+
+      {/* Each client's Athena-Backend engagement: the id and testing window this
+          dashboard recorded, the window's renewal (a person's act, confirmed), and
+          the backend's own view of the engagement when asked. */}
+      {clientsQ.state === "ready" && <BackendEngagementBlock clients={clients} className="mt-5" />}
 
       {/* footer banner */}
       <GlassCard hover={false} ruling className="mt-5" bodyClassName="flex flex-wrap items-center justify-between gap-4">

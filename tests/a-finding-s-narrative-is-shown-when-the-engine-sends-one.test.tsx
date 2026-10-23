@@ -127,6 +127,7 @@ async function startAScan() {
   })));
   fireEvent.change(document.querySelectorAll("select")[0], { target: { value: "c1" } });
   fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://acme.test" } });
+  fireEvent.click(screen.getByTestId("checkbox-consent"));
   fireEvent.click(screen.getByTestId("button-start-scan"));
   await waitFor(() => expect(screen.getByTestId("list-findings")).toBeTruthy());
 }

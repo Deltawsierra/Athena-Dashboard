@@ -191,6 +191,8 @@ relays, and sends the stop at once without waiting for a sign-in:
 | The stop lane's reads: the failsafe state (and the console's status read of it), the command list, one command | `failsafe:state`, `failsafe:commands` GET, `failsafe:command-detail` |
 | A deployment paused (Recompute with `paused: true`) | `deployment-recompute` |
 | A claim revoked or contradicted | `claim-transition` |
+| A Stop's mirror into the backend's record of a scan started through it, sent after the engine's answer and never awaited by it (see [Scans start through Athena-Backend](#scans-start-through-athena-backend-the-hybrid)) | `POST /api/pentest/scans/<uuid>/stop/` |
+| A deleted client's engagement withdrawn (moved off `running`; never deleted) | `PATCH /api/pentest/engagements/<id>/` with a status |
 
 The header goes on nothing else: not on a resume or a release or a signature on
 one, the withdrawal of a stop, a lift or a routine recompute, any other claim
@@ -201,8 +203,8 @@ not know a command's action (a signature or a withdrawal whose command it could
 not read), the request carries the header and the backend decides. If the
 backend does not accept the token, the stop falls back to the service account:
 a token already in hand rides along, and a 401 gets a fresh one and retries
-once. This server does not relay the backend's dispatch kill switch or an
-engagement's withdrawal, so neither is in the table.
+once. This server does not relay the backend's dispatch kill switch, so it is
+not in the table.
 
 The token is never logged and never put in an answer. A control plane error
 that quotes the request back has it taken out. It never reaches the browser,
@@ -309,6 +311,102 @@ Renewal, revocation, and no token in the browser are covered too.
 `tests/the-service-token-rides-on-every-stop-and-on-nothing-else.test.ts` walks
 the whole route list: every request that is not a stop goes as the signed-in
 person.
+
+## Scans start through Athena-Backend (the hybrid)
+
+Every scan a person starts from the Athena or Penetration Testing page is
+launched through Athena-Backend (`POST /api/pentest/scan/`, with the press's
+`Idempotency-Key`), never sent to the engine by this dashboard itself: the
+backend is the governance gate and the record. It records the owner's consent
+with the scan (the box on the start form; a start without it is refused before
+anything is sent, in the backend's own words), checks the client's engagement
+-- its scope and its testing window -- and runs its preflight; then the engine
+names the run, and this dashboard records the backend's scan id beside it. The
+live view stays direct: the pages poll the engine's `GET /api/scans/{run_id}`
+every 2 s, and the Stop is the engine's abort, sent directly and answered from
+its headers exactly as before.
+
+- **The engagement** (decision 2). One per client, created as the person the
+  first time a scan starts for the client: `running`, scoped to every host of
+  the client's sites, with the client's testing window -- 90 days from then
+  when none was set, recorded on the client. A site added since widens the
+  scope by PATCH; the scope is never narrowed, and the window is never
+  re-dated on its own. Renewing the window is a person's act on the Clients
+  page ("Renew / extend", behind a confirm step:
+  `POST /api/clients/:id/testing-window/renew`), which re-dates the backend
+  engagement as the person first, then records the window here; the
+  engagement's own name, status and scope are read from the backend when
+  asked (`GET /api/clients/:id/backend-engagement`). A deleted client's
+  engagement is marked `completed` -- a stop by the backend's judgement, sent
+  as every stop is -- and never deleted.
+- **The record.** When the live poll first sees the run finished, a collect
+  watch (`server/collect-watch.ts`: a row in `collect_watches`, resumed after a
+  restart, bounded in interval and total, on the pattern of the retest watch)
+  asks the backend to collect the run (`POST /api/pentest/scans/<uuid>/collect/`)
+  as the person reading the page, until the record stands (200, or 409 and a
+  read of it). Ending the watch is one storage step that succeeds only while
+  it is still running, so of two dashboards that have the record, one files
+  it: the backend's status word, verdict and label, error message, engagement
+  and PDF (`findings.backend`), with the run's results and coverage as the
+  record holds them. The scan pages show the record in three states -- not yet
+  in the record, being collected, collected -- and "No verdict: the run did not
+  finish." for a run that was stopped or failed; the PDF is relayed as the
+  person (`GET /api/scans/:testId/backend-pdf`) only when the record has one.
+  A scan started through the backend is never filed into this dashboard's own
+  findings ledger (`findings`, `findingSightings`): the backend's record is its
+  record. Rows this dashboard dispatched to the engine itself, before the
+  hybrid, keep their ledger and their labels.
+- **The stop mirror** (decision 6). A Stop sent from here -- the scan's own,
+  the kill switch's, a delete's -- is mirrored into the backend's record of the
+  scan (`POST /api/pentest/scans/<uuid>/stop/`) AFTER the engine's answer went
+  out, and is never awaited by anything that answers a stop: it presents the
+  failsafe service token and waits on no sign-in, and only when that attempt
+  fails is it sent once more as the person. The page says whether the stop was
+  mirrored (`abort_mirrored` / `abort_mirror_failed` in the log). A stop the
+  engine refused is mirrored too, since the backend's own stop may reach the
+  run; one the engine said had already ended is not.
+- **No break-glass** (decision 11). No direct launch path remains for a
+  person-initiated scan: with the backend unreachable, refusing, or the person
+  not signed in to it, a start is refused with the reason, and nothing is sent
+  to the engine. The engine's own refusal (a loopback target, say) comes back
+  through the backend verbatim. A launch the backend did not answer is said to
+  be of unknown outcome, and the row the backend made is adopted from its list.
+
+Two preconditions when deploying:
+
+1. **The stop account** (decision 6). `FAILSAFE_SERVICE_USER` on the backend
+   must be an account the backend lets stop a scan and withdraw an engagement
+   (an admin), so the mirror and the withdrawal are taken on the service token.
+   If they are not, the mirror falls back once to the person's credential; one
+   that still fails is logged and shown as not mirrored. The Stop itself is
+   unchanged either way.
+2. **One tenant for both engine keys** (decision 7). The engine scopes a run to
+   the tenant of the key that launched it. The key this dashboard polls and
+   stops with (`ATHENA_ENGINE_KEY`) must see the runs the backend's key starts.
+   If the first direct read of a new run answers 404, the row is marked
+   `stop: "backend"`: no direct Stop is offered, and the page names what
+   reaches the run -- the backend's own Stop on the scan's record, the kill
+   switch (which sends the stop by id and mirrors it into the record) and the
+   failsafes. The first direct read that succeeds clears the mark and brings
+   the Stop back.
+
+Also: authenticated scanning (a login block on the Penetration Testing page)
+is refused with `auth_not_carried_by_backend`, since the backend's launch
+carries no login block and the scan would run anonymously; nothing is sent.
+The report's recipient e-mail goes to the backend only when the person opted
+in on the start form and gave an address. A retest of a scan started through
+the backend runs and shows its verdict, but files it into neither record: the
+backend's record does not take one yet, and a scan started through the backend
+has no finding in this dashboard's ledger to file it on (planned separately).
+
+Tests: `tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts`,
+`tests/a-finished-hybrid-scan-is-collected-into-its-backend-record.test.ts`,
+`tests/a-backend-record-is-collected-once-across-a-restart.test.ts`,
+`tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts`,
+`tests/a-testing-window-is-renewed-only-by-a-person-s-act.test.ts` and
+`tests/the-backend-record-panel-shows-three-states-and-never-a-verdict-from-silence.test.tsx`;
+the stand-in backend they drive is `tests/helpers/hybrid-backend-stand-in.ts`,
+pinned by `tests/the-hybrid-backend-stand-in-answers-the-pinned-shapes.test.ts`.
 
 ## Relay reads never hold a stop
 
@@ -445,7 +543,7 @@ scoped to the signed-in account (`server/idempotency.ts`):
 
 | Press | Passed on to | What a press sent again gets |
 |---|---|---|
-| Start scan (`POST /api/scans`) | the engine's `POST /api/scan`, which reads the key (athena-engine #77) | The first press's answer, naming the same run and marked `replayed`. The row that press recorded is the answer: no second row, no second filing, no second log line. A run the first press started but never recorded here is recorded once, by this press. |
+| Start scan (`POST /api/scans`) | the backend's `POST /api/pentest/scan/`, which reads the key and replays its first answer (`Idempotent-Replayed`); the backend launches the engine with the scan's own key | The first press's answer, naming the same backend scan and the same run, marked `replayed`. The row that press recorded is the answer: no second backend scan, no second row, no second log line. A run the first press started but never recorded here is recorded once, by this press. |
 | Retest (`POST /api/tests/:testId/retest`) | the engine's `POST /api/remediation/retest`, which does not read a key yet | Unchanged: while the first retest may still be running, its held slot refuses a second one (409), with no engine call. |
 | Push (`POST /api/assurance/deployments/:uuid/connectors/:connector/push`) | the backend's push, which reads the key (athena-backend #113) | The first push's answer, marked `replayed`, with no second ticket and no second log line. |
 
@@ -475,15 +573,15 @@ starts again. Tests:
 
 ## Known gaps
 
-- Scans started from the Athena and Penetration Testing pages go to the engine
-  directly and are recorded by this dashboard from the engine's own answers;
-  they are not in the Athena-Backend record the Assurance page reads, and no
-  backend verdict, claim or report applies to them. Each surface says which
-  record it shows (the Overview's headline tiles, both scan pages and the
-  Assurance page), a scan that did not finish is drawn as not assessed and
-  never as a result, and each scan's coverage manifest -- what the engine
-  checked and what it did not -- is read directly from the engine for that run.
-  Routing dashboard scans through Athena-Backend is planned separately.
+- Scans started from the Athena and Penetration Testing pages start through
+  Athena-Backend and are in its record (see
+  [Scans start through Athena-Backend](#scans-start-through-athena-backend-the-hybrid)).
+  Rows recorded before that, by this dashboard directly from the engine, keep
+  their record and their labels, and no backend verdict, claim or report
+  applies to them; each surface says which record it shows. A retest of a scan
+  started through the backend shows its verdict but files it into neither
+  record. Authenticated scanning cannot start through the backend yet
+  (`auth_not_carried_by_backend`).
 - A retest pressed again after its first retest has finished starts a second
   retest. The engine reads the key only on `POST /api/scan` so far, and the held
   slot covers a retest only while it may be running.

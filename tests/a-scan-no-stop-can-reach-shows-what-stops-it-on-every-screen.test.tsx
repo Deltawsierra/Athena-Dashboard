@@ -38,9 +38,11 @@ import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import Tests from "@/pages/Tests";
 import { queryClient } from "@/lib/queryClient";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -80,9 +82,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   agent = await signIn(app);
+  await signInToBackend(agent);
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -97,6 +102,9 @@ beforeAll(async () => {
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://nostop.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -142,6 +150,7 @@ async function startAScan(target = "https://nostop.example/") {
   await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
   fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
   fireEvent.change(screen.getByTestId("input-target"), { target: { value: target } });
+  fireEvent.click(screen.getByTestId("checkbox-consent"));
   await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByTestId("button-start-scan"));
 }
@@ -243,9 +252,9 @@ for (const [name, Screen] of [["Athena", AthenaScan], ["Penetration testing", Pe
 describe("Scans running now", () => {
   it("lists a scan started elsewhere with no run id, with the panel in place of its Stop, beside one with its Stop", async () => {
     startBody = () => ({ state: "running" });
-    const unnamed = await agent.post("/api/scans").send({ clientId, target: "https://nostop.example/unnamed" });
+    const unnamed = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://nostop.example/unnamed" });
     startBody = (runId) => ({ run_id: runId, state: "running" });
-    const named = await agent.post("/api/scans").send({ clientId, target: "https://nostop.example/named" });
+    const named = await agent.post("/api/scans").send({ consent: true, clientId, target: "https://nostop.example/named" });
     expect([unnamed.status, named.status]).toEqual([201, 201]);
     realRoutes();
     render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);

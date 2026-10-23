@@ -151,6 +151,7 @@ describe("a change to a test or a finding refreshes the findings summary", () =>
     await waitFor(() => expect(document.querySelector('select option[value="c1"]')).toBeTruthy());
     fireEvent.change(document.querySelectorAll("select")[0], { target: { value: "c1" } });
     fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://acme.test" } });
+    fireEvent.click(screen.getByTestId("checkbox-consent"));
     await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("button-start-scan"));
     await waitFor(() => expect(screen.getByTestId("text-state").textContent).toMatch(/running/));

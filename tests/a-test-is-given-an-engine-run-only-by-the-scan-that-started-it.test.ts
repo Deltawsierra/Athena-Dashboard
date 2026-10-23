@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * R5-A. Round 4 stated the rule "a run id is recorded by the scan route that
@@ -25,6 +26,7 @@ import { makeApp, signIn } from "./helpers";
  * Only the scan route writes them. A key sent as null supplies nothing.
  */
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -58,17 +60,23 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.server.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.server.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "k";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   admin = await signIn(await makeApp());
+  await signInToBackend(admin);
   clientA = (await admin.post("/api/clients").send({ name: "A", company: "A", email: "a@a.test" })).body.id;
   await admin.post("/api/sites").send({ clientId: clientA, name: "A", url: "https://a.example" });
   clientB = (await admin.post("/api/clients").send({ name: "B", company: "B", email: "b@b.test" })).body.id;
   await admin.post("/api/sites").send({ clientId: clientB, name: "B", url: "https://b.example" });
-  const started = await admin.post("/api/scans").send({ clientId: clientA, target: "https://a.example/" });
+  const started = await admin.post("/api/scans").send({ consent: true, clientId: clientA, target: "https://a.example/" });
   expect(started.body.runId).toBe("run-1");
 });
 
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => (engine.server as Server).close(() => r()));

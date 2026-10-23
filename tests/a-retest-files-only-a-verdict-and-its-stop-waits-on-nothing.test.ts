@@ -6,7 +6,7 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn } from "./helpers";
 
 /**
  * athena-engine #71 changes what `/api/remediation/retest` answers, and this
@@ -168,9 +168,13 @@ async function aScannedFinding(fx: Fixture) {
     .send({ name: `Retested ${clientCount}`, company: "Retested Ltd", email: `r${clientCount}@example.test` });
   const site = await agent.post("/api/sites")
     .send({ clientId: client.body.id, name: "Main", url: "https://offline.invalid" });
-  const target = fx.exchanges[0].body.target as string;
-  const started = await agent.post("/api/scans").send({ clientId: client.body.id, siteId: site.body.id, target });
-  expect(started.status, JSON.stringify(started.body)).toBe(201);
+  // The fixture's setup scan, recorded and filed as this dashboard's own (tests/helpers.ts recordLegacyScan): the scan
+  // that found the finding a retest is about. A scan started through Athena-Backend is recorded there, never filed here.
+  const setup = fx.exchanges[0].body as { run_id: string; target: string; result: { results: unknown[] } };
+  const { test } = await recordLegacyScan(storage, {
+    clientId: client.body.id, siteId: site.body.id, target: setup.target, runId: setup.run_id, results: setup.result.results,
+  });
+  const started = { body: { test } };
   const twin = fx.exchanges[1].body.decisions[0];
   const key = lifecycle.fingerprint(client.body.id, {
     type: twin.finding_type, severity: null, message: null, target: twin.target, endpoint: twin.inputs.endpoint, header: null,

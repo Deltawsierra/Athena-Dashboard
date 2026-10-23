@@ -31,6 +31,7 @@ import type { AddressInfo } from "net";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+let hybrid: HybridBackendStandIn | null = null;
 const toasts = vi.hoisted(() => [] as Array<{ title?: unknown; description?: unknown }>);
 vi.mock("@/hooks/use-toast", () => {
   const toast = (one: { title?: unknown; description?: unknown }) => {
@@ -44,7 +45,8 @@ import RetestPanel from "@/components/RetestPanel";
 import AthenaScan from "@/pages/AthenaScan";
 import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 type Exchange = { note: string; request: { method: string; path: string }; status: number; body: any; headers?: Record<string, string> };
@@ -61,6 +63,8 @@ const A = retestLaunch.body.run_id as string;
 const B = "22222222-2222-4222-8222-222222222222";
 const twinId = setupOf(verdictFx, (p) => p.startsWith("/api/decisions?")).body.decisions[0].id as number;
 const scanLaunch = launchOf(load("scan-at-once-then-completed"), "/api/scan");
+/** The recorded 500 that names a run whose work started (athena-engine #71): Athena-Backend records the scan failed and keeps the run's id. */
+const failedAfterRegistration = launchOf(load("scan-failed-after-registration"), "/api/scan");
 /** derived: the recorded 503 "not admitted" answer, served as a stop's answer. */
 const refused = launchOf(load("not-admitted"), "/api/remediation/retest");
 /** The recorded accepted stop, and (derived) the recorded "not running" answer, each given a run's id. */
@@ -110,6 +114,11 @@ beforeAll(async () => {
         // derived: the recorded 202 with its `answer` spelled "Status".
         return json(res, 202, state.retestBody ?? { ...retestLaunch.body, answer: "Status" }, state.retestHeaders);
       }
+      // The scan runs this file launches read as running from the engine (the dashboard's own first read, decision 7); every other id is unknown to it, as before.
+      const read = /^\/api\/scans\/([^/]+)$/.exec(url);
+      if (req.method === "GET" && read && [scanLaunch.body.run_id, failedAfterRegistration.body.run_id].includes(decodeURIComponent(read[1]))) {
+        return json(res, 200, { run_id: decodeURIComponent(read[1]), state: "running", result: null });
+      }
       const abort = /^\/api\/scans\/([^/]+)\/abort$/.exec(url);
       if (req.method === "POST" && abort) return reply(state.abortFor(decodeURIComponent(abort[1])));
       return json(res, 404, { detail: "Not Found" });
@@ -118,9 +127,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   agent = await signIn(app);
+  await signInToBackend(agent);
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -135,6 +147,9 @@ beforeAll(async () => {
   siteId = (await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://offline.invalid" })).body.id;
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   engine.closeAllConnections?.();
@@ -167,7 +182,7 @@ function realRoutes(cookie = session) {
 
 /** A fresh test (its scan answered by the recorded setup scan), its panel rendered -- signed in as `cookie`'s account -- and Retest pressed. */
 async function retestOnPanel(cookie = session) {
-  const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, siteId, target: "https://offline.invalid/" });
   expect(started.status).toBe(201);
   realRoutes(cookie);
   render(<QueryClientProvider client={queryClient}><RetestPanel testId={started.body.test.id} /></QueryClientProvider>);
@@ -303,6 +318,7 @@ async function startScanOn(page: "athena" | "pentest") {
   await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
   fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
   fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://offline.invalid/" } });
+  fireEvent.click(screen.getByTestId("checkbox-consent"));
   await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByTestId("button-start-scan"));
   await waitFor(() => expect(toasts.length).toBe(1));
@@ -310,26 +326,39 @@ async function startScanOn(page: "athena" | "pentest") {
 }
 
 describe("#1 and #7: a scan start is \"did not start\" only when nothing may be running", () => {
-  it("(derived: engine main's unhandled 500, Starlette's text body) the scan may still be running", async () => {
+  it("(derived: engine main's unhandled 500, Starlette's text body) the backend records the scan failed naming no run: did not start, in the backend's words, the kill switch named", async () => {
     state.scan = { ...scanLaunch, status: 500, body: "Internal Server Error", headers: { "Content-Type": "text/plain; charset=utf-8" } };
     const title = await startScanOn("athena");
-    expect(title).toMatch(/^The scan may still be running/);
-    expect(title).toContain("kill switch");
-    expect(title).toContain("failsafe pause");
-    expect(title).not.toContain("did not start");
+    expect(title).toBe("The scan did not start");
+    const description = String(toasts[0].description);
+    expect(description).toContain("Athena-Backend recorded this scan as failed");
+    expect(description).toContain("kill switch");
+    expect(description).toContain("failsafe pause");
+    expect(calls.filter((one) => one.endsWith("/abort"))).toEqual([]);
   });
 
-  it("(derived: the recorded 202 with answer \"Status\"; its stop taken) the answer was not read and its run stopped: not \"did not start\"", async () => {
-    state.scan = { ...scanLaunch, body: { ...scanLaunch.body, answer: "Status" } };
-    state.abortFor = (runId) => accepted(runId);
-    const title = await startScanOn("pentest");
-    expect(calls).toContain(`POST /api/scans/${scanLaunch.body.run_id}/abort`);
-    expect(title).not.toContain("did not start");
-    expect(title).toBe("The scan's answer could not be read: the run it named was stopped, or had ended");
+  it("(the recorded 500 naming a run whose work started) the backend records the scan failed, yet the run it names may be running: recorded with its Stop and the backend's words, never \"did not start\"", async () => {
+    state.scan = failedAfterRegistration;
+    realRoutes();
+    render(<QueryClientProvider client={queryClient}><PentestScan /></QueryClientProvider>);
+    await waitFor(() => expect(screen.getByTestId("text-engine-connected")).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
+    fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
+    fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://offline.invalid/" } });
+    fireEvent.click(screen.getByTestId("checkbox-consent"));
+    await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("button-start-scan"));
+    const warning = await screen.findByTestId("text-start-warning");
+    expect(warning.textContent).toContain(failedAfterRegistration.body.run_id);
+    expect(warning.textContent).toContain("Athena-Backend recorded this scan as failed");
+    expect(warning.textContent).toContain(failedAfterRegistration.body.error);
+    expect(screen.getByTestId("button-stop-scan")).toBeTruthy();
+    expect(toasts).toEqual([]);
+    expect(calls.filter((one) => one.endsWith("/abort"))).toEqual([]);
   });
 
-  it("the engine's refusal (the recorded 429 queue full) is still \"did not start\"", async () => {
-    state.scan = launchOf(load("scan-queue-full"), "/api/scan");
+  it("the engine's refusal (the recorded 503 not admitted, naming no run) is still \"did not start\"", async () => {
+    state.scan = launchOf(load("scan-not-admitted"), "/api/scan");
     const title = await startScanOn("athena");
     expect(title).toBe("The scan did not start");
   });

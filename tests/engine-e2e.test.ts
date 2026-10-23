@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Express } from "express";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * The whole path, when there is an engine to drive.
@@ -12,6 +13,7 @@ import { makeApp, signIn } from "./helpers";
  *   ATHENA_E2E_ENGINE_URL=http://127.0.0.1:8099 \
  *   ATHENA_E2E_ENGINE_KEY=<operator key> npx vitest run tests/engine-e2e.test.ts
  */
+let hybrid: HybridBackendStandIn | null = null;
 const url = process.env.ATHENA_E2E_ENGINE_URL;
 const key = process.env.ATHENA_E2E_ENGINE_KEY;
 
@@ -22,8 +24,17 @@ describe.skipIf(!url)("against a real engine", () => {
   beforeAll(async () => {
     process.env.ATHENA_ENGINE_URL = url;
     if (key) process.env.ATHENA_ENGINE_KEY = key;
+    // A test-only Athena-Backend that launches on the real engine: the dashboard starts every scan through it.
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
+  });
+  afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
   });
 
   it("dispatches a scan, follows it, and counts only what came back", async () => {
@@ -34,7 +45,7 @@ describe.skipIf(!url)("against a real engine", () => {
       .post("/api/clients")
       .send({ name: "Acme", company: "Acme Corp", email: "sec@acme.test" });
 
-    const started = await agent.post("/api/scans").send({
+    const started = await agent.post("/api/scans").send({ consent: true,
       clientId: client.body.id,
       // Loopback, which the engine's egress policy refuses. That is the
       // useful case to assert: the refusal is a result with a reason, it

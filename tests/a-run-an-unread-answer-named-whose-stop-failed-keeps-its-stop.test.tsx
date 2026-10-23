@@ -26,6 +26,7 @@ import type { AddressInfo } from "net";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+let hybrid: HybridBackendStandIn | null = null;
 const toasts = vi.hoisted(() => [] as Array<{ title?: unknown; description?: unknown }>);
 vi.mock("@/hooks/use-toast", () => {
   const toast = (one: { title?: unknown; description?: unknown }) => {
@@ -38,7 +39,8 @@ vi.mock("@/hooks/use-toast", () => {
 import RetestPanel from "@/components/RetestPanel";
 import AthenaScan from "@/pages/AthenaScan";
 import { queryClient } from "@/lib/queryClient";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, recordLegacyScan, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 
 type Exchange = { note: string; request: { method: string; path: string }; status: number; body: any; headers?: Record<string, string> };
@@ -52,7 +54,8 @@ const verdictFx = load("at-once-then-verdict");
 const retestLaunch = launchOf(verdictFx, "/api/remediation/retest");
 const RUN = retestLaunch.body.run_id as string;
 const twinId = setupOf(verdictFx, (p) => p.startsWith("/api/decisions?")).body.decisions[0].id as number;
-const scanLaunch = launchOf(load("scan-at-once-then-completed"), "/api/scan");
+/** The recorded 500 that names a run whose work started (athena-engine #71): Athena-Backend records the scan failed and keeps the run's id. */
+const scanLaunch = launchOf(load("scan-failed-after-registration"), "/api/scan");
 /** derived: the recorded 503 "not admitted" answer, served as a stop's answer. */
 const refused = launchOf(load("not-admitted"), "/api/remediation/retest");
 
@@ -91,15 +94,20 @@ beforeAll(async () => {
       // derived: the recorded 202 with its `answer` spelled "Status".
       if (req.method === "POST" && url === "/api/remediation/retest") return json(res, 202, { ...retestLaunch.body, answer: "Status" });
       if (req.method === "POST" && url.endsWith("/abort")) return reply(refused);
+      // The scan run this file launches reads as running from the engine (the dashboard's own first read, decision 7).
+      if (req.method === "GET" && url === `/api/scans/${scanLaunch.body.run_id}`) return json(res, 200, { run_id: scanLaunch.body.run_id, state: "running", result: null });
       return json(res, 404, { detail: "Not Found" });
     });
   });
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   const app = await makeApp();
   agent = await signIn(app);
+  await signInToBackend(agent);
   server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -114,6 +122,9 @@ beforeAll(async () => {
   siteId = (await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://offline.invalid" })).body.id;
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   engine.closeAllConnections?.();
@@ -143,10 +154,14 @@ function realRoutes() {
 
 describe("a retest whose answer was not read, and whose run's stop was refused", () => {
   it("keeps the run on the finding's panel with its Stop, and the toast says it may still be running", async () => {
-    const started = await agent.post("/api/scans").send({ clientId, siteId, target: "https://offline.invalid/" });
-    expect(started.status).toBe(201);
+    // The scan that found the finding, recorded and filed as this dashboard's own (a scan from before the hybrid).
+    const { storage } = await import("../server/storage-unified");
+    const setupScan = setupOf(verdictFx, (p) => p === "/api/scan");
+    const { test } = await recordLegacyScan(storage, {
+      clientId, siteId, target: "https://offline.invalid/", runId: setupScan.body.run_id as string, results: setupScan.body.result.results as unknown[],
+    });
     realRoutes();
-    render(<QueryClientProvider client={queryClient}><RetestPanel testId={started.body.test.id} /></QueryClientProvider>);
+    render(<QueryClientProvider client={queryClient}><RetestPanel testId={test.id} /></QueryClientProvider>);
     fireEvent.click(await screen.findByTestId(`button-retest-${twinId}`));
 
     await waitFor(() => expect(toasts.length).toBe(1));
@@ -165,25 +180,32 @@ describe("a retest whose answer was not read, and whose run's stop was refused",
   });
 });
 
-describe("a scan start whose answer was not read, and whose run's stop was refused", () => {
-  it("the toast's title says the scan may still be running and names the kill switch and a failsafe pause", async () => {
-    // derived: the recorded 202 with its `answer` spelled "Status".
-    state.scan = { ...scanLaunch, body: { ...scanLaunch.body, answer: "Status" } };
+describe("a scan Athena-Backend recorded failed, naming a run whose stop the engine refused", () => {
+  it("is recorded with its Stop and the backend's words; the refused stop says the run may still be running, and the Stop stays", async () => {
+    state.scan = scanLaunch;
     realRoutes();
     render(<QueryClientProvider client={queryClient}><AthenaScan /></QueryClientProvider>);
     await waitFor(() => expect(screen.getByTestId("text-engine-connected")).toBeTruthy());
     await waitFor(() => expect(document.querySelector(`select option[value="${clientId}"]`)).toBeTruthy());
     fireEvent.change(document.querySelectorAll("select")[0], { target: { value: clientId } });
     fireEvent.change(screen.getByTestId("input-target"), { target: { value: "https://offline.invalid/" } });
+    fireEvent.click(screen.getByTestId("checkbox-consent"));
     await waitFor(() => expect((screen.getByTestId("button-start-scan") as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByTestId("button-start-scan"));
 
+    // Recorded as running, with the backend's words beside its Stop: nothing was stopped unasked.
+    const warning = await screen.findByTestId("text-start-warning");
+    expect(warning.textContent).toContain(scanLaunch.body.run_id);
+    expect(warning.textContent).toContain("Athena-Backend recorded this scan as failed");
+    expect(toasts).toEqual([]);
+    expect(calls.filter((one) => one.endsWith("/abort"))).toEqual([]);
+
+    // The Stop goes to the engine; its refusal is said as one, and the Stop stays.
+    fireEvent.click(screen.getByTestId("button-stop-scan"));
     await waitFor(() => expect(toasts.length).toBe(1));
     expect(calls).toContain(`POST /api/scans/${scanLaunch.body.run_id}/abort`);
-    expect(String(toasts[0].title)).toMatch(/^The scan may still be running/);
-    expect(String(toasts[0].title)).toContain("kill switch");
-    expect(String(toasts[0].title)).toContain("failsafe pause");
-    expect(String(toasts[0].title)).not.toContain("did not start");
-    expect(String(toasts[0].description)).toContain(`Run ${scanLaunch.body.run_id} was sent a stop and it did not take`);
+    expect(String(toasts[0].title)).toBe("Not stopped");
+    expect(String(toasts[0].description)).toContain("may still be running");
+    expect(screen.getByTestId("button-stop-scan")).toBeTruthy();
   });
 });

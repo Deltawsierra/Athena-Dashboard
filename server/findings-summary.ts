@@ -51,6 +51,7 @@ import {
   type UntrackedScan,
 } from "@shared/findings-summary";
 import { completedTime, latestCompletedBySite, ratingOf, readScan } from "@shared/latest-scans";
+import { backendScanIdOf } from "@shared/engine-record";
 import { foldResults } from "./findings";
 
 export { SUMMARY_SEVERITIES, type FindingsSummary, type SummarySeverity };
@@ -290,6 +291,10 @@ export function summarizeFindings(input: {
   const untrackedOf = new Map<string, UntrackedScan>();
   const newestOf = new Map<string, SummaryTest>();
   for (const scan of Array.from(latestCompletedBySite(tests).values())) {
+    // A scan started through Athena-Backend is recorded there, not in this
+    // ledger (shared/engine-record.ts backendScanIdOf): its counts stand behind
+    // the backend's record, so they are never read as "filed nothing here".
+    if (backendScanIdOf(scan.findings ?? null) !== null) continue;
     const reported = reportedSerious(scan);
     const sighted = filed.get(scan.id) ?? { critical: 0, high: 0 };
     const critical = Math.max(0, reported.critical - sighted.critical);

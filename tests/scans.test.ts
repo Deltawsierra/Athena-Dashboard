@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import type { Express } from "express";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * The penetration-testing screen counted a progress bar to a hundred over five
@@ -8,6 +9,7 @@ import { makeApp, signIn } from "./helpers";
  * cover the route that replaced it: an engagement it will not scan without, an
  * engine it will not pretend to have, and counts taken from what came back.
  */
+let hybrid: HybridBackendStandIn | null = null;
 describe("dispatching a scan", () => {
   let app: Express;
   let agent: Awaited<ReturnType<typeof signIn>>;
@@ -57,7 +59,7 @@ describe("dispatching a scan", () => {
   it("answers 503 for a scan with no engine, because nothing is broken", async () => {
     const response = await agent
       .post("/api/scans")
-      .send({ clientId, target: "https://shop.acme.test" });
+      .send({ consent: true, clientId, target: "https://shop.acme.test" });
 
     expect(response.status).toBe(503);
     expect(response.body.error).toContain("no engine is configured");
@@ -66,7 +68,7 @@ describe("dispatching a scan", () => {
   it("refuses a scan against a client that does not exist", async () => {
     const response = await agent
       .post("/api/scans")
-      .send({ clientId: "nope", target: "https://shop.acme.test" });
+      .send({ consent: true, clientId: "nope", target: "https://shop.acme.test" });
     expect(response.status).toBe(404);
   });
 
@@ -76,14 +78,14 @@ describe("dispatching a scan", () => {
     // customer.
     const response = await agent
       .post("/api/scans")
-      .send({ clientId, siteId: foreignSiteId, target: "https://shop.acme.test" });
+      .send({ consent: true, clientId, siteId: foreignSiteId, target: "https://shop.acme.test" });
 
     expect(response.status).toBe(400);
     expect(response.body.error).toContain("different client");
   });
 
   it("refuses a scan with no target at all", async () => {
-    const response = await agent.post("/api/scans").send({ clientId });
+    const response = await agent.post("/api/scans").send({ consent: true, clientId });
     expect(response.status).toBe(400);
   });
 
@@ -102,21 +104,26 @@ describe("dispatching a scan", () => {
     process.env.ATHENA_ENGINE_URL = "http://127.0.0.1:9";
     const response = await agent
       .post("/api/scans")
-      .send({ clientId, siteId, target: "https://shop.acme.test" });
+      .send({ consent: true, clientId, siteId, target: "https://shop.acme.test" });
 
-    // The engine is unreachable, so this is a 503 -- but it got past the
-    // engagement checks, which is what this asserts.
+    // The engine is unreachable and no Athena-Backend is configured to launch
+    // through, so this is a 503 -- but it got past the engagement checks,
+    // which is what this asserts.
     expect(response.status).toBe(503);
   });
 });
 
 /**
- * The engagement's scope, sent to the engine.
+ * The engagement's scope.
  *
- * The engine's fallback, given no scope, is the target's own host -- so its
- * check can only ever refuse the thing it derived the scope from, which is
- * not a check. Athena holds the client's site list, so Athena is the side
- * that can make it mean something.
+ * Every scan starts through Athena-Backend (decision 11), under the client's
+ * backend engagement: its scope is the client's recorded site hosts, created on
+ * the first start and widened when a site was added since, never narrowed
+ * (decision 2). The backend asks the engine with that scope; this dashboard asks
+ * the engine for nothing at launch. The engine's fallback, given no scope, is the
+ * target's own host -- so its check can only ever refuse the thing it derived
+ * the scope from, which is not a check. Athena holds the client's site list, so
+ * the engagement is where it means something.
  */
 describe("what authorises a scan", () => {
   let app: Express;
@@ -143,19 +150,40 @@ describe("what authorises a scan", () => {
     const port = (server.address() as import("net").AddressInfo).port;
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
+  });
+
+  afterEach(async () => {
+    // Every scan started here is recorded as ended, so none counts against the next (Max Concurrent Tests).
+    const { storage } = await import("../server/storage-unified");
+    for (const test of await storage.getAllTests()) {
+      if (test.status === "running") await storage.updateTest(test.id, { status: "aborted" });
+    }
   });
 
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it("sends the client's recorded sites as the scope", async () => {
+  /** The backend engagement a start ran under, as the stand-in backend holds it. */
+  const engagementOf = (started: { body: { backend: { engagementId: number } } }) =>
+    hybrid!.engagements.get(started.body.backend.engagementId)!;
+  /** The launches this dashboard sent the backend since `from`, by their bodies. */
+  const launchesSince = (from: number) => hybrid!.launches().slice(from).map((one) => one.json as Record<string, unknown>);
+
+  it("the client's recorded sites are its engagement's scope: the backend is asked under it, and asks the engine with that scope", async () => {
     sent = [];
+    const from = hybrid!.launches().length;
     const client = await agent.post("/api/clients")
       .send({ name: "Scoped", company: "Scoped Ltd", email: "s@example.test" });
     await agent.post("/api/sites")
@@ -164,15 +192,25 @@ describe("what authorises a scan", () => {
       .send({ clientId: client.body.id, name: "Two", url: "https://two.example" });
 
     const started = await agent.post("/api/scans")
-      .send({ clientId: client.body.id, target: "https://one.example/login" });
-    expect(started.status).toBe(201);
+      .send({ consent: true, clientId: client.body.id, target: "https://one.example/login" });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
 
+    const engagement = engagementOf(started);
+    expect(engagement.scope_hosts).toEqual(["one.example", "two.example"]);
+    expect(engagement.client_name).toBe("Scoped Ltd");
+    expect(engagement.status).toBe("running");
+    expect(started.body.backend.engagementCreated).toBe(true);
+    // This dashboard's launch names the engagement, the target and the consent -- and no scope of its own.
+    expect(launchesSince(from)).toHaveLength(1);
+    expect(launchesSince(from)[0]).toMatchObject({ engagement_id: engagement.id, url: "https://one.example/login", consent: true });
+    expect(launchesSince(from)[0].scope).toBeUndefined();
+    // The engine is asked once, by the backend, with the engagement's scope and reference.
     expect(sent).toHaveLength(1);
     expect(sent[0].scope).toEqual(["one.example", "two.example"]);
-    expect(sent[0].engagement_ref).toBe(client.body.id);
+    expect(sent[0].engagement_ref).toBe(`athena-backend:engagement:${engagement.id}`);
   });
 
-  it("narrows the scope to one site when one was chosen", async () => {
+  it("a chosen site is kept on the record; the engagement's scope stays the client's whole site list, never narrowed to it", async () => {
     sent = [];
     const client = await agent.post("/api/clients")
       .send({ name: "Narrow", company: "Narrow Ltd", email: "n@example.test" });
@@ -181,23 +219,27 @@ describe("what authorises a scan", () => {
     await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "Other", url: "https://other.example" });
 
-    await agent.post("/api/scans").send({
+    const started = await agent.post("/api/scans").send({ consent: true,
       clientId: client.body.id, siteId: site.body.id, target: "https://only.example/",
-    }).expect(201);
+    });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
+    expect(started.body.test.siteId).toBe(site.body.id);
 
-    // Choosing a site is a narrowing, so the other site is not in scope for
-    // this run even though the same client owns it.
-    expect(sent[0].scope).toEqual(["only.example"]);
+    // Choosing a site narrows what this dashboard records the scan against, not
+    // what the engagement authorises: the backend holds the client's whole list.
+    expect(engagementOf(started).scope_hosts).toEqual(["only.example", "other.example"]);
+    expect(sent[0].scope).toEqual(["only.example", "other.example"]);
   });
 
-  it("forwards authenticated-scanning config to the engine when enabled", async () => {
+  it("a start that asks for authenticated scanning is refused in so many words: the backend's launch carries no login block", async () => {
     sent = [];
+    const from = hybrid!.launches().length;
     const client = await agent.post("/api/clients")
       .send({ name: "Auth", company: "Auth Ltd", email: "a@example.test" });
     await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "App", url: "https://app.example" });
 
-    await agent.post("/api/scans").send({
+    const refused = await agent.post("/api/scans").send({ consent: true,
       clientId: client.body.id,
       target: "https://app.example/",
       auth: {
@@ -208,41 +250,48 @@ describe("what authorises a scan", () => {
           { name: "bob", cookies: { session: "x" } },
         ],
       },
-    }).expect(201);
+    });
 
-    const auth = sent[0].auth as Record<string, unknown> | undefined;
-    expect(auth).toBeDefined();
-    expect(auth!.enabled).toBe(true);
-    expect(auth!.login_url).toBe("/login");
-    expect((auth!.identities as unknown[]).length).toBe(2);
+    // Sent on, the identities would be dropped and the scan run anonymously while the page said otherwise.
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.reason).toBe("auth_not_carried_by_backend");
+    expect(refused.body.error).toContain("no login block");
+    expect(launchesSince(from)).toEqual([]);
+    expect(sent).toEqual([]);
   });
 
-  it("sends no auth block when authenticated scanning is not requested", async () => {
+  it("no auth block reaches the backend or the engine when authenticated scanning is not requested", async () => {
     sent = [];
+    const from = hybrid!.launches().length;
     const client = await agent.post("/api/clients")
       .send({ name: "Anon", company: "Anon Ltd", email: "an@example.test" });
     await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "App", url: "https://anon.example" });
 
     await agent.post("/api/scans")
-      .send({ clientId: client.body.id, target: "https://anon.example/" })
+      .send({ consent: true, clientId: client.body.id, target: "https://anon.example/" })
       .expect(201);
 
+    expect(launchesSince(from)[0].auth).toBeUndefined();
     expect(sent[0].auth).toBeUndefined();
   });
 
-  it("refuses to scan for a client with no site on record", async () => {
+  it("refuses to scan for a client with no site on record, before anything is sent to the backend", async () => {
     sent = [];
+    const from = hybrid!.launches().length;
+    const engagements = hybrid!.engagements.size;
     const client = await agent.post("/api/clients")
       .send({ name: "Bare", company: "Bare Ltd", email: "b@example.test" });
 
     const started = await agent.post("/api/scans")
-      .send({ clientId: client.body.id, target: "https://anything.example/" });
+      .send({ consent: true, clientId: client.body.id, target: "https://anything.example/" });
 
     // Nothing on record authorises any host, and scanning on the strength of
     // the target somebody just typed is the unfalsifiable check one layer up.
     expect(started.status).toBe(400);
     expect(started.body.error).toContain("no site is recorded");
+    expect(launchesSince(from)).toEqual([]);
+    expect(hybrid!.engagements.size).toBe(engagements);
     expect(sent).toEqual([]);
   });
 
@@ -253,11 +302,35 @@ describe("what authorises a scan", () => {
     await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "Typed", url: "shop.example.test" });
 
-    await agent.post("/api/scans")
-      .send({ clientId: client.body.id, target: "https://shop.example.test/" })
-      .expect(201);
+    const started = await agent.post("/api/scans")
+      .send({ consent: true, clientId: client.body.id, target: "https://shop.example.test/" });
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
 
+    expect(engagementOf(started).scope_hosts).toEqual(["shop.example.test"]);
     expect(sent[0].scope).toEqual(["shop.example.test"]);
+  });
+
+  it("a second start for the same client runs under the same engagement; a site added since widens its scope, and nothing narrows it", async () => {
+    sent = [];
+    const client = await agent.post("/api/clients")
+      .send({ name: "Growing", company: "Growing Ltd", email: "g@example.test" });
+    await agent.post("/api/sites")
+      .send({ clientId: client.body.id, name: "First", url: "https://first.example" });
+
+    const first = await agent.post("/api/scans").send({ consent: true, clientId: client.body.id, target: "https://first.example/" });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const engagements = hybrid!.engagements.size;
+
+    await agent.post("/api/sites").send({ clientId: client.body.id, name: "Second", url: "https://second.example" });
+    const second = await agent.post("/api/scans").send({ consent: true, clientId: client.body.id, target: "https://second.example/" });
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+
+    expect(second.body.backend.engagementId).toBe(first.body.backend.engagementId);
+    expect(second.body.backend.engagementCreated).toBeUndefined();
+    expect(second.body.backend.engagementWidenedBy).toEqual(["second.example"]);
+    expect(hybrid!.engagements.size).toBe(engagements);
+    expect(engagementOf(second).scope_hosts).toEqual(["first.example", "second.example"]);
+    expect(sent[1].scope).toEqual(["first.example", "second.example"]);
   });
 });
 
@@ -300,12 +373,18 @@ describe("stopping a scan", () => {
     const port = (server.address() as import("net").AddressInfo).port;
     process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${port}`;
     process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+    hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+    process.env.ATHENA_FAILSAFE_URL = hybrid.url;
     vi.resetModules();
     app = await makeApp();
     agent = await signIn(app);
+    await signInToBackend(agent);
   });
 
   afterAll(async () => {
+    delete process.env.ATHENA_FAILSAFE_URL;
+    await hybrid?.close();
+    hybrid = null;
     delete process.env.ATHENA_ENGINE_URL;
     delete process.env.ATHENA_ENGINE_KEY;
     await new Promise<void>((r) => server.close(() => r()));
@@ -317,7 +396,7 @@ describe("stopping a scan", () => {
     await agent.post("/api/sites")
       .send({ clientId: client.body.id, name: "S", url: "https://stop.example" });
     const started = await agent.post("/api/scans")
-      .send({ clientId: client.body.id, target: "https://stop.example/" });
+      .send({ consent: true, clientId: client.body.id, target: "https://stop.example/" });
     return started.body.test.id as string;
   }
 

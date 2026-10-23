@@ -653,9 +653,7 @@ type CallInit = { method?: string; body?: string; headers?: Record<string, strin
 function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs): Promise<EngineAnswer> {
   const base = baseUrl();
   if (!base) {
-    return Promise.reject(new EngineNotConfigured(
-      `no engine is configured; set ${ENGINE_URL} to the engine's address`,
-    ));
+    return Promise.reject(new EngineNotConfigured(notConfiguredRefusal()));
   }
   let url: URL;
   try {
@@ -1507,13 +1505,27 @@ export async function buildEvidencePack(request: EvidenceRequest): Promise<Evide
   };
 }
 
+/**
+ * The engine answered a run's read 404: it has no run under this id that this
+ * dashboard's key may see. For a run Athena-Backend launched with ITS key, that
+ * is the two keys' tenants disagreeing (athena-engine api/server.py scopes a
+ * run's read to its credential's tenant): the run exists, and this dashboard
+ * cannot read or stop it directly (routes.ts, the Option 1 hybrid, decision 7).
+ */
+export class EngineRunNotFound extends EngineUnavailable {}
+
+/** The refusal every call answers when no engine is configured here: one sentence, said the same everywhere. */
+export function notConfiguredRefusal(): string {
+  return `no engine is configured; set ${ENGINE_URL} to the engine's address`;
+}
+
 /** Where a run has got to. */
 export async function runState(runId: string): Promise<EngineScan> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}`);
   if (!response.ok) {
-    throw new EngineUnavailable(
-      `the engine answered ${response.status}: ${await body(response)}`,
-    );
+    const said = `the engine answered ${response.status}: ${await body(response)}`;
+    if (response.status === 404) throw new EngineRunNotFound(said);
+    throw new EngineUnavailable(said);
   }
   const payload = objectOrUnread(await jsonWithin(response, `run ${runId}`), `run ${runId}`);
   const result = (payload.result ?? {}) as Record<string, unknown>;

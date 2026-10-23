@@ -13,7 +13,9 @@ import { verifyPassword, isLegacyDefaultPassword, newPasswordRefusal } from "./p
 import * as assistant from "./assistant";
 import * as settings from "./settings";
 import * as engine from "./engine";
+import * as backendScans from "./backend-scans";
 import * as retests from "./retests";
+import { CollectWatcher, type CollectHooks } from "./collect-watch";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
@@ -23,14 +25,21 @@ import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
-import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+import {
+  BACKEND_RECORD_KEYS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom, stopIdFrom,
+  stoppedOnlyAtBackend,
+} from "@shared/engine-record";
+import { ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnavailable } from "./control-plane";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
-import type { AIControlSetting, Finding, RetestWatch, Test } from "@shared/schema";
+import type {
+  AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test,
+} from "@shared/schema";
+import type { BackendRecordView } from "@shared/backend-record";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -93,7 +102,12 @@ function completionStamp(
  * "not real", or dress invented ones up as measured. It is stripped from
  * every schema the API parses; the seeder is the only writer.
  */
-const createClientSchema = insertClientSchema.omit({ isSample: true });
+// The backend engagement id is the scan route's to write (shared/schema.ts
+// clients.backendEngagementId): a caller may not supply or change it. The
+// testing window stays a person's to set and renew.
+const createClientSchema = insertClientSchema.omit({ isSample: true, backendEngagementId: true });
+/** A testing window's renewal (POST /api/clients/:id/testing-window/renew): how many days from now; 90 unless said. */
+const renewTestingWindowSchema = z.object({ days: z.number().int().min(1).max(365).optional() }).strict();
 const createSiteSchema = insertSiteSchema.omit({ isSample: true });
 
 // What a scan needs before the engine is asked anything: a target, and the
@@ -125,9 +139,159 @@ const startScanSchema = z.object({
   target: z.string().min(1).max(2000),
   testType: z.string().min(1).max(100).default("penetration_test"),
   // Optional: present only when the operator turned on authenticated scanning.
-  // Not persisted -- forwarded to the engine for the scan and then dropped.
+  // Kept in the body's shape. Athena-Backend's launch carries no login block
+  // (pentest/views.py run_pentest_scan reads url, consent, engagement_id,
+  // recipient_email and wait_seconds), so a start that asks for it is refused
+  // below, in so many words, rather than sent on and run anonymously.
   auth: scanAuthSchema.optional(),
+  /**
+   * The person's consent to the scan, affirmed on the page (decision 10):
+   * Athena-Backend refuses a launch without it, and so does this route, before
+   * anything is sent. Never defaulted.
+   */
+  consent: z.boolean().optional(),
+  /**
+   * The address the backend e-mails the report to, only when the person opted
+   * in on the page (decision 10): absent or empty, none is sent, and the backend
+   * never defaults one.
+   */
+  recipientEmail: z.string().trim().email().max(254).or(z.literal("")).nullish(),
 });
+
+/** The backend's own sentence for a launch without consent (athena-backend pentest/views.py), quoted as it is. */
+const CONSENT_REQUIRED = "User consent required. Include 'consent': true.";
+/** A start that asks for authenticated scanning: the backend's launch carries no login block, so it is refused here, not run anonymously. */
+export const AUTH_NOT_CARRIED =
+  "Authenticated scanning cannot be started through Athena-Backend: its launch carries no login block, so the identities " +
+  "would be dropped and the scan would run anonymously. Nothing was sent.";
+
+/** How long a client's testing window runs when the person set none: 90 days from the first launch (decision 2). */
+const DEFAULT_TESTING_WINDOW_MS = 90 * 24 * 60 * 60_000;
+
+/** The name the client's backend engagement is created under (plan, section 1 Q3). */
+function engagementNameFor(client: { id: string; name: string; company: string }): string {
+  return `${client.company} — ${client.name} [dashboard client ${client.id}]`;
+}
+
+/**
+ * The backend's answer to a call that is not a launch -- a refusal in its own
+ * words, a sign-in it does not have, or the backend not there -- as the page is
+ * answered. A 503 is a fact about the deployment, never a 401: a 401 would send
+ * the browser to this console's sign-in screen, away from the kill switch.
+ */
+function refuseForBackend(res: Response, cause: unknown, what: string, launch = true): boolean {
+  const nothingStarted = launch ? " Nothing was started." : "";
+  if (cause instanceof ControlPlaneSignInRequired) {
+    res.status(503).json({ error: `${what} needs your Athena-Backend sign-in: ${cause.message}.${nothingStarted}`, reason: cause.code, code: cause.code });
+    return true;
+  }
+  if (cause instanceof ControlPlaneRefused || cause instanceof backendScans.BackendRefused) {
+    // The backend's refusal is the governance answer: its words, its status.
+    res.status(cause.status).json({ error: cause.message, reason: "backend_refused", backendStatus: cause.status });
+    return true;
+  }
+  if (cause instanceof ControlPlaneUnavailable) {
+    res.status(503).json({
+      error: `${what} could not be done: Athena-Backend, the governance gate every scan starts through, could not be reached ` +
+        `(${cause.message}).${nothingStarted}`,
+      reason: "backend_unavailable",
+    });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The client's backend engagement: created as the person the first time a
+ * scan starts for the client (decision 2) -- running, scoped to every host of
+ * the client's sites, with the client's testing window, or 90 days from now
+ * when none is set, which is then recorded on the client -- and WIDENED by
+ * PATCH when a site was added since. Never narrowed, and never re-dated, here:
+ * both are a person's acts in the client's settings. An engagement the person
+ * cannot see any more is the backend's refusal (ControlPlaneRefused), verbatim.
+ */
+async function ensureEngagement(
+  client: { id: string; name: string; company: string; backendEngagementId: number | null; testingWindowStart: Date | null; testingWindowEnd: Date | null },
+  hosts: string[],
+): Promise<{ engagement: backendScans.BackendEngagement; created: boolean; widenedBy: string[] }> {
+  if (client.backendEngagementId === null) {
+    const start = client.testingWindowStart ?? new Date();
+    const end = client.testingWindowEnd ?? new Date(start.getTime() + DEFAULT_TESTING_WINDOW_MS);
+    const engagement = await backendScans.createEngagement({
+      name: engagementNameFor(client), clientName: client.company, scopeHosts: hosts, testingWindowStart: start, testingWindowEnd: end,
+    });
+    // The engagement exists at the backend now; what this records is which one,
+    // and the window it was given. A write that fails is the caller's 500, and
+    // the next launch -- finding no id -- would create a second engagement: said
+    // in the log, so an operator can set the id by hand rather than scan twice.
+    try {
+      await storage.updateClient(client.id, { backendEngagementId: engagement.id, testingWindowStart: start, testingWindowEnd: end });
+    } catch (cause) {
+      console.error(logLine(`[scan] backend engagement #${engagement.id} was created for client ${client.id} but could not be recorded on it: ${causeOf(cause)}`));
+      throw cause;
+    }
+    return { engagement, created: true, widenedBy: [] };
+  }
+  const existing = await backendScans.getEngagement(client.backendEngagementId);
+  const missing = hosts.filter((host) => !existing.scopeHosts.includes(host));
+  if (missing.length === 0) return { engagement: existing, created: false, widenedBy: [] };
+  const widened = await backendScans.patchEngagement(existing, { scopeHosts: [...existing.scopeHosts, ...missing] });
+  return { engagement: widened, created: false, widenedBy: missing };
+}
+
+/** The backend's refusal of a launch outside the engagement's window: the person renews it in the client's settings. */
+const OUTSIDE_WINDOW = /outside its authorised testing window/;
+const RENEW_WINDOW = "Renew the testing window in the client's settings.";
+
+/** How far back the backend's list is searched for a launch whose answer was lost. */
+const ADOPT_WITHIN_MS = 10 * 60_000;
+
+/**
+ * A launch whose answer was lost may have made a scan at the backend. Its own
+ * list is read once, as the person, for a scan of this target, under this
+ * engagement, made in the last ADOPT_WITHIN_MS and recorded by no row here; its
+ * detail is read for the run it names. Null when none fits, or the backend
+ * cannot be read: the caller then says the outcome is not known.
+ */
+async function adoptLostLaunch(target: string, engagementId: number): Promise<backendScans.LaunchAnswer | null> {
+  let rows: backendScans.BackendScanListRow[];
+  try {
+    rows = await backendScans.listScans();
+  } catch {
+    return null;
+  }
+  const since = Date.now() - ADOPT_WITHIN_MS;
+  const known = new Set(
+    (await storage.getAllTests().catch(() => [] as Test[])).map((one) => backendScanIdOf(one.findings)).filter((id): id is string => id !== null),
+  );
+  const candidates = rows.filter((row) => row.targetUrl === target && !known.has(row.uuid)
+    && (row.createdAt === null || Date.parse(row.createdAt) >= since) && row.status !== "failed");
+  for (const candidate of candidates) {
+    let record: backendScans.BackendScanRecord;
+    try {
+      record = await backendScans.readScan(candidate.uuid);
+    } catch {
+      continue;
+    }
+    if (record.engagement?.id !== null && record.engagement?.id !== undefined && record.engagement.id !== engagementId) continue;
+    const engineRunId = record.engineRunId;
+    const stopId = stopIdFrom(record.raw.engine_run_id);
+    if (record.status === "completed") {
+      return { answer: "completed", scanId: record.uuid, result: record.engineResponse ?? {}, engineRunId, stopId, replayed: false };
+    }
+    // A pending scan the engine has not named a run for yet is not adopted: a
+    // row with no run id could be neither polled nor stopped from here. The
+    // press, sent again with its key, is answered from the backend's record
+    // once the engine has named the run.
+    if ((record.status === "pending" || record.status === "unknown") && stopId !== null) {
+      return {
+        answer: "pending", scanId: record.uuid, engineRunId, stopId,
+        detail: "adopted from the backend's list: the launch's own answer was lost", statusUrl: null, collectUrl: null, replayed: false,
+      };
+    }
+  }
+  return null;
+}
 
 /**
  * The severity counts, taken from the findings the engine returned.
@@ -516,6 +680,103 @@ async function sendStop(
   const outcome = unreadAnswer ? namedByUnreadAnswer(sent) : sent;
   await writeStopRecord(who, run, via, outcome, note, namedBy);
   return outcome;
+}
+
+/**
+ * Mirror a Stop this dashboard sent the engine into Athena-Backend's record of
+ * a hybrid scan (server/backend-scans.ts mirrorStop; decision 6), then record
+ * what came of it on the row (`findings.backendMirror`, shared/schema.ts
+ * BackendMirrorReading) and in the log (`abort_mirrored` / `abort_mirror_failed`).
+ *
+ * SAFETY: only ever called AFTER the stop was sent to the engine and its
+ * answer went out, and never awaited by anything that answers a stop: a
+ * mirror that fails, or takes its full bound, changes no stop's answer and
+ * delays none. It presents the failsafe service token and waits on no
+ * sign-in, and only when that attempt fails is it sent once more as the
+ * person. Nothing is mirrored for a row that names no backend scan (a scan
+ * this dashboard dispatched itself), and nothing for a run the engine said
+ * had already ended or did not know: nothing was stopped, and the backend's
+ * own collector records the run's end. A stop the engine refused IS
+ * mirrored: the backend's own stop may reach the run. Never throws.
+ */
+async function mirrorStopToBackend(
+  who: Who, test: { id: string; findings: unknown }, outcome: StopOutcome, via: "stop" | "kill_switch" | "delete",
+): Promise<void> {
+  const backendScanId = backendScanIdOf(test.findings);
+  if (backendScanId === null || outcome.alreadyFinished === true) return;
+  // "No such scan run" is an end for a run this dashboard's key can read. For a
+  // row marked `stop: "backend"` -- the key could never read the run -- it is
+  // not: the backend's own stop is what reaches it, so the mirror goes.
+  if (outcome.unknownRun === true && !stoppedOnlyAtBackend(test.findings)) return;
+  const pressed = via === "stop" ? "the scan's own Stop on the Athena dashboard"
+    : via === "kill_switch" ? "the Athena dashboard's kill switch"
+      : "the scan's deletion on the Athena dashboard, which stops its run first";
+  const answered = acceptedStop(outcome) ? "the engine accepted the stop"
+    : outcome.answerUnread ? "the engine answered the stop 2xx and the rest of its answer was not read"
+      : `the engine did not accept the stop (${outcome.detail})`;
+  const reason = `${pressed}: ${answered}`;
+  const mirror = await backendScans.mirrorStop(backendScanId, reason);
+  const reading: BackendMirrorReading = { at: new Date().toISOString(), mirrored: mirror.mirrored, via: mirror.via, detail: mirror.detail };
+  try {
+    // The row as it is now -- the live poll writes it too; a row deleted since keeps no reading.
+    const current = await storage.getTest(test.id);
+    if (current) {
+      await storage.updateTest(test.id, { findings: { ...((current.findings ?? {}) as Record<string, unknown>), backendMirror: reading } });
+    }
+  } catch (cause) {
+    console.error(logLine(`[abort] the reading of the stop mirror for backend scan ${backendScanId} could not be written: ${causeOf(cause)}`));
+  }
+  try {
+    await storage.createActivityLog({
+      action: mirror.mirrored ? "abort_mirrored" : "abort_mirror_failed",
+      entityType: "test",
+      entityId: test.id,
+      details: {
+        backendScanId, via, reason, mirrored: mirror.mirrored, credential: mirror.via, status: mirror.status,
+        ...(mirror.detail ? { detail: mirror.detail } : {}),
+      },
+      ...who,
+    });
+  } catch (cause) {
+    console.error(logLine(`[abort] the log of the stop mirror for backend scan ${backendScanId} could not be written: ${causeOf(cause)}`));
+  }
+  if (!mirror.mirrored) console.error(logLine(`[abort] the stop of backend scan ${backendScanId} was not mirrored to its record: ${mirror.detail}`));
+}
+
+/**
+ * Mirror the stops the kill switch or a delete sent, one row each, after every
+ * stop's answer went out (afterAnswer). `rows` are the tests as the route held
+ * them -- a delete's rows are gone from storage by then. Never awaited by
+ * them; never throws.
+ */
+function mirrorStopsToBackend(who: Who, stops: ScanStop[], via: "kill_switch" | "delete", rows: Array<{ id: string; findings: unknown }> = []): void {
+  for (const stop of stops) {
+    void (async () => {
+      const test = rows.find((one) => one.id === stop.testId) ?? storage.peekTest(stop.testId) ?? (await storage.getTest(stop.testId));
+      if (test) await mirrorStopToBackend(who, test, stop, via);
+    })().catch((cause) => console.error(logLine(`[abort] the stop mirror for test ${stop.testId} could not be sent: ${causeOf(cause)}`)));
+  }
+}
+
+/**
+ * Run `fn` once this response has gone out (or its connection closed), and
+ * never before: for what follows a stop -- its mirror to the backend's record
+ * -- and must neither delay nor change the stop's answer, whichever way the
+ * route answers.
+ */
+function afterAnswer(res: Response, fn: () => void): void {
+  let ran = false;
+  const once = () => {
+    if (ran) return;
+    ran = true;
+    try {
+      fn();
+    } catch (cause) {
+      console.error(logLine(`[after-answer] ${causeOf(cause)}`));
+    }
+  };
+  res.once("finish", once);
+  res.once("close", once);
 }
 
 /**
@@ -1154,10 +1415,14 @@ const HUMAN_FINDINGS_KEY = "details";
  * started: a run id, a target and results are what makes a row an engine scan
  * to every other part of the app (shared/engine-record.ts), and `coverage` --
  * the engine's manifest of what the run checked and what it did not
- * (shared/scan-coverage.ts) -- is the run's as much as its results are. A
- * person may supply none of them.
+ * (shared/scan-coverage.ts) -- is the run's as much as its results are. With
+ * them, the keys of the Athena-Backend record a hybrid scan carries
+ * (shared/engine-record.ts BACKEND_RECORD_KEYS): the backend scan and
+ * engagement ids, the collected record, a stop's mirror reading, and the mark
+ * that only the backend's Stop reaches the run. A person may supply none of
+ * them.
  */
-const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage"] as const;
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS] as const;
 
 /**
  * Refuse a person's test whose findings carry a run's keys, on create as on
@@ -2038,6 +2303,211 @@ const retestWatchHooks: retests.WatchHooks = {
   },
 };
 
+// ==== The backend's record of a hybrid scan (server/collect-watch.ts) ====
+
+/** A row's `findings.backend`, when it is a snapshot (shared/schema.ts BackendRecordSnapshot). */
+function backendSnapshotOf(value: unknown): BackendRecordSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const one = value as Record<string, unknown>;
+  return typeof one.status === "string" ? (one as unknown as BackendRecordSnapshot) : null;
+}
+
+/** A row's `findings.backendMirror`, when it is a reading (shared/schema.ts BackendMirrorReading). */
+function backendMirrorOf(value: unknown): BackendMirrorReading | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const one = value as Record<string, unknown>;
+  return typeof one.mirrored === "boolean" ? (one as unknown as BackendMirrorReading) : null;
+}
+
+/** An ISO 8601 text of a stored time, which storage hands back as a Date or as text; null for none. */
+function isoOf(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+/**
+ * The snapshot a collected record leaves on the scan's row (`findings.backend`),
+ * beside the record's own results and coverage. `direct` is what this
+ * dashboard's own poll recorded for the run, to say whether the record's
+ * bytes differ from it.
+ */
+function snapshotOfRecord(record: backendScans.BackendScanRecord, direct: { results: unknown; coverage: unknown }): BackendRecordSnapshot {
+  const results = backendScans.recordResults(record);
+  const coverage = backendScans.recordCoverage(record);
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  return {
+    status: record.status,
+    verdict: record.verdict,
+    verdictLabel: record.verdictLabel,
+    collectedAt: record.collectedAt,
+    detail: record.errorMessage ?? "",
+    pdfUrl: record.pdfUrl,
+    engagement: record.engagement,
+    engineRunId: record.engineRunId,
+    differsFromDirect: {
+      results: results === null || direct.results == null ? null : !same(results, direct.results),
+      coverage: coverage === null || direct.coverage == null ? null : !same(coverage, direct.coverage),
+    },
+  };
+}
+
+/**
+ * How a collect watch files the backend's record into the scan's row, and
+ * records its end. Filed once, by the dashboard whose claim on the watch
+ * succeeded (server/collect-watch.ts). The row then holds the RECORD's results
+ * and coverage -- the backend's record is the record of a hybrid scan -- with
+ * the counts recounted from them, and the snapshot the list screens read. A
+ * hybrid scan is never filed into this dashboard's own findings ledger.
+ */
+const collectWatchHooks: CollectHooks = {
+  async fileRecord(watch, record) {
+    const test = await storage.getTest(watch.testId);
+    if (!test) return;
+    const recorded = (test.findings ?? {}) as Record<string, unknown>;
+    const results = backendScans.recordResults(record);
+    const coverage = backendScans.recordCoverage(record);
+    const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
+    await storage.updateTest(test.id, {
+      findings: {
+        ...recorded,
+        backend: snapshot,
+        ...(results !== null ? { results } : {}),
+        ...(coverage !== null ? { coverage } : {}),
+      },
+      ...(results !== null ? countSeverities(results) : {}),
+    });
+  },
+  async recordEnd(watch) {
+    const record = backendScans.readRecord(watch.record);
+    await storage.createActivityLog({
+      action: watch.state === "collected" ? "backend_record_collected" : "backend_record_unwatched",
+      entityType: "test",
+      entityId: watch.testId,
+      details: {
+        backendScanId: watch.backendScanId,
+        engineRunId: watch.engineRunId,
+        // Filed by the dashboard when the backend had the record: not an act of any person at this moment.
+        filedBy: "collect_watch",
+        startedAt: isoOf(watch.startedAt),
+        endedAt: isoOf(watch.endedAt),
+        lastAnswer: watch.lastAnswer,
+        lastReadError: watch.lastReadError,
+        ...(record ? { status: record.status, verdict: record.verdict, collectedAt: record.collectedAt, errorMessage: record.errorMessage } : {}),
+      },
+      userId: null,
+      ipAddress: null,
+    });
+  },
+};
+
+// The shape of `backend` in the status answer: shared/backend-record.ts BackendRecordView.
+
+const NOT_ASKED_YET = "Athena-Backend has not been asked to collect this run's record yet: it is asked when the run ends";
+
+/** Where a running collect watch stands, from its last answer, in words. */
+function collectingSentence(watch: CollectWatch): string {
+  const why = watch.lastReadError ? ` (${watch.lastReadError})` : "";
+  switch (watch.lastAnswer) {
+    case null: return "Athena-Backend is being asked to collect this run's record";
+    case "pending": return "Athena-Backend read the run and it was not over yet; it is asked again";
+    case "conflict": return `Athena-Backend says the record already stands; it is being read${why}`;
+    case "unavailable": return `Athena-Backend could not collect the record yet${why}; it is asked again`;
+    case "refused": return `Athena-Backend refused the collect for the person asking${why}; it is asked again on the next read by a person it allows`;
+    case "sign_in_required": return `the collect waits on a person signed in to Athena-Backend reading this scan${why}`;
+    default: return `Athena-Backend last answered ${watch.lastAnswer}${why}; it is asked again`;
+  }
+}
+
+/** The view of a collected record, from the row's snapshot. */
+function collectedView(
+  test: { id: string },
+  base: { scanId: string; engagementId: number | null; mirror: BackendMirrorReading | null },
+  snapshot: BackendRecordSnapshot,
+): BackendRecordView {
+  return {
+    ...base,
+    collected: true,
+    watch: "collected",
+    status: snapshot.status,
+    verdict: snapshot.verdict,
+    verdictLabel: snapshot.verdictLabel,
+    detail: snapshot.detail,
+    collectedAt: snapshot.collectedAt,
+    pdfUrl: snapshot.pdfUrl ? `/api/scans/${encodeURIComponent(test.id)}/backend-pdf` : null,
+    engagement: snapshot.engagement ?? null,
+    engineRunId: snapshot.engineRunId ?? null,
+    differsFromDirect: snapshot.differsFromDirect ?? null,
+    lastAnswer: "collected",
+    lastReadAt: null,
+    lastReadError: null,
+  };
+}
+
+/**
+ * The `backend` of a status answer for a row naming backend scan `scanId`, from
+ * the app's collect watcher (server/collect-watch.ts). Reads storage only -- no
+ * backend call is made on a page read's path. When `start` is given, this read
+ * saw the run finished: the collect watch is started if none exists, asking as
+ * the person of `sessionId` (null for no person: the watch then waits for a
+ * signed-in read). Every signed-in read while the watch runs lends it its
+ * person. A record the watch collected but could not file into the row is filed
+ * here, from the watch's record.
+ */
+async function backendRecordView(
+  collectWatcher: CollectWatcher, test: Test, scanId: string, sessionId: string | null, start: { engineRunId: string | null } | null,
+): Promise<BackendRecordView> {
+  const findings = (test.findings ?? {}) as Record<string, unknown>;
+  const base = { scanId, engagementId: backendEngagementIdOf(findings), mirror: backendMirrorOf(findings.backendMirror) };
+  const snapshot = backendSnapshotOf(findings.backend);
+  if (snapshot !== null) return collectedView(test, base, snapshot);
+
+  let watch = await collectWatcher.view(scanId);
+  if (!watch) {
+    if (start === null) {
+      return {
+        ...base, collected: null, watch: null, status: null, verdict: null, verdictLabel: null, detail: NOT_ASKED_YET,
+        collectedAt: null, pdfUrl: null, engagement: null, engineRunId: null, differsFromDirect: null,
+        lastAnswer: null, lastReadAt: null, lastReadError: null,
+      };
+    }
+    watch = collectWatcher.start({ backendScanId: scanId, testId: test.id, engineRunId: start.engineRunId, sessionId });
+  } else if (watch.state === "running") {
+    collectWatcher.adopt(scanId, sessionId);
+  }
+
+  if (watch.state === "collected") {
+    const record = backendScans.readRecord(watch.record);
+    const filed = record === null
+      ? { status: "unknown", verdict: null, verdictLabel: null, collectedAt: isoOf(watch.endedAt), detail: "the record the watch collected could not be read here" }
+      : snapshotOfRecord(record, { results: findings.results, coverage: findings.coverage });
+    // Claimed and collected, but not on the row yet (a write that did not land): filed now.
+    if (record !== null) await collectWatchHooks.fileRecord(watch, record).catch(() => undefined);
+    return collectedView(test, base, filed);
+  }
+
+  const running = watch.state === "running";
+  return {
+    ...base,
+    collected: false,
+    watch: running ? "running" : "unwatched",
+    status: "pending",
+    verdict: null,
+    verdictLabel: null,
+    detail: running
+      ? collectingSentence(watch)
+      : `this dashboard stopped asking Athena-Backend to collect the record at ${isoOf(watch.endedAt) ?? "its deadline"}` +
+        `${watch.lastReadError ? ` (${watch.lastReadError})` : ""}; the backend's own collector records the run's end, and the record is read there`,
+    collectedAt: null,
+    pdfUrl: null,
+    engagement: null,
+    engineRunId: watch.engineRunId,
+    differsFromDirect: null,
+    lastAnswer: watch.lastAnswer,
+    lastReadAt: isoOf(watch.lastReadAt),
+    lastReadError: watch.lastReadError,
+  };
+}
+
 /** Engine run states in which a retest is still doing something to the target. */
 const LIVE_RETEST_STATES = new Set(["queued", "running", "aborting"]);
 
@@ -2234,6 +2704,12 @@ export function registerRoutes(app: Express): void {
   // For tests that reuse one engine run id across cases (as retestWatcher.reset()).
   app.locals.unreadRunHandles = unreadRunHandles;
   watcher.resume();
+  // This app's collect watches (server/collect-watch.ts): every scan started
+  // through Athena-Backend whose run has ended, asked about until the backend
+  // has its record. Resumed from the record in the background; on no stop's path.
+  const collectWatcher = new CollectWatcher(storage, collectWatchHooks);
+  app.locals.collectWatcher = collectWatcher;
+  collectWatcher.resume();
   // The tests, read once in the background so a Stop finds its run in memory
   // (storage.peekTest) without asking the database. Holds up nothing.
   setImmediate(() => void storage.getAllTests().catch(() => undefined));
@@ -2652,8 +3128,72 @@ export function registerRoutes(app: Express): void {
     res.json(client);
   }));
 
+  /**
+   * The client's backend engagement, read from Athena-Backend as the person
+   * when the client names one (decision 2): its name, status, scope and window
+   * as the backend holds them, beside what this dashboard recorded -- the id,
+   * the testing window, and the hosts of the client's sites (the scope the
+   * next launch widens the engagement to). Asked for, never on a page's load.
+   */
+  app.get("/api/clients/:id/backend-engagement", boundedRelayRead({ who: "Athena-Backend", what: "this engagement read" }), asyncHandler(async (req, res) => {
+    const client = await storage.getClient(req.params.id);
+    if (!client) return notFound(res, "Client");
+    const sites = await storage.getSitesByClient(client.id);
+    const recorded = {
+      backendEngagementId: client.backendEngagementId,
+      testingWindowStart: client.testingWindowStart,
+      testingWindowEnd: client.testingWindowEnd,
+      hosts: Array.from(new Set(sites.map((site) => hostOf(site.url)).filter((host): host is string => host !== null))),
+    };
+    if (client.backendEngagementId === null) return void res.json({ ...recorded, engagement: null });
+    try {
+      res.json({ ...recorded, engagement: await backendScans.getEngagement(client.backendEngagementId) });
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "reading the client's backend engagement", false)) return;
+      throw cause;
+    }
+  }));
+
+  /**
+   * Renew the client's testing window: from now, for `days` (90 unless said),
+   * on the client's backend engagement first -- re-dated as the person, so the
+   * backend's own refusal stands and the window here is never ahead of the
+   * authority there -- and then on the client's record. A person's act, pressed
+   * and confirmed on the Clients page; never done on its own (decision 2).
+   */
+  app.post("/api/clients/:id/testing-window/renew", asyncHandler(async (req, res) => {
+    const data = renewTestingWindowSchema.parse(req.body ?? {});
+    const client = await storage.getClient(req.params.id);
+    if (!client) return notFound(res, "Client");
+    const days = data.days ?? DEFAULT_TESTING_WINDOW_MS / (24 * 60 * 60_000);
+    const start = new Date();
+    const end = new Date(start.getTime() + days * 24 * 60 * 60_000);
+    let engagement: backendScans.BackendEngagement | null = null;
+    if (client.backendEngagementId !== null) {
+      try {
+        const current = await backendScans.getEngagement(client.backendEngagementId);
+        engagement = await backendScans.patchEngagement(current, { testingWindowStart: start, testingWindowEnd: end });
+      } catch (cause) {
+        if (refuseForBackend(res, cause, "renewing the testing window", false)) return;
+        throw cause;
+      }
+    }
+    const updated = await storage.updateClient(client.id, { testingWindowStart: start, testingWindowEnd: end });
+    if (!updated) return notFound(res, "Client");
+    await storage.createActivityLog({
+      action: "testing_window_renewed", entityType: "client", entityId: client.id,
+      details: {
+        days, testingWindowStart: start.toISOString(), testingWindowEnd: end.toISOString(),
+        backendEngagementId: client.backendEngagementId, ...(engagement === null ? { backendEngagementRedated: false } : { backendEngagementRedated: true }),
+      },
+      ...actor(req),
+    });
+    res.json({ client: updated, engagement, days });
+  }));
+
   app.delete("/api/clients/:id", asyncHandler(async (req, res) => {
-    if (!(await storage.getClient(req.params.id))) return notFound(res, "Client");
+    const client = await storage.getClient(req.params.id);
+    if (!client) return notFound(res, "Client");
     // Deleting a client removes its tests, sites and documents. Those rows
     // used to disappear with no audit trace at all, so the log recorded one
     // deletion where ten had happened. Count them before they are gone.
@@ -2667,6 +3207,8 @@ export function registerRoutes(app: Express): void {
     // Its tests' running engine runs are stopped first; nothing is deleted
     // while one of them could not be (stopBeforeDeleting).
     const stops = await stopBeforeDeleting(req, tests);
+    // Decision 6: each stop's record at the backend, once this answer has gone out, whichever way it goes.
+    afterAnswer(res, () => mirrorStopsToBackend(actor(req), stops, "delete", tests));
     if (refuseUnstoppedDelete(res, "the client", stops)) return;
     if (refuseUnforcedDeleteWithoutStop(req, res, "the client", tests, stops)) return;
     const withoutStop = tests.filter(unfinishedWithoutRunId).map((one) => one.id);
@@ -2699,6 +3241,30 @@ export function registerRoutes(app: Express): void {
       if (stops.length === 0) throw cause;
     }
     res.json(stops.length > 0 ? { success: true, stops } : { success: true });
+
+    // The client's backend engagement outlives the client here: its authority
+    // is withdrawn (moved to `completed`, a stop by the backend's own judgement,
+    // sent as every stop is), never deleted -- the record of what was authorised
+    // is kept. After the answer, best-effort, and never awaited.
+    if (client.backendEngagementId !== null) {
+      const engagementId = client.backendEngagementId;
+      const who = actor(req);
+      void backendScans.withdrawEngagement(engagementId, "completed").then(async (outcome) => {
+        try {
+          await storage.createActivityLog({
+            action: outcome.mirrored ? "backend_engagement_withdrawn" : "backend_engagement_not_withdrawn",
+            entityType: "client", entityId: client.id,
+            details: { backendEngagementId: engagementId, via: outcome.via, ...(outcome.detail ? { detail: outcome.detail } : {}) },
+            ...who,
+          });
+        } catch {
+          // Said in the log line below; the client is gone either way.
+        }
+        if (!outcome.mirrored) {
+          console.error(logLine(`[clients] backend engagement #${engagementId} of deleted client ${client.id} could not be marked completed: ${outcome.detail}`));
+        }
+      });
+    }
   }));
 
   // ==== SITES ====
@@ -2792,6 +3358,8 @@ export function registerRoutes(app: Express): void {
     // A running engine scan is stopped first, and deleted only once the engine
     // accepted the stop (stopBeforeDeleting): its row is its Stop.
     const stops = await stopBeforeDeleting(req, [test]);
+    // Decision 6: the stop's record at the backend, once this answer has gone out, whichever way it goes.
+    afterAnswer(res, () => mirrorStopsToBackend(actor(req), stops, "delete", [test]));
     if (refuseUnstoppedDelete(res, "the test", stops)) return;
     if (refuseUnforcedDeleteWithoutStop(req, res, "the test", [test], stops)) return;
     const withoutStop = unfinishedWithoutRunId(test);
@@ -3009,89 +3577,192 @@ export function registerRoutes(app: Express): void {
       });
     }
 
-    let started;
-    try {
-      started = await engine.startScan({
-        target: data.target,
-        engagementRef,
-        scope,
-        // Forwarded only when the operator enabled authenticated scanning.
-        ...(data.auth?.enabled ? { auth: data.auth } : {}),
-      }, forwarded);
-    } catch (cause) {
-      if (cause instanceof engine.EngineOutcomeUnknown) {
-        // The engine has no answer recorded for the first press with this key:
-        // it may have started a run, and nothing is recorded here for it. Said
-        // so -- never "refused", never "did not start" -- and never sent again
-        // with a new key.
-        return void res.status(409).json({
-          error: `We don't know whether this scan started: ${cause.message}. Check the scans list before starting it ` +
-            "again. Nothing was recorded here for it, so no Stop is offered for it here: the kill switch on the AI Control " +
-            "page, or a failsafe pause, stops it.",
-          reason: "scan_outcome_unknown",
-          idempotency: { state: cause.state },
-          mayStillBeRunning: true,
-        });
-      }
-      if (cause instanceof engine.EngineKeyRefused) {
-        return void res.status(500).json({ error: cause.message, reason: "idempotency_bug" });
-      }
-      if (cause instanceof engine.UnrecognisedScanAnswer) {
-        // The engine took the start (2xx) and answered in a shape this
-        // dashboard does not read: nothing is recorded from it, and the run it
-        // named -- which may be scanning, with no row here to carry its Stop --
-        // is stopped, as a start that could not be recorded is.
-        // An answer that named no run a stop can address: the engine took the
-        // start, so a run it started may be live (the error says what stops it).
-        if (cause.stopId === null) {
-          return void res.status(502).json({ error: cause.message, reason: "unrecognised_engine_answer", mayStillBeRunning: true });
-        }
-        // Every run it named -- its body's, and each its X-Run-Id header names
-        // when they differ -- is sent its stop, all at once; the record of each
-        // says why, and where the answer named it.
-        const ids = cause.stopIds;
-        const why = `sent because the engine answered a scan start in a shape this dashboard does not read, naming this run: ${cause.message}`;
-        const stops = await Promise.all(ids.map((runId) =>
-          sendStop(req, { runId, target: data.target, testId: null }, "start_not_recorded",
-            `${why}${namedBySentence(cause.namedBy[runId])}`, cause.namedBy[runId], true)));
-        return void res.status(502).json({
-          error: `${cause.message} ${ids.map((runId, at) => unreadAnswerStopSentence(runId, stops[at])).join(" ")}`,
-          reason: "unrecognised_engine_answer",
-          runId: ids[0],
-          runIds: ids,
-          stopped: stops.every((one) => one.stopped),
-          stops: ids.map((runId, at) => ({ runId, ...stops[at], ...(cause.namedBy[runId] ? { namedBy: cause.namedBy[runId] } : {}) })),
-          ...(stops.some((one) => one.alreadyFinished) ? { alreadyFinished: stops.every((one) => one.alreadyFinished === true) } : {}),
-          ...(stops.some((one) => one.answerUnread) ? { answerUnread: true } : {}),
-          // A run whose stop did not take may still be scanning: said so, first.
-          ...(stops.some(mayRunAfter) ? { mayStillBeRunning: true } : {}),
-        });
-      }
-      if (cause instanceof engine.EngineUnavailable) {
-        // 503, not 500. Nothing is broken: the engine is not there, or not
-        // answering, and that is a fact about the deployment. Only a start
-        // that never reached the engine, or that it refused or recorded failed
-        // before its work began, "did not start". Any other -- a timeout, a
-        // reset after sending, a 5xx, an answer whose body never came -- may
-        // have started a run the engine is scanning with: said so, first, with
-        // what stops it (as a retest's retest_unconfirmed/unanswered).
-        if (!engine.mayHaveStarted(cause)) return void res.status(503).json({ error: cause.message });
-        return void res.status(503).json({
-          error: `${cause.message}. The engine may have started this scan, and it may still be running: nothing was ` +
-            "recorded here, so no Stop is offered for it. The kill switch on the AI Control page, or a failsafe pause, stops it.",
-          reason: cause instanceof engine.EngineTimedOut ? "scan_unanswered" : "scan_unconfirmed",
-          mayStillBeRunning: true,
-        });
-      }
-      throw cause;
+    // Decision 11: every person-initiated scan launches through Athena-Backend
+    // -- the governance gate (consent, the engagement's scope and window, the
+    // engine's own preflight) and the record -- and never through this
+    // dashboard's own `engine.startScan`, which nothing below falls back to.
+    // The live poll and the Stop stay direct to the engine, so with no engine
+    // configured here nothing could watch or stop the run: refused as it always
+    // was, before anything is sent anywhere.
+    if (!engine.isConfigured()) {
+      return void res.status(503).json({ error: engine.notConfiguredRefusal(), reason: "engine_not_configured" });
     }
-
-    if (started.state === "refused") {
-      return void res.status(409).json({
-        error: "the engine refused this scan",
-        detail: started.refused ?? "",
+    // The person's consent, affirmed on the page (decision 10): the backend's
+    // own refusal, said here before any backend call.
+    if (data.consent !== true) {
+      return void res.status(400).json({
+        error: `Athena-Backend requires the person's consent on every launch -- "${CONSENT_REQUIRED}" -- and the page did not ` +
+          "affirm it. Nothing was sent.",
+        reason: "consent_required",
       });
     }
+    // Authenticated scanning asks the engine to log in as the identities given;
+    // the backend's launch has no field for them, so sending the start on would
+    // drop them and run the scan anonymously while the page said otherwise.
+    if (data.auth?.enabled === true) {
+      return void res.status(409).json({
+        error: AUTH_NOT_CARRIED,
+        reason: "auth_not_carried_by_backend",
+      });
+    }
+    // Decision 3: only an admin's backend account launches from this dashboard.
+    // The backend shows an engagement and its scans to their creator and to
+    // admins (athena-backend pentest/views.py engagements_visible_to,
+    // scans_visible_to), so a scan another role started could be seen, collected
+    // or stopped at the backend by nobody else here. The role is the backend's
+    // own word for the person (GET /api/accounts/users/me/), never guessed here.
+    let person: backendScans.BackendPerson;
+    try {
+      person = await backendScans.whoAmI();
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "Starting a scan")) return;
+      throw cause;
+    }
+    if (person.role !== "admin") {
+      return void res.status(403).json({
+        error: `Your Athena-Backend account${person.username ? ` (${person.username})` : ""} has the role ` +
+          `${person.role ?? "none this dashboard reads"}; only an admin's account may start a scan from this dashboard. ` +
+          "Athena-Backend shows an engagement and its scans to their creator and to admins, so a scan started by another " +
+          "role could be seen or stopped by nobody else here. Nothing was sent.",
+        reason: "backend_role_not_admin",
+        role: person.role,
+      });
+    }
+    // The client's backend engagement: created as the person on the first
+    // launch, widened when a site was added since, never narrowed here (decision 2).
+    const clientHosts = (await storage.getSitesByClient(client.id))
+      .map((one) => hostOf(one.url))
+      .filter((host): host is string => host !== null);
+    let ensured: Awaited<ReturnType<typeof ensureEngagement>>;
+    try {
+      ensured = await ensureEngagement(client, clientHosts);
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "The client's backend engagement")) return;
+      throw cause;
+    }
+    const { engagement } = ensured;
+
+    // The launch, as the person, with the press's key: the backend answers a
+    // press it has already answered from its record (its idempotency layer),
+    // and `wait_seconds: 0` means it answers as soon as the engine names the run.
+    const recipientEmail = data.recipientEmail ? data.recipientEmail : null;
+    let launched: backendScans.LaunchAnswer;
+    let adopted = false;
+    try {
+      launched = await backendScans.launchScan({
+        url: data.target, engagementId: engagement.id, consent: true, recipientEmail, idempotencyKey: forwarded,
+      });
+    } catch (cause) {
+      if (cause instanceof backendScans.BackendLaunchUnanswered) {
+        // The backend creates the scan's row before it launches, so a launch
+        // sent and not answered may have started a run. Its own list is read
+        // once to adopt the row it made; failing that, said so -- never
+        // "refused", never "did not start" -- and never sent again with a new key.
+        const found = await adoptLostLaunch(data.target, engagement.id);
+        if (found === null) {
+          return void res.status(409).json({
+            error: `We don't know whether this scan started: ${cause.message}. Check the scans list before starting it ` +
+              "again. Nothing was recorded here for it, so no Stop is offered for it here: the kill switch on the AI Control " +
+              "page, or a failsafe pause, stops it.",
+            reason: "scan_outcome_unknown",
+            idempotency: { state: cause.state },
+            mayStillBeRunning: true,
+          });
+        }
+        launched = found;
+        adopted = true;
+      } else if (cause instanceof backendScans.BackendKeyRefused) {
+        return void res.status(500).json({ error: cause.message, reason: "idempotency_bug" });
+      } else {
+        if (refuseForBackend(res, cause, "The launch")) return;
+        throw cause;
+      }
+    }
+
+    if (launched.answer === "refused") {
+      // The backend's refusal is the governance answer, in its words; a closed
+      // window adds the one thing a person can do about it here.
+      const renew = OUTSIDE_WINDOW.test(launched.detail);
+      return void res.status(launched.status).json({
+        error: renew ? `${launched.detail} ${RENEW_WINDOW}` : launched.detail,
+        reason: "backend_refused",
+        backendStatus: launched.status,
+        ...(renew ? { renewTestingWindow: true } : {}),
+      });
+    }
+    if (launched.answer === "failed" && launched.engineRunId === null) {
+      // The backend recorded the scan failed -- the engine refused the launch,
+      // could not be reached, or answered in a shape the backend did not take
+      // -- and named no run for it: nothing is recorded here, and no Stop is
+      // offered, since nothing a stop can name is known to be running. The
+      // backend's own words are the detail; a run the engine started without
+      // naming is the kill switch's or a failsafe pause's to stop, as always.
+      return void res.status(409).json({
+        error: `Athena-Backend recorded this scan as failed (${launched.error}), and the engine named no run for it: nothing ` +
+          "was recorded here. If the engine started work it did not name, the kill switch on the AI Control page, or a " +
+          "failsafe pause, stops it.",
+        detail: launched.error,
+        reason: "launch_failed",
+        backendScanId: launched.scanId,
+      });
+    }
+
+    // What the backend answered, read as the engine's own launch answer was
+    // read: a 200 is the finished run (`final`); a 202 names the run and is
+    // never done, whatever the engine's state was when the backend read it.
+    const backendScanId = launched.scanId;
+    if (backendScanId === null) {
+      // A 502 naming a run but no scan: not the contract's shape (the backend's
+      // row is made before the engine is asked), so nothing is recorded from it.
+      return void res.status(409).json({
+        error: "Athena-Backend recorded this scan as failed but named no record for it, so nothing was recorded here; " +
+          `the engine named run ${launched.engineRunId}, which the kill switch on the AI Control page, or a failsafe pause, stops`,
+        detail: launched.answer === "failed" ? launched.error : null,
+        reason: "launch_failed",
+        runId: launched.engineRunId,
+        mayStillBeRunning: true,
+      });
+    }
+    if (launched.answer === "completed" && launched.engineRunId === null) {
+      // A 200 carries the result and not the run's id (the contract's shape);
+      // the record names the run. Read once, as the person, so the row keeps
+      // the run the backend ran -- best-effort: a finished run needs no Stop.
+      try {
+        const record = await backendScans.readScan(backendScanId);
+        launched = { ...launched, engineRunId: record.engineRunId, stopId: stopIdFrom(record.raw.engine_run_id) };
+      } catch {
+        // Recorded without its run id; the collect watch reads the record again.
+      }
+    }
+    const started: engine.EngineScan = launched.answer === "completed"
+      ? {
+        runId: launched.engineRunId, stopId: launched.stopId, state: "completed",
+        findings: launched.result.results === undefined ? [] : Array.isArray(launched.result.results) ? launched.result.results : null,
+        detail: "the backend's record holds the finished run", final: true, coverage: coverageOf(launched.result.coverage),
+        ...(launched.replayed ? { replayed: true } : {}),
+      }
+      : launched.answer === "failed"
+        ? {
+          // The backend recorded the scan failed, yet the engine named a run for
+          // it (athena-backend keeps the id "whatever else went wrong"): the
+          // engine failed after it registered the run, or the run ended inside
+          // the launch's read. Its work may be running, so it is recorded here
+          // as running, with its Stop, and read from the engine until it ends --
+          // as the engine's own 500 naming a run always was. The backend's words
+          // are the warning the screens show beside that Stop.
+          runId: launched.engineRunId, stopId: stopIdFrom(launched.engineRunId), state: "running", findings: [],
+          detail: "the backend recorded the scan failed; the run it names is read from the engine",
+          warning: `Athena-Backend recorded this scan as failed (${launched.error}), yet the engine named run ` +
+            `${launched.engineRunId} for it, and its work may be running: it is recorded as running, with its Stop, ` +
+            "and read from the engine until it ends",
+          final: false, coverage: null,
+          ...(launched.replayed ? { replayed: true } : {}),
+        }
+        : {
+          runId: launched.engineRunId, stopId: launched.stopId, state: "running", findings: [],
+          detail: launched.detail || "the backend accepted the scan and the engine named its run", final: false, coverage: null,
+          ...(launched.replayed ? { replayed: true } : {}),
+        };
 
     // The engine answered this press from its record of the first: the same
     // run. When the first send recorded it here, that record is the answer --
@@ -3099,10 +3770,11 @@ export function registerRoutes(app: Express): void {
     // recorded it (the first send's answer never arrived, or its row could not
     // be written), it is recorded now, once, as the first would have been.
     const replayedRun = started.replayed === true ? started.stopId ?? started.runId : null;
-    if (replayedRun) {
-      // The press's own record: that run, for the client and site it was started for.
+    if (started.replayed === true) {
+      // The press's own record: the backend scan it made, or that run for the client and site it was started for.
       const recorded = (await storage.getAllTests()).find((one) =>
-        stopIdOf(one) === replayedRun && one.clientId === data.clientId && (one.siteId ?? null) === (data.siteId ?? null));
+        backendScanIdOf(one.findings) === backendScanId
+        || (replayedRun !== null && stopIdOf(one) === replayedRun && one.clientId === data.clientId && (one.siteId ?? null) === (data.siteId ?? null)));
       if (recorded) {
         return void res.status(201).json({
           test: recorded, runId: started.runId, state: started.state, replayed: true,
@@ -3145,6 +3817,9 @@ export function registerRoutes(app: Express): void {
           // (shared/scan-coverage.ts): none is recorded for a run still going,
           // and none is ever made up.
           ...(started.coverage ? { coverage: started.coverage } : {}),
+          // The backend's record this row points at (shared/engine-record.ts
+          // BACKEND_RECORD_KEYS): what is collected, mirrored to, and read by.
+          backendScanId, backendEngagementId: engagement.id,
         },
         // Results the engine sent that could not be read (null) count as
         // nothing here; the status route answers them as unread, never as none.
@@ -3209,36 +3884,51 @@ export function registerRoutes(app: Express): void {
     }
 
     // From here the row -- and so the run's Stop -- exists. Nothing after it
-    // may answer "the start failed" over a run that is scanning: a filing or
+    // may answer "the start failed" over a run that is scanning: a read or a
     // log write that fails is reported, and the page still gets its test.
-    let filed: lifecycle.IngestResult | null = null;
-    let notFiled: string | null = null;
-    if (started.findings === null) {
-      // Results the engine sent that could not be read are filed as nothing,
-      // and said so; the record holds them as unread.
-      notFiled = "the engine's results for this run could not be read";
-    } else {
+    //
+    // A hybrid scan's findings are not filed into this dashboard's own ledger
+    // (`findings`, `findingSightings`): Athena-Backend's record is the record
+    // of this scan, collected when the run ends (server/collect-watch.ts), and
+    // the same run filed in both would be counted twice. Legacy rows -- scans
+    // this dashboard dispatched to the engine itself -- keep their ledger.
+
+    // Decision 7: the first direct read, now, by the engine key this dashboard
+    // polls and stops with. The engine scopes a run's read to its credential's
+    // tenant, and the backend launched with ITS key: a 404 here means this
+    // dashboard cannot read or stop the run directly, so no direct Stop is
+    // offered -- the screens name the backend's Stop and the failsafes -- until
+    // a direct read succeeds (the status route clears the mark). Any other
+    // failure says nothing of the kind: the Stop stays, and the live poll reads
+    // again. Bounded by the engine client's own deadline; not a stop path.
+    let directRead: { ok: true; state: string } | { ok: false; notFound: boolean; detail: string } | null = null;
+    if (!completedInline && started.runId !== null) {
       try {
-        // File what came back as findings with a life of their own. A scan that
-        // completes inline has its results now; one still running is filed when
-        // it finishes, on the status route.
-        filed = await lifecycle.ingest(storage, started.findings, {
-          clientId: data.clientId,
-          siteId: data.siteId ?? null,
-          engagementRef,
-          target: data.target,
-          testId: test.id,
-          runId: started.runId ?? null,
-        });
+        const current = await engine.runState(started.runId);
+        directRead = { ok: true, state: current.state };
       } catch (cause) {
-        notFiled = causeOf(cause);
+        if (!(cause instanceof engine.EngineUnavailable)) throw cause;
+        directRead = { ok: false, notFound: cause instanceof engine.EngineRunNotFound, detail: cause.message };
+        if (cause instanceof engine.EngineRunNotFound) {
+          const marked = await storage.updateTest(test.id, {
+            findings: { ...(test.findings as Record<string, unknown>), stop: "backend" },
+          }).catch(() => undefined);
+          if (marked) test = marked;
+        }
       }
     }
 
     try {
       await storage.createActivityLog({
         action: "started", entityType: "test", entityId: test.id,
-        details: { target: data.target, engagementRef, runId: started.runId, filed, ...(started.warning ? { warning: started.warning } : {}) },
+        details: {
+          target: data.target, engagementRef, runId: started.runId, backendScanId, backendEngagementId: engagement.id,
+          ...(ensured.created ? { backendEngagementCreated: true } : {}),
+          ...(ensured.widenedBy.length > 0 ? { backendEngagementWidenedBy: ensured.widenedBy } : {}),
+          ...(adopted ? { adoptedFromBackendList: true } : {}),
+          ...(directRead !== null && !directRead.ok ? { firstDirectRead: directRead } : {}),
+          ...(started.warning ? { warning: started.warning } : {}),
+        },
         ...actor(req),
       });
     } catch {
@@ -3246,13 +3936,29 @@ export function registerRoutes(app: Express): void {
     }
 
     res.status(201).json({
-      test, runId: started.runId, state: started.state, filed,
+      test, runId: started.runId, state: started.state, filed: null,
+      // Results the engine sent for a run it finished inline that the screens
+      // cannot read: recorded as unread (null), counted as nothing, and said so.
+      ...(completedInline && started.findings === null
+        ? { detail: "the engine's results for this run could not be read, so nothing is counted from them" }
+        : {}),
       ...(started.replayed ? { replayed: true } : {}),
+      ...(adopted ? { adopted: true } : {}),
+      // Where the backend holds this scan, and the engagement it ran under.
+      backend: {
+        scanId: backendScanId, engagementId: engagement.id,
+        engagement: { id: engagement.id, name: engagement.name, clientName: engagement.clientName, status: engagement.status },
+        ...(ensured.created ? { engagementCreated: true } : {}),
+        ...(ensured.widenedBy.length > 0 ? { engagementWidenedBy: ensured.widenedBy } : {}),
+        directRead,
+      },
       // A run the engine started without a run id a stop can name breaks the
       // engine's contract: no Stop can reach it, and the screens say what can
       // (the Failsafe console) in place of a Stop that would answer 409.
       ...(started.runId === null && !completedInline ? { stop: "failsafe" as const } : {}),
-      ...(notFiled !== null ? { detail: `the run's results could not be filed as findings: ${notFiled}` } : {}),
+      // A run this dashboard's engine key cannot read: the backend's Stop and
+      // the failsafes reach it; no direct Stop is offered until a read succeeds.
+      ...(directRead !== null && !directRead.ok && directRead.notFound ? { stop: "backend" as const } : {}),
       ...(started.warning ? { warning: started.warning } : {}),
     });
   })));
@@ -3296,7 +4002,12 @@ export function registerRoutes(app: Express): void {
       outcome = await engine.abortRun(runId);
     } catch (cause) {
       if (cause instanceof engine.EngineUnavailable) {
-        return void res.status(503).json({ error: cause.message });
+        res.status(503).json({ error: cause.message });
+        // Decision 6, after the answer and never awaited by it: the backend's
+        // record of the stop asked for -- and the backend's own stop, which
+        // may reach a run this dashboard could not.
+        void mirrorStopToBackend(who, test, { stopped: false, detail: cause.message }, "stop");
+        return;
       }
       throw cause;
     }
@@ -3306,9 +4017,12 @@ export function registerRoutes(app: Express): void {
     // it is still running against somebody's system -- and a run that had
     // already ended was not aborted by this either.
     if (!outcome.accepted && !outcome.alreadyFinished) {
-      return void res.status(502).json({
+      res.status(502).json({
         error: "the engine did not accept the stop; the scan may still be running",
       });
+      // As above: the record of a stop asked for, after the answer, never awaited by it.
+      void mirrorStopToBackend(who, test, outcomeOf(outcome), "stop");
+      return;
     }
     const stopOutcome = outcomeOf(outcome);
     res.json(outcome.alreadyFinished
@@ -3319,6 +4033,10 @@ export function registerRoutes(app: Express): void {
     // (a full disk, a locked database) neither unsends the stop nor delays it.
     const failed = await writeStopRecord(who, { runId, target: null, testId: test.id }, "stop", stopOutcome);
     if (failed) console.error(logLine(`[abort] ${failed}`));
+    // Decision 6: the stop's record at the backend -- after the engine's answer
+    // has gone out and the stop's own record is written; never awaited by this
+    // answer, which has already been sent, and never on the path of the next.
+    void mirrorStopToBackend(who, test, stopOutcome, "stop");
   }));
 
   app.get("/api/scans/:testId", asyncHandler(async (req, res) => {
@@ -3331,6 +4049,25 @@ export function registerRoutes(app: Express): void {
     // coverageOf): what the run checked and what it did not. null when none was
     // recorded -- which is not "every check ran", and the screens say so.
     const carried = coverageOf(recorded.coverage);
+    // The backend scan this row names: a scan started through Athena-Backend
+    // (the hybrid), whose record the backend collects when the run ends. null
+    // for a scan this dashboard dispatched to the engine itself, which keeps
+    // today's answer to the letter.
+    const backendScanId = backendScanIdOf(test.findings);
+    const sessionId = req.session?.userId ? req.sessionID : null;
+    /**
+     * The answer, with the row's backend record beside it (`backend`: null for a
+     * row that names none) and the mark of a run no direct Stop reaches
+     * (`stop: "backend"`). `finished` says this read saw the run's end: the
+     * first such read starts the collect watch, which asks the backend as this
+     * person, off the request's path (backendRecordView).
+     */
+    const answer = async (row: Test, payload: Record<string, unknown>, finished: boolean) => {
+      const backend = backendScanId === null ? null
+        : await backendRecordView(collectWatcher, row, backendScanId, sessionId, finished ? { engineRunId: runId } : null);
+      res.json({ ...payload, backend, ...(stoppedOnlyAtBackend(row.findings) ? { stop: "backend" as const } : {}) });
+    };
+
     // A test no engine run stands behind -- a person's, or a sample row -- has
     // no findings of a run's to answer, completed or not. Decided by the one
     // rule the edit guard and the Tests screen use (shared/engine-record.ts):
@@ -3341,7 +4078,12 @@ export function registerRoutes(app: Express): void {
         coverage: null,
       });
     }
-    if (test.status === "completed") {
+    // A hybrid scan whose record the backend has collected is read from that
+    // record, whatever state the engine ended the run in: the record's results
+    // and coverage were filed into the row (collectWatchHooks.fileRecord), and
+    // the engine is not asked about it again.
+    const collected = backendScanId !== null && backendSnapshotOf(recorded.backend) !== null;
+    if (test.status === "completed" || collected) {
       // The engine is not asked again about a run recorded as completed, so what
       // it returned is what was recorded then: the last poll's findings, or the
       // start's for a run the engine finished inline. They are answered in the
@@ -3351,26 +4093,29 @@ export function registerRoutes(app: Express): void {
       // cannot be read are said to be unread, never answered as none.
       const results = readableResults(recorded.results);
       if (results === null) {
-        return void res.json({
+        return answer(test, {
           test, state: test.status, engine: null,
-          detail: "the findings recorded for this scan could not be read",
+          detail: collected
+            ? "the findings in the Athena-Backend record of this scan could not be read"
+            : "the findings recorded for this scan could not be read",
           coverage: carried,
-        });
+        }, true);
       }
       const answered: engine.EngineScan = {
-        runId, state: test.status, findings: results, detail: "the findings recorded when the run completed",
+        runId, state: test.status, findings: results,
+        detail: collected ? "the findings in the Athena-Backend record of this scan" : "the findings recorded when the run completed",
       };
-      return void res.json({ test, state: test.status, engine: answered, coverage: carried });
+      return answer(test, { test, state: test.status, engine: answered, coverage: carried }, true);
     }
     if (!runId) {
       // An engine scan the engine accepted without a run id, not recorded as
       // completed: the engine cannot be asked about it, and it is never told it
       // has no engine run. No Stop can reach it either: every read says so, so
       // the screens show what stops it in place of a Stop.
-      return void res.json({
+      return answer(test, {
         test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK, coverage: carried,
         ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
-      });
+      }, false);
     }
 
     let current;
@@ -3380,9 +4125,9 @@ export function registerRoutes(app: Express): void {
       if (cause instanceof engine.EngineUnavailable) {
         // The record stands even when the engine has gone. Saying so beats
         // reporting the row's last known status as if it were current.
-        return void res.status(200).json({
+        return answer(test, {
           test, state: test.status, engine: null, detail: cause.message, coverage: carried,
-        });
+        }, false);
       }
       throw cause;
     }
@@ -3400,20 +4145,38 @@ export function registerRoutes(app: Express): void {
       ? countSeverities(current.findings)
       : finished ? UNREAD_COUNTS : {};
 
+    // A direct read that succeeded clears the mark of a run this dashboard's
+    // engine key could not read on the first try (decision 7): the run is
+    // readable by this key after all, so its direct Stop is offered again.
+    const { stop: _marked, ...unmarked } = recorded;
+    const kept = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
+    // A Stop's mirror reading written to the row while the engine was being
+    // read (mirrorStopToBackend) is kept, not written over by this poll.
+    const latest = storage.peekTest(test.id);
+    const mirror = backendMirrorOf(((latest?.findings ?? {}) as Record<string, unknown>).backendMirror);
     const updated = await storage.updateTest(test.id, {
       status: current.state,
       completedAt: finished ? new Date() : null,
       // The engine's coverage manifest rides with the run's end
       // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
-      findings: { ...recorded, results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}) },
+      findings: {
+        ...kept, ...(mirror ? { backendMirror: mirror } : {}),
+        results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}),
+      },
       ...counts,
     });
 
     // Filed once the run has stopped moving. Filing a scan still in flight
     // would record half a picture as the current state of the engagement,
     // and the next poll would file the same findings again.
+    //
+    // Only a scan this dashboard dispatched to the engine itself (a legacy row)
+    // is filed here. A hybrid scan -- one started through Athena-Backend, which
+    // names its backend record (shared/engine-record.ts backendScanIdOf) -- is
+    // recorded by the backend, which collects the run when it ends; the same
+    // run filed into this ledger as well would be counted twice.
     let filed: lifecycle.IngestResult | null = null;
-    if (finished && current.findings !== null) {
+    if (finished && current.findings !== null && backendScanId === null) {
       const client = await storage.getClient(test.clientId);
       const site = test.siteId ? await storage.getSite(test.siteId) : null;
       if (client) {
@@ -3432,13 +4195,66 @@ export function registerRoutes(app: Express): void {
     // and never answered as a list: not as none, and not as a row that blanks the
     // page. The same rule answers them once the run is recorded as completed.
     if (readableResults(current.findings) === null) {
-      return void res.json({
+      return answer(updated ?? test, {
         test: updated ?? test, state: current.state, engine: null, filed,
         detail: "the findings the engine sent for this run could not be read",
         coverage: current.coverage ?? carried,
+      }, finished);
+    }
+    return answer(updated ?? test, {
+      test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried,
+    }, finished);
+  }));
+
+  /**
+   * The backend's PDF report of a hybrid scan, relayed as the person: the
+   * backend's own visibility and role checks apply to them, and its answer is
+   * passed on as it is -- the bytes for a completed scan, or its refusal in
+   * its own words (a stopped or failed run has no report: 409). Bounded by the
+   * read deadline, headers and body. A scan this dashboard dispatched itself
+   * has no backend record, and so no report here.
+   */
+  app.get("/api/scans/:testId/backend-pdf", boundedRelayRead({ who: "Athena-Backend", what: "this report read" }), asyncHandler(async (req, res) => {
+    const test = await storage.getTest(req.params.testId);
+    if (!test) return notFound(res, "Test");
+    const scanId = backendScanIdOf(test.findings);
+    if (scanId === null) {
+      return void res.status(409).json({
+        error: "this scan has no Athena-Backend record: this dashboard dispatched it to the engine itself, and the backend holds no report of it",
+        reason: "no_backend_record",
       });
     }
-    res.json({ test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried });
+    let relayed: Awaited<ReturnType<typeof backendScans.fetchPdf>>;
+    try {
+      relayed = await backendScans.fetchPdf(scanId);
+    } catch (cause) {
+      if (refuseForBackend(res, cause, "reading the report")) return;
+      throw cause;
+    }
+    if (!relayed.ok) {
+      const text = await relayed.text().catch(() => "");
+      let object: Record<string, unknown> | null = null;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+      } catch {
+        object = null;
+      }
+      // The backend's words, whole: the pdf route refuses with its `error` and the
+      // record's `error_message` as `detail` (a stopped or failed run has no report).
+      const said = object === null ? null : [object.error, object.detail].filter((one): one is string => typeof one === "string" && one.trim() !== "");
+      const words = said && said.length > 0 ? said.join(" ") : backendScans.refusalWords(object, text);
+      return void res.status(relayed.status).json({
+        error: `Athena-Backend answered ${relayed.status} to the report read: ${words}`,
+        reason: "backend_refused", backendStatus: relayed.status,
+      });
+    }
+    res.status(200);
+    res.setHeader("Content-Type", relayed.headers.get("content-type") ?? "application/pdf");
+    const disposition = relayed.headers.get("content-disposition");
+    if (disposition) res.setHeader("Content-Disposition", disposition);
+    // The report is read whole and sent: the read deadline bounds headers and body alike.
+    res.end(Buffer.from(await relayed.arrayBuffer()));
   }));
 
   // ==== RETEST ====
@@ -4342,6 +5158,12 @@ export function registerRoutes(app: Express): void {
       // Neither list failing is a 500: what the page must say is which list
       // could not be read -- not that nothing ran.
       ({ stops, engineRuns, writeFailures } = await sweep);
+      // Decision 6: each stopped hybrid scan's record at the backend, once THIS
+      // answer has gone out, whichever way it goes -- never before it, never
+      // awaited by it.
+      const stopped = stops.scans ?? [];
+      const whoPressed = actor(req);
+      afterAnswer(res, () => mirrorStopsToBackend(whoPressed, stopped, "kill_switch"));
     }
 
     // The other fields, now that every stop is answered.

@@ -4,7 +4,7 @@ import {
   type Site, type InsertSite,
   type Test, type InsertTest,
   type Finding, type InsertFinding,
-  type FindingSighting, type FindingCheck, type RetestWatch,
+  type FindingSighting, type FindingCheck, type RetestWatch, type CollectWatch,
   type Document, type InsertDocument,
   type ActivityLog, type InsertActivityLog,
   type AIHealthMetric, type InsertAIHealthMetric, type BenchmarkReading,
@@ -116,6 +116,26 @@ export interface IStorage {
    */
   endRetestWatch(engineRunId: string, end: RetestWatchEnd, filing?: RetestFiling): Promise<boolean>;
 
+  // Collect watches (server/collect-watch.ts): a scan started through
+  // Athena-Backend whose run has ended, kept here until the backend has
+  // collected its record, so a restart resumes it and the record is filed once.
+  /** Record a new watch. A second watch of the same backend scan is refused (its primary key). */
+  createCollectWatch(watch: CollectWatch): Promise<CollectWatch>;
+  getCollectWatch(backendScanId: string): Promise<CollectWatch | undefined>;
+  /** The watch of a test's scan, whatever its state, or undefined. */
+  getCollectWatchByTest(testId: string): Promise<CollectWatch | undefined>;
+  /** Every watch still `running`: what a dashboard starting up resumes. */
+  getOpenCollectWatches(): Promise<CollectWatch[]>;
+  /** Change a watch that is still `running`; answers whether it was. */
+  updateRunningCollectWatch(backendScanId: string, patch: Partial<Omit<CollectWatch, "backendScanId" | "state">>): Promise<boolean>;
+  /**
+   * End a watch that is still `running`. This is the claim: of two dashboards
+   * that collected the same record, only the one whose call finds the watch
+   * still running files it into the row; the other's answers false and writes
+   * nothing.
+   */
+  endCollectWatch(backendScanId: string, end: CollectWatchEnd): Promise<boolean>;
+
   // Documents
   getDocument(id: string): Promise<Document | undefined>;
   getAllDocuments(): Promise<Document[]>;
@@ -210,6 +230,10 @@ export interface RetestFiling {
 
 /** Raised when a check for an engine run that already has one is filed: one retest, one check. */
 export class DuplicateRetestCheck extends Error {}
+
+/** How a collect watch ended (CollectWatch fields). */
+export type CollectWatchEnd = Pick<CollectWatch, "state" | "endedAt" | "record"> &
+  Partial<Pick<CollectWatch, "lastAnswer" | "lastReadAt" | "lastReadError">>;
 
 function defaultControlSettings(): AIControlSetting {
   return {
@@ -348,6 +372,9 @@ export class MemStorage implements IStorage {
       notes: null,
       lastTestDate: null,
       isSample: false,
+      backendEngagementId: null,
+      testingWindowStart: null,
+      testingWindowEnd: null,
       ...insertClient,
       id: randomUUID(),
       createdAt: new Date(),
@@ -536,6 +563,39 @@ export class MemStorage implements IStorage {
       this.findings.set(finding.id, { ...finding, ...filing.findingPatch, id: finding.id });
     }
     this.retestWatches.set(engineRunId, { ...row, ...end });
+    return true;
+  }
+
+  private collectWatches = new Map<string, CollectWatch>();
+  async createCollectWatch(watch: CollectWatch) {
+    if (this.collectWatches.has(watch.backendScanId)) {
+      throw new Error(`backend scan ${watch.backendScanId} is already watched`);
+    }
+    this.collectWatches.set(watch.backendScanId, { ...watch });
+    return { ...watch };
+  }
+  async getCollectWatch(backendScanId: string) {
+    const row = this.collectWatches.get(backendScanId);
+    return row ? { ...row } : undefined;
+  }
+  async getCollectWatchByTest(testId: string) {
+    const row = Array.from(this.collectWatches.values()).find((one) => one.testId === testId);
+    return row ? { ...row } : undefined;
+  }
+  async getOpenCollectWatches() {
+    return Array.from(this.collectWatches.values()).filter((one) => one.state === "running").map((one) => ({ ...one }));
+  }
+  async updateRunningCollectWatch(backendScanId: string, patch: Partial<Omit<CollectWatch, "backendScanId" | "state">>) {
+    const row = this.collectWatches.get(backendScanId);
+    if (!row || row.state !== "running") return false;
+    this.collectWatches.set(backendScanId, { ...row, ...patch });
+    return true;
+  }
+  async endCollectWatch(backendScanId: string, end: CollectWatchEnd) {
+    // Synchronous from the read to the write: the check-and-set is the claim.
+    const row = this.collectWatches.get(backendScanId);
+    if (!row || row.state !== "running") return false;
+    this.collectWatches.set(backendScanId, { ...row, ...end });
     return true;
   }
 

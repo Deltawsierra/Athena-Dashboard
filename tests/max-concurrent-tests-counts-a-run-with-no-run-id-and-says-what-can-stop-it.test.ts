@@ -24,8 +24,10 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -65,13 +67,19 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "Limit", company: "Limit", email: "l@l.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://limit.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -87,7 +95,7 @@ afterEach(async () => {
   await agent.patch("/api/ai-control").send({ maxConcurrentTests: 5 });
 });
 
-const start = () => agent.post("/api/scans").send({ clientId, target: "https://limit.example/" });
+const start = () => agent.post("/api/scans").send({ consent: true, clientId, target: "https://limit.example/" });
 const limitTo = async (n: number) => expect((await agent.patch("/api/ai-control").send({ maxConcurrentTests: n })).status).toBe(200);
 
 describe("a running scan the engine accepted without a run id", () => {

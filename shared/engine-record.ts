@@ -93,3 +93,37 @@ export function isEngineRecord(findings: unknown): boolean {
   if (recorded === null) return false;
   return typeof recorded.target === "string" || (recorded.results !== undefined && recorded.results !== null);
 }
+
+/**
+ * The keys of a record that come from Athena-Backend's record of the scan
+ * (the Option 1 hybrid), owned by the scan route and the collect watch as the
+ * run's own keys are: a person may not supply them, and an edit keeps them.
+ *
+ *   - `backendScanId`: the backend's scan uuid -- what is collected, what a
+ *     stop is mirrored to, what the PDF is read by;
+ *   - `backendEngagementId`: the engagement the launch ran under;
+ *   - `backend`: the record once collected (shared/schema.ts BackendRecordSnapshot);
+ *   - `backendMirror`: what a Stop's mirror to the record came to;
+ *   - `stop`: "backend" while this dashboard's engine key cannot read the run
+ *     (its first direct read answered 404), so no direct Stop is offered and
+ *     the screens name the backend's Stop and the failsafes; cleared by the
+ *     first direct read that succeeds.
+ */
+export const BACKEND_RECORD_KEYS = ["backendScanId", "backendEngagementId", "backend", "backendMirror", "stop"] as const;
+
+/** The backend scan uuid a record names, or null when it names none (a scan this dashboard dispatched to the engine itself). */
+export function backendScanIdOf(findings: unknown): string | null {
+  const value = recordOf(findings)?.backendScanId;
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/** The backend engagement a record names, or null. */
+export function backendEngagementIdOf(findings: unknown): number | null {
+  const value = recordOf(findings)?.backendEngagementId;
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+/** Whether a record's run is one no direct Stop reaches: this dashboard's engine key could not read it (see BACKEND_RECORD_KEYS). */
+export function stoppedOnlyAtBackend(findings: unknown): boolean {
+  return recordOf(findings)?.stop === "backend";
+}

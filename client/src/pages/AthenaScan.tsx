@@ -21,6 +21,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ChevronRight, Play, Plug, ShieldCheck, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -44,7 +45,9 @@ import {
   ENGINE_ERROR_LABEL, FINDINGS_BEFORE_END, NOTHING_HERE_IS_A_RESULT, NOT_ASSESSED, NOT_ASSESSED_BASIS, endedState,
   notFinished,
 } from "@/lib/scanSummaryCopy";
-import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
+import { DASHBOARD_DIRECT, HYBRID_SOURCE, coverageSourceFor } from "@/lib/sourceLabels";
+import BackendRecordPanel from "@/components/BackendRecordPanel";
+import type { BackendRecordView } from "@shared/backend-record";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
   SCAN_STAGES,
@@ -91,8 +94,14 @@ interface ScanView {
   test: Test;
   state: string;
   detail?: string;
-  /** "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel). */
-  stop?: "failsafe";
+  /**
+   * "failsafe": the engine gave this scan no run id a stop can name, so no Stop can reach it (NoStopPanel).
+   * "backend": this dashboard's engine key could not read the run Athena-Backend started, so no direct Stop is
+   * offered until a read succeeds (NoStopPanel's backend variant).
+   */
+  stop?: "failsafe" | "backend";
+  /** Athena-Backend's record of a scan started through it (shared/backend-record.ts); null for a scan this dashboard dispatched itself. */
+  backend?: BackendRecordView | null;
   /** The engine's coverage manifest for this run, as recorded (shared/scan-coverage.ts); null when none was. */
   coverage?: unknown;
   engine: {
@@ -132,6 +141,13 @@ export default function AthenaScan() {
   const [clientId, setClientId] = useState("");
   const [siteId, setSiteId] = useState("");
   const [target, setTarget] = useState("");
+  // Athena-Backend records the owner's consent with the scan and refuses a
+  // start without it; the box is ticked by the person, never pre-ticked.
+  const [consent, setConsent] = useState(false);
+  // The report's recipient: sent to Athena-Backend only when the person opted
+  // in (decision 10); unticked and blank by default, never defaulted.
+  const [emailOptIn, setEmailOptIn] = useState(false);
+  const [recipientEmail, setRecipientEmail] = useState("");
   const [testId, setTestId] = useState<string | null>(null);
 
   // Polled, like the scan below. React Query keeps the last answer after a
@@ -166,8 +182,13 @@ export default function AthenaScan() {
     enabled: testId !== null,
     // Polled while it moves, left alone once it has stopped.
     refetchInterval: (query) => {
-      const state = (query.state.data as ScanView | undefined)?.state;
-      return state && FINISHED.has(state) ? false : 2_000;
+      const data = query.state.data as ScanView | undefined;
+      if (!data || !FINISHED.has(data.state)) return 2_000;
+      // A finished scan started through Athena-Backend is read again while the
+      // backend collects its record (shared/backend-record.ts), so the page
+      // shows the record once it stands; left alone once it is collected or no
+      // longer asked for, and at once for a scan with no record there.
+      return data.backend && data.backend.collected === false && data.backend.watch === "running" ? 2_000 : false;
     },
   }));
   // The scan's last state, only while it is current. When a poll fails the
@@ -188,10 +209,13 @@ export default function AthenaScan() {
   const press = useKeyedPress();
   const start = useMutation({
     mutationFn: async () => {
-      const request = { clientId, siteId: siteId || undefined, target: target.trim() };
+      const request = {
+        clientId, siteId: siteId || undefined, target: target.trim(), consent,
+        ...(emailOptIn && recipientEmail.trim() !== "" ? { recipientEmail: recipientEmail.trim() } : {}),
+      };
       const response = await apiRequest("POST", "/api/scans", request, press.headersFor(request));
       return (await response.json()) as {
-        test: Test; runId: string | null; state?: string; stop?: "failsafe"; warning?: string; replayed?: boolean;
+        test: Test; runId: string | null; state?: string; stop?: "failsafe" | "backend"; warning?: string; replayed?: boolean;
       };
     },
     onSuccess: (result) => {
@@ -239,7 +263,7 @@ export default function AthenaScan() {
   // wrong key answers it happily. `null` (an engine too old to be asked) is
   // allowed through rather than grounding a working deployment.
   const engineReady = Boolean(engine?.configured && engine?.reachable) && engine?.authorized !== false;
-  const engagementReady = clientId !== "" && target.trim() !== "";
+  const engagementReady = clientId !== "" && target.trim() !== "" && consent;
   const canScan = engineReady && engagementReady;
 
   // What the run returned. Null when this read carries none: the engine could
@@ -266,6 +290,17 @@ export default function AthenaScan() {
     ? start.data.warning : null;
   const failsafeOnly = testId !== null
     && ((start.data !== undefined && start.data.test.id === testId && start.data.stop === "failsafe") || scan?.stop === "failsafe");
+  // A run this dashboard's engine key could not read (the server marked it
+  // `stop: "backend"`, decision 7): no direct Stop is offered, and NoStopPanel's
+  // backend variant names what reaches it. The start's word until the first
+  // read; then each read's -- a direct read that succeeds clears the mark, and
+  // the Stop is back.
+  const backendOnly = testId !== null
+    && (scan !== undefined ? scan.stop === "backend" : start.data !== undefined && start.data.test.id === testId && start.data.stop === "backend");
+  // Athena-Backend's record of this scan (shared/backend-record.ts): null for a scan this dashboard dispatched itself.
+  const backendRecord = scan?.backend ?? null;
+  const recordedTarget = typeof (scan?.test.findings as { target?: unknown } | undefined)?.target === "string"
+    ? ((scan!.test.findings as { target: string }).target) : null;
   const finished = scan !== undefined && FINISHED.has(scan.state);
   // How the run ended, when it ended short of completed (lib/scanSummaryCopy.ts
   // endedState): aborted, failed or refused. Nothing is derived from such a run:
@@ -489,12 +524,50 @@ export default function AthenaScan() {
             anything it may not reach; its reason is shown here unchanged.
           </p>
 
+          <div className="flex items-start gap-3" data-testid="field-consent">
+            <Checkbox
+              id="consent"
+              data-testid="checkbox-consent"
+              checked={consent}
+              onCheckedChange={(checked) => setConsent(checked === true)}
+            />
+            <Label htmlFor="consent" className="cursor-pointer text-[12px] font-normal leading-5 text-muted-foreground">
+              The owner of this target has agreed to this test. Athena-Backend records
+              that consent with the scan and refuses a start without it.
+            </Label>
+          </div>
+
+          <div className="space-y-2" data-testid="field-recipient">
+            <div className="flex items-start gap-3">
+              <Checkbox
+                id="email-opt-in"
+                data-testid="checkbox-email-opt-in"
+                checked={emailOptIn}
+                onCheckedChange={(checked) => setEmailOptIn(checked === true)}
+              />
+              <Label htmlFor="email-opt-in" className="cursor-pointer text-[12px] font-normal leading-5 text-muted-foreground">
+                E-mail the report from Athena-Backend when the run completes. Nothing is sent unless this is ticked
+                and an address is given.
+              </Label>
+            </div>
+            {emailOptIn && (
+              <Input
+                id="recipient-email"
+                type="email"
+                data-testid="input-recipient-email"
+                placeholder="reports@example.com"
+                value={recipientEmail}
+                onChange={(e) => setRecipientEmail(e.target.value)}
+              />
+            )}
+          </div>
+
           <div className="flex items-center gap-3">
             <Button type="submit" data-testid="button-start-scan" disabled={!canScan || start.isPending || mayBeRunning}>
               <Play className="mr-2 h-4 w-4" />
               {start.isPending ? "Asking the engine…" : "Start scan"}
             </Button>
-            {mayBeRunning && !failsafeOnly && (
+            {mayBeRunning && !failsafeOnly && !backendOnly && (
               <Button
                 type="button"
                 variant="destructive"
@@ -525,6 +598,7 @@ export default function AthenaScan() {
             </div>
           )}
           {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
+          {mayBeRunning && backendOnly && !failsafeOnly && <NoStopPanel variant="backend" className="mt-3" />}
           {/* What the engine said went wrong around a run it started all the
               same (a 500 that named a run whose work started, or an answer
               that named no run id): the server's words, as it said them. */}
@@ -571,7 +645,7 @@ export default function AthenaScan() {
               <p className="mt-1 text-[13px] text-muted-foreground">{clientName}</p>
               {/* Where this scan is recorded (lib/sourceLabels.ts): here, from the
                   engine; no backend verdict, claim or report applies to it. */}
-              <p className="mt-2 text-[11px] text-muted-foreground" data-testid="text-scan-source">{DASHBOARD_DIRECT}.</p>
+              <p className="mt-2 text-[11px] text-muted-foreground" data-testid="text-scan-source">{backendRecord ? HYBRID_SOURCE : DASHBOARD_DIRECT}.</p>
               {scan.detail && <p className="mt-3 text-[13px] leading-relaxed text-muted-foreground">{scan.detail}</p>}
               <div className="mt-4 border-t border-border/40 pt-4">
                 <p className="athena-label">Started</p>
@@ -738,8 +812,16 @@ export default function AthenaScan() {
           {/* What this scan checked and what it did not: the engine's own
               manifest for this run (shared/scan-coverage.ts), written when the
               run ends, and said to be pending until then. */}
+          {/* Athena-Backend's record of this scan: not asked yet, being collected, or
+              collected -- with its verdict, engagement and report, or no verdict for
+              a run that did not finish. Never for a scan this dashboard dispatched itself. */}
+          {backendRecord && (
+            <GlassCard hover={false} glow={false} className="mt-5">
+              <BackendRecordPanel backend={backendRecord} target={recordedTarget} />
+            </GlassCard>
+          )}
           <GlassCard hover={false} glow={false} className="mt-5">
-            <ScanCoverage coverage={scan.coverage} running={running} />
+            <ScanCoverage coverage={scan.coverage} running={running} {...coverageSourceFor(backendRecord)} />
           </GlassCard>
         </>
       )}

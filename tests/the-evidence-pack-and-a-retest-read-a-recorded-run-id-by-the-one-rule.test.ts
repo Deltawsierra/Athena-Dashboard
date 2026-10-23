@@ -17,8 +17,10 @@ import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
 import type { IStorage } from "../server/storage";
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
+let hybrid: HybridBackendStandIn | null = null;
 const TARGET = "https://pack.example/";
 const XSS = { type: "reflected_xss", severity: "high", message: "Reflected input on /search", endpoint: "/search" };
 
@@ -63,13 +65,19 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   agent = await signIn(await makeApp());
+  await signInToBackend(agent);
   storage = (await import("../server/storage-unified")).storage;
   clientId = (await agent.post("/api/clients").send({ name: "Pack", company: "Pack", email: "p@p.test" })).body.id;
   await agent.post("/api/sites").send({ clientId, name: "Shop", url: "https://pack.example" });
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -78,11 +86,15 @@ afterAll(async () => {
 /** A finished scan whose run id is recorded as the number the engine sent, as it was before the shared rule. */
 async function scanRecordedByNumber(runId: number) {
   startBody = { run_id: runId, state: "completed", result: { results: [XSS] } };
-  const started = await agent.post("/api/scans").send({ clientId, target: TARGET });
+  const started = await agent.post("/api/scans").send({ consent: true, clientId, target: TARGET });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   const id = started.body.test.id as string;
   const recorded = (await storage.getTest(id))!.findings as Record<string, unknown>;
   await storage.updateTest(id, { findings: { ...recorded, runId } });
+  // A scan started through Athena-Backend is not filed into this dashboard's own ledger (its record is the
+  // backend's); the finding the retest below is about is filed here as a scan recorded before the hybrid was.
+  const lifecycle = await import("../server/findings");
+  await lifecycle.ingest(storage, [XSS], { clientId, siteId: null, engagementRef: clientId, target: TARGET, testId: id, runId: String(runId) });
   return id;
 }
 

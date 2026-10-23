@@ -3,7 +3,8 @@ import http from "http";
 import type { IncomingMessage, Server, ServerResponse } from "http";
 import type { AddressInfo } from "net";
 
-import { makeApp, signIn } from "./helpers";
+import { makeApp, signIn, signInToBackend } from "./helpers";
+import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 
 /**
  * Every field the engine or the scan route decided is refused as an edit of an
@@ -20,6 +21,7 @@ import { makeApp, signIn } from "./helpers";
  * (Pins mutants R11-R16 of the round-5 mutation run, each of which survived
  * the whole suite: a field dropped from the list, or null read as a run.)
  */
+let hybrid: HybridBackendStandIn | null = null;
 const json = (res: ServerResponse, code: number, body: unknown) => {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
@@ -40,10 +42,16 @@ beforeAll(async () => {
   await new Promise<void>((r) => engine.listen(0, "127.0.0.1", r));
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${(engine.address() as AddressInfo).port}`;
   process.env.ATHENA_ENGINE_KEY = "k";
+  hybrid = await hybridBackendStandIn({ engine: { url: process.env.ATHENA_ENGINE_URL!, key: process.env.ATHENA_ENGINE_KEY } });
+  process.env.ATHENA_FAILSAFE_URL = hybrid.url;
   vi.resetModules();
   admin = await signIn(await makeApp());
+  await signInToBackend(admin);
 });
 afterAll(async () => {
+  delete process.env.ATHENA_FAILSAFE_URL;
+  await hybrid?.close();
+  hybrid = null;
   delete process.env.ATHENA_ENGINE_URL;
   delete process.env.ATHENA_ENGINE_KEY;
   await new Promise<void>((r) => engine.close(() => r()));
@@ -54,7 +62,7 @@ describe("every field the engine or the scan route decided is refused as an edit
     const clientId = (await admin.post("/api/clients").send({ name: "O", company: "O", email: "o@o.test" })).body.id;
     const siteA = (await admin.post("/api/sites").send({ clientId, name: "A", url: "https://a.example" })).body.id;
     const siteB = (await admin.post("/api/sites").send({ clientId, name: "B", url: "https://b.example" })).body.id;
-    const started = await admin.post("/api/scans").send({ clientId, siteId: siteA, target: "https://a.example/" });
+    const started = await admin.post("/api/scans").send({ consent: true, clientId, siteId: siteA, target: "https://a.example/" });
     expect(started.status).toBe(201);
     const id = started.body.test.id;
     for (const [body, named] of [
