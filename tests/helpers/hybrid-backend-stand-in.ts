@@ -45,6 +45,25 @@
  *     and the tests count the stub's aborts); `stopAbortsEngine` turns that on.
  *   - `GET /api/pentest/scans/<uuid>/pdf/`: bytes for a completed scan; 409
  *     `{error, detail}` for any other status (a stopped or failed run has no PDF).
+ *   - With `assurance`, the retest-check routes of athena-backend #189 (owner
+ *     decision 8; assurance/retest_checks.py, FindingViewSet.retest_checks_collect):
+ *     `POST /api/assurance/findings/<uuid>/retest-checks/collect/` (admin or
+ *     analyst; the finding visible) with `{run_id, twin_run_id}`, in the
+ *     backend's order -- a run already recorded is 200 with its row (409 when it
+ *     is another finding's); ONE read of the engine stub's `GET /api/scans/<run_id>`
+ *     (404 → 404 "the engine has no run"; unreachable → 503, nothing written); a
+ *     run still going → 202 `{phase: "running"}`; one that stopped, failed or
+ *     ended without a verdict → 200 `{phase, recorded: false}`, nothing written;
+ *     then identity, every check or nothing written: the scan under `twin_run_id`
+ *     is in this record (else 404), its deployment is the finding's (else 422),
+ *     the verdict's type is the finding's and the finding is the one of that type
+ *     in the deployment (else 422 / 409 with the candidates), the verdict's target
+ *     host is the scan's (else 422), and the engine lists the twin under that run
+ *     with that type (else 422); then one row, UNIQUE on the run id, answered 201
+ *     `{check, recorded: true, closure}`. A check is NOT closure evidence: the
+ *     finding's status, closure and everything else stay as they were.
+ *     `GET /api/assurance/findings/<uuid>/retest-checks/`: every check, newest
+ *     first, paginated; the findings list carries each finding's latest ten.
  *
  * Every request is recorded with the account it was made as, what authenticated
  * it, whether the backend judges it a stop, its Idempotency-Key, and its status.
@@ -172,8 +191,41 @@ export interface HybridFinding {
   /** The scan this finding was ingested from, and the run it names; null for one filed another way. */
   scan_uuid: string | null;
   engine_run_id: string | number | null;
-  retest_checks: unknown[];
+  /** The retest checks recorded against it, newest first (#189 RetestCheckSerializer); the list serves the latest ten. */
+  retest_checks: HybridRetestCheck[];
 }
+
+/** One retest check as the backend serves it (#189 RetestCheckSerializer's fields, and nothing else). */
+export interface HybridRetestCheck {
+  engine_run_id: string;
+  scan_record_id: string | null;
+  twin_id: number;
+  twin_run_id: string;
+  /** The engine's word, as sent (closed | still_open | inconclusive, or another). */
+  verdict: string;
+  verdict_known: boolean;
+  detail: string;
+  /** completed | aborted */
+  state: string;
+  stopped_after_recording: boolean;
+  engine_checked_at: string | null;
+  collected_at: string;
+  collected_by: string | null;
+}
+
+/** The verdicts the engine's retest files (athena-backend assurance/retest_checks.py KNOWN_VERDICTS). */
+const KNOWN_VERDICTS = ["closed", "still_open", "inconclusive"];
+/** The shape of an engine run id the backend names to the engine (retest_checks.py RUN_ID). */
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** What the backend says for a run that ended without a verdict it keeps (retest_checks.py _PHASE_DETAIL). */
+const PHASE_DETAIL: Record<string, string> = {
+  stopped: "the run was stopped on the engine before its check was filed: no verdict, and nothing was recorded",
+  failed: "the run failed on the engine: its inconclusive result is not a verdict on the finding, and nothing was recorded",
+  refused: "the engine refused the run before any of its work started: nothing was recorded",
+  ended_without_verdict: "the run ended without a verdict: nothing was recorded",
+};
+/** How many of a finding's checks its serializer carries (serializers.py RETEST_CHECKS_SERVED). */
+const RETEST_CHECKS_SERVED = 10;
 
 export interface HybridStandInOptions {
   /** The test's own engine stub: where every launch goes, as the real backend launches with its own key. */
@@ -309,6 +361,8 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
   /** The assurance record's deployments and findings, served when opts.assurance is set. */
   const deployments = new Map<string, HybridDeployment>();
   const findings = new Map<string, HybridFinding>();
+  /** Every retest check recorded, by the engine run id it is UNIQUE on, with the finding it was recorded against. */
+  const retestChecks = new Map<string, HybridRetestCheck & { finding_uuid: string }>();
   /** The Idempotency-Key layer: per account and route, the first request and its answer. */
   const keyed = new Map<string, { request: string; answer: { status: number; body: unknown } | null }>();
   const engineCalls: Array<{ method: string; path: string; body: Record<string, unknown> | null; key: string | null }> = [];
@@ -343,11 +397,16 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     holdScansLists: false,
     /** The next scan detail read is answered with this instead of the record (a finished scan the sync cannot read now). */
     failNextScanDetail: null as { status: number; body: unknown } | null,
+    /** The next retest-check collect is answered with this, before anything is read or written. */
+    failNextRetestCheckCollect: null as { status: number; body: unknown } | null,
+    /** Retest-check collects held unanswered until releaseRetestCheckCollects(). */
+    holdRetestCheckCollects: false,
   };
   const heldLaunches: Array<() => void> = [];
   const heldScansLists: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
   const heldStops: Array<() => void> = [];
+  const heldRetestCheckCollects: Array<() => void> = [];
   /** The scans a collect is reading the engine for right now: a second collector meanwhile is told the record is claimed (409). */
   const collecting = new Set<string>();
 
@@ -660,8 +719,10 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
         };
         const assuranceList = opts.assurance === true && method === "GET"
           && (path === "/api/assurance/deployments/" || path === "/api/assurance/findings/");
+        /** #189's retest-check routes on a finding: `retest-checks/` (the list) and `retest-checks/collect/`. */
+        const retestCheckPath = opts.assurance === true ? /^\/api\/assurance\/findings\/([^/]+)\/retest-checks\/(collect\/)?$/.exec(path) : null;
         const servedHere = path.startsWith("/api/pentest/") || path === "/api/accounts/users/me/"
-          || path === "/api/token/" || path === "/api/token/refresh/" || path === "/api/token/revoke/" || assuranceList;
+          || path === "/api/token/" || path === "/api/token/refresh/" || path === "/api/token/revoke/" || assuranceList || retestCheckPath !== null;
         if (!servedHere && opts.upstream) return void (await forward());
 
         if (path === "/api/token/" && method === "POST") {
@@ -747,8 +808,157 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
           const wanted = url.searchParams.get("deployment");
           const uuids = new Set(visible.map((one) => one.uuid));
           const rows = Array.from(findings.values())
-            .filter((one) => uuids.has(one.deployment_uuid) && (wanted === null || one.deployment_uuid === wanted));
+            .filter((one) => uuids.has(one.deployment_uuid) && (wanted === null || one.deployment_uuid === wanted))
+            // The serializer carries the latest RETEST_CHECKS_SERVED checks, newest first; the whole list is the retest-checks route.
+            .map((one) => ({ ...one, retest_checks: one.retest_checks.slice(0, RETEST_CHECKS_SERVED) }));
           return answer(200, pageOf(rows, path, url.searchParams));
+        }
+
+        // ---- the retest-check routes (opts.assurance; athena-backend #189) ----
+        if (retestCheckPath) {
+          const uuid = retestCheckPath[1];
+          const collect = retestCheckPath[2] === "collect/";
+          // The permission classes run before the view: a viewer's collect is 403 before any lookup.
+          if (collect && method === "POST" && !adminOrAnalyst) return forbidden();
+          const visible = new Set(deploymentsVisibleTo(who).map((one) => one.uuid));
+          const finding = findings.get(uuid);
+          // get_object on the person's queryset: a finding they cannot see is "not found", as detail is.
+          if (!finding || !visible.has(finding.deployment_uuid)) return answer(404, { detail: "No Finding matches the given query." });
+          if (!collect && method === "GET") return answer(200, pageOf(finding.retest_checks, path, url.searchParams));
+          if (!collect || method !== "POST") return answer(405, { detail: `Method "${method}" not allowed.` });
+          if (controls.failNextRetestCheckCollect !== null) {
+            const fault = controls.failNextRetestCheckCollect;
+            controls.failNextRetestCheckCollect = null;
+            return answer(fault.status, fault.body);
+          }
+          if (controls.holdRetestCheckCollects) {
+            await new Promise<void>((release) => { heldRetestCheckCollects.push(release); held.push(res); });
+            if (res.destroyed) return;
+          }
+          // The body: both run ids required, each a run id this backend names to the engine (the view's ValidationError shape).
+          if (body === null) return answer(400, { body: "a JSON object naming run_id and twin_run_id" });
+          const named: Record<string, string> = {};
+          for (const field of ["run_id", "twin_run_id"]) {
+            const value = body[field];
+            if (typeof value !== "string" || value.trim() === "") return answer(400, { [field]: "required: the engine's run id, a non-empty string" });
+            if (!RUN_ID.test(value)) {
+              return answer(400, { [field]: "not a run id this backend names to the engine: letters, digits, '.', '_' and '-', at most 64 of them" });
+            }
+            named[field] = value;
+          }
+          const runId = named.run_id;
+          const twinRunId = named.twin_run_id;
+          const served = (row: HybridRetestCheck & { finding_uuid: string }): HybridRetestCheck => {
+            const { finding_uuid: _own, ...fields } = row;
+            return fields;
+          };
+          // The finding's closure standing, unchanged by any check: a check is not closure evidence.
+          const closure = () => finding.closure ?? { standing: "not_closable", retest_required: finding.retest_required, reasons: ["no closure evidence recorded"], evidence: null };
+          // 1. A run already recorded is answered with its row, and the engine is not read.
+          const existing = retestChecks.get(runId);
+          if (existing !== undefined) {
+            if (existing.finding_uuid !== uuid) {
+              return answer(409, { detail: `run ${runId} is already recorded as a retest check of another finding; nothing was written`, run_id: runId, recorded: false });
+            }
+            return answer(200, { check: served(existing), recorded: false, closure: closure() });
+          }
+          // 2. ONE bounded engine read, before anything is written. Its 404 is a 404 here (a tenant-bound key reads another tenant's run as no such run).
+          const unreadable = (what: string, kind: string, extra: Record<string, unknown>) => answer(503, {
+            detail: `Not recorded: the engine could not be read about ${what} (${kind}). Nothing was written; collect it again once the engine can be read.`,
+            ...extra, recorded: false, engine: kind,
+          });
+          if (controls.engineUnreachable) return unreadable(`retest run ${runId}`, "unreachable", { run_id: runId });
+          const read = await engine("GET", `/api/scans/${runSegment(runId)}`);
+          if (!read.ok) return unreadable(`retest run ${runId}`, "unreachable", { run_id: runId });
+          if (read.status === 404) return answer(404, { detail: `the engine has no run ${runId} this backend can read`, run_id: runId, recorded: false });
+          if (read.status !== 200) return unreadable(`retest run ${runId}`, "refused", { run_id: runId });
+          const payload = read.body ?? {};
+          const state = typeof payload.state === "string" ? payload.state : "unknown";
+          const result = payload.result && typeof payload.result === "object" && !Array.isArray(payload.result) ? (payload.result as Record<string, unknown>) : {};
+          const verdict = typeof result.verdict === "string" ? result.verdict : null;
+          const check = result.check && typeof result.check === "object" && !Array.isArray(result.check) ? (result.check as Record<string, unknown>) : null;
+          // 3. read_retest_run's phases: a run still going is 202; one that ended without a verdict is its honest phase, nothing written.
+          const notAVerdict = (phase: string, status: number) => answer(status, {
+            phase, state, run_id: runId, recorded: false,
+            detail: phase === "running"
+              ? "the run is still going on the engine: nothing was recorded; collect it once it has ended"
+              : PHASE_DETAIL[phase] ?? "the run produced no verdict this backend reads: nothing was recorded",
+          });
+          if (payload.done !== true || state === "queued" || state === "running" || state === "aborting") return notAVerdict("running", 202);
+          if (state === "failed") return notAVerdict("failed", 200);
+          if (state === "aborted" && !(verdict !== null && check !== null)) return notAVerdict("stopped", 200);
+          if (verdict === null) return notAVerdict("ended_without_verdict", 200);
+          // 4. Identity. Every check passes, or nothing is written.
+          const scan = Array.from(scans.values()).find((one) => one.engine_run_id !== null && String(one.engine_run_id) === twinRunId);
+          if (!scan) {
+            return answer(404, {
+              detail: "that scan is not in this record: no scan of this backend ran under that engine run, so its retest cannot be recorded here",
+              twin_run_id: twinRunId, recorded: false,
+            });
+          }
+          // The scan's deployment: the one its engagement's ingest keyed (existing_deployment_for_scan), found and never created here.
+          const scanDeployment = Array.from(deployments.values()).find((one) => one.engagement_id === scan.engagement);
+          if (!scanDeployment) {
+            return answer(422, {
+              detail: "that scan's deployment is not in this record: its run was never ingested here, so no finding of it can have been retested",
+              twin_run_id: twinRunId, recorded: false,
+            });
+          }
+          if (scanDeployment.uuid !== finding.deployment_uuid) {
+            return answer(422, { detail: "the twin's scan belongs to another deployment than this finding's; nothing was written", twin_run_id: twinRunId, recorded: false });
+          }
+          const findingType = typeof result.finding_type === "string" && result.finding_type !== "" ? result.finding_type : null;
+          if (findingType === null) return answer(422, { detail: "the engine's verdict names no finding type; nothing was written", recorded: false });
+          if (findingType !== finding.finding_type) {
+            return answer(422, {
+              detail: `the verdict is of type '${findingType}'; this finding is of type '${finding.finding_type}'; nothing was written`,
+              finding_type: findingType, recorded: false,
+            });
+          }
+          const candidates = Array.from(findings.values()).filter((one) => one.deployment_uuid === scanDeployment.uuid && one.finding_type === findingType).map((one) => one.uuid);
+          if (candidates.length > 1) {
+            return answer(409, {
+              detail: `${candidates.length} findings of type '${findingType}' are in that deployment, so the run's twin cannot be told to one of them; nothing was written`,
+              finding_type: findingType, candidates, recorded: false,
+            });
+          }
+          if (candidates[0] !== uuid) return answer(409, { detail: "the run's twin is a finding other than this one; nothing was written", recorded: false });
+          const verdictHost = typeof result.target === "string" ? hostOf(result.target) : "";
+          const scanHost = hostOf(scan.target_url);
+          if (verdictHost === "" || verdictHost !== scanHost) {
+            return answer(422, { detail: `the verdict's target host '${verdictHost || "(none)"}' is not the scan's ('${scanHost}'); nothing was written`, recorded: false });
+          }
+          const twinId = typeof result.twin_id === "number" && Number.isSafeInteger(result.twin_id) ? result.twin_id : null;
+          if (twinId === null) return answer(422, { detail: "the engine's verdict names no twin; nothing was written", recorded: false });
+          // The strong check: one more bounded read -- the engine lists the twin under the scan run with the verdict's type.
+          const twins = await engine("GET", `/api/decisions?run_id=${encodeURIComponent(twinRunId)}&finding_type=${encodeURIComponent(findingType)}`);
+          if (!twins.ok || twins.status !== 200) return unreadable(`the twins of scan run ${twinRunId}`, twins.ok ? "refused" : "unreachable", { twin_run_id: twinRunId });
+          const decisions = Array.isArray(twins.body?.decisions) ? (twins.body!.decisions as unknown[]) : [];
+          const listed = decisions.some((one) => !!one && typeof one === "object"
+            && (one as { id?: unknown }).id === twinId && (one as { finding_type?: unknown }).finding_type === findingType);
+          if (!listed) {
+            return answer(422, { detail: `the engine lists no twin ${twinId} of type '${findingType}' under scan run ${twinRunId}; nothing was written`, twin_run_id: twinRunId, recorded: false });
+          }
+          // 5. One row, UNIQUE on the run id, this table only: the finding's status, closure and everything else stay as they were.
+          const checkedAt = check !== null && typeof check.checked_at === "string" ? check.checked_at : null;
+          const row: HybridRetestCheck & { finding_uuid: string } = {
+            finding_uuid: uuid,
+            engine_run_id: runId,
+            scan_record_id: result.scan_record_id === null || result.scan_record_id === undefined ? null : String(result.scan_record_id).slice(0, 64),
+            twin_id: twinId,
+            twin_run_id: twinRunId,
+            verdict: verdict.slice(0, 32),
+            verdict_known: KNOWN_VERDICTS.includes(verdict),
+            detail: (typeof result.detail === "string" ? result.detail : "").slice(0, 1000),
+            state: state === "aborted" ? "aborted" : "completed",
+            stopped_after_recording: state === "aborted",
+            engine_checked_at: checkedAt,
+            collected_at: new Date().toISOString(),
+            collected_by: who,
+          };
+          retestChecks.set(runId, row);
+          finding.retest_checks.unshift(served(row));
+          return answer(201, { check: served(row), recorded: true, closure: closure() });
         }
 
         // ---- engagements ----
@@ -986,6 +1196,8 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     /** The assurance record's deployments and findings it holds (served when opts.assurance is set). */
     deployments,
     findings,
+    /** Every retest check recorded (#189), by the engine run id it is unique on, each naming the finding it was recorded against. */
+    retestChecks,
     /** A deployment in the assurance record, as the backend's ingest would have made one under an engagement. */
     addDeployment(input: Partial<HybridDeployment> & { uuid: string; name: string }): HybridDeployment {
       const now = new Date().toISOString();
@@ -1049,9 +1261,17 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       controls.holdScansLists = false;
       heldScansLists.splice(0).forEach((release) => release());
     },
+    /** Hold every retest-check collect's answer until releaseRetestCheckCollects(): a collect in flight that no stop waits on. */
+    holdRetestCheckCollects(): void { controls.holdRetestCheckCollects = true; },
+    releaseRetestCheckCollects(): void {
+      controls.holdRetestCheckCollects = false;
+      heldRetestCheckCollects.splice(0).forEach((release) => release());
+    },
     /** Requests of one kind seen so far. */
     launches: () => seen.filter((one) => one.method === "POST" && one.path === "/api/pentest/scan/"),
-    collects: () => seen.filter((one) => one.method === "POST" && one.path.endsWith("/collect/")),
+    /** The scan collects (`/api/pentest/scans/<uuid>/collect/`); a retest-check collect is another route (retestCheckCollects). */
+    collects: () => seen.filter((one) => one.method === "POST" && one.path.startsWith("/api/pentest/scans/") && one.path.endsWith("/collect/")),
+    retestCheckCollects: () => seen.filter((one) => one.method === "POST" && /^\/api\/assurance\/findings\/[^/]+\/retest-checks\/collect\/$/.test(one.path)),
     stops: () => seen.filter((one) => one.method === "POST" && one.path.endsWith("/stop/")),
     deletes: () => seen.filter((one) => one.method === "DELETE"),
     /** The first request, arrived or yet to arrive, that matches. */
@@ -1066,6 +1286,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       heldCollects.splice(0).forEach((release) => release());
       heldStops.splice(0).forEach((release) => release());
       heldScansLists.splice(0).forEach((release) => release());
+      heldRetestCheckCollects.splice(0).forEach((release) => release());
       for (const res of held) res.destroy();
       server.closeAllConnections?.();
       await new Promise<void>((done) => server.close(() => done()));
