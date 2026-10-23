@@ -1,3 +1,4 @@
+import type { RetestCheckRecordView } from "@shared/backend-record";
 import {
   type User, type InsertUser,
   type Client, type InsertClient,
@@ -123,6 +124,14 @@ export interface IStorage {
    * nothing. A check for an engine run already filed is refused as well.
    */
   endRetestWatch(engineRunId: string, end: RetestWatchEnd, filing?: RetestFiling): Promise<boolean>;
+  // Retest checks (server/retest-check-watch.ts): where a verdict's recording
+  // at Athena-Backend stands, kept on the ENDED watch's row (`result.backend`,
+  // shared/backend-record.ts RetestCheckRecordView) -- never on a running one,
+  // and never in finding_checks, which is the dashboard's own filing.
+  /** Set `result.backend` on a watch that ended with a verdict; answers whether there is one. */
+  noteRetestCheckBackend(engineRunId: string, backend: RetestCheckRecordView): Promise<boolean>;
+  /** Every watch that ended with a verdict whose backend standing is still `asking`: what a dashboard starting up resumes. */
+  getRetestWatchesAskingBackend(): Promise<RetestWatch[]>;
 
   // Collect watches (server/collect-watch.ts): a scan started through
   // Athena-Backend whose run has ended, kept here until the backend has
@@ -576,6 +585,17 @@ export class MemStorage implements IStorage {
     }
     this.retestWatches.set(engineRunId, { ...row, ...end });
     return true;
+  }
+  async noteRetestCheckBackend(engineRunId: string, backend: RetestCheckRecordView) {
+    const row = this.retestWatches.get(engineRunId);
+    if (!row || row.state !== "verdict") return false;
+    this.retestWatches.set(engineRunId, { ...row, result: { ...(row.result ?? {}), backend } });
+    return true;
+  }
+  async getRetestWatchesAskingBackend() {
+    return Array.from(this.retestWatches.values())
+      .filter((one) => one.state === "verdict" && (one.result?.backend as { state?: unknown } | undefined)?.state === "asking")
+      .map((one) => ({ ...one }));
   }
 
   private collectWatches = new Map<string, CollectWatch>();

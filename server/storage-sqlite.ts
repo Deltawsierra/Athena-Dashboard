@@ -1,11 +1,12 @@
 import { db, sqlite } from "./db-sqlite";
 import * as schema from "@shared/schema";
-import { and, desc, eq, getTableColumns, gte, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, gte, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
 import { DuplicateBackendScan, DuplicateRetestCheck, type CollectWatchEnd, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
+import type { RetestCheckRecordView } from "@shared/backend-record";
 import { backendScanIdOf } from "@shared/engine-record";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
@@ -456,6 +457,26 @@ export class SqliteStorage implements IStorage {
       return true;
     });
     return run.immediate();
+  }
+  async noteRetestCheckBackend(engineRunId: string, backend: RetestCheckRecordView): Promise<boolean> {
+    // One IMMEDIATE transaction: the row is read and its `result` written back with
+    // the standing, so a standing written by another dashboard a moment ago is
+    // not lost to a stale read. Only a watch that ended with a verdict takes it.
+    const run = sqlite.transaction((): boolean => {
+      const row = db.select().from(schema.retestWatches).where(eq(schema.retestWatches.engineRunId, engineRunId)).get();
+      if (!row || row.state !== "verdict") return false;
+      return db.update(schema.retestWatches).set({ result: { ...(row.result ?? {}), backend } })
+        .where(and(eq(schema.retestWatches.engineRunId, engineRunId), eq(schema.retestWatches.state, "verdict")))
+        .run().changes === 1;
+    });
+    return run.immediate();
+  }
+  async getRetestWatchesAskingBackend(): Promise<RetestWatch[]> {
+    // Narrowed by the column's text first (every standing carries the key), then read by the field.
+    return db.select().from(schema.retestWatches)
+      .where(and(eq(schema.retestWatches.state, "verdict"), like(schema.retestWatches.result, '%"backend"%')))
+      .all()
+      .filter((one) => (one.result?.backend as { state?: unknown } | undefined)?.state === "asking");
   }
 
   async createCollectWatch(watch: CollectWatch): Promise<CollectWatch> {

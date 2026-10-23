@@ -29,7 +29,9 @@ import PageHeader from "@/components/PageHeader";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
+import { retestCheckRecordLine } from "@/lib/backendRecordCopy";
 import type { Client } from "@shared/schema";
+import type { RetestCheckRecordView } from "@shared/backend-record";
 import { ratingOf } from "@shared/latest-scans";
 
 interface FindingRow {
@@ -57,6 +59,12 @@ interface FindingRow {
     /** `retest_watch`: collected from the engine after it answered 202, filed as the requester's retest. */
     filedVia?: string | null;
     requestedAt?: string | null;
+    /**
+     * Where this check's recording at Athena-Backend as a RETEST CHECK stands
+     * (server/retest-check-watch.ts), from the retest watch's row; null for a
+     * check with no watch behind it, of which nothing is said of the backend.
+     */
+    backend?: RetestCheckRecordView | null;
   }>;
 }
 
@@ -303,6 +311,14 @@ export default function Findings() {
                                     </span>
                                   )}
                                 </span>
+                                {/* Where its recording at Athena-Backend stands (lib/backendRecordCopy.ts), as the server
+                                    says it: a retest check, never closure evidence; the backend's own reason when it is not
+                                    in the record; nothing from silence. */}
+                                {one.backend ? (
+                                  <span className="block text-muted-foreground" data-testid={`text-check-backend-record-${one.id}`} data-state={one.backend.state}>
+                                    {retestCheckRecordLine(one.backend)}
+                                  </span>
+                                ) : null}
                               </li>
                             ))}
                           </ul>

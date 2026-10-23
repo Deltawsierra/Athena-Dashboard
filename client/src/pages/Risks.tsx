@@ -46,7 +46,11 @@ import {
   DASHBOARD_DIRECT, LEDGER_READ_ONLY, RISKS_BACKEND_EMPTY, RISKS_BACKEND_READING, RISKS_BACKEND_SOURCE, RISKS_BACKEND_UNREAD,
   RISKS_NO_ENGAGEMENT_AT_BACKEND, SCAN_NOT_YET_ADOPTED,
 } from "@/lib/sourceLabels";
-import { BACKEND_RECORD_TITLE, OPEN_SCAN, engineRunRef, findingsInRecord } from "@/lib/backendRecordCopy";
+import {
+  BACKEND_RECORD_TITLE, OPEN_SCAN, RETEST_CHECKS_COLUMN, RETEST_CHECKS_NONE, RETEST_CHECK_RECORDED, engineRunRef, findingsInRecord,
+  retestCheckLine, retestChecksCount,
+} from "@/lib/backendRecordCopy";
+import type { RetestCheckView } from "@shared/backend-record";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { isOpenStatus, untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
@@ -63,6 +67,8 @@ interface RecordFinding {
   uuid: string; title: string; severity: string; status: string; statusLabel: string; findingType: string;
   deploymentUuid: string | null; scanUuid: string | null; engineRunId: string | null;
   test: { id: string; status: string } | null;
+  /** The engine's retest verdicts the backend recorded against it as RETEST CHECKS (latest ten); never closure evidence. */
+  retestChecks: RetestCheckView[];
 }
 interface ClientRecordFindings {
   clientId: string; engagementId: number | null; deployments: Array<{ uuid: string; name: string }>; findings: RecordFinding[]; readAt: string;
@@ -163,10 +169,10 @@ function BackendRecordSection({ record }: { record: Loaded<ClientRecordFindings>
         <p className="px-5 py-6 text-center text-[13px] text-muted-foreground" data-testid="text-risks-backend-empty">{RISKS_BACKEND_EMPTY}</p>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left">
+          <table className="w-full min-w-[920px] text-left">
             <thead>
               <tr className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/80">
-                {["Severity", "Finding", "Status", "Deployment", "Engine run", "Scan"].map((h) => (
+                {["Severity", "Finding", "Status", "Deployment", "Engine run", "Scan", RETEST_CHECKS_COLUMN].map((h) => (
                   <th key={h} className="px-3 py-2 font-medium">{h}</th>
                 ))}
               </tr>
@@ -189,6 +195,27 @@ function BackendRecordSection({ record }: { record: Loaded<ClientRecordFindings>
                       ) : one.scanUuid !== null ? (
                         <span className="text-muted-foreground" data-testid="text-record-finding-scan">{SCAN_NOT_YET_ADOPTED}</span>
                       ) : "—"}
+                    </td>
+                    {/* The backend's retest checks of this finding, as served: each the engine's verdict the backend pulled
+                        and recorded -- a retest check, never closure evidence (lib/backendRecordCopy.ts). */}
+                    <td className="px-3 py-2.5 text-[12px]" data-testid="cell-record-finding-retest-checks">
+                      {(one.retestChecks ?? []).length === 0 ? (
+                        <span className="text-muted-foreground" data-testid="text-record-finding-no-retest-checks">{RETEST_CHECKS_NONE}</span>
+                      ) : (
+                        <details data-testid={`record-finding-retest-checks-${one.uuid}`}>
+                          <summary className="cursor-pointer text-gold" data-testid="text-record-finding-retest-checks-count">
+                            {retestChecksCount(one.retestChecks.length)}
+                          </summary>
+                          <p className="mt-1 text-[11px] text-muted-foreground" data-testid="text-record-finding-retest-checks-label">{RETEST_CHECK_RECORDED}</p>
+                          <ul className="mt-1 space-y-1">
+                            {one.retestChecks.map((check) => (
+                              <li key={check.engineRunId} className="athena-mono text-[11px] text-muted-foreground" data-testid={`retest-check-${check.engineRunId}`}>
+                                {retestCheckLine(check)}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
                     </td>
                   </tr>
                 );

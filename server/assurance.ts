@@ -25,6 +25,8 @@ import {
 import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
 import { runIdFrom } from "@shared/engine-record";
+import type { RetestCheckView } from "@shared/backend-record";
+import { readRetestCheck } from "./backend-scans";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
 
@@ -120,6 +122,14 @@ export interface AssuranceFinding {
    */
   scanUuid: string | null;
   engineRunId: string | null;
+  /**
+   * The engine's retest verdicts the backend pulled and recorded against this
+   * finding as RETEST CHECKS (athena-backend #189, `FindingSerializer.retest_checks`:
+   * the latest ten, newest first), each read by its fields (server/backend-scans.ts
+   * readRetestCheck). Checks, never closure evidence: `closure` above is what a
+   * closure stands on, and no check moves it. Empty when the backend served none.
+   */
+  retestChecks: RetestCheckView[];
 }
 
 /** The closure standings the backend serves, closed. Anything else reads "unknown". */
@@ -1498,6 +1508,9 @@ function finding(raw: Record<string, unknown>): AssuranceFinding {
     closure: closure(raw.closure),
     scanUuid: strOrNull(raw.scan_uuid),
     engineRunId: runIdFrom(raw.engine_run_id),
+    retestChecks: Array.isArray(raw.retest_checks)
+      ? raw.retest_checks.map(readRetestCheck).filter((one): one is RetestCheckView => one !== null)
+      : [],
   };
 }
 

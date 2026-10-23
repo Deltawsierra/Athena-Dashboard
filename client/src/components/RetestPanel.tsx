@@ -30,7 +30,9 @@ import { apiRequest, keptStops, mayStillBeRunning } from "@/lib/queryClient";
 import { isKeyBug, useKeyedPress } from "@/lib/keyedPress";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import { isAdmin } from "@/utils/auth";
+import { retestCheckRecordLine } from "@/lib/backendRecordCopy";
 import type { PublicUser } from "@shared/schema";
+import type { RetestCheckRecordView } from "@shared/backend-record";
 import { ratingOf } from "@shared/latest-scans";
 
 interface DecisionTwin {
@@ -72,6 +74,13 @@ interface RetestResult {
   stopTakenHere?: boolean;
   /** This dashboard had sent a stop for the run, its answer unread. */
   stopSentUnreadHere?: boolean;
+  /**
+   * Where the verdict's recording at Athena-Backend as a RETEST CHECK stands
+   * (server/retest-check-watch.ts; shared/backend-record.ts): on a verdict the
+   * watch collected. Absent on one the engine answered the press itself with,
+   * for which nothing is said of the backend.
+   */
+  backend?: RetestCheckRecordView | null;
 }
 
 /**
@@ -193,10 +202,32 @@ function verdictStyle(verdict: string): {
   }
 }
 
-/** The verdict, drawn as the engine said it. */
+/**
+ * The verdict, drawn as the engine said it -- and, beneath it, where its
+ * recording at Athena-Backend as a retest check stands, by the server's state:
+ * recorded (never closure evidence), not in the record with the backend's
+ * reason, being asked, or no longer asked. While the backend is being asked the
+ * run is read again every POLL_MS, bounded, so the line follows the answer;
+ * silence stays "being asked", never "recorded".
+ */
 function VerdictView({ twinId, result }: { twinId: number; result: RetestResult }) {
   const style = verdictStyle(result.verdict);
   const Icon = style.icon;
+  const runId = result.engineRunId ?? null;
+  const [since] = useState(() => Date.now());
+  const standing = useQuery<RetestWatchView>({
+    queryKey: [`/api/retests/${runId}`],
+    enabled: runId !== null && result.backend?.state === "asking",
+    retry: false,
+    refetchInterval: (query) => {
+      const latest = query.state.data;
+      const read = latest?.answer === "verdict" ? latest.result.backend : undefined;
+      if (read && read.state !== "asking") return false;
+      return Date.now() - since < POLL_FOR_MS ? POLL_MS : false;
+    },
+  });
+  const read = standing.data?.answer === "verdict" ? standing.data.result.backend : undefined;
+  const backend = read ?? result.backend ?? null;
   return (
     <div className="mt-3 flex items-start gap-2 border-t border-border/60 pt-3" data-testid={`verdict-${twinId}`}>
       <Icon className="mt-0.5 h-4 w-4 shrink-0" style={{ color: style.colour }} />
@@ -233,6 +264,13 @@ function VerdictView({ twinId, result }: { twinId: number; result: RetestResult 
             to it was not read, and the run finished with this verdict, which was filed.
           </p>
         )}
+        {/* Where the recording at Athena-Backend stands (lib/backendRecordCopy.ts), as the server says it: a retest
+            check, never closure evidence; the backend's own reason when it is not in the record. */}
+        {backend ? (
+          <p className="text-xs text-muted-foreground" data-testid={`text-retest-check-record-${twinId}`} data-state={backend.state}>
+            {retestCheckRecordLine(backend)}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -592,8 +630,12 @@ export default function RetestPanel({ testId }: { testId: string }) {
                   twinId={twin.id}
                   initial={status}
                   onVerdict={(verdict) => {
-                    void invalidateTestsAndFindings();
-                    void open$.refetch();
+                    // The finding and the open runs are read again when the verdict first comes; a later read
+                    // of the same verdict (its backend standing moved) changes neither.
+                    if (!(result && !isStatus(result))) {
+                      void invalidateTestsAndFindings();
+                      void open$.refetch();
+                    }
                     setResults((previous) => ({ ...previous, [twin.id]: { ...verdict, answer: "verdict" } }));
                   }}
                   onStopAnswered={() => void open$.refetch()}

@@ -44,6 +44,7 @@ import {
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf } from "@shared/idempotency";
 import { runIdFrom, stopIdFrom } from "@shared/engine-record";
 import { coverageOf } from "@shared/scan-coverage";
+import type { RetestCheckView } from "@shared/backend-record";
 
 /** How long a launch may take, headers and body. Tests shorten it. Not a stop path. */
 export const launchTimeouts = { launchMs: 25_000 };
@@ -708,6 +709,98 @@ export async function collectScan(uuid: string): Promise<CollectAnswer> {
   }
   if (response.status === 409) return { answer: "conflict", detail: refusalWords(object, text) };
   if (response.status === 403 || response.status === 404 || response.status === 401) throw await refused(response, `collecting scan ${uuid}`);
+  return { answer: "unavailable", status: response.status, detail: refusalWords(object, text) };
+}
+
+// ==== Retest checks (owner decision 8: the backend PULLS a retest's verdict and records it as a check) ====
+
+/** One retest check as the backend serves it (assurance/serializers.py RetestCheckSerializer). Null when it is not one. */
+export function readRetestCheck(raw: unknown): RetestCheckView | null {
+  const object = objectOf(raw);
+  const engineRunId = textOf(object?.engine_run_id) ?? (typeof object?.engine_run_id === "number" ? String(object.engine_run_id) : null);
+  if (object === null || engineRunId === null) return null;
+  return {
+    engineRunId,
+    scanRecordId: textOf(object.scan_record_id) ?? (typeof object.scan_record_id === "number" ? String(object.scan_record_id) : null),
+    twinId: numberOf(object.twin_id),
+    twinRunId: textOf(object.twin_run_id) ?? (typeof object.twin_run_id === "number" ? String(object.twin_run_id) : null),
+    verdict: textOf(object.verdict),
+    verdictKnown: typeof object.verdict_known === "boolean" ? object.verdict_known : null,
+    detail: typeof object.detail === "string" ? object.detail : null,
+    state: textOf(object.state),
+    stoppedAfterRecording: typeof object.stopped_after_recording === "boolean" ? object.stopped_after_recording : null,
+    engineCheckedAt: textOf(object.engine_checked_at),
+    collectedAt: textOf(object.collected_at),
+    collectedBy: textOf(object.collected_by),
+  };
+}
+
+/**
+ * The backend's answers to a retest-check collect, each read by its own field
+ * (athena-backend assurance/retest_checks.py, FindingViewSet.retest_checks_collect):
+ */
+export type RetestCheckCollectAnswer =
+  /** 201: the check was recorded now; 200 with `check`: the backend already held the row for this run (`existing`). Either is a RETEST CHECK, never closure evidence. */
+  | { answer: "recorded"; status: 201 | 200; existing: boolean; check: RetestCheckView; closure: Record<string, unknown> | null }
+  /** 202: the run is still going on the engine; nothing was recorded. Asked again later. */
+  | { answer: "running"; status: 202; phase: string; detail: string }
+  /** 200 with `phase` (stopped | failed | refused | ended_without_verdict): the run produced no verdict; nothing was recorded. */
+  | { answer: "not_a_verdict"; status: 200; phase: string | null; detail: string }
+  /**
+   * 404, 409, 422 -- the engine has no run this backend can read, the scan is not in the record, or the identity does
+   * not hold -- in the backend's own words; and a 400, this dashboard's request refused (a bug here). Nothing was
+   * recorded, and asking again changes nothing: the retest is NOT in the backend's record.
+   */
+  | { answer: "not_in_record"; status: 400 | 404 | 409 | 422; detail: string; candidates: string[] }
+  /** 503 -- the backend could not read the engine -- or an answer in no shape this reads: nothing recorded; asked again. */
+  | { answer: "unavailable"; status: number; detail: string };
+
+/**
+ * Ask the backend to collect a finished retest run's verdict from the engine and
+ * record it against `findingUuid` as a retest check, as the person
+ * (`POST /api/assurance/findings/<uuid>/retest-checks/collect/`, athena-backend
+ * #189). The body names the retest run (`run_id`) and the scan run the retested
+ * twin was listed under (`twin_run_id`); the backend reads the engine itself,
+ * with its own key, and decides identity itself. Bounded by the control plane's
+ * TIMEOUT_MS. Reads, and writes nothing here. A 401 is the person's sign-in
+ * (ControlPlaneSignInRequired); a 403 the backend's refusal of this person
+ * (ControlPlaneRefused); every other answer is returned as what it said.
+ *
+ * SAFETY: never on a stop's path. The retest-check watch (server/retest-check-
+ * watch.ts) sends this after the dashboard's own filing of the verdict, off the
+ * request path, and nothing that answers a stop, a 202 or the kill switch
+ * awaits it.
+ */
+export async function collectRetestCheck(findingUuid: string, body: { runId: string; twinRunId: string }): Promise<RetestCheckCollectAnswer> {
+  const response = await call(`/api/assurance/findings/${encodeURIComponent(findingUuid)}/retest-checks/collect/`, {
+    method: "POST",
+    body: JSON.stringify({ run_id: body.runId, twin_run_id: body.twinRunId }),
+  });
+  const { object, text } = await jsonObject(response);
+  if (response.status === 201 || response.status === 200) {
+    const check = readRetestCheck(object?.check);
+    if (check !== null) {
+      return { answer: "recorded", status: response.status, existing: response.status === 200 || object?.recorded !== true, check, closure: objectOf(object?.closure) };
+    }
+    if (response.status === 200 && object !== null && typeof object.phase === "string") {
+      return { answer: "not_a_verdict", status: 200, phase: object.phase, detail: refusalWords(object, text) };
+    }
+    return {
+      answer: "unavailable", status: response.status,
+      detail: `Athena-Backend answered ${response.status} to the retest-check collect in a shape this dashboard does not read (${text.slice(0, 200) || "no body"})`,
+    };
+  }
+  if (response.status === 202) {
+    return { answer: "running", status: 202, phase: textOf(object?.phase) ?? "running", detail: refusalWords(object, text) };
+  }
+  if (response.status === 400 || response.status === 404 || response.status === 409 || response.status === 422) {
+    const candidates = Array.isArray(object?.candidates) ? object!.candidates.filter((one): one is string => typeof one === "string") : [];
+    const detail = response.status === 400
+      ? `Athena-Backend refused this dashboard's request (400): ${refusalWords(object, text)}`
+      : refusalWords(object, text);
+    return { answer: "not_in_record", status: response.status, detail, candidates };
+  }
+  if (response.status === 401 || response.status === 403) throw await refused(response, `recording retest check ${body.runId}`);
   return { answer: "unavailable", status: response.status, detail: refusalWords(object, text) };
 }
 

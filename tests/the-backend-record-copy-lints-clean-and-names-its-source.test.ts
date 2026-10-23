@@ -16,6 +16,8 @@ import {
   engagementLine, recordPill,
   ADOPTED_FROM_RECORD, LAUNCH_ANSWER_AWAITED, NOT_LINKED_TO_CLIENT, NO_SCANS_RECORDED, RECORD_COULD_NOT_BE_READ, RECORD_NEEDS_SIGN_IN,
   SCANS_COULD_NOT_BE_READ, WINDOW_ENDED, adoptionOutcomeLine, failedOnEngine, scanCountsLine, stoppedOnEngine, windowRemaining,
+  RETEST_CHECK_ASKING, RETEST_CHECK_DIRECT_SCAN_REASON, RETEST_CHECK_RECORDED, RETEST_CHECK_STOPPED_ASKING, RETEST_CHECKS_NONE,
+  retestCheckLine, retestCheckNotInRecord, retestCheckRecordLine, retestChecksCount,
 } from "@/lib/backendRecordCopy";
 import {
   COVERAGE_RECORD_PENDING, COVERAGE_SOURCE, HYBRID_SOURCE, allSourceLabelStrings, coverageSourceFor, coverageSourceFromRecord,
@@ -83,6 +85,45 @@ describe("backend record copy: every authored string lints clean", () => {
     expect(NOT_LINKED_TO_CLIENT).toBe("Not linked to a dashboard client");
     expect(ADOPTED_FROM_RECORD).toBe("Adopted from the Athena-Backend record; not started from this dashboard");
     for (const text of strings) expect(text).not.toMatch(/\bnone\b.*could not be read|could not be read.*\bnone\b/i);
+  });
+
+  it("says a retest check as what it is -- recorded, never closure evidence; not in the record with the backend's reason; being asked; no longer asked -- in the pinned words", () => {
+    expect(RETEST_CHECK_RECORDED).toBe("Recorded in the Athena-Backend as a retest check (not closure evidence)");
+    expect(retestCheckNotInRecord("the engine has no run rt-1 this backend can read")).toBe(
+      "Not in the Athena-Backend record: the engine has no run rt-1 this backend can read",
+    );
+    expect(RETEST_CHECK_ASKING).toBe("Athena-Backend is being asked to record this retest check");
+    expect(RETEST_CHECK_STOPPED_ASKING).toMatch(/^This dashboard stopped asking Athena-Backend to record this retest check/);
+    // The line a view shows, by the server's state alone -- never a fifth guessed, and silence is "being asked".
+    const base = {
+      recorded: null, detail: "", reason: null, status: null, findingUuid: null, checkId: null, check: null, lastAnswer: null, lastAskedAt: null,
+      lastReadError: null, startedAt: "2026-10-23T04:00:00.000Z", deadlineAt: "2026-10-23T05:00:00.000Z", endedAt: null, twinRunId: "run-1", backendScanId: "s1",
+    } as const;
+    expect(retestCheckRecordLine({ ...base, state: "asking" })).toBe(RETEST_CHECK_ASKING);
+    expect(retestCheckRecordLine({ ...base, state: "recorded", recorded: true })).toBe(RETEST_CHECK_RECORDED);
+    expect(retestCheckRecordLine({ ...base, state: "not_in_record", recorded: false, detail: "that scan is not in this record", status: 404 })).toBe(
+      "Not in the Athena-Backend record: that scan is not in this record",
+    );
+    expect(retestCheckRecordLine({ ...base, state: "not_in_record", recorded: false, reason: "dashboard_direct", detail: "anything the server said" })).toBe(
+      `Not in the Athena-Backend record: ${RETEST_CHECK_DIRECT_SCAN_REASON}`,
+    );
+    expect(retestCheckRecordLine({ ...base, state: "unwatched", recorded: false })).toBe(RETEST_CHECK_STOPPED_ASKING);
+    // No string here calls a check closure evidence, or a verdict anything but the engine's word.
+    for (const text of [RETEST_CHECK_RECORDED, RETEST_CHECK_ASKING, RETEST_CHECK_STOPPED_ASKING, RETEST_CHECK_DIRECT_SCAN_REASON]) {
+      expect(text).not.toMatch(/\b(?:is|as) closure evidence\b|verified|fixed/i);
+    }
+    expect(retestChecksCount(1)).toBe("1 retest check");
+    expect(retestChecksCount(3)).toBe("3 retest checks");
+    expect(RETEST_CHECKS_NONE).toBe("None recorded");
+    expect(retestCheckLine({ verdict: "closed", verdictKnown: true, state: "completed", engineCheckedAt: "2026-10-23T04:30:00+00:00" })).toBe(
+      "closed · the run completed · checked by the engine at 2026-10-23T04:30:00+00:00",
+    );
+    expect(retestCheckLine({ verdict: "still_open", verdictKnown: true, state: "aborted", engineCheckedAt: null })).toBe(
+      "still_open · the run ended stopped after its check was recorded · the engine's check time was not served",
+    );
+    expect(retestCheckLine({ verdict: "maybe", verdictKnown: false, state: null, engineCheckedAt: null })).toBe(
+      "maybe (a verdict word the record does not know) · run state not served · the engine's check time was not served",
+    );
   });
 
   it("names the engagement as the plan pins it: id, deployment name, host", () => {

@@ -12,6 +12,8 @@
  * Labels are by SOURCE: never "legacy", never a promise about the backend.
  */
 
+import type { RetestCheckRecordView } from "@shared/backend-record";
+
 /** The panel's heading on both scan pages. */
 export const BACKEND_RECORD_TITLE = "Backend record";
 
@@ -242,6 +244,61 @@ export function readAtLine(when: string): string {
   return `Read from Athena-Backend at ${when}.`;
 }
 
+// ==== Retest checks (owner decision 8, the dashboard half; server/retest-check-watch.ts) ====
+//
+// A retest's verdict is recorded in Athena-Backend as a RETEST CHECK, pulled by
+// the backend from the engine with its own key. The views say exactly which of
+// four states the recording is in (shared/backend-record.ts RetestCheckRecordView)
+// and never call a check closure evidence: the backend's `closure` is what a
+// closure stands on, and no check moves it. The backend's own reason for a
+// refusal is shown verbatim after the colon and is not authored here.
+
+/** recorded: the backend answered 201, or 200 with the row it already held. */
+export const RETEST_CHECK_RECORDED = "Recorded in the Athena-Backend as a retest check (not closure evidence)";
+/** not_in_record: 404, 409 or 422 in the backend's words, or no backend record to be in (RETEST_CHECK_DIRECT_SCAN_REASON). */
+export function retestCheckNotInRecord(reason: string): string {
+  return `Not in the Athena-Backend record: ${reason}`;
+}
+/** The reason when nothing was sent: the retested scan has no backend record (reason "dashboard_direct"). */
+export const RETEST_CHECK_DIRECT_SCAN_REASON =
+  "the scan it looked again at was recorded by this dashboard directly from the engine, so there is no backend record for the check to be in";
+/** asking: the backend has not answered with the record; silence is never read as recorded. */
+export const RETEST_CHECK_ASKING = "Athena-Backend is being asked to record this retest check";
+/** unwatched: this dashboard stopped asking at its deadline -- where it stood, never an outcome. */
+export const RETEST_CHECK_STOPPED_ASKING =
+  "This dashboard stopped asking Athena-Backend to record this retest check; whether it is in the record is not known here";
+
+/** The one line a retest view shows for where the recording stands, by the server's state and never a fifth guessed. */
+export function retestCheckRecordLine(backend: RetestCheckRecordView): string {
+  switch (backend.state) {
+    case "recorded":
+      return RETEST_CHECK_RECORDED;
+    case "not_in_record":
+      return retestCheckNotInRecord(backend.reason === "dashboard_direct" ? RETEST_CHECK_DIRECT_SCAN_REASON : backend.detail);
+    case "unwatched":
+      return RETEST_CHECK_STOPPED_ASKING;
+    default:
+      return RETEST_CHECK_ASKING;
+  }
+}
+
+/** The Risks page's backend section: the column of the backend finding's checks, its count, and a finding with none. */
+export const RETEST_CHECKS_COLUMN = "Retest checks";
+export const RETEST_CHECKS_NONE = "None recorded";
+export function retestChecksCount(count: number): string {
+  return `${count} retest check${count === 1 ? "" : "s"}`;
+}
+/** One check as the backend served it: the verdict word, whether the record knows it, the run's state, and when the engine checked. */
+export function retestCheckLine(check: { verdict: string | null; verdictKnown: boolean | null; state: string | null; engineCheckedAt: string | null }): string {
+  const verdict = check.verdict ?? "no verdict word served";
+  const known = check.verdictKnown === false ? " (a verdict word the record does not know)" : "";
+  const state = check.state === "aborted"
+    ? "the run ended stopped after its check was recorded"
+    : check.state === "completed" ? "the run completed" : check.state ? `run state ${check.state}` : "run state not served";
+  const when = check.engineCheckedAt ? `checked by the engine at ${check.engineCheckedAt}` : "the engine's check time was not served";
+  return `${verdict}${known} · ${state} · ${when}`;
+}
+
 /** Every authored string above, for the lint test (tests/the-backend-record-copy-lints-clean-and-names-its-source.test.ts). */
 export function allBackendRecordStrings(): string[] {
   return [
@@ -335,5 +392,19 @@ export function allBackendRecordStrings(): string[] {
     engineRunRef("run-1"),
     collectedLine("—"),
     readAtLine("2026-10-23"),
+    RETEST_CHECK_RECORDED,
+    retestCheckNotInRecord("the engine has no run rt-1 this backend can read"),
+    retestCheckNotInRecord(RETEST_CHECK_DIRECT_SCAN_REASON),
+    RETEST_CHECK_DIRECT_SCAN_REASON,
+    RETEST_CHECK_ASKING,
+    RETEST_CHECK_STOPPED_ASKING,
+    RETEST_CHECKS_COLUMN,
+    RETEST_CHECKS_NONE,
+    retestChecksCount(1),
+    retestChecksCount(2),
+    retestCheckLine({ verdict: "closed", verdictKnown: true, state: "completed", engineCheckedAt: "2026-10-23T04:30:00+00:00" }),
+    retestCheckLine({ verdict: "still_open", verdictKnown: true, state: "aborted", engineCheckedAt: null }),
+    retestCheckLine({ verdict: "maybe", verdictKnown: false, state: null, engineCheckedAt: null }),
+    retestCheckLine({ verdict: null, verdictKnown: null, state: "queued", engineCheckedAt: null }),
   ];
 }
