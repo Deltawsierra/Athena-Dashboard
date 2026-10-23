@@ -318,6 +318,7 @@ function createSchema(handle: DatabaseType): void {
       fixed_by_run_id TEXT,
       fixed_verdict TEXT,
       reopened_at INTEGER,
+      source TEXT NOT NULL DEFAULT 'dashboard-direct',
       is_sample INTEGER NOT NULL DEFAULT 0
     );
     -- One row per issue per customer. The uniqueness is the dedupe: a rescan
@@ -339,7 +340,8 @@ function createSchema(handle: DatabaseType): void {
       run_id TEXT,
       test_id TEXT,
       seen INTEGER NOT NULL,
-      observed_at INTEGER NOT NULL
+      observed_at INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'dashboard-direct'
     );
     CREATE INDEX IF NOT EXISTS idx_sightings_finding ON finding_sightings(finding_id);
     -- Whether a test filed anything, asked by the findings summary of each
@@ -682,6 +684,10 @@ function addMissingColumns(handle: DatabaseType): void {
     ["clients", "backend_engagement_id", "INTEGER"],
     ["clients", "testing_window_start", "INTEGER"],
     ["clients", "testing_window_end", "INTEGER"],
+    // The ledger's source (shared/schema.ts): every row already here was filed by
+    // this dashboard directly from the engine, and is labelled so.
+    ["findings", "source", "TEXT NOT NULL DEFAULT 'dashboard-direct'"],
+    ["finding_sightings", "source", "TEXT NOT NULL DEFAULT 'dashboard-direct'"],
   ];
   for (const [table, column, definition] of additions) {
     const present = handle

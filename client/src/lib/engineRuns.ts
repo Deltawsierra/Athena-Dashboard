@@ -5,7 +5,7 @@
  * server would stop.
  */
 
-import { engineRunIdOf, engineStopIdOf, isEngineRecord } from "@shared/engine-record";
+import { engineRunIdOf, engineStopIdOf, isEngineRecord, stoppedOnlyAtBackend } from "@shared/engine-record";
 
 /** Engine run states after which nothing more happens. */
 export const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
@@ -37,4 +37,16 @@ export function failsafeOnly(test: { findings: unknown; status: string }): boole
  */
 export function noStopCanBeSent(test: { findings: unknown; status: string }): boolean {
   return failsafeOnly(test) && engineStopIdOf(test.findings) === null;
+}
+
+/**
+ * Whether a scan's run may still be running and only the backend's Stop reaches
+ * it yet (shared/engine-record.ts stoppedOnlyAtBackend; owner decision 7): the
+ * server marked the row `stop: "backend"` -- a scan adopted from the record, or
+ * one whose run this dashboard's key could not read -- until a direct read of
+ * the run succeeds. The screens show NoStopPanel's backend variant for it in
+ * place of a Stop; the kill switch and the backend's own stop still reach it.
+ */
+export function backendOnly(test: { findings: unknown; status: string }): boolean {
+  return unfinishedRunOf(test) !== null && stoppedOnlyAtBackend(test.findings);
 }

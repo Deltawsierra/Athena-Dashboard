@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { isEngineInternal } from "@shared/engine-internal";
 import { ratingOf } from "@shared/latest-scans";
 import type { Finding } from "@shared/schema";
+import { LEDGER_SOURCE_DASHBOARD_DIRECT } from "@shared/schema";
 
 /** A finding as it comes off a scan result, with where it came from. */
 export interface Sighting {
@@ -315,6 +316,8 @@ export async function ingest(
         status: "open",
         lastTestId: context.testId,
         lastRunId: context.runId,
+        // This ledger's one source: filed here, directly from the engine's answer.
+        source: LEDGER_SOURCE_DASHBOARD_DIRECT,
       });
       await store.recordSighting(made.id, context.runId, context.testId, true);
       seenIds.add(made.id);

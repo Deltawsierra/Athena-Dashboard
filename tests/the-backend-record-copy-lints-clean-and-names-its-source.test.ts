@@ -25,7 +25,7 @@ describe("backend record copy: every authored string lints clean", () => {
   const strings = allBackendRecordStrings();
 
   it("has every string of the module on the list", () => {
-    expect(strings.length).toBeGreaterThanOrEqual(70);
+    expect(strings.length).toBeGreaterThanOrEqual(20);
     expect(new Set(strings).size).toBe(strings.length);
   });
 

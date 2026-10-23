@@ -133,6 +133,40 @@ describe("adding a column to a database that already exists", () => {
     expect(openReport.duplicateBackendScanIds).toEqual(["scan-twice"]);
   });
 
+  it("labels every finding and sighting written before the source column existed as this dashboard's own, directly from the engine", async () => {
+    const file = oldShapedDatabase();
+    const handle = new Database(file);
+    // findings and finding_sightings exactly as they were before `source` existed, with a row each.
+    handle.exec(`
+      CREATE TABLE findings (
+        id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, client_id TEXT NOT NULL, site_id TEXT, engagement_ref TEXT NOT NULL,
+        type TEXT NOT NULL, severity TEXT, message TEXT, target TEXT, endpoint TEXT, header TEXT,
+        status TEXT NOT NULL DEFAULT 'open', owner_id TEXT, status_note TEXT, status_changed_by TEXT, status_changed_at INTEGER,
+        first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, times_seen INTEGER NOT NULL DEFAULT 1,
+        last_test_id TEXT, last_run_id TEXT, fixed_at INTEGER, fixed_by_run_id TEXT, fixed_verdict TEXT, reopened_at INTEGER,
+        is_sample INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE finding_sightings (
+        id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, run_id TEXT, test_id TEXT, seen INTEGER NOT NULL, observed_at INTEGER NOT NULL
+      );
+      INSERT INTO findings (id, fingerprint, client_id, engagement_ref, type, severity, first_seen_at, last_seen_at)
+        VALUES ('f-old', 'fp-old', 'c1', 'existing.example', 'sql_injection', 'high', 1000, 1000);
+      INSERT INTO finding_sightings (id, finding_id, run_id, test_id, seen, observed_at) VALUES ('s-old', 'f-old', 'run-old', 't1', 1, 1000);
+    `);
+    handle.close();
+    process.env.ATHENA_DB_PATH = file;
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    // The old rows read as what they are: filed by this dashboard directly from the engine, before the label existed.
+    expect((await storage.getFindingsByClient("c1")).map((one) => [one.id, one.source])).toEqual([["f-old", "dashboard-direct"]]);
+    expect((await storage.getSightings("f-old")).map((one) => one.source)).toEqual(["dashboard-direct"]);
+    // And a new row carries the label without being told to.
+    const made = await storage.createFinding({ fingerprint: "fp-new", clientId: "c1", engagementRef: "existing.example", type: "xss", status: "open" });
+    expect(made.source).toBe("dashboard-direct");
+    await storage.recordSighting(made.id, "run-new", "t1", true);
+    expect((await storage.getSightings(made.id)).map((one) => one.source)).toEqual(["dashboard-direct"]);
+  });
+
   it("relaxes the health columns that have no source, keeping the rows", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-health-"));
     const file = path.join(dir, "athena.db");

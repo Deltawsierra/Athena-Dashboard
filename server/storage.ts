@@ -14,6 +14,7 @@ import {
   type ConnectionSetting, type UpdateConnectionSettings,
   type SampleDataCounts,
   type ApiKey,
+  LEDGER_SOURCE_DASHBOARD_DIRECT,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
@@ -474,6 +475,7 @@ export class MemStorage implements IStorage {
       statusNote: null, statusChangedBy: null, statusChangedAt: null,
       timesSeen: 1, lastTestId: null, lastRunId: null,
       fixedAt: null, fixedByRunId: null, fixedVerdict: null, reopenedAt: null,
+      source: LEDGER_SOURCE_DASHBOARD_DIRECT,
       isSample: false,
       ...insert,
       id: randomUUID(),
@@ -502,7 +504,7 @@ export class MemStorage implements IStorage {
     );
     if (already) { already.seen = seen; return; }
     this.sightings.push({
-      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(),
+      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(), source: LEDGER_SOURCE_DASHBOARD_DIRECT,
     });
   }
   async getSightings(findingId: string) {

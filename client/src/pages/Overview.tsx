@@ -50,6 +50,8 @@ import {
   Calendar,
   ArrowRight,
   XCircle,
+  ClipboardList,
+  Radar,
   type LucideIcon,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -70,7 +72,11 @@ import mythosGlyph from "@assets/mythos/mark-glyph.webp";
 import PageHero from "@/components/mythos/PageHero";
 import { Divider, RingFrame } from "@/components/mythos/Ornament";
 import StatCard from "@/components/mythos/StatCard";
-import { OVERVIEW_SOURCES } from "@/lib/sourceLabels";
+import {
+  BACKEND_FINDINGS_COUNT_UNREAD, BACKEND_FINDINGS_LABEL, BACKEND_FINDINGS_UNREAD, ENGINE_LIST_UNREAD, ENGINE_LIVE_LABEL,
+  ENGINE_NOT_CONFIGURED, OVERVIEW_RECORD_SOURCES, OVERVIEW_SOURCES, OWN_FINDINGS_LABEL, OWN_FINDINGS_SUBLABEL, OWN_FINDINGS_UNREAD,
+  backendFindingsSublabel, engineLiveLine,
+} from "@/lib/sourceLabels";
 import { Label, SeverityPill, severityFrom, type Severity } from "@/components/mythos/atoms";
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
@@ -117,6 +123,13 @@ export interface OverviewModel {
   activity: PanelRows<{ icon: LucideIcon; tone: string; text: string; meta: string; ago: string | null }>;
   reviews: PanelRows<{ date: string; name: string; findings: number; sev: Severity }>;
   issues: PanelRows<{ t: string; sev: Severity; meta?: string }>;
+  /**
+   * Three populations by source (lib/sourceLabels.ts, decision 1): the findings
+   * in the Athena-Backend record (its deployments' counts), this dashboard's own
+   * ledger (open findings), and the engine's live runs. Each its own figure,
+   * never one sum. Absent from the sample model.
+   */
+  record?: { backendFindings: OverviewMetric; ownFindings: OverviewMetric; engineLive: OverviewMetric };
 }
 
 const TREND_SERIES = [
@@ -135,7 +148,9 @@ interface ApiTest {
   startedAt: string; completedAt: string | null; vulnerabilitiesFound: number;
   criticalCount: number; highCount: number; mediumCount: number; lowCount: number; findings?: unknown;
 }
-interface ApiDeployment { uuid: string; decision: string | null }
+interface ApiDeployment { uuid: string; decision: string | null; findingCount?: number }
+/** The engine's list of live runs (GET /api/engine/runs): read from the engine, or said to be unread. */
+interface EngineRuns { runs: Array<{ state?: string | null }>; configured: boolean }
 
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
@@ -243,6 +258,8 @@ function useLiveOverview(): OverviewModel {
   // would be wrong and look right -- so there is no partial total to guard
   // against here. One request, however many clients there are.
   const summary = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
+  // The engine's live runs, read from the engine itself: a third population, never summed with either record.
+  const engineRuns = loaded(useQuery<EngineRuns>({ queryKey: ["/api/engine/runs"] }));
 
   const metrics: OverviewMetric[] = [
     {
@@ -293,6 +310,34 @@ function useLiveOverview(): OverviewModel {
       icon: ShieldCheck,
     },
   ];
+
+  // The record tiles: a figure only from a source in hand, and each from its own.
+  const backendFindings: OverviewMetric = (() => {
+    if (deployments.state !== "ready") {
+      return { key: "backend-findings", label: BACKEND_FINDINGS_LABEL, value: figure(deployments, () => 0), sublabel: deployments.state === "error" ? `${BACKEND_FINDINGS_UNREAD}: ${deployments.message}` : BACKEND_FINDINGS_UNREAD, icon: ClipboardList };
+    }
+    const counted = deployments.data.every((one) => typeof one.findingCount === "number");
+    return {
+      key: "backend-findings", label: BACKEND_FINDINGS_LABEL,
+      value: counted ? deployments.data.reduce((sum, one) => sum + (one.findingCount as number), 0) : "—",
+      sublabel: counted ? backendFindingsSublabel(deployments.data.length) : BACKEND_FINDINGS_COUNT_UNREAD,
+      icon: ClipboardList,
+    };
+  })();
+  const ownFindings: OverviewMetric = {
+    key: "own-findings", label: OWN_FINDINGS_LABEL, value: figure(summary, (s) => s.open.total),
+    sublabel: summary.state === "error" ? `${OWN_FINDINGS_UNREAD}: ${summary.message}` : OWN_FINDINGS_SUBLABEL, icon: AlertTriangle, accent: "var(--sev-high)",
+  };
+  const engineLive: OverviewMetric = (() => {
+    if (engineRuns.state !== "ready") {
+      return { key: "engine-live", label: ENGINE_LIVE_LABEL, value: figure(engineRuns, () => 0), sublabel: engineRuns.state === "error" ? `${ENGINE_LIST_UNREAD}: ${engineRuns.message}` : ENGINE_LIST_UNREAD, icon: Radar };
+    }
+    if (!engineRuns.data.configured) return { key: "engine-live", label: ENGINE_LIVE_LABEL, value: "—", sublabel: ENGINE_NOT_CONFIGURED, icon: Radar };
+    const runs = engineRuns.data.runs;
+    const running = runs.filter((one) => one.state === "running").length;
+    const aborting = runs.filter((one) => one.state === "aborting").length;
+    return { key: "engine-live", label: ENGINE_LIVE_LABEL, value: runs.length, sublabel: engineLiveLine(running, aborting, runs.length - running - aborting), icon: Radar };
+  })();
 
   const environments: OverviewModel["environments"] = (() => {
     if (summary.state !== "ready") return pending(summary, "findings by environment");
@@ -448,6 +493,7 @@ function useLiveOverview(): OverviewModel {
   })();
 
   return {
+    record: { backendFindings, ownFindings, engineLive },
     metrics,
     posture: {
       note:
@@ -590,6 +636,31 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
       <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground" data-testid="text-overview-sources">
         {OVERVIEW_SOURCES}
       </p>
+
+      {/* The record by source (lib/sourceLabels.ts, decision 1): the backend's
+          findings, this dashboard's own ledger and the engine's live runs are
+          three populations. Each tile is its own figure; nothing adds them. */}
+      {model.record && (
+        <>
+          <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3" data-testid="overview-record-tiles">
+            {[model.record.backendFindings, model.record.ownFindings, model.record.engineLive].map((m) => (
+              <StatCard
+                key={m.key}
+                data-testid={`overview-record-${m.key}`}
+                label={m.label}
+                value={m.value}
+                icon={m.icon}
+                accent={m.accent}
+                sublabel={m.sublabel}
+                tag={tag}
+              />
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground" data-testid="text-overview-record-sources">
+            {OVERVIEW_RECORD_SOURCES}
+          </p>
+        </>
+      )}
 
       {/* posture / trend / env */}
       <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)_360px]">

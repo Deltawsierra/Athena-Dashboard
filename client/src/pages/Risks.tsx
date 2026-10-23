@@ -20,6 +20,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "wouter";
 import {
   AlertTriangle,
   Flame,
@@ -41,7 +42,11 @@ import { Divider, Corners } from "@/components/mythos/Ornament";
 import { SEV_LABEL, SeverityPill, StatusPill, severityFrom, type Severity, type StatusTone } from "@/components/mythos/atoms";
 import owlMedallion from "@assets/mythos/owl-medallion.webp";
 import { cn } from "@/lib/utils";
-import { DASHBOARD_DIRECT } from "@/lib/sourceLabels";
+import {
+  DASHBOARD_DIRECT, LEDGER_READ_ONLY, RISKS_BACKEND_EMPTY, RISKS_BACKEND_READING, RISKS_BACKEND_SOURCE, RISKS_BACKEND_UNREAD,
+  RISKS_NO_ENGAGEMENT_AT_BACKEND, SCAN_NOT_YET_ADOPTED,
+} from "@/lib/sourceLabels";
+import { BACKEND_RECORD_TITLE, OPEN_SCAN, engineRunRef, findingsInRecord } from "@/lib/backendRecordCopy";
 import { figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
 import { isOpenStatus, untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 
@@ -53,6 +58,15 @@ interface ApiFinding {
 }
 interface FindingsView { findings: ApiFinding[]; counts: Record<string, number> }
 interface ApiUser { id: string; username: string }
+/** A finding in the Athena-Backend record, with the scan it came from and the row here for that scan (GET /api/record/clients/:id/findings). */
+interface RecordFinding {
+  uuid: string; title: string; severity: string; status: string; statusLabel: string; findingType: string;
+  deploymentUuid: string | null; scanUuid: string | null; engineRunId: string | null;
+  test: { id: string; status: string } | null;
+}
+interface ClientRecordFindings {
+  clientId: string; engagementId: number | null; deployments: Array<{ uuid: string; name: string }>; findings: RecordFinding[]; readAt: string;
+}
 
 // "unrated" (no severity recorded) ranks below low and above info: it may be critical.
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "unrated", "info"];
@@ -119,6 +133,74 @@ function HeatCell({ hue, count }: { hue: string; count: number }) {
   return <td className="border border-border/30 px-3 py-2.5 text-center text-[12px] font-semibold text-foreground" style={{ background: `hsl(var(${hue}) / ${alpha})` }}>{count}</td>;
 }
 
+/**
+ * The Athena-Backend record of the selected client's findings: the findings of
+ * every deployment ingested under the client's engagement, read as the person
+ * (lib/sourceLabels.ts, decision 1). Its own section with its own source line,
+ * never counted into the ledger's figures above or the register below. A
+ * client with no engagement at the backend has nothing in that record, and is
+ * told so; a read that failed is said to have failed, never shown empty.
+ */
+function BackendRecordSection({ record }: { record: Loaded<ClientRecordFindings> }) {
+  return (
+    <GlassCard hover={false} bodyClassName="p-0" data-testid="panel-risks-backend-record">
+      <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
+        <p className="athena-label" data-testid="text-risks-backend-title">
+          {BACKEND_RECORD_TITLE}
+          {record.state === "ready" && record.data.engagementId !== null ? (
+            <span className="text-muted-foreground"> ({findingsInRecord(record.data.findings.length)})</span>
+          ) : null}
+        </p>
+      </div>
+      <p className="px-5 pt-3 text-[11px] text-muted-foreground" data-testid="text-risks-backend-source">{RISKS_BACKEND_SOURCE}</p>
+      {record.state === "loading" ? (
+        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground">{RISKS_BACKEND_READING}</p>
+      ) : record.state === "error" ? (
+        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground" data-testid="text-risks-backend-unread">{RISKS_BACKEND_UNREAD}: {record.message}</p>
+      ) : record.data.engagementId === null ? (
+        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground" data-testid="text-risks-backend-no-engagement">{RISKS_NO_ENGAGEMENT_AT_BACKEND}</p>
+      ) : record.data.findings.length === 0 ? (
+        <p className="px-5 py-6 text-center text-[13px] text-muted-foreground" data-testid="text-risks-backend-empty">{RISKS_BACKEND_EMPTY}</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-left">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/80">
+                {["Severity", "Finding", "Status", "Deployment", "Engine run", "Scan"].map((h) => (
+                  <th key={h} className="px-3 py-2 font-medium">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {record.data.findings.map((one) => {
+                const deployment = record.data.deployments.find((d) => d.uuid === one.deploymentUuid);
+                return (
+                  <tr key={one.uuid} className="border-t border-border/40" data-testid={`record-finding-${one.uuid}`}>
+                    <td className="px-3 py-2.5"><SeverityPill severity={severityFrom(one.severity)} /></td>
+                    <td className="px-3 py-2.5 text-[12px] text-foreground" data-testid="text-record-finding-title">{one.title}</td>
+                    <td className="px-3 py-2.5"><StatusPill tone="neutral">{one.statusLabel || one.status}</StatusPill></td>
+                    <td className="px-3 py-2.5 text-[12px] text-muted-foreground">{deployment?.name ?? "—"}</td>
+                    <td className="athena-mono px-3 py-2.5 text-[12px] text-muted-foreground" data-testid="text-record-finding-run">
+                      {one.engineRunId !== null ? engineRunRef(one.engineRunId) : "—"}
+                    </td>
+                    <td className="px-3 py-2.5 text-[12px]">
+                      {one.test !== null ? (
+                        <Link href={`/athena?test=${encodeURIComponent(one.test.id)}`} className="text-gold underline-offset-2 hover:underline" data-testid="link-record-finding-scan">{OPEN_SCAN}</Link>
+                      ) : one.scanUuid !== null ? (
+                        <span className="text-muted-foreground" data-testid="text-record-finding-scan">{SCAN_NOT_YET_ADOPTED}</span>
+                      ) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
 function FilterSelect({
   label, value, onChange, options,
 }: { label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
@@ -175,6 +257,9 @@ export default function Risks() {
   // findings ledger cannot see those counts, so "nothing needs attention" is
   // said only once the summary has answered that there are none.
   const summaryQ = loaded(useQuery<FindingsSummary>({ queryKey: ["/api/findings/summary"] }));
+  // The Athena-Backend record of this client's findings, read as the person: its
+  // own population, shown in its own section and never summed with the ledger's.
+  const record$ = loaded(useQuery<ClientRecordFindings>({ queryKey: [`/api/record/clients/${clientId}/findings`], enabled: clientId !== "" }));
   const untracked: Loaded<UntrackedScan | null> = (() => {
     if (summaryQ.state !== "ready") return summaryQ;
     const own = summaryQ.data.byClient.find((one) => one.clientId === clientId);
@@ -351,6 +436,8 @@ export default function Risks() {
             </GlassCard>
           </div>
 
+          {clientId !== "" && !noEngagement ? <BackendRecordSection record={record$} /> : null}
+
           <GlassCard hover={false} bodyClassName="p-0">
             <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
               <p className="athena-label">Risk Register <span className="text-muted-foreground">({ready ? `${view.length}${filtersActive ? ` of ${findings.length}` : ""}` : count(() => 0)})</span></p>
@@ -358,6 +445,7 @@ export default function Risks() {
             {/* Where these findings are recorded (lib/sourceLabels.ts): here, from
                 the engine; no backend verdict, claim or report applies to them. */}
             <p className="px-5 pt-3 text-[11px] text-muted-foreground" data-testid="text-risks-source">{DASHBOARD_DIRECT}.</p>
+            <p className="px-5 pt-1 text-[11px] text-muted-foreground" data-testid="text-risks-ledger-read-only">{LEDGER_READ_ONLY}</p>
             {!ready ? (
               <p className="px-5 py-10 text-center text-[13px] text-muted-foreground">{unavailable}</p>
             ) : empty ? (

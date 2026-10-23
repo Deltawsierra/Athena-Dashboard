@@ -64,6 +64,8 @@ const RECORD_ROUTES = new Map<string, string>([
   [`/api/findings?clientId=${SAMPLE}`, "Client not found"],
   // The client's Athena-Backend engagement (the Clients page, read when asked).
   [`/api/clients/${SAMPLE}/backend-engagement`, "Client not found"],
+  // The client's findings in the Athena-Backend record (the Risks page's backend section).
+  [`/api/record/clients/${SAMPLE}/findings`, "Client not found"],
 ]);
 
 /** Why the server's answer to a swept URL means the key is wrong; null when a route accepted it. */

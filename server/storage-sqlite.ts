@@ -341,6 +341,7 @@ export class SqliteStorage implements IStorage {
       statusNote: null, statusChangedBy: null, statusChangedAt: null,
       timesSeen: 1, lastTestId: null, lastRunId: null,
       fixedAt: null, fixedByRunId: null, fixedVerdict: null, reopenedAt: null,
+      source: schema.LEDGER_SOURCE_DASHBOARD_DIRECT,
       isSample: false,
       ...insert,
       id: randomUUID(),
@@ -368,7 +369,7 @@ export class SqliteStorage implements IStorage {
       return;
     }
     db.insert(schema.findingSightings).values({
-      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(),
+      id: randomUUID(), findingId, runId, testId, seen, observedAt: new Date(), source: schema.LEDGER_SOURCE_DASHBOARD_DIRECT,
     }).run();
   }
   async getSightings(findingId: string): Promise<FindingSighting[]> {
