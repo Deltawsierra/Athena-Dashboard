@@ -122,7 +122,7 @@ describe("Settings with sample mode off (the default)", () => {
     // The guidance rail says what is not reported, in so many words.
     const guidance = screen.getByTestId("settings-card-guidance");
     for (const title of [
-      "Secure defaults: not reported",
+      "Configuration baseline: not reported",
       "SSO: not reported",
       "Training-data reuse: not reported",
       "Approval gates: not reported",

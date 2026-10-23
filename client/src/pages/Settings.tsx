@@ -195,8 +195,8 @@ const SOURCE_LABEL: Record<string, string> = { stored: "saved here", environment
 const UNREPORTED: Guidance[] = [
   {
     tone: "unreported",
-    title: "Secure defaults: not reported",
-    note: "Nothing in this build checks the configuration against a secure baseline, so no alignment is claimed.",
+    title: "Configuration baseline: not reported",
+    note: "Nothing in this build checks the configuration against a baseline, so no alignment is claimed.",
   },
   {
     tone: "unreported",
@@ -317,7 +317,7 @@ export default function Settings() {
         <StatCard
           layout="tile"
           data-testid="settings-stat-secure-defaults"
-          label="Secure Defaults"
+          label="Configuration Baseline"
           value={demo ? demo.secureDefaults.value : "—"}
           icon={Lock}
           sublabel={demo ? demo.secureDefaults.sublabel : "Not reported: nothing checks this yet"}
@@ -538,11 +538,11 @@ export default function Settings() {
         <Card id="guidance" sample={sample} className="self-start">
           <div className="mb-3 flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-gold" />
-            <p className="text-[15px] font-semibold text-foreground">Safe Configuration Guidance</p>
+            <p className="text-[15px] font-semibold text-foreground">Configuration Guidance</p>
           </div>
           <p className="mb-4 text-[12px] text-muted-foreground">
             {demo
-              ? "Mythos recommendations to keep your environment secure and compliant."
+              ? "Mythos recommendations on this environment's configuration."
               : "What this environment reports about itself. A statement nothing reports is marked as not reported."}
           </p>
           <ul className="space-y-3">
