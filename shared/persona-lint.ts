@@ -29,6 +29,15 @@
  * Zero-drift follow-up (FOR THE LEAD; NOT IN THIS PR): have the fence export its
  * forbidden list as a JSON data artifact the dashboard vendors and this file
  * reads, so the two can never silently diverge. Out of scope here.
+ *
+ * DASHBOARD-SIDE TIGHTENING (mirror it into `mythos_core.persona`; a follow-up
+ * for the lead): the fence matches whole words, so a verdict in another form
+ * slipped past it -- a "Failing" label past `fail`, a "Safer AI" sign-off past
+ * `safe`. Here each verdict token also matches its inflections (see
+ * FORBIDDEN_PATTERNS), and a promise of confidence ("Deploy with confidence")
+ * is false reassurance. Stricter only: nothing refused before is allowed now,
+ * and `FORBIDDEN_WORDS` (the charter's list, pinned by a test) is unchanged. The
+ * page copy is held to all of it by tests/page-copy-lints-clean.test.ts.
  */
 
 /**
@@ -66,17 +75,29 @@ export interface Violation {
  * reading of the charter, which names the verdict words, not every string that
  * contains their letters, and it is what keeps the dashboard's existing honest
  * error copy legal.
+ *
+ * A verdict word in another form is the same verdict, so each token also
+ * matches its inflections, still on whole words: safe/safer/safest,
+ * secure/secured/securely, clean/cleaner, pass/passing/passed, fail/failing. A
+ * "Failing" state label or a "Safer AI" sign-off says the verdict the bare word
+ * would be refused for. The reported `term` stays the charter's word.
+ *
+ * `failed` is NOT matched. "The request failed" / "The read failed" say that an
+ * operation did not complete, which is the honest error copy this fence exists
+ * to protect: tests/persona-microcopy.test.ts pins both as legal, and the
+ * registry's own `requestFailed` is one. Telling that apart from a "Failed"
+ * RESULT label needs more than a word list, and is the owner's call.
  */
 const FORBIDDEN_PATTERNS: ReadonlyArray<readonly [ForbiddenWord, RegExp]> = [
-  ["secure", /\bsecure\b/i],
-  ["safe", /\bsafe\b/i],
-  ["clean", /\bclean\b/i],
+  ["secure", /\b(?:secure|secured|securely)\b/i],
+  ["safe", /\b(?:safe|safer|safest)\b/i],
+  ["clean", /\b(?:clean|cleaner)\b/i],
   ["guaranteed", /\bguaranteed\b/i],
   ["clearly", /\bclearly\b/i],
   ["obviously", /\bobviously\b/i],
   ["no issues", /\bno\s+issues\b/i],
-  ["pass", /\bpass\b/i],
-  ["fail", /\bfail\b/i],
+  ["pass", /\b(?:pass|passing|passed)\b/i],
+  ["fail", /\b(?:fail|failing)\b/i],
   // "you're protected", tolerant of apostrophe style and "you are"/"youre".
   ["you're protected", /\byou(?:'re|re|\s+are)\s+protected\b/i],
 ];
@@ -111,6 +132,16 @@ const REASSURANCE_PHRASES = [
   "no cause for concern",
 ] as const;
 
+/**
+ * Confidence as a PROMISE -- "Deploy with confidence", "From evidence to
+ * confidence" -- is reassurance beyond the evidence, and in a tagline a release
+ * call. Confidence as a MEASURE ("sorted with confidence scores", "with
+ * confidence level 0.8") is data about a finding, not a promise, and stays
+ * legal: the lookahead leaves the measures out.
+ */
+const CONFIDENCE_PROMISE =
+  /\b(?:with|to)\s+confidence\b(?!\s+(?:interval|score|level|threshold|band|rating|value|figure|basis)s?\b)/i;
+
 /** Straighten curly apostrophes so phrase matching is not defeated by typography. */
 function normalize(text: string): string {
   return text.replace(/[‘’]/g, "'");
@@ -141,6 +172,9 @@ export function lintMicrocopy(text: string): Violation[] {
   for (const phrase of REASSURANCE_PHRASES) {
     if (lower.includes(phrase)) violations.push({ rule: "false-reassurance", term: phrase });
   }
+
+  const promise = CONFIDENCE_PROMISE.exec(normalized);
+  if (promise) violations.push({ rule: "false-reassurance", term: promise[0].toLowerCase().replace(/\s+/g, " ") });
 
   return violations;
 }
