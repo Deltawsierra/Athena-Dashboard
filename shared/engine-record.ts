@@ -127,3 +127,23 @@ export function backendEngagementIdOf(findings: unknown): number | null {
 export function stoppedOnlyAtBackend(findings: unknown): boolean {
   return recordOf(findings)?.stop === "backend";
 }
+
+/**
+ * The keys of a row ADOPTED from Athena-Backend's record -- a scan the backend
+ * lists for the person that this dashboard had no row for, started from
+ * elsewhere (server/backend-adoption.ts; the Option 1 hybrid, owner decision
+ * 4) -- owned by the adoption as the run's own keys are: a person may not
+ * supply them, and an edit keeps them.
+ *
+ *   - `source`: "backend" -- the row was made from the backend's record, not
+ *     from a launch this dashboard made; the screens say so, by source;
+ *   - `adoptedAt`: when the record was read into the row (ISO 8601).
+ *
+ * Kept apart from BACKEND_RECORD_KEYS, which the record's own tests pin.
+ */
+export const ADOPTION_KEYS = ["source", "adoptedAt"] as const;
+
+/** Whether a row was adopted from the backend's record (see ADOPTION_KEYS). */
+export function adoptedFromRecord(findings: unknown): boolean {
+  return recordOf(findings)?.source === "backend";
+}

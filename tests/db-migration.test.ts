@@ -83,6 +83,56 @@ describe("adding a column to a database that already exists", () => {
     expect((await storage.getClient("c1"))?.name).toBe("Existing Client");
   });
 
+  it("relaxes tests.client_id so a scan adopted from the backend record can name no client, keeps the rows, and records one row per backend scan", async () => {
+    process.env.ATHENA_DB_PATH = oldShapedDatabase();
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    const { openReport } = await import("../server/db-sqlite");
+
+    // The old row came through the rebuild, is_sample and all.
+    const kept = await storage.getTest("t1");
+    expect(kept?.criticalCount).toBe(2);
+    expect(kept?.clientId).toBe("c1");
+    expect(kept?.isSample).toBe(false);
+    expect((await storage.getTestsByClient("c1")).map((one) => one.id)).toEqual(["t1"]);
+
+    // A row with no client, which the old shape refused outright.
+    const adopted = await storage.createTest({
+      clientId: null, testType: "penetration_test", status: "running",
+      findings: { runId: "run-9", target: "https://x.example/", results: [], backendScanId: "scan-9", backendEngagementId: 9, source: "backend" },
+    });
+    expect(adopted.clientId).toBeNull();
+    expect((await storage.getTest(adopted.id))?.clientId).toBeNull();
+
+    // One row per backend scan: the index was created, and refuses a second.
+    expect(openReport.duplicateBackendScanIds).toEqual([]);
+    expect(openReport.backendScanIndexNotCreated).toBeNull();
+    await expect(storage.createTest({
+      clientId: "c1", testType: "penetration_test", status: "running",
+      findings: { runId: "run-10", target: "https://x.example/", results: [], backendScanId: "scan-9" },
+    })).rejects.toThrow("a test already names backend scan scan-9");
+    // A person's test names no backend scan, and is not refused by it.
+    expect((await storage.createTest({ clientId: "c1", testType: "manual", status: "pending", findings: { details: "by hand" } })).id).toBeTruthy();
+  });
+
+  it("leaves the backend-scan index off, and says so, when a database already holds two rows for one backend scan", async () => {
+    const file = oldShapedDatabase();
+    const handle = new Database(file);
+    handle.exec(`
+      INSERT INTO tests (id, client_id, test_type, started_at, findings)
+        VALUES ('d1', 'c1', 'penetration_test', 1000, '{"runId":"run-1","backendScanId":"scan-twice"}'),
+               ('d2', 'c1', 'penetration_test', 1001, '{"runId":"run-2","backendScanId":"scan-twice"}');
+    `);
+    handle.close();
+    process.env.ATHENA_DB_PATH = file;
+    vi.resetModules();
+    const { storage } = await import("../server/storage-sqlite");
+    const { openReport } = await import("../server/db-sqlite");
+    // The database opens, both rows stand, and the duplicate is reported rather than the open failing.
+    expect((await storage.getTestsByClient("c1")).map((one) => one.id).sort()).toEqual(["d1", "d2", "t1"]);
+    expect(openReport.duplicateBackendScanIds).toEqual(["scan-twice"]);
+  });
+
   it("relaxes the health columns that have no source, keeping the rows", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-health-"));
     const file = path.join(dir, "athena.db");

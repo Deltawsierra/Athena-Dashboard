@@ -218,7 +218,7 @@ export interface HybridStandInOptions {
   upstream?: string;
 }
 
-const VERDICT_LABEL: Record<string, string> = {
+export const VERDICT_LABEL: Record<string, string> = {
   READY: "Ready for deployment",
   READY_RESTRICTED: "Ready with restrictions",
   NEEDS_REMEDIATION: "Requires remediation",
@@ -339,8 +339,11 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
     failNextAssurance: null as { status: number; body: unknown } | null,
     /** The next scans list read is answered with this instead of the list. */
     failNextScansList: null as { status: number; body: unknown } | null,
+    /** Scans list reads held unanswered until releaseScansLists(): a sync in flight that no stop waits on. */
+    holdScansLists: false,
   };
   const heldLaunches: Array<() => void> = [];
+  const heldScansLists: Array<() => void> = [];
   const heldCollects: Array<() => void> = [];
   const heldStops: Array<() => void> = [];
   /** The scans a collect is reading the engine for right now: a second collector meanwhile is told the record is claimed (409). */
@@ -880,6 +883,10 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
             controls.failNextScansList = null;
             return answer(fault.status, fault.body);
           }
+          if (controls.holdScansLists) {
+            await new Promise<void>((release) => { heldScansLists.push(release); held.push(res); });
+            if (res.destroyed) return;
+          }
           const rows = scansVisibleTo(who).sort((a, b) => b.created_at.localeCompare(a.created_at)).map(listRowOf);
           return answer(200, pageOf(rows, path, url.searchParams));
         }
@@ -1027,6 +1034,12 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       controls.holdStops = false;
       heldStops.splice(0).forEach((release) => release());
     },
+    /** Hold every scans list read's answer until releaseScansLists(). */
+    holdScansLists(): void { controls.holdScansLists = true; },
+    releaseScansLists(): void {
+      controls.holdScansLists = false;
+      heldScansLists.splice(0).forEach((release) => release());
+    },
     /** Requests of one kind seen so far. */
     launches: () => seen.filter((one) => one.method === "POST" && one.path === "/api/pentest/scan/"),
     collects: () => seen.filter((one) => one.method === "POST" && one.path.endsWith("/collect/")),
@@ -1043,6 +1056,7 @@ export async function hybridBackendStandIn(opts: HybridStandInOptions) {
       heldLaunches.splice(0).forEach((release) => release());
       heldCollects.splice(0).forEach((release) => release());
       heldStops.splice(0).forEach((release) => release());
+      heldScansLists.splice(0).forEach((release) => release());
       for (const res of held) res.destroy();
       server.closeAllConnections?.();
       await new Promise<void>((done) => server.close(() => done()));

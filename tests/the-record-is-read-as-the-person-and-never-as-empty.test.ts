@@ -29,8 +29,9 @@ import { TEST_ADMIN_PASSWORD } from "./test-admin";
  *     `engineRunId`) and the row here for that scan; a client with no engagement
  *     at the backend reads nothing there, and is answered as having no record
  *     there -- never as "no findings";
- *   - GET /api/record/scans/:uuid/pdf: the backend's report, relayed as the
- *     person, for a scan no row here need name; the backend's refusal in its words.
+ *   - the backend's report of a scan the record lists is relayed as the person
+ *     through the row the adoption sync gives it (PR-B's GET /api/scans/:testId/
+ *     backend-pdf, the one relay); the backend's refusal in its words.
  *
  * The stand-in backend (tests/helpers/hybrid-backend-stand-in.ts) serves the
  * record's shapes after athena-backend #188, paged two rows at a time here.
@@ -306,8 +307,8 @@ describe("GET /api/record/clients/:id/findings", () => {
   });
 });
 
-describe("GET /api/record/scans/:uuid/pdf", () => {
-  it("relays the backend's report as the person for a completed scan the record lists, and the backend's refusal for one with no report", async () => {
+describe("the report of a scan the record lists", () => {
+  it("is relayed as the person through the row the sync adopts the scan into, and the backend's refusal for one with no report", async () => {
     const clientId = await aClient("report.example");
     const started = await admin.post("/api/scans").send({ clientId, target: "https://report.example/", consent: true });
     expect(started.status).toBe(201);
@@ -315,9 +316,13 @@ describe("GET /api/record/scans/:uuid/pdf", () => {
     engine.control.completeNext = true;
     const completed = await aScanStartedElsewhere(engagementId, "https://report.example/done");
     expect(hybrid.scans.get(completed.uuid)!.status).toBe("completed");
+    const synced = await admin.post("/api/record/adopt");
+    expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+    const adopted = (synced.body.adopted as Array<{ testId: string; backendScanId: string }>).find((one) => one.backendScanId === completed.uuid);
+    expect(adopted).toBeDefined();
     hybrid.seen.length = 0;
 
-    const pdf = await admin.get(`/api/record/scans/${completed.uuid}/pdf`).buffer(true).parse((res, done) => {
+    const pdf = await admin.get(`/api/scans/${adopted!.testId}/backend-pdf`).buffer(true).parse((res, done) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => done(null, Buffer.concat(chunks)));
@@ -328,7 +333,7 @@ describe("GET /api/record/scans/:uuid/pdf", () => {
     expect(hybrid.seen.filter((one) => one.path.endsWith("/pdf/"))).toHaveLength(1);
     expect(hybrid.seen.filter((one) => one.path.endsWith("/pdf/"))[0]).toMatchObject({ account: "admin", by: "bearer", stop: false });
 
-    const pending = await admin.get(`/api/record/scans/${started.body.test.findings.backendScanId}/pdf`);
+    const pending = await admin.get(`/api/scans/${started.body.test.id}/backend-pdf`);
     expect(pending.status).toBe(409);
     expect(pending.body).toMatchObject({ reason: "backend_refused", backendStatus: 409 });
     expect(pending.body.error).toContain("This scan is pending, so there is no report to render.");

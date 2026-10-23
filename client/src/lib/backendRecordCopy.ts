@@ -80,6 +80,16 @@ export const ENGAGEMENTS_SOURCE =
 /** The Clients page: the on-demand read of the backend's engagement. */
 export const READ_ENGAGEMENT = "Read from Athena-Backend";
 
+/**
+ * A scan adopted from the Athena-Backend record (server/backend-adoption.ts)
+ * whose engagement no client here names: wherever a row's client is shown.
+ * No client is made up for it.
+ */
+export const NOT_LINKED_TO_CLIENT = "Not linked to a dashboard client";
+
+/** Beside such a row on the Tests screen and in Scans running now: where it came from, by source. */
+export const ADOPTED_FROM_RECORD = "Adopted from the Athena-Backend record; not started from this dashboard";
+
 /** Every authored string above, for the lint test (tests/the-backend-record-copy-lints-clean-and-names-its-source.test.ts). */
 export function allBackendRecordStrings(): string[] {
   return [
@@ -105,5 +115,7 @@ export function allBackendRecordStrings(): string[] {
     ENGAGEMENTS_TITLE,
     ENGAGEMENTS_SOURCE,
     READ_ENGAGEMENT,
+    NOT_LINKED_TO_CLIENT,
+    ADOPTED_FROM_RECORD,
   ];
 }

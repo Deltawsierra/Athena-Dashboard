@@ -16,18 +16,19 @@ import * as engine from "./engine";
 import * as backendScans from "./backend-scans";
 import * as retests from "./retests";
 import { CollectWatcher, type CollectHooks } from "./collect-watch";
+import { adoptBackendScans, firstDirectReads, type AdoptionDeps, type AdoptionOutcome } from "./backend-adoption";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
-import { boundedRelayRead } from "./read-deadline";
+import { boundedRelayRead, runBoundedRead } from "./read-deadline";
 import { SIGN_IN_REQUIRED, asThePerson, signInPerson } from "./person-credential";
 import * as idempotency from "./idempotency";
 import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
 import {
-  BACKEND_RECORD_KEYS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom, stopIdFrom,
-  stoppedOnlyAtBackend,
+  ADOPTION_KEYS, BACKEND_RECORD_KEYS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom,
+  stopIdFrom, stoppedOnlyAtBackend,
 } from "@shared/engine-record";
 import { ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnavailable } from "./control-plane";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
@@ -1455,9 +1456,10 @@ const HUMAN_FINDINGS_KEY = "details";
  * (shared/engine-record.ts BACKEND_RECORD_KEYS): the backend scan and
  * engagement ids, the collected record, a stop's mirror reading, and the mark
  * that only the backend's Stop reaches the run. A person may supply none of
- * them.
+ * them. Nor the keys of a row adopted from the backend's record (ADOPTION_KEYS:
+ * its source and when it was adopted): the adoption alone writes those.
  */
-const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS] as const;
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS, ...ADOPTION_KEYS] as const;
 
 /**
  * Refuse a person's test whose findings carry a run's keys, on create as on
@@ -4215,7 +4217,7 @@ export function registerRoutes(app: Express): void {
     // recorded by the backend, which collects the run when it ends; the same
     // run filed into this ledger as well would be counted twice.
     let filed: lifecycle.IngestResult | null = null;
-    if (finished && current.findings !== null && backendScanId === null) {
+    if (finished && current.findings !== null && backendScanId === null && test.clientId !== null) {
       const client = await storage.getClient(test.clientId);
       const site = test.siteId ? await storage.getSite(test.siteId) : null;
       if (client) {
@@ -4399,9 +4401,59 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
-  /** The backend's report of a scan by its backend uuid, relayed as the person: for a scan the record lists and no row here names. */
-  app.get("/api/record/scans/:uuid/pdf", asyncHandler(async (req, res) => {
-    await relayBackendPdf(res, req.params.uuid);
+  // What the adoption sync works with (server/backend-adoption.ts): this
+  // dashboard's rows, the scan route's own counting and snapshot of a record,
+  // one bounded direct read of a run by this dashboard's engine key, and the log.
+  const adoptionDeps: AdoptionDeps = {
+    storage,
+    countSeverities,
+    snapshotOf: (record) => snapshotOfRecord(record, { results: null, coverage: null }),
+    hostOf,
+    async readRun(runId) {
+      try {
+        await engine.runState(runId);
+        return "read";
+      } catch (cause) {
+        return cause instanceof engine.EngineRunNotFound ? "not_found" : "unread";
+      }
+    },
+    async log(entry) {
+      await storage.createActivityLog({
+        action: "adopted_from_backend_record", entityType: "test", entityId: entry.testId, details: entry.details,
+        userId: entry.userId, ipAddress: entry.ipAddress,
+      });
+    },
+  };
+
+  /**
+   * The adoption sync (server/backend-adoption.ts): every scan the backend lists
+   * for the person that no row here names gets one, so the screens, the Stop
+   * and the kill switch cover it. The pages ask on load (Tests, Engagements,
+   * Overview); a sync within adoption.minIntervalMs of the last one for this
+   * session answers that outcome, throttled. A POST, bounded by the read
+   * deadline all the same (runBoundedRead: the backend reads are cancelled with
+   * it). On no stop's path: never awaited by a stop, the kill switch, a launch's
+   * answer or the abort route, and refused outright while the kill switch is
+   * engaged (enforceKillSwitch, as every write is). A sync that fails changes
+   * nothing and is answered "could not be read". The body is not read: the run
+   * ids written are the record's alone.
+   */
+  app.post("/api/record/adopt", asyncHandler(async (req, res) => {
+    const who = actor(req);
+    const key = req.session?.userId ? req.sessionID : `api-key:${who.userId ?? "none"}`;
+    let outcome: AdoptionOutcome;
+    try {
+      outcome = await runBoundedRead(res, { who: "Athena-Backend", what: "the adoption sync" }, () => adoptBackendScans(adoptionDeps, key, who));
+    } catch (cause) {
+      if (refuseRecordRead(res, cause, "The backend's scans list")) return;
+      throw cause;
+    }
+    res.json(outcome);
+    // Decision 7, PR-B's rule: the first direct read of each adopted running
+    // run -- after this answer has gone out, never awaited by it.
+    if (!outcome.throttled && outcome.adopted.length > 0) {
+      afterAnswer(res, () => void firstDirectReads(adoptionDeps, outcome.adopted));
+    }
   }));
 
   // ==== RETEST ====
@@ -4472,6 +4524,15 @@ export function registerRoutes(app: Express): void {
     const test = await storage.getTest(req.params.testId);
     if (!test) return notFound(res, "Test");
 
+    if (test.clientId === null) {
+      // A scan adopted from the backend's record under an engagement no client
+      // here names: no client's sites authorise a retest's scope from here.
+      return void res.status(409).json({
+        error: "this scan was adopted from the Athena-Backend record and its engagement is not linked to a dashboard client, " +
+          "so no recorded site authorises a retest from here",
+        reason: "not_linked_to_client",
+      });
+    }
     const client = await storage.getClient(test.clientId);
     if (!client) return notFound(res, "Client");
     const site = test.siteId ? await storage.getSite(test.siteId) : null;

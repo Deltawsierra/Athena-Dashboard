@@ -114,7 +114,15 @@ export const sites = sqliteTable("sites", {
 
 export const tests = sqliteTable("tests", {
   id: id(),
-  clientId: text("client_id").notNull(),
+  /**
+   * The client this test belongs to. Null for exactly one kind of row: a scan
+   * adopted from Athena-Backend's record (server/backend-adoption.ts) whose
+   * engagement no client here names by its `backendEngagementId` -- the
+   * screens say "not linked to a dashboard client", and no client is ever
+   * made up for it. A person's test always names its client
+   * (insertTestSchema); adoption alone writes null.
+   */
+  clientId: text("client_id"),
   siteId: text("site_id"),
   testType: text("test_type").notNull(),
   status: text("status").notNull().default("pending"),
@@ -635,6 +643,9 @@ export const insertSiteSchema = createInsertSchema(sites, {
 }).omit({ id: true, createdAt: true });
 
 export const insertTestSchema = createInsertSchema(tests, {
+  // A person's test names its client; only a row adopted from the backend's
+  // record may name none (shared/schema.ts tests.clientId; NewTest below).
+  clientId: z.string().min(1),
   testType: z.string().min(1).max(100),
   completedAt: optionalDate,
   findings: optionalJson,
@@ -744,6 +755,12 @@ export type Client = typeof clients.$inferSelect;
 export type InsertSite = z.infer<typeof insertSiteSchema>;
 export type Site = typeof sites.$inferSelect;
 export type InsertTest = z.infer<typeof insertTestSchema>;
+/**
+ * A row as storage writes one: a person's or the scan route's test (InsertTest,
+ * a client named), or a scan adopted from the backend's record whose
+ * engagement no client here names (`clientId: null`; server/backend-adoption.ts).
+ */
+export type NewTest = Omit<InsertTest, "clientId"> & { clientId: string | null };
 export type Test = typeof tests.$inferSelect;
 export type InsertFinding = z.infer<typeof insertFindingSchema>;
 export type FindingSighting = typeof findingSightings.$inferSelect;

@@ -56,7 +56,13 @@ export const BUSY_TIMEOUT_MS = 0;
  * What opening the database found and could not do, said rather than thrown:
  * a database that cannot open takes every Stop down with it.
  */
-export const openReport: { duplicateEngineRunIds: string[] } = { duplicateEngineRunIds: [] };
+export const openReport: {
+  duplicateEngineRunIds: string[];
+  /** Backend scan uuids more than one test row names, which kept idx_tests_backend_scan from being created (createBackendScanIndex). */
+  duplicateBackendScanIds: string[];
+  /** Why idx_tests_backend_scan could not be created, when it could not for another reason (a findings cell that is not JSON); null when it was. */
+  backendScanIndexNotCreated: string | null;
+} = { duplicateEngineRunIds: [], duplicateBackendScanIds: [], backendScanIndexNotCreated: null };
 
 let connection: Connection | null = null;
 
@@ -265,7 +271,9 @@ function createSchema(handle: DatabaseType): void {
 
     CREATE TABLE IF NOT EXISTS tests (
       id TEXT PRIMARY KEY,
-      client_id TEXT NOT NULL,
+      -- Null only for a scan adopted from the backend record whose engagement
+      -- no client here names (shared/schema.ts tests.clientId).
+      client_id TEXT,
       site_id TEXT,
       test_type TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -514,6 +522,102 @@ function createSchema(handle: DatabaseType): void {
   addMissingColumns(handle);
   createCheckRunIndex(handle);
   relaxHealthMetricColumns(handle);
+  relaxTestsClientColumn(handle);
+  // After the rebuild above: DROP TABLE takes the table's indexes with it.
+  createBackendScanIndex(handle);
+}
+
+/**
+ * One test row per backend scan: a unique index over the backend scan uuid a
+ * row's findings name (`backendScanId`, shared/engine-record.ts), so a scan
+ * started through Athena-Backend is recorded by its launch or adopted from the
+ * backend's list ONCE, however many dashboards share this file
+ * (server/backend-adoption.ts). Only rows whose findings are JSON and name a
+ * scan are indexed: a person's test names none.
+ *
+ * As for the check-run index: a database that already holds two rows for one
+ * backend scan cannot take it, and creating it anyway would fail the open -- a
+ * dashboard that cannot open stops nothing. So duplicates are looked for
+ * first, reported (openReport, and the log), and the index is left off until
+ * they are dealt with; adoption's own read of the rows still adopts each scan
+ * once. A findings cell that is not JSON (an earlier version wrote none, but
+ * nothing here depends on that) fails the look-up, which is reported the same
+ * way, and the index is left off.
+ */
+function createBackendScanIndex(handle: DatabaseType): void {
+  const named = "json_valid(findings) AND json_extract(findings, '$.backendScanId') IS NOT NULL";
+  try {
+    const duplicates = handle.prepare(
+      `SELECT json_extract(findings, '$.backendScanId') AS id FROM tests WHERE ${named} ` +
+      "GROUP BY json_extract(findings, '$.backendScanId') HAVING COUNT(*) > 1",
+    ).all() as Array<{ id: string }>;
+    openReport.duplicateBackendScanIds = duplicates.map((one) => one.id);
+    if (duplicates.length > 0) {
+      console.error(
+        `[db] tests holds more than one row for backend scan(s) ${openReport.duplicateBackendScanIds.join(", ")}; ` +
+        "the index that records one row per backend scan was not created. Remove the extra rows to create it.",
+      );
+      return;
+    }
+    handle.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_tests_backend_scan ON tests(json_extract(findings, '$.backendScanId')) WHERE ${named}`,
+    );
+    openReport.backendScanIndexNotCreated = null;
+  } catch (cause) {
+    openReport.backendScanIndexNotCreated = cause instanceof Error ? cause.message : String(cause);
+    console.error(`[db] the index that records one row per backend scan could not be created: ${openReport.backendScanIndexNotCreated}`);
+  }
+}
+
+/**
+ * Drop NOT NULL from tests.client_id: a scan adopted from the backend's record
+ * whose engagement no client here names is recorded with no client, and no
+ * client is made up for it (shared/schema.ts tests.clientId). The same
+ * copy-and-rename as relaxHealthMetricColumns, run only while the old shape is
+ * on disk, inside a transaction, copying every row and every column -- the
+ * ones addMissingColumns added included, which is why it runs after it -- and
+ * the table's index with them.
+ */
+function relaxTestsClientColumn(handle: DatabaseType): void {
+  const columns = handle
+    .prepare("PRAGMA table_info(tests)")
+    .all() as Array<{ name: string; notnull: number }>;
+  if (!columns.some((one) => one.name === "client_id" && one.notnull === 1)) return;
+
+  handle.transaction(() => {
+    handle.exec(`
+      CREATE TABLE tests_rebuilt (
+        id TEXT PRIMARY KEY,
+        client_id TEXT,
+        site_id TEXT,
+        test_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        severity TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        summary TEXT,
+        findings TEXT,
+        vulnerabilities_found INTEGER NOT NULL DEFAULT 0,
+        critical_count INTEGER NOT NULL DEFAULT 0,
+        high_count INTEGER NOT NULL DEFAULT 0,
+        medium_count INTEGER NOT NULL DEFAULT 0,
+        low_count INTEGER NOT NULL DEFAULT 0,
+        executed_by TEXT,
+        is_sample INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO tests_rebuilt (
+        id, client_id, site_id, test_type, status, severity, started_at, completed_at, summary, findings,
+        vulnerabilities_found, critical_count, high_count, medium_count, low_count, executed_by, is_sample
+      )
+      SELECT id, client_id, site_id, test_type, status, severity, started_at, completed_at, summary, findings,
+             vulnerabilities_found, critical_count, high_count, medium_count, low_count, executed_by, is_sample
+      FROM tests;
+      DROP TABLE tests;
+      ALTER TABLE tests_rebuilt RENAME TO tests;
+      CREATE INDEX IF NOT EXISTS idx_tests_client_id ON tests(client_id);
+    `);
+  })();
+  console.log("[db] tests rebuilt: client_id accepts null (a scan adopted from the backend record whose engagement no client here names)");
 }
 
 /**

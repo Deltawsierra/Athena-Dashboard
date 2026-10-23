@@ -5,14 +5,15 @@ import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
-import { DuplicateRetestCheck, type CollectWatchEnd, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
+import { DuplicateBackendScan, DuplicateRetestCheck, type CollectWatchEnd, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
+import { backendScanIdOf } from "@shared/engine-record";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 import type {
   User, InsertUser,
   Client, InsertClient,
   Site, InsertSite,
-  Test, InsertTest,
+  Test, InsertTest, NewTest,
   Finding, InsertFinding,
   FindingSighting, FindingCheck, RetestWatch, CollectWatch,
   Document, InsertDocument,
@@ -493,7 +494,7 @@ export class SqliteStorage implements IStorage {
     return this.readBack(() => this.getFinding(id));
   }
 
-  async createTest(test: InsertTest): Promise<Test> {
+  async createTest(test: NewTest): Promise<Test> {
     const row: Test = {
       status: "pending",
       siteId: null,
@@ -512,7 +513,16 @@ export class SqliteStorage implements IStorage {
       id: crypto.randomUUID(),
       startedAt: new Date(),
     };
-    db.insert(schema.tests).values(row).run();
+    try {
+      db.insert(schema.tests).values(row).run();
+    } catch (cause) {
+      // The unique index on the backend scan a row names (db-sqlite.ts
+      // createBackendScanIndex): a second row for one backend scan is refused.
+      if (cause instanceof Error && cause.message.includes("idx_tests_backend_scan")) {
+        throw new DuplicateBackendScan(`a test already names backend scan ${backendScanIdOf(row.findings)}`);
+      }
+      throw cause;
+    }
     return (await this.readBack(() => this.getTest(row.id)))!;
   }
   async updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined> {

@@ -104,12 +104,40 @@ export function boundedRelayRead(subject: ReadSubject): RequestHandler {
       next();
       return;
     }
-    const controller = new AbortController();
-    const deadline = startReadDeadline(res, subject, () => controller.abort());
-    for (const name of ["status", "json", "send", "end", "set", "setHeader", "type"] as const) {
-      const original = (res[name] as (...args: unknown[]) => unknown).bind(res);
-      (res as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => (deadline.passed() ? res : original(...args));
-    }
-    reads.run({ signal: controller.signal }, () => next());
+    const signal = armDeadline(res, subject);
+    reads.run({ signal }, () => next());
   };
+}
+
+/**
+ * Lay the read deadline on `res`: past it the browser is answered 504 (or cut),
+ * the handler's own late answer is dropped, and the signal returned is aborted,
+ * so a backend read made with it is cancelled too.
+ */
+function armDeadline(res: Response, subject: ReadSubject): AbortSignal {
+  const controller = new AbortController();
+  const deadline = startReadDeadline(res, subject, () => controller.abort());
+  for (const name of ["status", "json", "send", "end", "set", "setHeader", "type"] as const) {
+    const original = (res[name] as (...args: unknown[]) => unknown).bind(res);
+    (res as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => (deadline.passed() ? res : original(...args));
+  }
+  return controller.signal;
+}
+
+/**
+ * Run `work` -- reads of a backend, and what is written here from them -- under
+ * the read deadline on `res`, for a request the middleware above does not bound
+ * because it is not a GET: the adoption sync (`POST /api/record/adopt`,
+ * server/backend-adoption.ts). The deadline, or a browser that went away,
+ * cancels every backend READ `work` makes (control-plane.ts readSignalFor: the
+ * GETs among them; a write is never given a read's signal), the browser is
+ * answered 504 past it, and `work`'s own late answer is dropped.
+ *
+ * Never for a stop: nothing that stops, pauses, stands down, terminates or
+ * revokes anything runs under this, and a stop made while such work is being
+ * served is still refused the signal (readSignalFor).
+ */
+export function runBoundedRead<T>(res: Response, subject: ReadSubject, work: () => Promise<T>): Promise<T> {
+  const signal = armDeadline(res, subject);
+  return reads.run({ signal }, work);
 }
