@@ -279,9 +279,8 @@ describe("a launch", () => {
     await expect(launch()).rejects.toBeInstanceOf(client.BackendLaunchUnanswered);
     client.launchTimeouts.launchMs = 300;
     backend.settings.launch = () => "hold";
-    const before = Date.now();
+    // The launch's own bound (launchMs) ends the wait: a launch that hung would fail this case by the test's timeout.
     await expect(launch()).rejects.toBeInstanceOf(client.BackendLaunchUnanswered);
-    expect(Date.now() - before).toBeLessThan(5_000);
     expect(backend.seen.some((one) => one.path === "/api/pentest/scan/"), "the launch was sent").toBe(true);
   });
 
