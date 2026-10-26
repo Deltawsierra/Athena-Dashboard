@@ -44,6 +44,12 @@ node tools/assistant-bench/bench.mjs \
   --url http://127.0.0.1:8080/v1 --model local --db ~/.athena/athena.db
 ```
 
+In PowerShell (these forms have not yet been run on a Windows host): start each server
+(`ollama serve`, `llama-server ...`, the `stub-model.mjs` personas below) in its own window
+instead of ending the line with `&`; end a continued line with a backtick instead of `\`, or
+put the command on one line; and write the database path in full instead of with `~`, for example
+`$HOME\.athena\athena.db`.
+
 Options: `--client "History Co"` picks which engagement the retrieval questions
 are about, `--timeout` raises the per-question limit for a slow machine, `--out`
 chooses where the JSON transcript lands. Exit code is **1** if the model

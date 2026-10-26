@@ -132,6 +132,13 @@ function initialAdminPassword(env: NodeJS.ProcessEnv): { password: string; file:
   fs.writeFileSync(file, `${password}\n`, { mode: 0o600, flag: "wx" });
   // The mode given at creation is narrowed by the umask, never widened; this
   // makes it exactly 0600 whatever the umask was.
+  //
+  // Windows does not apply POSIX mode bits to who may read a file (chmod there
+  // changes only the read-only attribute), so on Windows this does not limit
+  // access. What does is the access list of the folder the file is in, which for
+  // a data directory under the user's profile is inherited from the profile
+  // (by default: that user, the Administrators group and the system). That list
+  // is not checked here. The README says so under "First sign-in".
   fs.chmodSync(file, 0o600);
   return { password, file, refused };
 }

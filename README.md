@@ -8,6 +8,10 @@ embedded Express API and a local SQLite database.
 - Node.js 20 or later
 - npm
 
+`better-sqlite3` is a native module. `npm install` downloads a prebuilt binary
+for your Node version where one exists; where none does it compiles one, which
+needs a C++ toolchain (on Windows, the Visual Studio Build Tools).
+
 ## Getting started
 
 ```bash
@@ -21,10 +25,15 @@ To run the desktop shell against the dev server:
 npm run electron
 ```
 
-The `npm` commands are the same in PowerShell. What is not is a `NAME=value` prefix on a
-command line (below): in PowerShell set the variable for the session first, with
-`$env:NAME = "value"`, in the window that runs the command (the PowerShell forms below have
-not yet been run on a Windows host).
+The `npm` commands are the same in PowerShell, and `npm run dev` and `npm start` set
+`NODE_ENV` themselves (through `cross-env`), so neither needs a variable set first. What is
+not the same is a `NAME=value` prefix on a command line (below): in PowerShell set the
+variable for the session first, with `$env:NAME = "value"`, in the window that runs the
+command (the PowerShell forms below have not yet been run on a Windows host).
+
+Closing the desktop shell in development ends the dev server it started. On Windows that
+means the processes under the `cmd.exe` that `npm run dev` runs in (`taskkill /T`), so the
+port and the database file are free again; a test on a Windows CI runner covers it.
 
 ### First sign-in
 
@@ -39,6 +48,17 @@ password is written anywhere in this repository:
   the database (`ATHENA_USER_DATA`, the directory of `ATHENA_DB_PATH`, or the
   working directory), readable only by the user the server runs as. The log
   says where the file is; it never prints the password.
+
+On Windows that sentence rests on something other than the file mode. The file is
+written with mode `0600` (as is the per-install `session-secret` file), but Windows
+does not apply POSIX mode bits to who may read a file, so there the mode does not
+limit who can read it. What decides is the access list of the folder the file is in. A folder under
+your user profile, where the desktop app keeps its data, inherits the profile's list,
+which by default names your account, the Administrators group and the system. A data
+directory you point `ATHENA_USER_DATA` or `ATHENA_DB_PATH` at elsewhere has whatever
+list that location has. Neither this repository's code nor its tests check the list,
+so if the folder is shared, look at it (`icacls <folder>` in PowerShell) before relying
+on the file.
 
 Sign in as `admin` with that password. Before anything else the app asks for
 a new one (at least 12 characters, not the current one, not the username);
@@ -81,7 +101,10 @@ npm run check        # TypeScript, client and server
 npm test             # Vitest: auth, users, CRUD, SQLite storage, password hashing
 ```
 
-CI runs all of the above plus both builds on every push and pull request.
+CI runs all of the above plus both builds on every push and pull request. A second CI
+job runs on Windows: the install, the type check, and the tests for ending the dev
+server's process tree and for a Stop reaching the engine. The full suite and the
+packaged build run on Linux only.
 
 ## Configuration
 
@@ -108,7 +131,8 @@ CI runs all of the above plus both builds on every push and pull request.
 | `VITE_MYTHOS_SAMPLE_MODE` | unset (off)                    | Build time. `1` turns on sample mode for prospect demos; see below. Never set it for a customer build. |
 
 Database location, in order: `ATHENA_DB_PATH`, then `ATHENA_USER_DATA/athena.db`,
-then `~/.athena-ai/athena.db` under Electron, then `./athena.db`.
+then `~/.athena-ai/athena.db` under Electron (`%USERPROFILE%\.athena-ai\athena.db` on
+Windows), then `./athena.db`.
 
 ### Sample mode (prospect demos only)
 

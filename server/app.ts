@@ -48,6 +48,9 @@ export function resolveSessionSecret(): string {
     }
     const secret = crypto.randomBytes(32).toString("hex");
     fs.mkdirSync(userData, { recursive: true });
+    // 0600 keeps the file to its owner on POSIX. Windows does not apply mode
+    // bits to who may read a file, so there the folder's access list decides
+    // (see server/init-data.ts and the README, "First sign-in").
     fs.writeFileSync(file, secret, { mode: 0o600 });
     return secret;
   }
