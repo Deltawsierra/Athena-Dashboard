@@ -111,3 +111,4 @@ jobs:
           tests/a-sign-in-flood-never-delays-a-stop.test.ts
           tests/scans.test.ts
           tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts
+          tests/closing-the-database-releases-its-file-and-the-next-query-opens-it-again.test.ts
