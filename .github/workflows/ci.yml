@@ -58,3 +58,56 @@ jobs:
           echo "the packaged app did not serve within 60 seconds"
           cat packaged-app.log
           exit 1
+
+  # The dashboard is run on Windows as well, so the paths that matter most there
+  # run there: the install (better-sqlite3 is a native module), the type check,
+  # and the tests for ending the dev server's process tree and for a Stop
+  # reaching the engine. Not the whole suite and not the packaged build, which
+  # stay on the Linux job above.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # --foreground-scripts shows whether better-sqlite3 came from a prebuilt
+      # binary (prebuild-install) or was compiled (node-gyp).
+      - name: Install dependencies
+        run: npm ci --foreground-scripts
+
+      - name: Check that better-sqlite3 loads
+        run: node -p "new (require('better-sqlite3'))(':memory:').prepare('select sqlite_version() as v').get().v"
+
+      - name: Typecheck (client and server)
+        run: npm run check
+
+      # What `npm test` runs first (its pretest).
+      - name: Build better-sqlite3 for Node
+        run: npm run rebuild:node
+
+      - name: Stop-path tests and the process-tree tests
+        run: >-
+          node scripts/test.mjs
+          tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts
+          tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts
+          tests/a-failed-write-never-holds-back-or-hides-a-stop.test.ts
+          tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts
+          tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts
+          tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts
+          tests/the-kill-switch-never-blocks-another-stop.test.ts
+          tests/the-kill-switch-sends-stops-only-to-runs-that-may-be-running.test.ts
+          tests/deleting-a-running-scan-stops-it-first.test.ts
+          tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts
+          tests/a-scan-no-stop-can-reach-is-marked-failsafe-and-deleted-only-with-force.test.ts
+          tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts
+          tests/a-write-flood-under-a-held-lock-delays-no-stop-and-writes-nothing-twice.test.ts
+          tests/an-api-key-stop-waits-on-no-write-and-no-start-passes-a-pressed-kill-switch.test.ts
+          tests/a-tests-table-at-estate-scale-never-delays-a-stop.test.ts
+          tests/a-sign-in-flood-never-delays-a-stop.test.ts
+          tests/scans.test.ts
+          tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts
