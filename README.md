@@ -21,13 +21,19 @@ To run the desktop shell against the dev server:
 npm run electron
 ```
 
+The `npm` commands are the same in PowerShell. What is not is a `NAME=value` prefix on a
+command line (below): in PowerShell set the variable for the session first, with
+`$env:NAME = "value"`, in the window that runs the command (the PowerShell forms below have
+not yet been run on a Windows host).
+
 ### First sign-in
 
 On first start the database is created with ONE account, `admin`, and no
 password is written anywhere in this repository:
 
 - Set `ATHENA_INITIAL_ADMIN_PASSWORD` (at least 12 characters) before the
-  first start to choose the admin's first password; or
+  first start to choose the admin's first password (in PowerShell,
+  `$env:ATHENA_INITIAL_ADMIN_PASSWORD = "<12 or more characters>"`); or
 - leave it unset (or shorter), and a random password is generated and
   written once to `initial-admin-password.txt` in the data directory, beside
   the database (`ATHENA_USER_DATA`, the directory of `ATHENA_DB_PATH`, or the
@@ -113,6 +119,14 @@ sample estate and tenant instead:
 
 ```bash
 VITE_MYTHOS_SAMPLE_MODE=1 npm run dev            # or: npm run build:client
+```
+
+In PowerShell:
+
+```powershell
+$env:VITE_MYTHOS_SAMPLE_MODE = "1"
+npm run dev                                      # or: npm run build:client
+Remove-Item Env:VITE_MYTHOS_SAMPLE_MODE          # unset it again for a normal build
 ```
 
 The flag is read at build time: a build made without it cannot show the sample
