@@ -1,0 +1,10 @@
+# Text is stored with LF and checked out with LF on every platform, so a
+# checkout on Windows (where Git for Windows may otherwise convert to CRLF)
+# reads the same bytes as one on Linux. Tests and tools read source files,
+# fixtures and the README and match on "\n".
+* text=auto eol=lf
+
+# Never converted.
+*.png binary
+*.webp binary
+*.ico binary

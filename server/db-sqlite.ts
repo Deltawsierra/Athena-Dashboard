@@ -133,6 +133,13 @@ export const CHECKPOINT_EVERY_MS = 1_000;
 export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
 
 /**
+ * The checkpointer threads this copy of the module has started and that are
+ * still running. `intentional` is set by closeDatabase before it ends one, so
+ * that an exit it caused is not read as the thread failing.
+ */
+const checkpointerThreads = new Map<Worker, { intentional: boolean }>();
+
+/**
  * Move the write-ahead log into the database from a thread of its own, on a
  * connection of its own (a PASSIVE checkpoint: it waits on no lock, and
  * holds up no reader or writer), so the checkpoint's writes and its fsync
@@ -167,7 +174,10 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
     return;
   }
   worker.unref();
+  const thread = { intentional: false };
+  checkpointerThreads.set(worker, thread);
   worker.on("message", (message: unknown) => {
+    if (thread.intentional) return;
     if (message === "running" && checkpointer.state === "off") {
       try {
         handle.pragma("wal_autocheckpoint = 0");
@@ -180,10 +190,49 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
       loopCheckpoints(String((message as { failed: unknown }).failed));
     }
   });
-  worker.on("error", (cause) => loopCheckpoints(cause instanceof Error ? cause.message : String(cause)));
-  worker.on("exit", (code) => {
-    if (checkpointer.state !== "failed") loopCheckpoints(`its thread exited (${code})`);
+  worker.on("error", (cause) => {
+    if (!thread.intentional) loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
   });
+  worker.on("exit", (code) => {
+    checkpointerThreads.delete(worker);
+    if (!thread.intentional && checkpointer.state !== "failed") loopCheckpoints(`its thread exited (${code})`);
+  });
+}
+
+/**
+ * Release the database file: end this copy's checkpointer thread(s), close the
+ * connection, and forget it, so the next query opens the database afresh (and
+ * starts a new thread). The state is reset to `off`, so the new thread can
+ * report `on` again. An exit caused here is not a failure: nothing falls back
+ * to FULL syncs and nothing is logged. Never throws.
+ *
+ * For tests, which remove their database file afterwards: Windows will not
+ * remove or rename a file while a handle on it is open, and each thread holds
+ * a connection of its own. Nothing in the server calls this, and the Stop
+ * paths do not reach it.
+ */
+export async function closeDatabase(): Promise<void> {
+  try {
+    const ending: Array<Promise<unknown>> = [];
+    for (const [worker, thread] of Array.from(checkpointerThreads.entries())) {
+      thread.intentional = true;
+      checkpointerThreads.delete(worker);
+      ending.push(Promise.resolve(worker.terminate()).catch(() => undefined));
+    }
+    // terminate() settles once the thread has stopped, and with it the connection it held.
+    await Promise.all(ending);
+    const open = connection;
+    connection = null;
+    try {
+      open?.sqlite.close();
+    } catch {
+      // Already closed.
+    }
+    checkpointer.state = "off";
+    checkpointer.detail = "";
+  } catch {
+    // Closing is best effort; there is nothing a caller could do about a failure.
+  }
 }
 
 /** The checkpointer's thread: a connection of its own, a PASSIVE checkpoint every `everyMs`. */

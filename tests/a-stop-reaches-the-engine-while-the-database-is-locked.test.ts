@@ -6,6 +6,7 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -14,8 +15,10 @@ function tempDir(prefix: string): string {
   madeDirs.push(dir);
   return dir;
 }
-afterAll(() => {
-  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
 });
 
 /**
@@ -86,6 +89,7 @@ async function boot(watches: number) {
   const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-stop-lock-")), "athena.db");
   process.env.ATHENA_DB_PATH = dbPath;
   vi.resetModules();
+  await noteDatabase();
   const { createApp } = await import("../server/app");
   const { initializeDefaultData } = await import("../server/init-data");
   const app = createApp();

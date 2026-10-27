@@ -26,6 +26,9 @@ const APP_ORIGIN = SERVER_ORIGIN;
 
 let mainWindow;
 let devServerProcess;
+// Set on the development path only (see startExpressServer): the packaged app
+// ships only the files named in electron-builder.json and never loads the helper.
+let endDevServerTree;
 
 /**
  * Report a fatal startup problem and exit.
@@ -78,6 +81,7 @@ async function startExpressServer() {
     }
   } else {
     const { spawn } = require('child_process');
+    ({ endProcessTree: endDevServerTree } = require('./end-process-tree.cjs'));
     devServerProcess = spawn('npm', ['run', 'dev'], {
       shell: true,
       env: { ...process.env, NODE_ENV: 'development' },
@@ -282,6 +286,10 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   if (devServerProcess) {
-    devServerProcess.kill();
+    // `shell: true` makes the child a shell wrapper. On Windows `kill()` ends
+    // only that wrapper and leaves the server running with its port and
+    // database file, so the whole tree is ended (end-process-tree.cjs). On
+    // POSIX it is still a plain kill() of the child.
+    endDevServerTree(devServerProcess);
   }
 });

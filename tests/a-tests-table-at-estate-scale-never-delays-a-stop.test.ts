@@ -6,6 +6,7 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /**
  * SAFETY: `GET /api/tests` reads the whole table with one unbounded,
@@ -25,8 +26,10 @@ function tempDir(prefix: string): string {
   madeDirs.push(dir);
   return dir;
 }
-afterAll(() => {
-  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
 });
 
 const calls: Array<{ line: string; at: number }> = [];
@@ -82,6 +85,7 @@ describe("a tests table at estate scale", () => {
     process.env.ATHENA_STORAGE = "sqlite";
     const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-d325-scale-")), "athena.db");
     process.env.ATHENA_DB_PATH = dbPath;
+    await noteDatabase();
     const { createApp } = await import("../server/app");
     const { initializeDefaultData } = await import("../server/init-data");
     const app = createApp();
@@ -110,12 +114,15 @@ describe("a tests table at estate scale", () => {
        VALUES (@id, @clientId, 'vulnerability-scan', 'completed', @now, @now, @summary, @findings, 3, 1, 1, 1, 0, NULL, 0)`,
     );
     const N = 60_000;
-    raw.transaction(() => {
-      for (let i = 0; i < N; i += 1) {
-        insert.run({ id: `bulk-${i}`, clientId: client.id, now, summary: `Scan of target-${i}.example.test`, findings: findingsBlobFor(i) });
-      }
-    })();
-    raw.close();
+    try {
+      raw.transaction(() => {
+        for (let i = 0; i < N; i += 1) {
+          insert.run({ id: `bulk-${i}`, clientId: client.id, now, summary: `Scan of target-${i}.example.test`, findings: findingsBlobFor(i) });
+        }
+      })();
+    } finally {
+      raw.close();
+    }
 
     try {
       calls.length = 0;
