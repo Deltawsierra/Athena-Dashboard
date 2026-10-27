@@ -1,10 +1,19 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { adminHasSetPassword } from "./test-admin";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
+
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
+});
 
 /**
  * A sign-in that verified a legacy (sha256) hash rehashes the password it was
@@ -46,42 +55,41 @@ const legacy = (pw: string) => crypto.createHash("sha256").update(pw).digest("he
 
 describe("a sign-in on an old hash never writes over a changed password", () => {
   it("over the API: the change stands, the old password is refused, and the in-flight sign-in holds nothing", async () => {
-    const dbFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rehash-")), "athena.db");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rehash-"));
+    madeDirs.push(dir);
+    const dbFile = path.join(dir, "athena.db");
     process.env.ATHENA_STORAGE = "sqlite";
     process.env.ATHENA_DB_PATH = dbFile;
-    try {
-      const { createApp } = await import("../server/app");
-      const { initializeDefaultData } = await import("../server/init-data");
-      const { storage } = await import("../server/storage-unified");
-      const { db } = await import("../server/db-sqlite");
-      const schema = await import("@shared/schema");
-      const { eq } = await import("drizzle-orm");
-      const app = createApp();
-      await initializeDefaultData();
-      await adminHasSetPassword();
+    await noteDatabase();
+    const { createApp } = await import("../server/app");
+    const { initializeDefaultData } = await import("../server/init-data");
+    const { storage } = await import("../server/storage-unified");
+    const { db } = await import("../server/db-sqlite");
+    const schema = await import("@shared/schema");
+    const { eq } = await import("drizzle-orm");
+    const app = createApp();
+    await initializeDefaultData();
+    await adminHasSetPassword();
 
-      const ops = await storage.createUser({ username: "ops", password: "placeholder-password-1", role: "admin", isActive: true }); // pragma: allowlist secret
-      // An account from an early release: its hash is the legacy sha256.
-      db.update(schema.users).set({ password: legacy(OLD) }).where(eq(schema.users.id, ops.id)).run();
+    const ops = await storage.createUser({ username: "ops", password: "placeholder-password-1", role: "admin", isActive: true }); // pragma: allowlist secret
+    // An account from an early release: its hash is the legacy sha256.
+    db.update(schema.users).set({ password: legacy(OLD) }).where(eq(schema.users.id, ops.id)).run();
 
-      const rehashing = holdTheNextRehash();
-      const inFlight = request.agent(app);
-      const signingIn = inFlight.post("/api/auth/login").send({ username: "ops", password: OLD }).then((r) => r);
-      await rehashing;
+    const rehashing = holdTheNextRehash();
+    const inFlight = request.agent(app);
+    const signingIn = inFlight.post("/api/auth/login").send({ username: "ops", password: OLD }).then((r) => r);
+    await rehashing;
 
-      const owner = request.agent(app);
-      expect((await owner.post("/api/auth/login").send({ username: "ops", password: OLD })).status).toBe(200);
-      expect((await owner.post("/api/auth/change-password").send({ currentPassword: OLD, newPassword: NEW })).status).toBe(200);
+    const owner = request.agent(app);
+    expect((await owner.post("/api/auth/login").send({ username: "ops", password: OLD })).status).toBe(200);
+    expect((await owner.post("/api/auth/change-password").send({ currentPassword: OLD, newPassword: NEW })).status).toBe(200);
 
-      hold.release();
-      expect((await signingIn).status).toBe(401);
+    hold.release();
+    expect((await signingIn).status).toBe(401);
 
-      expect((await inFlight.get("/api/users")).status).toBe(401);
-      expect((await request(app).post("/api/auth/login").send({ username: "ops", password: OLD })).status).toBe(401);
-      expect((await request(app).post("/api/auth/login").send({ username: "ops", password: NEW })).status).toBe(200);
-    } finally {
-      fs.rmSync(path.dirname(dbFile), { recursive: true, force: true });
-    }
+    expect((await inFlight.get("/api/users")).status).toBe(401);
+    expect((await request(app).post("/api/auth/login").send({ username: "ops", password: OLD })).status).toBe(401);
+    expect((await request(app).post("/api/auth/login").send({ username: "ops", password: NEW })).status).toBe(200);
   }, 60_000);
 
   it("in the memory backend: a password changed during the rehash is the account's", async () => {

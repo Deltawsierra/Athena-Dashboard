@@ -1,10 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { adminHasSetPassword } from "./test-admin";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
+
+/** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
+const madeDirs: string[] = [];
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
+});
 
 const OLD = "the-old-legacy-hashed-pw"; // pragma: allowlist secret
 const legacy = (pw: string) => crypto.createHash("sha256").update(pw).digest("hex");
@@ -29,9 +38,12 @@ describe("two sign-ins at once on a legacy hash", () => {
 });
 
   it("sqlite over the API: two concurrent correct sign-ins on a legacy hash both succeed", async () => {
-  const dbFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "rehash-c-")), "athena.db");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rehash-c-"));
+  madeDirs.push(dir);
+  const dbFile = path.join(dir, "athena.db");
   process.env.ATHENA_STORAGE = "sqlite";
   process.env.ATHENA_DB_PATH = dbFile;
+  await noteDatabase();
   const { createApp } = await import("../server/app");
   const { initializeDefaultData } = await import("../server/init-data");
   const { storage } = await import("../server/storage-unified");
@@ -44,7 +56,6 @@ describe("two sign-ins at once on a legacy hash", () => {
   const ops = await storage.createUser({ username: "ops", password: "placeholder-password-1", role: "admin", isActive: true }); // pragma: allowlist secret
   db.update(schema.users).set({ password: legacy(OLD) }).where(eq(schema.users.id, ops.id)).run();
   const rs = await Promise.all([1, 2, 3].map(() => request(app).post("/api/auth/login").send({ username: "ops", password: OLD })));
-  fs.rmSync(path.dirname(dbFile), { recursive: true, force: true });
   expect(rs.map((r) => r.status)).toEqual([200, 200, 200]);
 }, 60000);
 });

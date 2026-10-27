@@ -10,6 +10,7 @@ import request from "supertest";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 import { makeApp } from "./helpers";
 import { LEGACY_DEFAULT_PASSWORDS } from "../server/password";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /**
  * No install is seeded with a password anyone can read.
@@ -38,6 +39,7 @@ function captureLogs(): string[] {
 /** The modules, fresh: the in-memory backend, with its data directory `dir` (where the database file would be). */
 async function fresh() {
   vi.resetModules();
+  await noteDatabase();
   const init = await import("../server/init-data");
   const { storage } = await import("../server/storage-unified");
   const { verifyPassword } = await import("../server/password");
@@ -52,12 +54,14 @@ beforeEach(() => {
   logs = captureLogs();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   process.env.ATHENA_INITIAL_ADMIN_PASSWORD = TEST_ADMIN_PASSWORD;
   process.env.ATHENA_STORAGE = "memory";
   delete process.env.ATHENA_DB_PATH;
-  fs.rmSync(dir, { recursive: true, force: true });
+  // The one test that runs on a SQLite file leaves the server's connection and the checkpointer thread's connection open
+  // on it, and Windows will not remove an open file: every database this test loaded is closed first, then `dir` is removed.
+  await releaseAndRemove([dir]);
 });
 
 describe("first run", () => {

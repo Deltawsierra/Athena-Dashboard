@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import type { AddressInfo } from "net";
 import { PerformanceObserver } from "perf_hooks";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -17,8 +18,10 @@ function tempDir(prefix: string): string {
   madeDirs.push(dir);
   return dir;
 }
-afterAll(() => {
-  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
 });
 
 /**
@@ -93,6 +96,7 @@ async function boot(runId: string) {
   const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-r4-lock-")), "athena.db");
   process.env.ATHENA_DB_PATH = dbPath;
   vi.resetModules();
+  await noteDatabase();
   const { createApp } = await import("../server/app");
   const { initializeDefaultData } = await import("../server/init-data");
   const app = createApp();
@@ -115,11 +119,19 @@ async function boot(runId: string) {
 
 function holdTheWriteLock(dbPath: string) {
   const lock = new Database(dbPath);
-  lock.pragma("busy_timeout = 0");
-  lock.exec("BEGIN IMMEDIATE");
-  return () => {
-    lock.exec("ROLLBACK");
+  try {
+    lock.pragma("busy_timeout = 0");
+    lock.exec("BEGIN IMMEDIATE");
+  } catch (cause) {
     lock.close();
+    throw cause;
+  }
+  return () => {
+    try {
+      lock.exec("ROLLBACK");
+    } finally {
+      lock.close();
+    }
   };
 }
 
@@ -296,10 +308,13 @@ describe("the kill switch and another dashboard's scan, when the engine's list d
     const engineModule = await import("../server/engine");
     engineModule.engineTimeouts.callMs = 3_000;
     const other = new Database(dbPath);
-    const row = other.prepare("SELECT * FROM tests LIMIT 1").get() as Record<string, unknown>;
-    other.prepare("INSERT INTO tests (id, client_id, test_type, status, started_at, findings, vulnerabilities_found, critical_count, high_count, medium_count, low_count, is_sample) VALUES (?, ?, 'vulnerability-scan', 'running', ?, ?, 0,0,0,0,0,0)")
-      .run("other-dash-test-r4", row.client_id, row.started_at, JSON.stringify({ runId: "other-dash-run-r4", target: "https://b.invalid/", results: [] }));
-    other.close();
+    try {
+      const row = other.prepare("SELECT * FROM tests LIMIT 1").get() as Record<string, unknown>;
+      other.prepare("INSERT INTO tests (id, client_id, test_type, status, started_at, findings, vulnerabilities_found, critical_count, high_count, medium_count, low_count, is_sample) VALUES (?, ?, 'vulnerability-scan', 'running', ?, ?, 0,0,0,0,0,0)")
+        .run("other-dash-test-r4", row.client_id, row.started_at, JSON.stringify({ runId: "other-dash-run-r4", target: "https://b.invalid/", results: [] }));
+    } finally {
+      other.close();
+    }
     await knob("__hang", { hang: true });
     calls.length = 0;
     try {
