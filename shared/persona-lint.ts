@@ -30,14 +30,16 @@
  * forbidden list as a JSON data artifact the dashboard vendors and this file
  * reads, so the two can never silently diverge. Out of scope here.
  *
- * DASHBOARD-SIDE TIGHTENING (mirror it into `mythos_core.persona`; a follow-up
- * for the lead): the fence matches whole words, so a verdict in another form
- * slipped past it -- a "Failing" label past `fail`, a "Safer AI" sign-off past
- * `safe`. Here each verdict token also matches its inflections (see
- * FORBIDDEN_PATTERNS), and a promise of confidence ("Deploy with confidence")
- * is false reassurance. Stricter only: nothing refused before is allowed now,
- * and `FORBIDDEN_WORDS` (the charter's list, pinned by a test) is unchanged. The
- * page copy is held to all of it by tests/page-copy-lints-clean.test.ts.
+ * DASHBOARD-SIDE TIGHTENING (mirrored into `mythos_core.persona` by Mythos-Core
+ * #55; a change here is made there too): the fence matched whole words, so a
+ * verdict in another form slipped past it -- a "Failing" label past `fail`, a
+ * "Safer AI" sign-off past `safe`. Here each verdict token also matches its
+ * inflections (see FORBIDDEN_PATTERNS), and a promise of confidence ("Deploy
+ * with confidence") is false reassurance. `FORBIDDEN_WORDS` (the charter's
+ * list, pinned by a test) is unchanged. The reassurance phrases match on whole
+ * words and a number or a measure after "confidence" is a measure (see
+ * REASSURANCE_PATTERNS and CONFIDENCE_PROMISE): the first versions refused honest
+ * copy. The page copy is held to all of it by tests/page-copy-lints-clean.test.ts.
  */
 
 /**
@@ -109,6 +111,12 @@ const SHIP_OR_HOLD = /\b(?:ship|hold)\b/i;
  * False reassurance / boasting beyond the evidence (charter guardrail). Several
  * of these also contain a forbidden word; they are listed so the reason is named
  * precisely. The forbidden-word list and the dramatization rule do the rest.
+ *
+ * Matched on whole words, a hyphen counting as part of a word: a substring match
+ * refused honest copy whose words merely run into a phrase ("overall goodput"
+ * holds "all good", "everything is fine-grained" holds "everything is fine").
+ * Found by linting every string the engines ship against the shared fence; the
+ * same rule is in `mythos_core.persona.lint`.
  */
 const REASSURANCE_PHRASES = [
   "rest assured",
@@ -132,15 +140,29 @@ const REASSURANCE_PHRASES = [
   "no cause for concern",
 ] as const;
 
+/** Each phrase as a whole-word pattern, any run of whitespace between its words.
+ * No lookbehind: the client bundle runs this too, and older Safari has none. */
+const REASSURANCE_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = REASSURANCE_PHRASES.map(
+  (phrase) =>
+    [
+      phrase,
+      new RegExp(
+        `(?:^|[^\\w-])${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")}(?![\\w-])`,
+        "i",
+      ),
+    ] as const,
+);
+
 /**
  * Confidence as a PROMISE -- "Deploy with confidence", "From evidence to
  * confidence" -- is reassurance beyond the evidence, and in a tagline a release
  * call. Confidence as a MEASURE ("sorted with confidence scores", "with
- * confidence level 0.8") is data about a finding, not a promise, and stays
- * legal: the lookahead leaves the measures out.
+ * confidence level 0.8", "scored with confidence 0.82", "with confidence of
+ * 0.82") is data about a finding, not a promise, and stays legal: the lookahead
+ * leaves out a number, "of" and a number, and a measure's name.
  */
 const CONFIDENCE_PROMISE =
-  /\b(?:with|to)\s+confidence\b(?!\s+(?:interval|score|level|threshold|band|rating|value|figure|basis)s?\b)/i;
+  /\b(?:with|to)\s+confidence\b(?!\s*(?:[:=]|\.?[0-9]|of\s+\.?[0-9]|(?:interval|score|level|threshold|band|rating|value|figure|basis|estimate|weight|metric|measure)s?\b))/i;
 
 /** Straighten curly apostrophes so phrase matching is not defeated by typography. */
 function normalize(text: string): string {
@@ -155,7 +177,6 @@ function normalize(text: string): string {
  */
 export function lintMicrocopy(text: string): Violation[] {
   const normalized = normalize(text);
-  const lower = normalized.toLowerCase();
   const violations: Violation[] = [];
 
   for (const [word, pattern] of FORBIDDEN_PATTERNS) {
@@ -169,8 +190,8 @@ export function lintMicrocopy(text: string): Violation[] {
   // and never levity on an error.
   if (normalized.includes("!")) violations.push({ rule: "dramatization", term: "!" });
 
-  for (const phrase of REASSURANCE_PHRASES) {
-    if (lower.includes(phrase)) violations.push({ rule: "false-reassurance", term: phrase });
+  for (const [phrase, pattern] of REASSURANCE_PATTERNS) {
+    if (pattern.test(normalized)) violations.push({ rule: "false-reassurance", term: phrase });
   }
 
   const promise = CONFIDENCE_PROMISE.exec(normalized);
