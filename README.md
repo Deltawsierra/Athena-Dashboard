@@ -433,7 +433,23 @@ Two preconditions when deploying:
    reaches the run -- the backend's own Stop on the scan's record, the kill
    switch (which sends the stop by id and mirrors it into the record) and the
    failsafes. The first direct read that succeeds clears the mark and brings
-   the Stop back.
+   the Stop back. Such a row is not left "running" for ever either: once the
+   engine's 404 to its reads stands -- five reads in a row over at least
+   thirty seconds (`notKnown` in `server/routes.ts`; one 404 is an engine that
+   restarted, or a registry not yet caught up) -- the collect watch is started
+   for that reason (logged `collect_watch_started_run_not_readable`), and
+   Athena-Backend, whose key launched the run, is asked for its record: pending
+   while the run goes on. The record's end -- completed, stopped (`aborted`
+   here) or failed, spelled by `STATUS_HERE` in `server/backend-adoption.ts` --
+   ends the row through the one path every record is filed by
+   (`fileRecordIntoRow`), with the record's results, counts and collection
+   time. A row a direct read already ended keeps the engine's own word; the
+   record's end stands beside it in the snapshot. The adoption sync is the
+   backstop for a run longer than the watch's hour: a known row still
+   unfinished here whose record the backend lists as ended is ended from the
+   record's detail the same way, counted in the sync's answer as
+   `endedFromRecord` and logged `ended_from_backend_record`. No 404 ever
+   writes a status: nothing here invents an end.
 
 Also: authenticated scanning (a login block on the Penetration Testing page)
 is refused with `auth_not_carried_by_backend`, since the backend's launch
@@ -534,12 +550,88 @@ and `tests/a-running-retest-keeps-its-stop-on-every-screen.test.tsx` stand uncha
 
 Tests: `tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts`,
 `tests/a-finished-hybrid-scan-is-collected-into-its-backend-record.test.ts`,
+`tests/a-hybrid-run-this-key-never-reads-ends-with-its-record.test.ts`,
 `tests/a-backend-record-is-collected-once-across-a-restart.test.ts`,
 `tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts`,
 `tests/a-testing-window-is-renewed-only-by-a-person-s-act.test.ts` and
 `tests/the-backend-record-panel-shows-three-states-and-never-a-verdict-from-silence.test.tsx`;
 the stand-in backend they drive is `tests/helpers/hybrid-backend-stand-in.ts`,
 pinned by `tests/the-hybrid-backend-stand-in-answers-the-pinned-shapes.test.ts`.
+
+## A scan whose run the engine does not know
+
+The engine answers a read of a run it has no record of 404 "No such scan run":
+it restarted and forgot the run, the run never started, or it runs under
+another id. A scan whose every read was answered so read "running" for ever.
+Now no such scan is a dead end, and none is given an end it did not have.
+
+- **The reading.** One 404 is an engine that restarted, or a registry not yet
+  caught up. Once the 404 to a row's reads stands -- five reads in a row over
+  at least thirty seconds (`notKnown` in `server/routes.ts`, in memory, let go
+  by any read the engine answers) -- a scan this dashboard dispatched to the
+  engine itself is answered `engineKnowsRun: false` with
+  `notKnown: {since, reads, said}`, the engine's words verbatim, and the row
+  carries the reading (`findings.notKnown`, written at most once a minute and
+  never awaited: a write that fails still answers from memory). Its status is
+  unchanged, since the engine has not said the run ended, and its Stop is
+  offered and sent as before. A scan started through Athena-Backend is never
+  given the reading: its record is asked for instead, and the record's end ends
+  it (see the hybrid's precondition 2).
+- **The act** (`POST /api/scans/:testId/record-not-known`, an admin's). Only a
+  person ends such a scan, and only with the engine's 404 in hand. The act
+  sends the run its stop FIRST (bounded, as every stop is) and writes nothing
+  before the answer. The stop's own line is logged (`abort_run_unknown`, via
+  `record_not_known`). Only when the engine answered that stop 404 "No such scan
+  run" is the row's status written `not_known` (`NOT_KNOWN_STATUS` in
+  `shared/engine-record.ts`, the retest panel's word for the same thing), with
+  `completedAt`, who recorded it, when, the stop's outcome and the engine's
+  words (`findings.notKnown.recorded`), and `recorded_not_known` logged. The
+  engine took the stop, or answered that the run had ended: 409, "the engine
+  knows this run; its own end will be read". The engine could not be asked:
+  503, and nothing is recorded. The write failed: 500, with the stop's
+  outcome. A hybrid row is refused 409: its end is its record's. The act is no
+  stop: it is refused while the kill switch is engaged (the switch has already
+  sent the run a stop). It is held by its scan, not by a press's key (no key is
+  read: three routes read one, see
+  [Retries and duplicates](#retries-and-duplicates)): while one press on a scan
+  is answered, any other sends nothing (409 `idempotency_in_flight`), and one
+  sent after it was recorded is answered from the record (`alreadyRecorded`),
+  with no second stop.
+- **After it.** `not_known` is an end here: no Stop is offered, a delete sends
+  no stop, and Max Concurrent Tests does not count it. The kill switch still
+  sends the run a stop by its id (`sweptStopIdOf`: it only adds rows), and says
+  what the engine answered. Nothing else writes the word: a person's test
+  cannot be given it, a scan's status is refused as an edit as before, and
+  `findings.notKnown` cannot be supplied and is kept by an edit.
+- **On the pages** (`client/src/lib/notKnownCopy.ts`, `client/src/components/NotKnownPanel.tsx`).
+  The Athena and Penetration Testing pages say the reading beside the Stop --
+  "Not known to the engine since <t>: it may still be running under another
+  id. Stop sends the stop again; the kill switch on the AI Control page sends
+  it a stop by id.", the engine's words, and that its status is unchanged --
+  and read the scan every 30 s instead of every 2; the Stop stays as it is,
+  and is never disabled by any of this. An admin sees "Record as not known to
+  the engine", behind a confirm step; anyone else is told who can. A recorded
+  scan reads "Not assessed", who recorded it and when, the engine's words and
+  "Nothing here is a result." -- never "Clear", and never "The scan finished
+  and returned no findings". The Tests page filters by "Not known to the
+  engine" (a recorded scan, or one whose reading stands: `notKnownToEngine` in
+  `client/src/lib/engineRuns.ts`), shows the label as the badge and a note on
+  the row, and offers no Stop for a recorded scan. Scans running now leaves a
+  recorded scan out. The Overview's Scans In Progress counts neither, and says
+  how many there are as its own figure beside the scans on record, never
+  summed. Every new sentence is held to the persona lint by
+  `tests/not-known-copy-lints-clean.test.ts`.
+
+The scan abort route still answers a 404 to a Stop 502, "the engine did not
+accept the stop; the scan may still be running": that answer is pinned by
+`tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts`.
+
+Tests: `tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts` (the
+reading; it runs on its own, `tests/wall-clock.json`) and
+`tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts`
+(the act, the kill switch, the delete and the count),
+`tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx`
+(the pages) and `tests/not-known-copy-lints-clean.test.ts` (the copy).
 
 ## The record is the source (Engagements, adoption, the ledger by source)
 
@@ -581,7 +673,10 @@ the backend's population to its own.
   abort, and the kill switch stops it as it stops every other. The sync is
   asked once per sign-in from the app's shell and again when the Engagements
   page loads, is throttled per session on the server, adopts at most 25 rows
-  per sync (the rest wait for the next), and is never on a stop's path: a Stop
+  per sync (the rest wait for the next), ends from the record's detail each
+  known row still unfinished here whose record the list shows ended (at most
+  25 a sync, counted as `endedFromRecord`; see the hybrid's precondition 2),
+  and is never on a stop's path: a Stop
   and the kill switch are each answered while a sync is held at the backend's
   list. Nothing is filed into this dashboard's own findings ledger by it.
 - **The Engagements page** (`/engagements`, beside Assurance). Each engagement
@@ -759,7 +854,6 @@ scoped to the signed-in account (`server/idempotency.ts`):
 | Start scan (`POST /api/scans`) | the backend's `POST /api/pentest/scan/`, which reads the key and replays its first answer (`Idempotent-Replayed`); the backend launches the engine with the scan's own key | The first press's answer, naming the same backend scan and the same run, marked `replayed`. The row that press recorded is the answer: no second backend scan, no second row, no second log line. A run the first press started but never recorded here is recorded once, by this press. |
 | Retest (`POST /api/tests/:testId/retest`) | the engine's `POST /api/remediation/retest`, which does not read a key yet | Unchanged: while the first retest may still be running, its held slot refuses a second one (409), with no engine call. |
 | Push (`POST /api/assurance/deployments/:uuid/connectors/:connector/push`) | the backend's push, which reads the key (athena-backend #113) | The first push's answer, marked `replayed`, with no second ticket and no second log line. |
-
 What the answers mean on screen:
 
 - **Replayed:** this is the scan (or push) the earlier press started, and no new one was started.

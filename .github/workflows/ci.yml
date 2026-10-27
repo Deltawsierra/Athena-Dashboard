@@ -62,9 +62,9 @@ jobs:
   # The dashboard is run on Windows as well, so the paths that matter most there
   # run there: the install (better-sqlite3 is a native module), the type check,
   # the tests for ending the dev server's process tree (taskkill, by its full
-  # path) and for a Stop reaching the engine, and the test files that remove the
-  # SQLite files they used (Windows refuses to remove a file that is still open).
-  # Not the whole suite and not the packaged build, which stay on the Linux job
+  # path) and for a Stop reaching the engine, the test files that remove the
+  # SQLite files they used (Windows refuses to remove a file that is still open),
+  # and the tests of a scan whose run the engine does not know. Not the whole suite and not the packaged build, which stay on the Linux job
   # above.
   windows:
     runs-on: windows-latest
@@ -122,3 +122,8 @@ jobs:
           tests/first-run-seeds-no-known-password-and-a-legacy-default-must-be-changed.test.ts
           tests/no-statement-waits-on-the-lock-and-another-dashboards-change-is-honoured.test.ts
           tests/two-sign-ins-at-once-on-a-legacy-hash-both-get-in.test.ts
+          tests/a-hybrid-run-this-key-never-reads-ends-with-its-record.test.ts
+          tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts
+          tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts
+          tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx
+          tests/not-known-copy-lints-clean.test.ts

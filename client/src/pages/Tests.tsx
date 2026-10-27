@@ -40,11 +40,14 @@ import SampleDataNotice from "@/components/SampleDataNotice";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import NoStopPanel from "@/components/NoStopPanel";
-import { backendOnly, failsafeOnly, noStopCanBeSent, unfinishedRunOf } from "@/lib/engineRuns";
+import { backendOnly, failsafeOnly, noStopCanBeSent, notKnownToEngine, unfinishedRunOf } from "@/lib/engineRuns";
+import { NOT_KNOWN_LABEL, readingNote, recordedBy } from "@/lib/notKnownCopy";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
 import type { Test, Client, Site, CreateTest } from "@shared/schema";
 import { countsNotRecorded, reportedTotal } from "@shared/latest-scans";
-import { adoptedFromRecord, backendScanIdOf, engineRunIdOf, isEngineRecord } from "@shared/engine-record";
+import {
+  NOT_KNOWN_STATUS, adoptedFromRecord, backendScanIdOf, engineRunIdOf, isEngineRecord, notKnownMarkOf, notKnownRecordedOf,
+} from "@shared/engine-record";
 import { StatusPill, type StatusTone } from "@/components/mythos/atoms";
 import {
   DASHBOARD_DIRECT, SOURCE_FILTER_ALL, SOURCE_FILTER_BACKEND, SOURCE_FILTER_DIRECT, SOURCE_FILTER_LABEL, SOURCE_FILTER_NONE,
@@ -102,6 +105,25 @@ function notesOf(findings: unknown): string | null {
   if (!findings || typeof findings !== "object") return null;
   const details = (findings as { details?: unknown }).details;
   return typeof details === "string" ? details : null;
+}
+
+/** The status filter's value for "Not known to the engine" (lib/engineRuns.ts notKnownToEngine): no status word is spelled so. */
+const NOT_KNOWN_FILTER = "not-known";
+
+/** A time the server wrote, as this browser shows times; the text as sent when it is not one. */
+function shownTime(at: string): string {
+  const time = new Date(at);
+  return Number.isNaN(time.getTime()) ? at : time.toLocaleString();
+}
+
+/** What the row says of a scan the engine does not know: who recorded it and when, or since when the reading stands. */
+function notKnownNoteOf(test: Test): string {
+  if (test.status === NOT_KNOWN_STATUS) {
+    const recorded = notKnownRecordedOf(test.findings);
+    return recordedBy(recorded?.by ?? null, recorded ? shownTime(recorded.at) : "a time not recorded");
+  }
+  const reading = notKnownMarkOf(test.findings);
+  return readingNote(reading ? shownTime(reading.since) : "a time not recorded");
 }
 
 /** `findings` is free-form JSON; show the details field when there is one. */
@@ -286,7 +308,10 @@ export default function Tests() {
   const filteredTests = tests.filter((test) => {
     const matchesSearch = test.summary?.toLowerCase().includes(searchQuery.toLowerCase()) ||
                          test.testType.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = statusFilter === "all" || test.status === statusFilter;
+    // "Not known to the engine": a scan a person recorded so, or one whose reading stands
+    // while it may still be running (lib/engineRuns.ts notKnownToEngine) -- by its own rule, not its status word.
+    const matchesStatus = statusFilter === "all"
+      || (statusFilter === NOT_KNOWN_FILTER ? notKnownToEngine(test) : test.status === statusFilter);
     const matchesClient = clientFilter === "all" || test.clientId === clientFilter;
     const matchesSource = sourceFilter === "all" || (recordSourcePill(test)?.source ?? "none") === sourceFilter;
 
@@ -581,6 +606,7 @@ export default function Tests() {
                   <SelectItem value="in-progress">In Progress</SelectItem>
                   <SelectItem value="completed">Completed</SelectItem>
                   <SelectItem value="failed">Failed</SelectItem>
+                  <SelectItem value={NOT_KNOWN_FILTER} data-testid="option-filter-not-known">{NOT_KNOWN_LABEL}</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={clientFilter} onValueChange={setClientFilter}>
@@ -664,8 +690,14 @@ export default function Tests() {
                               </h3>
                               <Badge variant={getStatusColor(test.status)} data-testid={`badge-status-${test.id}`}>
                                 {getStatusIcon(test.status)}
-                                <span className="ml-1">{test.status}</span>
+                                <span className="ml-1">{test.status === NOT_KNOWN_STATUS ? NOT_KNOWN_LABEL : test.status}</span>
                               </Badge>
+                              {/* The reading stands on a scan that may still be running: said beside its status, which is unchanged. */}
+                              {test.status !== NOT_KNOWN_STATUS && notKnownToEngine(test) && (
+                                <span data-testid={`pill-not-known-${test.id}`}>
+                                  <StatusPill tone="neutral">{NOT_KNOWN_LABEL}</StatusPill>
+                                </span>
+                              )}
                               {test.severity && (
                                 <Badge variant={getSeverityColor(test.severity)} data-testid={`badge-severity-${test.id}`}>
                                   {test.severity}
@@ -685,6 +717,12 @@ export default function Tests() {
                             {/* Adopted from the record (server/backend-adoption.ts): said by source, beside the row. */}
                             {adoptedFromRecord(test.findings) && (
                               <p className="text-[12px] text-muted-foreground" data-testid={`text-adopted-${test.id}`}>{ADOPTED_FROM_RECORD}</p>
+                            )}
+                            {/* Not known to the engine: who recorded it and when, or since when the reading stands. */}
+                            {notKnownToEngine(test) && (
+                              <p className="text-[12px] text-muted-foreground" data-testid={`text-not-known-${test.id}`}>
+                                {notKnownNoteOf(test)}
+                              </p>
                             )}
                           </div>
                           <div className="flex gap-2">
