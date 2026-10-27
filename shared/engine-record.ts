@@ -147,3 +147,77 @@ export const ADOPTION_KEYS = ["source", "adoptedAt"] as const;
 export function adoptedFromRecord(findings: unknown): boolean {
   return recordOf(findings)?.source === "backend";
 }
+
+/**
+ * A scan's status once a PERSON has recorded that the engine does not know its
+ * run (POST /api/scans/:testId/record-not-known): the act sent the run a stop,
+ * and the engine answered it 404 "No such scan run". Written by nothing but
+ * that act -- never by a read, a count or a mark -- and only on a scan this
+ * dashboard dispatched to the engine itself (a hybrid row's end is its
+ * record's). A run's end as far as this dashboard is concerned (FINISHED_RUN_STATES):
+ * a delete sends it no stop. The kill switch still sends it one by its id. The
+ * same word, with the same meaning, as the retest handle's `not_known` phase:
+ * one vocabulary.
+ */
+export const NOT_KNOWN_STATUS = "not_known";
+
+/**
+ * The key of a scan's `findings` that holds what this dashboard knows of a run
+ * the engine does not know, owned by the status route and the act as the run's
+ * own keys are (a person may not supply it, and an edit keeps it):
+ *
+ *   - the READING (NotKnownMark): the engine's 404 to the row's reads has stood
+ *     (server/routes.ts notKnown) -- written by the status read, never awaited
+ *     by it, and let go by any read the engine answers;
+ *   - `recorded`: the person's act that ended the row (NotKnownRecorded).
+ */
+export const NOT_KNOWN_KEY = "notKnown";
+
+/** The reading of a run the engine has not known for a while: since when, how many reads, the engine's latest words. */
+export interface NotKnownMark {
+  since: string;
+  reads: number;
+  lastReadAt: string;
+  said: string;
+}
+
+/** A person's act that recorded the run as not known to the engine (NOT_KNOWN_STATUS). */
+export interface NotKnownRecorded {
+  /** The person, by name where the account has one. */
+  by: string | null;
+  at: string;
+  /** What the stop the act sent came to, in this dashboard's words. */
+  stop: string;
+  /** The engine's own words to that stop. */
+  said: string;
+}
+
+function notKnownOf(findings: unknown): Record<string, unknown> | null {
+  const value = recordOf(findings)?.[NOT_KNOWN_KEY];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** The standing reading on a row (NotKnownMark), or null when it holds none. */
+export function notKnownMarkOf(findings: unknown): NotKnownMark | null {
+  const held = notKnownOf(findings);
+  if (held === null || typeof held.since !== "string" || typeof held.reads !== "number") return null;
+  return {
+    since: held.since, reads: held.reads,
+    lastReadAt: typeof held.lastReadAt === "string" ? held.lastReadAt : held.since,
+    said: typeof held.said === "string" ? held.said : "",
+  };
+}
+
+/** The person's act on a row (NotKnownRecorded), or null when none was recorded. */
+export function notKnownRecordedOf(findings: unknown): NotKnownRecorded | null {
+  const recorded = notKnownOf(findings)?.recorded;
+  if (!recorded || typeof recorded !== "object" || Array.isArray(recorded)) return null;
+  const one = recorded as Record<string, unknown>;
+  if (typeof one.at !== "string") return null;
+  return {
+    by: typeof one.by === "string" ? one.by : null,
+    at: one.at,
+    stop: typeof one.stop === "string" ? one.stop : "",
+    said: typeof one.said === "string" ? one.said : "",
+  };
+}

@@ -11,7 +11,10 @@
  * value, in any process; two accounts never share one.
  *
  * A key is never read on a stop: the abort routes, the kill switch and the
- * failsafe relays take none, and pass none on.
+ * failsafe relays take none, and pass none on. A person's act recording a run
+ * as not known to the engine (POST /api/scans/:testId/record-not-known), which
+ * is no stop, reads no key either: it holds its scan (`hold`), so a second
+ * press on that scan sends nothing while the first is answered.
  */
 import crypto from "node:crypto";
 import type { NextFunction, Request, Response } from "express";

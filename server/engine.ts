@@ -1649,7 +1649,7 @@ export interface AbortOutcome {
 }
 
 /** What both engines answer a stop to a run id they have no record of (api/server.py: HTTPException(404, "No such scan run")). */
-const NO_SUCH_RUN = "No such scan run";
+export const NO_SUCH_RUN = "No such scan run";
 
 /** Ask a running scan to stop. */
 export async function abortRun(runId: string): Promise<AbortOutcome> {

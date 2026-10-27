@@ -27,8 +27,8 @@ import { controlMap, type ScanFinding } from "./compliance";
 import { AI_SYSTEMS, DEFAULT_ACTIVE_SYSTEMS, systemOfScan } from "@shared/ai-systems";
 import { isEngineInternal } from "@shared/engine-internal";
 import {
-  ADOPTION_KEYS, BACKEND_RECORD_KEYS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf, isEngineRecord, runIdFrom,
-  stopIdFrom, stoppedOnlyAtBackend,
+  ADOPTION_KEYS, BACKEND_RECORD_KEYS, NOT_KNOWN_KEY, NOT_KNOWN_STATUS, backendEngagementIdOf, backendScanIdOf, engineRunIdOf, engineStopIdOf,
+  isEngineRecord, notKnownRecordedOf, runIdFrom, stopIdFrom, stoppedOnlyAtBackend, type NotKnownMark, type NotKnownRecorded,
 } from "@shared/engine-record";
 import { ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnavailable } from "./control-plane";
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
@@ -420,8 +420,14 @@ function readableResults(results: unknown): unknown[] | null {
   return Array.isArray(results) && results.every(isResultRow) ? results : null;
 }
 
-/** Engine run states after which nothing more happens. */
-const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+/**
+ * Engine run states after which nothing more happens -- and NOT_KNOWN_STATUS,
+ * a person's record that the engine does not know the run (shared/engine-record.ts),
+ * read as an end here: no Stop is offered for it, a delete sends it no stop,
+ * and Max Concurrent Tests does not count it. The kill switch still sends it
+ * one by its id (sweptStopIdOf).
+ */
+const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused", NOT_KNOWN_STATUS]);
 
 /** What a finished run whose results could not be read records as its counts: none, read as "not recorded". */
 const UNREAD_COUNTS = {
@@ -432,16 +438,24 @@ const UNREAD_COUNTS = {
  * When the engine's 404 to a row's reads ("No such scan run") STANDS: after
  * `reads` reads in a row so answered, over at least `floorMs`. One 404 is an
  * engine that restarted, or a registry not yet caught up; a run of them, over
- * half a minute, is a run the engine does not have under this id. For a hybrid
- * row (a scan started through Athena-Backend, whose key launched the run) that
- * is a run this dashboard's key cannot read (decision 7): its record is asked
- * for (the collect watch starts, WatchStart `run_not_readable`), and the
- * record's end, when it comes, ends the row. Nothing here writes a status: the
- * engine has not said the run ended. Exported for tests, which shorten these.
+ * half a minute, is a run the engine does not have under this id -- it ended
+ * and was forgotten, never ran, or runs under another id. What follows differs
+ * by row, and neither writes a status: the engine has not said the run ended.
+ *   - A hybrid row (a scan started through Athena-Backend, whose key launched
+ *     the run): a run this dashboard's key cannot read (decision 7). Its record
+ *     is asked for (the collect watch starts, WatchStart `run_not_readable`),
+ *     and the record's end, when it comes, ends the row.
+ *   - A legacy row (a scan this dashboard dispatched to the engine itself): the
+ *     answer says so (`engineKnowsRun: false`, `notKnown`), and the row carries
+ *     the reading (`findings.notKnown`, shared/engine-record.ts NotKnownMark),
+ *     written at most every `persistEveryMs` and never awaited. Its end is a
+ *     person's act (POST /api/scans/:testId/record-not-known), never this.
+ * Any read the engine answers lets the count and the reading go. Exported for
+ * tests, which shorten these.
  *
  * SAFETY: the count is memory, read and written synchronously on the status
- * read's path only; no stop reads it, waits on it, or is offered or refused by
- * it.
+ * read's path only, and the reading's write is never awaited; no stop reads
+ * either, waits on either, or is offered or refused by either.
  */
 export const notKnown = { reads: 5, floorMs: 30_000, persistEveryMs: 60_000 };
 
@@ -452,6 +466,8 @@ interface RunNotKnownCount {
   since: number;
   /** The engine's words, from the latest 404. */
   said: string;
+  /** When the row's reading was last written (ms since the epoch); null while it was not. */
+  markedAt?: number | null;
 }
 const runNotKnownCounts = new Map<string, RunNotKnownCount>();
 /** The most rows counted at once; past it the oldest count is let go (a row read, ended or deleted is let go at once). */
@@ -476,6 +492,36 @@ function countRunNotKnown(testId: string, said: string, now = Date.now()): RunNo
 /** The run was read, the engine answered anything but a 404, the row ended or is gone: its count starts over. */
 function forgetRunNotKnown(testId: string): void {
   runNotKnownCounts.delete(testId);
+}
+
+/** A standing count as the row's reading (shared/engine-record.ts NotKnownMark). */
+function notKnownMark(count: RunNotKnownCount, now = Date.now()): NotKnownMark {
+  return { since: new Date(count.since).toISOString(), reads: count.reads, lastReadAt: new Date(now).toISOString(), said: count.said };
+}
+
+/**
+ * Write a legacy row's reading of a run the engine does not know -- at most
+ * once every notKnown.persistEveryMs -- WITHOUT being awaited: the status read
+ * answers from memory whatever this write does. Written onto the row as it is
+ * now, and only while the count still stands and the row is not at an end: a
+ * read the engine answered meanwhile has let the count go, and its reading is
+ * not written back. A write that fails is said on the console and changes
+ * nothing else.
+ */
+function markRunNotKnown(testId: string, now = Date.now()): void {
+  const count = runNotKnownCounts.get(testId);
+  if (!count || (count.markedAt != null && now - count.markedAt < notKnown.persistEveryMs)) return;
+  count.markedAt = now;
+  void (async () => {
+    const latest = await storage.getTest(testId);
+    if (!latest || FINISHED_RUN_STATES.has(latest.status) || runNotKnownCounts.get(testId) !== count) return;
+    const findings = (latest.findings ?? {}) as Record<string, unknown>;
+    await storage.updateTest(testId, { findings: { ...findings, [NOT_KNOWN_KEY]: notKnownMark(count, now) } });
+  })().catch((cause) => {
+    // Tried again on the next standing read.
+    if (runNotKnownCounts.get(testId) === count) count.markedAt = null;
+    console.error(logLine(`[scans] the reading that the engine does not know the run of test ${testId} could not be written: ${causeOf(cause)}`));
+  });
 }
 
 /** Said of an engine scan the engine accepted without a run id, read before it is recorded as completed. */
@@ -673,6 +719,17 @@ const UNKNOWN_NAMED_RUN = "the engine does not know the run this answer named; a
 const KILL_SWITCH_SWEPT = "the kill switch sent a stop to every run the engine listed as live, where a run that start began " +
   "under another id would be";
 const UNKNOWN_NAMED_RUN_SWEPT = `the engine does not know the run an answer this dashboard did not read had named; ${KILL_SWITCH_SWEPT}`;
+/**
+ * The refusals of a person's act recording a run as not known to the engine
+ * (POST /api/scans/:testId/record-not-known): the engine took its stop, or
+ * answered that the run had ended; the row is a hybrid one; the engine gave it
+ * no run id to ask by.
+ */
+const ENGINE_KNOWS_THIS_RUN = "the engine knows this run; its own end will be read";
+const HYBRID_END_IS_THE_RECORDS = "this scan was started through Athena-Backend, so its end is the backend's record of it, " +
+  "which is read when the backend collects it; it is not recorded here";
+const NO_RUN_ID_TO_RECORD = "the engine accepted this scan without a run id, so it cannot be asked whether it knows the run; " +
+  "pause, stand down or terminate the engine from the Failsafe console";
 /** How a verdict that came after a stop whose answer was not read is marked: never "despite a stop request". */
 const AFTER_UNREAD_STOP = "Completed after a stop whose answer was not read";
 const ANSWER_UNREAD =
@@ -717,7 +774,7 @@ type Who = ReturnType<typeof actor>;
 async function writeStopRecord(
   who: Who,
   run: { runId: string; target: string | null; testId: string | null },
-  via: "kill_switch" | "delete" | "start_not_recorded" | "stop" | "retest_stop",
+  via: "kill_switch" | "delete" | "start_not_recorded" | "stop" | "retest_stop" | "record_not_known",
   outcome: StopOutcome,
   note?: string,
   /** Where an answer this dashboard did not read named the run (engine.RunNamedBy), for a stop sent because of one. */
@@ -1133,10 +1190,22 @@ function settle<T>(pending: Promise<T>): Promise<Settled<T>> {
   return pending.then((value) => ({ ok: true as const, value }), (cause) => ({ ok: false as const, detail: causeOf(cause) }));
 }
 
-/** The engine scans recorded in these rows as running, by the id a stop names them by. */
+/**
+ * The id the kill switch sends a test's run a stop by: every run that may still
+ * be running (unfinishedStopIdOf), and every run a person recorded as not known
+ * to the engine (NOT_KNOWN_STATUS) -- the engine did not know it by this id
+ * then, and a stop costs nothing if it still does not. Only ever MORE rows
+ * than unfinishedStopIdOf: nothing else in the kill switch reads this.
+ */
+function sweptStopIdOf(test: { findings: unknown; status: string }): string | null {
+  const stopId = stopIdOf(test);
+  return stopId !== null && (!FINISHED_RUN_STATES.has(test.status) || test.status === NOT_KNOWN_STATUS) ? stopId : null;
+}
+
+/** The engine scans recorded in these rows as running -- or as not known to the engine -- by the id a stop names them by. */
 function runningScansOf(rows: Test[]): Array<{ test: Test; runId: string }> {
   return rows
-    .map((test) => ({ test, runId: unfinishedStopIdOf(test) }))
+    .map((test) => ({ test, runId: sweptStopIdOf(test) }))
     .filter((one): one is { test: Test; runId: string } => one.runId !== null);
 }
 
@@ -1508,9 +1577,12 @@ const HUMAN_FINDINGS_KEY = "details";
  * engagement ids, the collected record, a stop's mirror reading, and the mark
  * that only the backend's Stop reaches the run. A person may supply none of
  * them. Nor the keys of a row adopted from the backend's record (ADOPTION_KEYS:
- * its source and when it was adopted): the adoption alone writes those.
+ * its source and when it was adopted): the adoption alone writes those. Nor
+ * `notKnown` (shared/engine-record.ts NOT_KNOWN_KEY): the reading of a run the
+ * engine does not know, and a person's act that recorded it, are the status
+ * route's and the act's to write.
  */
-const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS, ...ADOPTION_KEYS] as const;
+const ENGINE_FINDINGS_KEYS = ["runId", "target", "results", "coverage", ...BACKEND_RECORD_KEYS, ...ADOPTION_KEYS, NOT_KNOWN_KEY] as const;
 
 /**
  * Refuse a person's test whose findings carry a run's keys, on create as on
@@ -1532,6 +1604,21 @@ function suppliedEngineKeys(res: Response, findings: unknown): boolean {
   res.status(400).json({
     message: `${named.map((key) => `findings.${key}`).join(", ")} ${named.length === 1 ? "is" : "are"} recorded ` +
       "by the scan that started an engine run and cannot be supplied",
+  });
+  return true;
+}
+
+/**
+ * Refuse a status of NOT_KNOWN_STATUS sent by a person, on create as on
+ * update: it is written by one act alone (POST /api/scans/:testId/record-not-known),
+ * on an engine scan whose run the engine answered a stop it does not know.
+ * Sending back the status a row already holds is fine.
+ */
+function suppliedNotKnownStatus(res: Response, data: { status?: unknown }, before: { status: string } | null): boolean {
+  if (data.status !== NOT_KNOWN_STATUS || before?.status === NOT_KNOWN_STATUS) return false;
+  res.status(400).json({
+    message: `status "${NOT_KNOWN_STATUS}" is recorded only by a person's act on an engine scan whose run the engine ` +
+      "answered a stop it does not know (Record as not known to the engine), and cannot be supplied",
   });
   return true;
 }
@@ -3575,6 +3662,7 @@ export function registerRoutes(app: Express): void {
     const data = createTestSchema.parse(req.body);
     // A person's test: a run's keys are the scan route's to write, never this one's.
     if (suppliedEngineKeys(res, data.findings)) return;
+    if (suppliedNotKnownStatus(res, data, null)) return;
     if (await parentMissing(res, data.clientId, data.siteId)) return;
     const test = await storage.createTest({
       ...data,
@@ -3594,6 +3682,7 @@ export function registerRoutes(app: Express): void {
     const before = await storage.getTest(req.params.id);
     if (!before) return notFound(res, "Test");
     if (engineRecordEdited(res, before, data)) return;
+    if (suppliedNotKnownStatus(res, data, before)) return;
     const test = await storage.updateTest(req.params.id, { ...data, ...completionStamp(data, before) });
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
@@ -4289,6 +4378,127 @@ export function registerRoutes(app: Express): void {
     void mirrorStopToBackend(who, test, stopOutcome, "stop");
   }));
 
+  /**
+   * A PERSON's act: record that the engine does not know this scan's run. The
+   * end of a legacy row -- a scan this dashboard dispatched to the engine
+   * itself -- whose reads the engine answers 404 "No such scan run": the only
+   * thing that writes NOT_KNOWN_STATUS (shared/engine-record.ts). No read, count
+   * or mark ever does.
+   *
+   * In this order, and nothing written before the stop:
+   *   1. the engine-record checks, as the abort route makes them;
+   *   2. the run is sent its stop (sendAbort, bounded by engineTimeouts): a run
+   *      still going under this id is stopped by it;
+   *   3. what the stop came to is logged (writeStopRecord, via record_not_known);
+   *   4. ONLY when the engine answered that stop 404 "No such scan run": the
+   *      row's status is written `not_known`, with completedAt, and who recorded
+   *      it, when, the stop's outcome and the engine's words
+   *      (`findings.notKnown.recorded`); then `recorded_not_known` is logged.
+   * The engine took the stop, or answered that the run had ended: 409, it knows
+   * this run and its own end will be read. The engine could not be asked, or
+   * did not take the stop and did not say it does not know the run: 503, and
+   * nothing is recorded -- an end is never invented. The row could not be
+   * written: 500, with the stop's outcome, which the failed write does not
+   * change.
+   *
+   * Not a stop: an admin's act, refused while the kill switch is engaged
+   * (enforceKillSwitch -- the switch has already sent this run a stop,
+   * sweptStopIdOf), and behind the password guard. Held by its SCAN, not by a
+   * press's key (no key is read here: tests/a-press-sent-again-with-its-key-
+   * starts-one-scan-and-is-recorded-once.test.ts pins the three routes that
+   * read one): while one press on a scan is answered, any other press on it
+   * sends nothing (idempotency.hold, 409 idempotency_in_flight), and one sent
+   * after it was recorded is answered from the record, with no second stop. A
+   * hybrid row (one naming a backend scan) is refused 409: its end is its
+   * record's (fileRecordIntoRow).
+   */
+  app.post("/api/scans/:testId/record-not-known", requireAdmin, asyncHandler(idempotency.releasing(async (req, res) => {
+    const test = await storage.getTest(req.params.testId);
+    if (!test) return notFound(res, "Test");
+
+    // 1. The checks the abort route makes, and the act's own.
+    const runId = stopIdOf(test);
+    if (!runId && isEngineRecord(test.findings)) {
+      return void res.status(409).json({ error: NO_RUN_ID_TO_RECORD, stop: "failsafe", reason: "no_run_id" });
+    }
+    if (!runId) {
+      return void res.status(409).json({
+        error: "this test has no engine run recorded against it, so there is no run for the engine to know", reason: "no_engine_run",
+      });
+    }
+    if (backendScanIdOf(test.findings) !== null) {
+      return void res.status(409).json({ error: HYBRID_END_IS_THE_RECORDS, reason: "hybrid_row" });
+    }
+    if (test.status === NOT_KNOWN_STATUS) {
+      // Recorded already -- by this press's first send, or another's: nothing is sent again.
+      return void res.json({ recorded: false, alreadyRecorded: true, status: NOT_KNOWN_STATUS, test, notKnown: notKnownRecordedOf(test.findings) });
+    }
+    if (FINISHED_RUN_STATES.has(test.status)) {
+      return void res.status(409).json({
+        error: `this scan's run is recorded as ended here (${test.status}), so there is nothing to record`, reason: "ended",
+      });
+    }
+    // One press on a scan at a time, whoever sends it: held until this handler ends (idempotency.releasing).
+    if (!idempotency.hold(res, `record-not-known:${test.id}`)) {
+      return void res.status(409).json({
+        error: idempotency.stillBeingAnswered("this scan's page"), reason: "idempotency_in_flight", idempotency: { state: "in_flight" },
+      });
+    }
+
+    // 2. The stop, before anything is written.
+    const who = actor(req);
+    const outcome = await sendAbort(runId);
+    // 3. What it came to, on the record. A line that could not be written changes nothing else.
+    const unlogged = await writeStopRecord(who, { runId, target: null, testId: test.id }, "record_not_known", outcome);
+    if (unlogged) console.error(logLine(`[record-not-known] ${unlogged}`));
+    const stop = { runId, ...outcome };
+    if (outcome.unknownRun !== true) {
+      if (notRunningAfter(outcome) || outcome.answerUnread === true) {
+        return void res.status(409).json({ error: ENGINE_KNOWS_THIS_RUN, reason: "engine_knows_run", stop });
+      }
+      return void res.status(503).json({
+        error: `the engine did not answer that it does not know run ${runId} (${outcome.detail}), so nothing was recorded`,
+        reason: "engine_not_asked", stop,
+      });
+    }
+
+    // 4. The engine does not know the run: the person's act is recorded.
+    const at = new Date();
+    const recorded: NotKnownRecorded = {
+      by: req.currentUser?.username ?? who.userId, at: at.toISOString(), stop: outcome.detail, said: engine.NO_SUCH_RUN,
+    };
+    let updated: Test | undefined;
+    let reading: unknown;
+    try {
+      const latest = (await storage.getTest(test.id)) ?? test;
+      const findings = (latest.findings ?? {}) as Record<string, unknown>;
+      reading = findings[NOT_KNOWN_KEY];
+      const kept = reading && typeof reading === "object" && !Array.isArray(reading) ? (reading as Record<string, unknown>) : {};
+      updated = await storage.updateTest(test.id, {
+        status: NOT_KNOWN_STATUS,
+        completedAt: at,
+        findings: { ...findings, [NOT_KNOWN_KEY]: { ...kept, recorded } },
+      });
+    } catch (cause) {
+      return void res.status(500).json({
+        error: `run ${runId} was sent a stop and the engine answered that it does not know it, but that could not be recorded: ${causeOf(cause)}`,
+        reason: "not_recorded", stop,
+      });
+    }
+    if (!updated) return notFound(res, "Test");
+    forgetRunNotKnown(test.id);
+    try {
+      await storage.createActivityLog({
+        action: "recorded_not_known", entityType: "test", entityId: test.id,
+        details: { runId, statusBefore: test.status, by: recorded.by, said: recorded.said, stop: outcome.detail, ...(reading !== undefined ? { reading } : {}) },
+        ...who,
+      });
+    } catch (cause) {
+      console.error(logLine(`[record-not-known] the record of test ${test.id} was written, but its log line could not be: ${causeOf(cause)}`));
+    }
+    res.json({ recorded: true, status: NOT_KNOWN_STATUS, test: updated, notKnown: recorded, stop });
+  })));
+
   app.get("/api/scans/:testId", asyncHandler(async (req, res) => {
     const test = await storage.getTest(req.params.testId);
     if (!test) {
@@ -4408,19 +4618,27 @@ export function registerRoutes(app: Express): void {
         // reporting the row's last known status as if it were current.
         //
         // A 404 ("No such scan run") to a row whose run may still be going is
-        // counted (notKnown); any other failure starts the count over. A
-        // hybrid row whose 404 stands -- a run Athena-Backend's key launched
-        // that this key cannot read (decision 7), or one the engine lost --
-        // has its record asked for: the collect watch starts for that reason,
-        // and the record's end, when the backend collects it, ends the row
-        // (fileRecordIntoRow). Never on the first 404, and no status is
-        // written here: nothing saw an end.
-        const notFound = cause instanceof engine.EngineRunNotFound && !FINISHED_RUN_STATES.has(test.status);
-        const count = notFound ? countRunNotKnown(test.id, cause.message) : null;
+        // counted (notKnown); any other failure starts the count over. Once
+        // the 404 stands -- never on the first -- a hybrid row (a run
+        // Athena-Backend's key launched that this key cannot read, decision
+        // 7) has its record asked for: the collect watch starts for that
+        // reason, and the record's end, when the backend collects it, ends
+        // the row (fileRecordIntoRow). A legacy row is said to be not known to
+        // the engine, from memory, and carries the reading (markRunNotKnown,
+        // never awaited); its end is a person's act. No status is written
+        // here, and the Stop is offered as before: nothing saw an end.
+        const answered404 = cause instanceof engine.EngineRunNotFound && !FINISHED_RUN_STATES.has(test.status);
+        const count = answered404 ? countRunNotKnown(test.id, cause.message) : null;
         if (count === null) forgetRunNotKnown(test.id);
-        const askTheRecord = count !== null && count.standing && backendScanId !== null;
+        const standing = count !== null && count.standing;
+        const askTheRecord = standing && backendScanId !== null;
+        const reading = standing && backendScanId === null;
+        if (reading) markRunNotKnown(test.id);
         return answer(test, {
           test, state: test.status, engine: null, detail: cause.message, coverage: carried,
+          ...(reading
+            ? { engineKnowsRun: false, notKnown: { since: new Date(count.since).toISOString(), reads: count.reads, said: count.said } }
+            : {}),
         }, askTheRecord ? { engineRunId: runId, because: "run_not_readable", count } : null);
       }
       throw cause;
@@ -4445,7 +4663,10 @@ export function registerRoutes(app: Express): void {
     // engine key could not read on the first try (decision 7): the run is
     // readable by this key after all, so its direct Stop is offered again.
     const { stop: _marked, ...unmarked } = recorded;
-    const kept = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
+    const readable = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
+    // So does it clear the reading that the engine did not know the run
+    // (markRunNotKnown): it has just answered for it.
+    const { [NOT_KNOWN_KEY]: _reading, ...kept } = readable;
     // A Stop's mirror reading written to the row while the engine was being
     // read (mirrorStopToBackend) is kept, not written over by this poll.
     const latest = storage.peekTest(test.id);

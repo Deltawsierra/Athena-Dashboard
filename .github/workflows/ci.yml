@@ -123,3 +123,5 @@ jobs:
           tests/no-statement-waits-on-the-lock-and-another-dashboards-change-is-honoured.test.ts
           tests/two-sign-ins-at-once-on-a-legacy-hash-both-get-in.test.ts
           tests/a-hybrid-run-this-key-never-reads-ends-with-its-record.test.ts
+          tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts
+          tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts
