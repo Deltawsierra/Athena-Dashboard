@@ -32,8 +32,10 @@ variable for the session first, with `$env:NAME = "value"`, in the window that r
 command (the PowerShell forms below have not yet been run on a Windows host).
 
 Closing the desktop shell in development ends the dev server it started. On Windows that
-means the processes under the `cmd.exe` that `npm run dev` runs in (`taskkill /T`), so the
-port and the database file are free again; a test on a Windows CI runner covers it.
+means the processes under the `cmd.exe` that `npm run dev` runs in (`taskkill /T`, run from
+`%SystemRoot%\System32` and not looked up on `PATH`, so that a `taskkill.exe` earlier on
+`PATH` is never the one that runs), so the port and the database file are free again; a test
+on a Windows CI runner covers it.
 
 ### First sign-in
 
@@ -102,9 +104,11 @@ npm test             # Vitest: auth, users, CRUD, SQLite storage, password hashi
 ```
 
 CI runs all of the above plus both builds on every push and pull request. A second CI
-job runs on Windows: the install, the type check, and the tests for ending the dev
-server's process tree and for a Stop reaching the engine. The full suite and the
-packaged build run on Linux only.
+job runs on Windows: the install, the type check, the tests for ending the dev server's
+process tree and for a Stop reaching the engine, and the test files that remove the SQLite
+files they used (Windows will not remove a file that is still open, so those tests close
+their databases first; one that leaves a database open fails there). The full suite and
+the packaged build run on Linux only.
 
 ## Configuration
 
