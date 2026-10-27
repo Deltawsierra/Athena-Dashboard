@@ -389,7 +389,7 @@ describe("the adoption sync is the backstop", () => {
     expect(await logsOf("ended_from_backend_record", testId)).toHaveLength(1);
   });
 
-  it("a record the list says ended whose detail could not be read is said unread and ends nothing; the next sync ends it", async () => {
+  it("a record the list says ended whose detail could not be read ends nothing, is said on the console and not as the adoption's, and the next sync ends it", async () => {
     engine.control.tenantBound = true;
     const { testId, runId, scanId } = await aRunningScan();
     engine.finish(runId, { state: "aborted", result: { results: [], detail: "aborted by operator" }, reason: "aborted by operator" });
@@ -397,10 +397,13 @@ describe("the adoption sync is the backstop", () => {
     expect(hybrid.scans.get(scanId)!.status).toBe("stopped");
 
     hybrid.controls.failNextScanDetail = { status: 500, body: { detail: "the scans table is locked" } };
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const unread = await adopt();
     expect(unread.status).toBe(200);
-    expect(unread.body).toMatchObject({ endedFromRecord: 0, adopted: [] });
-    expect(unread.body.detailUnread).toEqual([{ backendScanId: scanId, reason: expect.stringContaining("the scans table is locked") }]);
+    // detailUnread is the adoption's own (scans to adopt): it keeps that meaning.
+    expect(unread.body).toMatchObject({ endedFromRecord: 0, adopted: [], detailUnread: [] });
+    expect(warned.mock.calls.some(([line]) => String(line).includes(scanId) && String(line).includes("the scans table is locked"))).toBe(true);
+    warned.mockRestore();
     expect((await storage.getTest(testId))!.status, "nothing is written from a detail that was not read").toBe("running");
 
     const next = await adopt();

@@ -142,7 +142,7 @@ export interface AdoptionOutcome {
   unlinked: number;
   /** Candidates left for the next sync (adoption.perSync). */
   remaining: number;
-  /** Finished scans whose detail could not be read now: adopted (or, a known row, ended: `endedFromRecord`) whole next time. */
+  /** Finished scans whose detail could not be read now: adopted whole next time. */
   detailUnread: Array<{ backendScanId: string; reason: string }>;
   /** A row that could not be written stopped the sync here; the rows before it stand. Null when every row was written. */
   writeFailed: string | null;
@@ -321,9 +321,10 @@ async function sync(deps: AdoptionDeps, who: { userId: string | null; ipAddress:
  * -- the record's bytes, never the list row's word alone -- and filed into it
  * by deps.fileRecord, which writes the record's end as the row's status. At
  * most adoption.perSync a sync, the rest next time. A detail that could not be
- * read is said (`detailUnread`) and left for the next sync; a detail that says
- * the run is not at an end after all writes nothing; a row that could not be
- * written stops this here (`writeFailed`).
+ * read is said on the console and left for the next sync -- never counted in
+ * `detailUnread`, which is the adoption's own (scans to adopt) and keeps that
+ * meaning; a detail that says the run is not at an end after all writes
+ * nothing; a row that could not be written stops this here (`writeFailed`).
  */
 async function endKnownRowsFromRecord(
   deps: AdoptionDeps, who: { userId: string | null; ipAddress: string | null },
@@ -343,7 +344,8 @@ async function endKnownRowsFromRecord(
     try {
       record = await backendScans.readScan(row.uuid);
     } catch (cause) {
-      outcome.detailUnread.push({ backendScanId: row.uuid, reason: causeOf(cause) });
+      console.warn(`[adoption] the record of backend scan ${row.uuid} could not be read to end row ${test.id} here ` +
+        `(${causeOf(cause)}); it is read again on the next sync`);
       continue;
     }
     if (recordEnd(record, now) === null) continue;
