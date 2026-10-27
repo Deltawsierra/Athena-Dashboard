@@ -417,3 +417,47 @@ html * {
     cursor: auto !important;
   }
 }
+
+/* Route transition: a short, subtle entrance replayed on each navigation
+   (components/RouteTransition.tsx keys the wrapper on the path). Defined only
+   when motion is welcome, so reduced-motion users get the new screen at full
+   opacity with no movement. */
+@media (prefers-reduced-motion: no-preference) {
+  .route-transition {
+    animation: route-fade-in 160ms ease-out both;
+    /* Hint the compositor for the brief fade only; cleared when it ends. */
+    will-change: opacity, transform;
+  }
+}
+
+@keyframes route-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Honour prefers-reduced-motion across the app. Framer Motion is handled in JS
+   via <MotionConfig reducedMotion="user"> (App.tsx) and the decorative layers
+   (custom cursor, ambient field, Lenis smooth scroll) stand down on their own;
+   this neutralises the remaining CSS-driven motion and restores the native
+   cursor the custom one usually replaces, so the pointer is never lost. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  html,
+  html * {
+    cursor: auto !important;
+  }
+}

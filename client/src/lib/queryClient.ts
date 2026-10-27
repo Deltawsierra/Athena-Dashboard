@@ -1,4 +1,4 @@
-import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { QueryClient, QueryFunction, keepPreviousData } from "@tanstack/react-query";
 
 // In the packaged Electron app the renderer is served from app://athena, so API
 // calls need an absolute URL. In the browser they are same-origin.
@@ -225,6 +225,13 @@ export const queryClient = new QueryClient({
       // Data is refetched when a mutation invalidates it; 30s keeps navigation
       // snappy without showing indefinitely stale rows.
       staleTime: 30_000,
+      // When a query key changes -- a Risks filter by client, a selected
+      // deployment on Assurance, a "show all" toggle -- keep the last key's
+      // data on screen while the next loads, instead of collapsing the list
+      // to a loading note and back. The screens read `data` through
+      // lib/loaded.ts, so stale rows stay put and update in place rather than
+      // flashing an empty state on every filter change or background refetch.
+      placeholderData: keepPreviousData,
       retry: false,
     },
     mutations: {

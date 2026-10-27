@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useReducedMotion } from "framer-motion";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 
@@ -146,6 +147,11 @@ function useIsDark(): boolean {
 }
 
 export default function AmbientField({ alert = false }: AmbientFieldProps) {
+  // Under reduced motion the field is drawn once and then left still: the
+  // shader's slow drift is motion, and someone who asked for less of it gets a
+  // static ground instead of a per-frame render loop running behind every page.
+  const reduceMotion = useReducedMotion() === true;
+
   // Not drawn in light mode, and this is the reason light mode looked broken:
   // the canvas is `alpha: false`, so it paints an opaque near-black field over
   // the whole viewport at z-index -1. Every token could be light and the page
@@ -171,6 +177,9 @@ export default function AmbientField({ alert = false }: AmbientFieldProps) {
         // Half resolution. It is a soft gradient; nobody can tell, and it
         // leaves the GPU budget for the globe on the page above it.
         dpr={[0.5, 1]}
+        // Reduced motion: render on demand (once) rather than every frame, so
+        // the drift freezes and nothing animates behind the page.
+        frameloop={reduceMotion ? "demand" : "always"}
         gl={{ antialias: false, alpha: false, powerPreference: "low-power" }}
         // No camera work is needed for a full-screen quad, and skipping the
         // default frameloop when nothing is on screen would cost more in
