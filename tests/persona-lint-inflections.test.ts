@@ -100,3 +100,42 @@ describe("persona lint: confidence as a promise is false reassurance", () => {
     }
   });
 });
+
+describe("persona lint: a net matches what it names, not text that merely contains it", () => {
+  // Found by linting every string the engines ship against the shared fence
+  // (Mythos-Core #55): a substring match refused honest copy whose words run
+  // into a phrase. mythos_core.persona.lint holds the same cases.
+  it.each([
+    "overall goodput held at 40 rps",
+    "we have got your scan request",
+    "you are all settings-driven",
+    "everything is fine-grained",
+    "an all-good flag the target set",
+  ])("leaves %j alone: no reassurance phrase is in it as words", (text) => {
+    expect(lintMicrocopy(text).filter((v) => v.rule === "false-reassurance")).toEqual([]);
+  });
+
+  it("still flags each phrase as words, across any run of whitespace", () => {
+    expect(lintMicrocopy("All good.")).toContainEqual({ rule: "false-reassurance", term: "all good" });
+    expect(lintMicrocopy("Everything is\n fine")).toContainEqual({ rule: "false-reassurance", term: "everything is fine" });
+    expect(lintMicrocopy("Don’t worry.")).toContainEqual({ rule: "false-reassurance", term: "don't worry" });
+  });
+
+  it.each([
+    "scored with confidence 0.82",
+    "scored with confidence .82",
+    "with confidence of 0.82",
+    "with confidence: 0.82",
+    "Reported with confidence estimates",
+    "Weighted with confidence weights",
+    "Compared with confidence metrics",
+  ])("reads %j as confidence measured, not promised", (text) => {
+    expect(lintMicrocopy(text).filter((v) => v.rule === "false-reassurance")).toEqual([]);
+  });
+
+  it("still flags a promise followed by punctuation", () => {
+    for (const text of ["Deploy with confidence.", "Deploy with confidence, today", "to confidence"]) {
+      expect(lintMicrocopy(text).map((v) => v.rule)).toContain("false-reassurance");
+    }
+  });
+});
