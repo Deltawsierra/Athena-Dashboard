@@ -81,6 +81,8 @@ import { Label, SeverityPill, severityFrom, type Severity } from "@/components/m
 import { isSampleMode, overviewSample, SampleModeBanner, SamplePanelLabel } from "@/sample";
 import { cn } from "@/lib/utils";
 import { both, figure, loaded, notInHand, type Loaded } from "@/lib/loaded";
+import { notKnownToEngine } from "@/lib/engineRuns";
+import { notKnownCount } from "@/lib/notKnownCopy";
 import { untrackedResults, type FindingsSummary, type UntrackedScan } from "@shared/findings-summary";
 import { readScan } from "@shared/latest-scans";
 
@@ -154,6 +156,13 @@ interface EngineRuns { runs: Array<{ state?: string | null }>; configured: boole
 
 /** A test the engine (or a person) has not finished with. */
 const IN_FLIGHT = new Set(["pending", "queued", "running", "in-progress"]);
+
+/**
+ * Whether the engine does not know a test's run (lib/engineRuns.ts
+ * notKnownToEngine): recorded so by a person, or read so while it may still be
+ * running. Such a test is not counted in progress; it is its own figure.
+ */
+const notKnown = (test: ApiTest): boolean => notKnownToEngine({ findings: test.findings, status: test.status });
 const SEV_ORDER: Severity[] = ["critical", "high", "medium", "low", "unrated", "info"];
 /** How many clients the coverage panel lists. */
 const COVERAGE_ROWS = 6;
@@ -272,8 +281,12 @@ function useLiveOverview(): OverviewModel {
     {
       key: "scans",
       label: "Scans In Progress",
-      value: figure(tests, (list) => list.filter((t) => IN_FLIGHT.has(t.status)).length),
-      sublabel: tests.state === "ready" ? `${plural(tests.data.length, "scan")} on record` : "Pending, queued or running",
+      // A scan the engine does not know is not counted in progress: its own figure, beside the scans on record, never summed.
+      value: figure(tests, (list) => list.filter((t) => IN_FLIGHT.has(t.status) && !notKnown(t)).length),
+      sublabel: tests.state === "ready"
+        ? `${plural(tests.data.length, "scan")} on record` +
+          (tests.data.some(notKnown) ? ` · ${notKnownCount(tests.data.filter(notKnown).length)}` : "")
+        : "Pending, queued or running",
       icon: ScanLine,
     },
     {

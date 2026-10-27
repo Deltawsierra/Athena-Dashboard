@@ -33,6 +33,7 @@ import FindingNarrative from "@/components/FindingNarrative";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
 import NoStopPanel from "@/components/NoStopPanel";
+import NotKnownPanel, { NotKnownRecordedSummary, type NotKnownReading } from "@/components/NotKnownPanel";
 import RunningScans from "@/components/RunningScans";
 import ScanCoverage from "@/components/ScanCoverage";
 import { Divider } from "@/components/mythos/Ornament";
@@ -47,8 +48,10 @@ import {
   notFinished,
 } from "@/lib/scanSummaryCopy";
 import { DASHBOARD_DIRECT, HYBRID_SOURCE, coverageSourceFor } from "@/lib/sourceLabels";
+import { NOT_KNOWN_BASIS } from "@/lib/notKnownCopy";
 import BackendRecordPanel from "@/components/BackendRecordPanel";
 import type { BackendRecordView } from "@shared/backend-record";
+import { NOT_KNOWN_STATUS, notKnownRecordedOf } from "@shared/engine-record";
 import templeStorm from "@assets/mythos/temple-storm.webp";
 import {
   SCAN_STAGES,
@@ -105,6 +108,10 @@ interface ScanView {
   backend?: BackendRecordView | null;
   /** The engine's coverage manifest for this run, as recorded (shared/scan-coverage.ts); null when none was. */
   coverage?: unknown;
+  /** false once the engine's 404 to this scan's reads stands (server/routes.ts notKnown); absent otherwise. Never a Stop's condition. */
+  engineKnowsRun?: boolean;
+  /** With it: since when, how many reads, and the engine's words. */
+  notKnown?: NotKnownReading;
   engine: {
     findings?: EngineFinding[];
     /** The engine's `reason` for how the run ended (a stop's), when it sent one. */
@@ -114,8 +121,11 @@ interface ScanView {
   } | null;
 }
 
-/** States the engine reports for a run that has stopped moving. */
-const FINISHED = new Set(["completed", "aborted", "failed", "refused"]);
+/**
+ * States the engine reports for a run that has stopped moving -- and `not_known`,
+ * a person's record that the engine does not know the run (shared/engine-record.ts).
+ */
+const FINISHED = new Set(["completed", "aborted", "failed", "refused", NOT_KNOWN_STATUS]);
 
 /** A result's badge: its severity, or "Not rated" (muted) when it has none -- never "Info", which says "not a risk". */
 function SeverityBadge({ level }: { level: ResultLevel }) {
@@ -191,6 +201,11 @@ export default function AthenaScan() {
     // Polled while it moves, left alone once it has stopped.
     refetchInterval: (query) => {
       const data = query.state.data as ScanView | undefined;
+      // A run the engine has not known for a while (server/routes.ts notKnown):
+      // asked every 30 s, not every 2. A Stop goes when it is pressed, whatever
+      // this interval is, and once answered reads the scan again at once (it
+      // invalidates this query): this slows no Stop.
+      if (data && data.engineKnowsRun === false && !FINISHED.has(data.state)) return 30_000;
       if (!data || !FINISHED.has(data.state)) return 2_000;
       // A finished scan started through Athena-Backend is read again while the
       // backend collects its record (shared/backend-record.ts), so the page
@@ -367,6 +382,14 @@ export default function AthenaScan() {
   // A run that ended short of completed with nothing gradable on record: not
   // "Clear". No result is derived from a scan that did not complete.
   const notAssessed = finished && !countsUnread && !notRated && !clearOverUnread && band === "Clear" && ended !== null;
+  // A scan a person recorded as not known to the engine (shared/engine-record.ts
+  // NOT_KNOWN_STATUS): "Not assessed" whatever was counted before, with who
+  // recorded it, when and the engine's words -- never "Clear", and never "the
+  // scan finished and returned no findings".
+  const notKnownHere = scan !== undefined && scan.state === NOT_KNOWN_STATUS;
+  // The server's reading of a run the engine has not known for a while, while
+  // it may still be running: said beside the Stop, which stays as it is.
+  const notKnownReading = mayBeRunning && scan !== undefined && scan.engineKnowsRun === false && scan.notKnown ? scan.notKnown : null;
   const clientName = clients.find((c) => c.id === clientId)?.name ?? "—";
 
   return (
@@ -607,6 +630,8 @@ export default function AthenaScan() {
           )}
           {mayBeRunning && failsafeOnly && <NoStopPanel className="mt-3" />}
           {mayBeRunning && backendOnly && !failsafeOnly && <NoStopPanel variant="backend" className="mt-3" />}
+          {/* The engine has not known this run for a while: said beside the Stop, which is offered as before. */}
+          {notKnownReading !== null && testId !== null && <NotKnownPanel testId={testId} reading={notKnownReading} className="mt-3" />}
           {/* What the engine said went wrong around a run it started all the
               same (a 500 that named a run whose work started, or an answer
               that named no run id): the server's words, as it said them. */}
@@ -669,10 +694,12 @@ export default function AthenaScan() {
               <div className="mt-2 flex items-baseline gap-3">
                 <span
                   className="whitespace-nowrap text-2xl font-semibold"
-                  style={{ color: `hsl(var(--${countsUnread || notRated || clearOverUnread || notAssessed ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
+                  style={{ color: `hsl(var(--${notKnownHere || countsUnread || notRated || clearOverUnread || notAssessed ? "muted-foreground" : RISK_BAND_TONE[band]}))` }}
                   data-testid="text-risk-band"
                 >
-                  {countsUnread
+                  {notKnownHere
+                    ? NOT_ASSESSED
+                    : countsUnread
                     ? returned === null ? "Not read" : "Not recorded"
                     : notRated ? "Not rated"
                     : clearOverUnread ? infoOverUnread ? "Informational" : "Not read"
@@ -682,7 +709,9 @@ export default function AthenaScan() {
                 </span>
               </div>
               <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="text-risk-basis">
-                {countsUnread
+                {notKnownHere
+                  ? NOT_KNOWN_BASIS
+                  : countsUnread
                   ? returned === null
                     ? "The findings could not be read, so no band is derived from them."
                     : "The counts were not recorded, so no band is derived from them."
@@ -760,7 +789,8 @@ export default function AthenaScan() {
                 </div>
               </div>
             )}
-            {returned !== null && findings.length === 0 && finished && ended === null && (
+            {notKnownHere && <NotKnownRecordedSummary recorded={notKnownRecordedOf(scan.test.findings)} className="mt-3" />}
+            {returned !== null && findings.length === 0 && finished && ended === null && !notKnownHere && (
               <div className="mt-3 flex items-start gap-3">
                 <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
                 <p className="text-[13px] text-muted-foreground">

@@ -603,6 +603,24 @@ Now no such scan is a dead end, and none is given an end it did not have.
   what the engine answered. Nothing else writes the word: a person's test
   cannot be given it, a scan's status is refused as an edit as before, and
   `findings.notKnown` cannot be supplied and is kept by an edit.
+- **On the pages** (`client/src/lib/notKnownCopy.ts`, `client/src/components/NotKnownPanel.tsx`).
+  The Athena and Penetration Testing pages say the reading beside the Stop --
+  "Not known to the engine since <t>: it may still be running under another
+  id. Stop sends the stop again; the kill switch on the AI Control page sends
+  it a stop by id.", the engine's words, and that its status is unchanged --
+  and read the scan every 30 s instead of every 2; the Stop stays as it is,
+  and is never disabled by any of this. An admin sees "Record as not known to
+  the engine", behind a confirm step; anyone else is told who can. A recorded
+  scan reads "Not assessed", who recorded it and when, the engine's words and
+  "Nothing here is a result." -- never "Clear", and never "The scan finished
+  and returned no findings". The Tests page filters by "Not known to the
+  engine" (a recorded scan, or one whose reading stands: `notKnownToEngine` in
+  `client/src/lib/engineRuns.ts`), shows the label as the badge and a note on
+  the row, and offers no Stop for a recorded scan. Scans running now leaves a
+  recorded scan out. The Overview's Scans In Progress counts neither, and says
+  how many there are as its own figure beside the scans on record, never
+  summed. Every new sentence is held to the persona lint by
+  `tests/not-known-copy-lints-clean.test.ts`.
 
 The scan abort route still answers a 404 to a Stop 502, "the engine did not
 accept the stop; the scan may still be running": that answer is pinned by
@@ -611,7 +629,9 @@ accept the stop; the scan may still be running": that answer is pinned by
 Tests: `tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts` (the
 reading; it runs on its own, `tests/wall-clock.json`) and
 `tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts`
-(the act, the kill switch, the delete and the count).
+(the act, the kill switch, the delete and the count),
+`tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx`
+(the pages) and `tests/not-known-copy-lints-clean.test.ts` (the copy).
 
 ## The record is the source (Engagements, adoption, the ledger by source)
 

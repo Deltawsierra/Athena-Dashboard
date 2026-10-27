@@ -5,10 +5,29 @@
  * server would stop.
  */
 
-import { engineRunIdOf, engineStopIdOf, isEngineRecord, stoppedOnlyAtBackend } from "@shared/engine-record";
+import {
+  NOT_KNOWN_STATUS, engineRunIdOf, engineStopIdOf, isEngineRecord, notKnownMarkOf, stoppedOnlyAtBackend,
+} from "@shared/engine-record";
 
-/** Engine run states after which nothing more happens. */
-export const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"]);
+/**
+ * Engine run states after which nothing more happens -- and `not_known`, a
+ * person's record that the engine does not know the run (shared/engine-record.ts
+ * NOT_KNOWN_STATUS): no Stop is offered for it here, as the server sends none
+ * but the kill switch's.
+ */
+export const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused", NOT_KNOWN_STATUS]);
+
+/**
+ * Whether the engine does not know an engine scan's run: a person recorded it
+ * so (`not_known`), or -- for a row that may still be running -- the server's
+ * reading stands (`findings.notKnown`: its reads answered 404 for a while; its
+ * status unchanged, its Stop offered as before). The one rule the Tests
+ * screen's filter and the Overview's count read.
+ */
+export function notKnownToEngine(test: { findings: unknown; status: string }): boolean {
+  if (!isEngineRecord(test.findings)) return false;
+  return test.status === NOT_KNOWN_STATUS || (!FINISHED_RUN_STATES.has(test.status) && notKnownMarkOf(test.findings) !== null);
+}
 
 /** The run id of a test whose engine run may still be running, or null. */
 export function unfinishedRunOf(test: { findings: unknown; status: string }): string | null {

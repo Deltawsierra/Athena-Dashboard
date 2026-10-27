@@ -125,3 +125,5 @@ jobs:
           tests/a-hybrid-run-this-key-never-reads-ends-with-its-record.test.ts
           tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts
           tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts
+          tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx
+          tests/not-known-copy-lints-clean.test.ts
