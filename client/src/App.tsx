@@ -1,4 +1,5 @@
 import { Switch, Route, Redirect, useLocation } from "wouter";
+import { MotionConfig } from "framer-motion";
 import { queryClient, onUnauthorized, onPasswordChangeRequired } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -10,6 +11,7 @@ import WebGLBoundary from "@/components/three/WebGLBoundary";
 import MagneticCursor from "@/components/MagneticCursor";
 import CursorGlow from "@/components/CursorGlow";
 import SmoothScroll from "@/components/SmoothScroll";
+import RouteTransition from "@/components/RouteTransition";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import Login from "@/pages/Login";
 import ChangePassword from "@/pages/ChangePassword";
@@ -196,7 +198,9 @@ function App() {
     content = (
       <AppShell onLogout={handleLogout} isAdmin={isAdmin(user)} username={user.username}>
         <RecordAdoptionOnSignIn />
-        <AppRoutes admin={isAdmin(user)} />
+        <RouteTransition>
+          <AppRoutes admin={isAdmin(user)} />
+        </RouteTransition>
       </AppShell>
     );
   }
@@ -204,6 +208,11 @@ function App() {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
+        {/* "user": honour the OS prefers-reduced-motion setting for every
+            Framer Motion animation (page reveals, the custom cursor, hovers).
+            Transform/scale motion is dropped for those users while opacity
+            still fades, so nothing is left stuck invisible. */}
+        <MotionConfig reducedMotion="user">
         <TooltipProvider>
           <SmoothScroll>
             {/* The ambient layer is decorative, so a machine that cannot give
@@ -219,6 +228,7 @@ function App() {
             {content}
           </SmoothScroll>
         </TooltipProvider>
+        </MotionConfig>
       </QueryClientProvider>
     </ErrorBoundary>
   );

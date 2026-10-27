@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import { motion, useSpring, useMotionValue } from 'framer-motion';
+import { motion, useSpring, useMotionValue, useReducedMotion } from 'framer-motion';
 
 export default function MagneticCursor() {
   const cursorRef = useRef<HTMLDivElement>(null);
   const cursorDotRef = useRef<HTMLDivElement>(null);
-  
+  // `null` means no stated preference; only an explicit "reduce" turns the
+  // custom cursor off. When it is off, index.css restores the native cursor
+  // (which this component normally replaces), so the pointer is never lost.
+  const reduceMotion = useReducedMotion() === true;
+
   const cursorX = useMotionValue(0);
   const cursorY = useMotionValue(0);
-  
+
   // Faster, more responsive spring config
   const springConfig = { damping: 15, stiffness: 500, mass: 0.3 };
   const cursorXSpring = useSpring(cursorX, springConfig);
@@ -21,6 +25,9 @@ export default function MagneticCursor() {
   const [isHovering, setIsHovering] = useState(false);
 
   useEffect(() => {
+    // No pointer tracking, and no per-move spring work, under reduced motion.
+    if (reduceMotion) return;
+
     const moveCursor = (e: MouseEvent) => {
       cursorX.set(e.clientX);
       cursorY.set(e.clientY);
@@ -49,7 +56,10 @@ export default function MagneticCursor() {
         el.removeEventListener('mouseleave', handleMouseLeave);
       });
     };
-  }, [cursorX, cursorY, dotX, dotY]);
+  }, [cursorX, cursorY, dotX, dotY, reduceMotion]);
+
+  // Reduced motion: render no custom cursor at all; the native one is shown.
+  if (reduceMotion) return null;
 
   return (
     <>

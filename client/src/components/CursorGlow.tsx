@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { motion, useMotionValue, useSpring } from 'framer-motion';
+import { motion, useMotionValue, useSpring, useReducedMotion } from 'framer-motion';
 
 export default function CursorGlow() {
   const [isVisible, setIsVisible] = useState(false);
+  // Only an explicit "reduce" turns the following glow off.
+  const reduceMotion = useReducedMotion() === true;
   const mouseX = useMotionValue(0);
   const mouseY = useMotionValue(0);
 
@@ -10,6 +12,8 @@ export default function CursorGlow() {
   const smoothY = useSpring(mouseY, { damping: 30, stiffness: 200, mass: 0.3 });
 
   useEffect(() => {
+    if (reduceMotion) return;
+
     const handleMouseMove = (e: MouseEvent) => {
       mouseX.set(e.clientX);
       mouseY.set(e.clientY);
@@ -27,7 +31,10 @@ export default function CursorGlow() {
       window.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseleave', handleMouseLeave);
     };
-  }, [mouseX, mouseY]);
+  }, [mouseX, mouseY, reduceMotion]);
+
+  // Reduced motion: no following glow layer, and no per-move spring work.
+  if (reduceMotion) return null;
 
   return (
     <motion.div
