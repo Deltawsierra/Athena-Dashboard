@@ -47,7 +47,10 @@ describe("the helper, with the platform and the spawner injected", () => {
     expect(endProcessTree(child, { platform: "win32", spawnSync: spawner })).toBe("taskkill");
     expect(spawner).toHaveBeenCalledTimes(1);
     const [command, args, options] = spawner.mock.calls[0] as unknown as [string, string[], { windowsHide?: boolean; timeout?: number }];
-    expect(command).toBe("taskkill");
+    // By its full path under System32, never by a name that PATH would resolve (the paths themselves are pinned in
+    // taskkill-is-run-by-its-full-path-under-the-system-root.test.ts).
+    expect(path.win32.isAbsolute(command)).toBe(true);
+    expect(path.win32.basename(command)).toBe("taskkill.exe");
     expect(args).toEqual(["/PID", "4242", "/T", "/F"]);
     expect(options.windowsHide).toBe(true);
     expect(options.timeout).toBe(TASKKILL_TIMEOUT_MS);

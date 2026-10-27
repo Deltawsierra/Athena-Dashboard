@@ -11,6 +11,7 @@ import request from "supertest";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 import { signInToBackend } from "./helpers";
 import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -19,8 +20,10 @@ function tempDir(prefix: string): string {
   madeDirs.push(dir);
   return dir;
 }
-afterAll(() => {
-  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
 });
 
 /**
@@ -128,6 +131,7 @@ type Instance = {
  */
 async function boot(fresh: boolean): Promise<Instance> {
   if (fresh) vi.resetModules();
+  await noteDatabase();
   const { createApp } = await import("../server/app");
   const { initializeDefaultData } = await import("../server/init-data");
   const app = createApp();

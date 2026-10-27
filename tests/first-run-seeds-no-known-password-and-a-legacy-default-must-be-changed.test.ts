@@ -10,6 +10,7 @@ import request from "supertest";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
 import { makeApp } from "./helpers";
 import { LEGACY_DEFAULT_PASSWORDS } from "../server/password";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /**
  * No install is seeded with a password anyone can read.
@@ -35,9 +36,20 @@ function captureLogs(): string[] {
   return lines;
 }
 
+/**
+ * A file's permission bits as the platform reports them. Where mode bits mean something they are asked for exactly
+ * (0600). Windows does not apply them (README, "First sign-in"): it reports a writable file as 0666 whatever mode it
+ * was created with, so there only the owner's read and write bits can be asked of it.
+ */
+function modeOf(file: string): number {
+  const mode = fs.statSync(file).mode & 0o777;
+  return process.platform === "win32" ? mode & 0o600 : mode;
+}
+
 /** The modules, fresh: the in-memory backend, with its data directory `dir` (where the database file would be). */
 async function fresh() {
   vi.resetModules();
+  await noteDatabase();
   const init = await import("../server/init-data");
   const { storage } = await import("../server/storage-unified");
   const { verifyPassword } = await import("../server/password");
@@ -52,12 +64,14 @@ beforeEach(() => {
   logs = captureLogs();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   process.env.ATHENA_INITIAL_ADMIN_PASSWORD = TEST_ADMIN_PASSWORD;
   process.env.ATHENA_STORAGE = "memory";
   delete process.env.ATHENA_DB_PATH;
-  fs.rmSync(dir, { recursive: true, force: true });
+  // The one test that runs on a SQLite file leaves the server's connection and the checkpointer thread's connection open
+  // on it, and Windows will not remove an open file: every database this test loaded is closed first, then `dir` is removed.
+  await releaseAndRemove([dir]);
 });
 
 describe("first run", () => {
@@ -72,7 +86,7 @@ describe("first run", () => {
 
     const file = path.join(dir, INITIAL_ADMIN_PASSWORD_FILE);
     expect(file).toBe(path.join(dir, "initial-admin-password.txt"));
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(modeOf(file)).toBe(0o600);
     const password = fs.readFileSync(file, "utf8").trim();
     expect(password).toMatch(/^[A-Za-z0-9_-]{24,}$/);
     expect((await verifyPassword(password, admin.password)).ok).toBe(true);
@@ -114,7 +128,7 @@ describe("first run", () => {
     expect(admin.mustChangePassword).toBe(true);
     expect((await verifyPassword(short, admin.password)).ok).toBe(false);
     const file = path.join(dir, INITIAL_ADMIN_PASSWORD_FILE);
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(modeOf(file)).toBe(0o600);
     const generated = fs.readFileSync(file, "utf8").trim();
     expect(generated.length).toBeGreaterThanOrEqual(24);
     expect((await verifyPassword(generated, admin.password)).ok).toBe(true);

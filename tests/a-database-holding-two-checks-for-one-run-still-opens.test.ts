@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
+import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -11,8 +12,10 @@ function tempDir(prefix: string): string {
   madeDirs.push(dir);
   return dir;
 }
-afterAll(() => {
-  for (const dir of madeDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterAll(async () => {
+  // Every database this file loaded is closed first (the server's connection and the checkpointer thread's connection hold
+  // the files open, and Windows will not remove an open file), then the directories are removed.
+  await releaseAndRemove(madeDirs);
 });
 
 /**
@@ -33,19 +36,23 @@ describe("opening a database with duplicate engine run ids on its checks", () =>
   it("opens, reports the duplicates, and leaves the unique index off", async () => {
     const dbPath = path.join(tempDir(path.join(os.tmpdir(), "athena-dup-checks-")), "athena.db");
     const seed = new Database(dbPath);
-    seed.exec(`CREATE TABLE finding_checks (
-      id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, verdict TEXT NOT NULL, detail TEXT, run_id TEXT,
-      inventory_digest TEXT, checked_by TEXT, checked_at INTEGER NOT NULL,
-      engine_run_id TEXT, filed_via TEXT, requested_at INTEGER)`);
-    const insert = seed.prepare("INSERT INTO finding_checks (id, finding_id, verdict, checked_at, engine_run_id) VALUES (?, 'f', 'closed', 1, ?)");
-    insert.run("c1", "run-twice");
-    insert.run("c2", "run-twice");
-    insert.run("c3", "run-once");
-    seed.close();
+    try {
+      seed.exec(`CREATE TABLE finding_checks (
+        id TEXT PRIMARY KEY, finding_id TEXT NOT NULL, verdict TEXT NOT NULL, detail TEXT, run_id TEXT,
+        inventory_digest TEXT, checked_by TEXT, checked_at INTEGER NOT NULL,
+        engine_run_id TEXT, filed_via TEXT, requested_at INTEGER)`);
+      const insert = seed.prepare("INSERT INTO finding_checks (id, finding_id, verdict, checked_at, engine_run_id) VALUES (?, 'f', 'closed', 1, ?)");
+      insert.run("c1", "run-twice");
+      insert.run("c2", "run-twice");
+      insert.run("c3", "run-once");
+    } finally {
+      seed.close();
+    }
 
     process.env.ATHENA_STORAGE = "sqlite";
     process.env.ATHENA_DB_PATH = dbPath;
     vi.resetModules();
+    await noteDatabase();
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const db = await import("../server/db-sqlite");
     db.openDatabase();
@@ -63,6 +70,7 @@ describe("opening a database with duplicate engine run ids on its checks", () =>
     process.env.ATHENA_STORAGE = "sqlite";
     process.env.ATHENA_DB_PATH = dbPath;
     vi.resetModules();
+    await noteDatabase();
     const db = await import("../server/db-sqlite");
     db.openDatabase();
     expect(db.openReport.duplicateEngineRunIds).toEqual([]);

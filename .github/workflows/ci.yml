@@ -61,9 +61,11 @@ jobs:
 
   # The dashboard is run on Windows as well, so the paths that matter most there
   # run there: the install (better-sqlite3 is a native module), the type check,
-  # and the tests for ending the dev server's process tree and for a Stop
-  # reaching the engine. Not the whole suite and not the packaged build, which
-  # stay on the Linux job above.
+  # the tests for ending the dev server's process tree (taskkill, by its full
+  # path) and for a Stop reaching the engine, and the test files that remove the
+  # SQLite files they used (Windows refuses to remove a file that is still open).
+  # Not the whole suite and not the packaged build, which stay on the Linux job
+  # above.
   windows:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -90,7 +92,7 @@ jobs:
       - name: Build better-sqlite3 for Node
         run: npm run rebuild:node
 
-      - name: Stop-path tests and the process-tree tests
+      - name: Stop-path tests, the process-tree tests and the tests that remove their SQLite files
         run: >-
           node scripts/test.mjs
           tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts
@@ -112,3 +114,11 @@ jobs:
           tests/scans.test.ts
           tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts
           tests/closing-the-database-releases-its-file-and-the-next-query-opens-it-again.test.ts
+          tests/taskkill-is-run-by-its-full-path-under-the-system-root.test.ts
+          tests/the-helper-that-removes-sqlite-files-never-swallows-a-file-still-held.test.ts
+          tests/a-backend-record-is-collected-once-across-a-restart.test.ts
+          tests/a-database-holding-two-checks-for-one-run-still-opens.test.ts
+          tests/a-sign-in-on-an-old-hash-never-writes-over-a-changed-password.test.ts
+          tests/first-run-seeds-no-known-password-and-a-legacy-default-must-be-changed.test.ts
+          tests/no-statement-waits-on-the-lock-and-another-dashboards-change-is-honoured.test.ts
+          tests/two-sign-ins-at-once-on-a-legacy-hash-both-get-in.test.ts
