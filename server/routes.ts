@@ -16,7 +16,7 @@ import * as engine from "./engine";
 import * as backendScans from "./backend-scans";
 import * as retests from "./retests";
 import { CollectWatcher, type CollectHooks } from "./collect-watch";
-import { adoptBackendScans, firstDirectReads, type AdoptionDeps, type AdoptionOutcome } from "./backend-adoption";
+import { adoptBackendScans, firstDirectReads, recordEnd as endOfRecord, type AdoptionDeps, type AdoptionOutcome } from "./backend-adoption";
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
@@ -427,6 +427,56 @@ const FINISHED_RUN_STATES = new Set(["completed", "aborted", "failed", "refused"
 const UNREAD_COUNTS = {
   severity: null, vulnerabilitiesFound: 0, criticalCount: 0, highCount: 0, mediumCount: 0, lowCount: 0,
 } as const;
+
+/**
+ * When the engine's 404 to a row's reads ("No such scan run") STANDS: after
+ * `reads` reads in a row so answered, over at least `floorMs`. One 404 is an
+ * engine that restarted, or a registry not yet caught up; a run of them, over
+ * half a minute, is a run the engine does not have under this id. For a hybrid
+ * row (a scan started through Athena-Backend, whose key launched the run) that
+ * is a run this dashboard's key cannot read (decision 7): its record is asked
+ * for (the collect watch starts, WatchStart `run_not_readable`), and the
+ * record's end, when it comes, ends the row. Nothing here writes a status: the
+ * engine has not said the run ended. Exported for tests, which shorten these.
+ *
+ * SAFETY: the count is memory, read and written synchronously on the status
+ * read's path only; no stop reads it, waits on it, or is offered or refused by
+ * it.
+ */
+export const notKnown = { reads: 5, floorMs: 30_000, persistEveryMs: 60_000 };
+
+/** The 404s in a row a row's reads of its run have met: in memory, let go by any other answer. */
+interface RunNotKnownCount {
+  reads: number;
+  /** When the first of these reads was answered 404 (ms since the epoch). */
+  since: number;
+  /** The engine's words, from the latest 404. */
+  said: string;
+}
+const runNotKnownCounts = new Map<string, RunNotKnownCount>();
+/** The most rows counted at once; past it the oldest count is let go (a row read, ended or deleted is let go at once). */
+const RUN_NOT_KNOWN_ROWS_CAP = 10_000;
+
+/** One more read of `testId`'s run answered 404: the count so far, and whether it now stands (notKnown). */
+function countRunNotKnown(testId: string, said: string, now = Date.now()): RunNotKnownCount & { standing: boolean } {
+  let count = runNotKnownCounts.get(testId);
+  if (!count) {
+    if (runNotKnownCounts.size >= RUN_NOT_KNOWN_ROWS_CAP) {
+      const oldest = runNotKnownCounts.keys().next().value;
+      if (oldest !== undefined) runNotKnownCounts.delete(oldest);
+    }
+    count = { reads: 0, since: now, said };
+    runNotKnownCounts.set(testId, count);
+  }
+  count.reads += 1;
+  count.said = said;
+  return { ...count, standing: count.reads >= notKnown.reads && now - count.since >= notKnown.floorMs };
+}
+
+/** The run was read, the engine answered anything but a 404, the row ended or is gone: its count starts over. */
+function forgetRunNotKnown(testId: string): void {
+  runNotKnownCounts.delete(testId);
+}
 
 /** Said of an engine scan the engine accepted without a run id, read before it is recorded as completed. */
 const NO_RUN_ID_TO_ASK = "the engine accepted this scan without a run id, so the engine cannot be asked about it";
@@ -2486,30 +2536,49 @@ function snapshotOfRecord(record: backendScans.BackendScanRecord, direct: { resu
 }
 
 /**
- * How a collect watch files the backend's record into the scan's row, and
- * records its end. Filed once, by the dashboard whose claim on the watch
- * succeeded (server/collect-watch.ts). The row then holds the RECORD's results
- * and coverage -- the backend's record is the record of a hybrid scan -- with
- * the counts recounted from them, and the snapshot the list screens read. A
- * hybrid scan is never filed into this dashboard's own findings ledger.
+ * File the backend's record into a scan's row: the snapshot the list screens
+ * read, and the RECORD's results and coverage -- the backend's record is the
+ * record of a hybrid scan -- with the counts recounted from them. A row not at
+ * an end here takes the record's end as its status and completedAt
+ * (server/backend-adoption.ts recordEnd: the one mapping, STATUS_HERE --
+ * completed, stopped as aborted, failed); a row a direct read already ended
+ * keeps the engine's own word, the record's end beside it in the snapshot. The
+ * one path a record is filed by: the collect watch, the status read that finds
+ * a record the watch collected but could not file, and the adoption sync's
+ * backstop. A hybrid scan is never filed into this dashboard's own findings
+ * ledger. Answers the end it wrote, or null when it wrote none.
+ */
+async function fileRecordIntoRow(testId: string, record: backendScans.BackendScanRecord): Promise<{ status: string; completedAt: Date } | null> {
+  const test = await storage.getTest(testId);
+  if (!test) return null;
+  const recorded = (test.findings ?? {}) as Record<string, unknown>;
+  const results = backendScans.recordResults(record);
+  const coverage = backendScans.recordCoverage(record);
+  const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
+  const end = FINISHED_RUN_STATES.has(test.status) ? null : endOfRecord(record, new Date());
+  await storage.updateTest(test.id, {
+    findings: {
+      ...recorded,
+      backend: snapshot,
+      ...(results !== null ? { results } : {}),
+      ...(coverage !== null ? { coverage } : {}),
+    },
+    ...(results !== null ? countSeverities(results) : {}),
+    ...(end !== null ? { status: end.status, completedAt: end.completedAt } : {}),
+  });
+  // Ended: the row's reads of its run are counted no more.
+  if (end !== null) forgetRunNotKnown(test.id);
+  return end;
+}
+
+/**
+ * How a collect watch files the backend's record into the scan's row
+ * (fileRecordIntoRow), and records its end. Filed once, by the dashboard whose
+ * claim on the watch succeeded (server/collect-watch.ts).
  */
 const collectWatchHooks: CollectHooks = {
   async fileRecord(watch, record) {
-    const test = await storage.getTest(watch.testId);
-    if (!test) return;
-    const recorded = (test.findings ?? {}) as Record<string, unknown>;
-    const results = backendScans.recordResults(record);
-    const coverage = backendScans.recordCoverage(record);
-    const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
-    await storage.updateTest(test.id, {
-      findings: {
-        ...recorded,
-        backend: snapshot,
-        ...(results !== null ? { results } : {}),
-        ...(coverage !== null ? { coverage } : {}),
-      },
-      ...(results !== null ? countSeverities(results) : {}),
-    });
+    await fileRecordIntoRow(watch.testId, record);
   },
   async recordEnd(watch) {
     const record = backendScans.readRecord(watch.record);
@@ -2578,17 +2647,34 @@ function collectedView(
 }
 
 /**
+ * Why a status read starts a hybrid row's collect watch, said in so many words:
+ *   finished          -- this read saw the run's end on the engine;
+ *   run_not_readable  -- the engine's 404 to this row's reads stands (notKnown):
+ *                        this dashboard's key cannot read the run Athena-Backend's
+ *                        key launched (decision 7), or the engine has lost it.
+ *                        Nothing here saw an end: the backend, whose key can read
+ *                        the run, is asked for its record (pending while the run
+ *                        goes on), and the record's end ends the row
+ *                        (fileRecordIntoRow). Logged as
+ *                        `collect_watch_started_run_not_readable`.
+ */
+type WatchStart =
+  | { engineRunId: string | null; because: "finished" }
+  | { engineRunId: string | null; because: "run_not_readable"; count: RunNotKnownCount };
+
+/**
  * The `backend` of a status answer for a row naming backend scan `scanId`, from
  * the app's collect watcher (server/collect-watch.ts). Reads storage only -- no
- * backend call is made on a page read's path. When `start` is given, this read
- * saw the run finished: the collect watch is started if none exists, asking as
- * the person of `sessionId` (null for no person: the watch then waits for a
- * signed-in read). Every signed-in read while the watch runs lends it its
- * person. A record the watch collected but could not file into the row is filed
- * here, from the watch's record.
+ * backend call is made on a page read's path. When `start` is given, the
+ * collect watch is started if none exists, for the reason it names
+ * (WatchStart), asking as the person of `sessionId` (null for no person: the
+ * watch then waits for a signed-in read); a scan already watched is not watched
+ * twice. Every signed-in read while the watch runs lends it its person. A
+ * record the watch collected but could not file into the row is filed here,
+ * from the watch's record.
  */
 async function backendRecordView(
-  collectWatcher: CollectWatcher, test: Test, scanId: string, sessionId: string | null, start: { engineRunId: string | null } | null,
+  collectWatcher: CollectWatcher, test: Test, scanId: string, sessionId: string | null, start: WatchStart | null,
 ): Promise<BackendRecordView> {
   const findings = (test.findings ?? {}) as Record<string, unknown>;
   const base = { scanId, engagementId: backendEngagementIdOf(findings), mirror: backendMirrorOf(findings.backendMirror) };
@@ -2605,6 +2691,22 @@ async function backendRecordView(
       };
     }
     watch = collectWatcher.start({ backendScanId: scanId, testId: test.id, engineRunId: start.engineRunId, sessionId });
+    if (start.because === "run_not_readable") {
+      // On the record, so the row's end -- when the watch files it -- is seen
+      // to come from the backend's record of a run this key never read. Never
+      // awaited by the answer: a line that could not be written changes nothing.
+      void storage.createActivityLog({
+        action: "collect_watch_started_run_not_readable",
+        entityType: "test",
+        entityId: test.id,
+        details: {
+          backendScanId: scanId, engineRunId: start.engineRunId, filedBy: "status_route",
+          reads: start.count.reads, since: new Date(start.count.since).toISOString(), said: start.count.said,
+        },
+        userId: null,
+        ipAddress: null,
+      }).catch((cause) => console.error(logLine(`[collect] the start of the watch for backend scan ${scanId} could not be logged: ${causeOf(cause)}`)));
+    }
   } else if (watch.state === "running") {
     collectWatcher.adopt(scanId, sessionId);
   }
@@ -2615,7 +2717,7 @@ async function backendRecordView(
       ? { status: "unknown", verdict: null, verdictLabel: null, collectedAt: isoOf(watch.endedAt), detail: "the record the watch collected could not be read here" }
       : snapshotOfRecord(record, { results: findings.results, coverage: findings.coverage });
     // Claimed and collected, but not on the row yet (a write that did not land): filed now.
-    if (record !== null) await collectWatchHooks.fileRecord(watch, record).catch(() => undefined);
+    if (record !== null) await fileRecordIntoRow(test.id, record).catch(() => undefined);
     return collectedView(test, base, filed);
   }
 
@@ -4189,7 +4291,10 @@ export function registerRoutes(app: Express): void {
 
   app.get("/api/scans/:testId", asyncHandler(async (req, res) => {
     const test = await storage.getTest(req.params.testId);
-    if (!test) return notFound(res, "Test");
+    if (!test) {
+      forgetRunNotKnown(req.params.testId);
+      return notFound(res, "Test");
+    }
 
     const recorded = (test.findings ?? {}) as Record<string, unknown>;
     const runId = runIdOf(test);
@@ -4204,17 +4309,59 @@ export function registerRoutes(app: Express): void {
     const backendScanId = backendScanIdOf(test.findings);
     const sessionId = req.session?.userId ? req.sessionID : null;
     /**
+     * The answer for a row recorded at its end: the findings recorded when the
+     * run completed, or -- for a hybrid row whose record is collected -- the
+     * record's, in the shape the engine's own are. Findings that cannot be read
+     * are said to be unread, never answered as none.
+     */
+    const recordedPayload = (row: Test, fromRecord: boolean): Record<string, unknown> => {
+      const held = (row.findings ?? {}) as Record<string, unknown>;
+      const coverage = coverageOf(held.coverage);
+      const results = readableResults(held.results);
+      if (results === null) {
+        return {
+          test: row, state: row.status, engine: null,
+          detail: fromRecord
+            ? "the findings in the Athena-Backend record of this scan could not be read"
+            : "the findings recorded for this scan could not be read",
+          coverage,
+        };
+      }
+      const answered: engine.EngineScan = {
+        runId, state: row.status, findings: results,
+        detail: fromRecord ? "the findings in the Athena-Backend record of this scan" : "the findings recorded when the run completed",
+      };
+      return { test: row, state: row.status, engine: answered, coverage };
+    };
+    /**
      * The answer, with the row's backend record beside it (`backend`: null for a
      * row that names none) and the mark of a run no direct Stop reaches
-     * (`stop: "backend"`). `finished` says this read saw the run's end: the
-     * first such read starts the collect watch, which asks the backend as this
+     * (`stop: "backend"`). `start` says why this read starts the collect watch
+     * (WatchStart: it saw the run's end, or the engine's 404 to the row's reads
+     * stands); the first such read starts it, and it asks the backend as this
      * person, off the request's path (backendRecordView).
      */
-    const answer = async (row: Test, payload: Record<string, unknown>, finished: boolean) => {
+    const answer = async (row: Test, payload: Record<string, unknown>, start: WatchStart | null) => {
       const backend = backendScanId === null ? null
-        : await backendRecordView(collectWatcher, row, backendScanId, sessionId, finished ? { engineRunId: runId } : null);
-      res.json({ ...payload, backend, ...(stoppedOnlyAtBackend(row.findings) ? { stop: "backend" as const } : {}) });
+        : await backendRecordView(collectWatcher, row, backendScanId, sessionId, start);
+      // A record the watch collected while this read was on its way was filed
+      // into the row after this read took it (fileRecordIntoRow), its end with
+      // it: answered from the row as it is now, as the next read would answer
+      // it -- never "running" beside a collected record. A read of storage, on
+      // no stop's path.
+      let current = row;
+      let said = payload;
+      if (backend?.collected === true && !FINISHED_RUN_STATES.has(row.status)) {
+        const latest = await storage.getTest(row.id);
+        if (latest && FINISHED_RUN_STATES.has(latest.status)) {
+          current = latest;
+          said = recordedPayload(latest, true);
+        }
+      }
+      res.json({ ...said, backend, ...(stoppedOnlyAtBackend(current.findings) ? { stop: "backend" as const } : {}) });
     };
+    /** This read saw the run's end: the watch's reason, when it starts one. */
+    const sawTheEnd: WatchStart = { engineRunId: runId, because: "finished" };
 
     // A test no engine run stands behind -- a person's, or a sample row -- has
     // no findings of a run's to answer, completed or not. Decided by the one
@@ -4239,21 +4386,7 @@ export function registerRoutes(app: Express): void {
       // `engine: null`, and the scan screens read that as "returned no findings"
       // beside the counts those same findings were counted into. Findings that
       // cannot be read are said to be unread, never answered as none.
-      const results = readableResults(recorded.results);
-      if (results === null) {
-        return answer(test, {
-          test, state: test.status, engine: null,
-          detail: collected
-            ? "the findings in the Athena-Backend record of this scan could not be read"
-            : "the findings recorded for this scan could not be read",
-          coverage: carried,
-        }, true);
-      }
-      const answered: engine.EngineScan = {
-        runId, state: test.status, findings: results,
-        detail: collected ? "the findings in the Athena-Backend record of this scan" : "the findings recorded when the run completed",
-      };
-      return answer(test, { test, state: test.status, engine: answered, coverage: carried }, true);
+      return answer(test, recordedPayload(test, collected), sawTheEnd);
     }
     if (!runId) {
       // An engine scan the engine accepted without a run id, not recorded as
@@ -4263,7 +4396,7 @@ export function registerRoutes(app: Express): void {
       return answer(test, {
         test, state: test.status, engine: null, detail: NO_RUN_ID_TO_ASK, coverage: carried,
         ...(FINISHED_RUN_STATES.has(test.status) ? {} : { stop: "failsafe" as const }),
-      }, false);
+      }, null);
     }
 
     let current;
@@ -4273,12 +4406,27 @@ export function registerRoutes(app: Express): void {
       if (cause instanceof engine.EngineUnavailable) {
         // The record stands even when the engine has gone. Saying so beats
         // reporting the row's last known status as if it were current.
+        //
+        // A 404 ("No such scan run") to a row whose run may still be going is
+        // counted (notKnown); any other failure starts the count over. A
+        // hybrid row whose 404 stands -- a run Athena-Backend's key launched
+        // that this key cannot read (decision 7), or one the engine lost --
+        // has its record asked for: the collect watch starts for that reason,
+        // and the record's end, when the backend collects it, ends the row
+        // (fileRecordIntoRow). Never on the first 404, and no status is
+        // written here: nothing saw an end.
+        const notFound = cause instanceof engine.EngineRunNotFound && !FINISHED_RUN_STATES.has(test.status);
+        const count = notFound ? countRunNotKnown(test.id, cause.message) : null;
+        if (count === null) forgetRunNotKnown(test.id);
+        const askTheRecord = count !== null && count.standing && backendScanId !== null;
         return answer(test, {
           test, state: test.status, engine: null, detail: cause.message, coverage: carried,
-        }, false);
+        }, askTheRecord ? { engineRunId: runId, because: "run_not_readable", count } : null);
       }
       throw cause;
     }
+    // The run was read: the engine knows it, whatever it answered before.
+    forgetRunNotKnown(test.id);
 
     const finished = current.state === "completed" || current.state === "aborted"
       || current.state === "failed";
@@ -4347,11 +4495,11 @@ export function registerRoutes(app: Express): void {
         test: updated ?? test, state: current.state, engine: null, filed,
         detail: "the findings the engine sent for this run could not be read",
         coverage: current.coverage ?? carried,
-      }, finished);
+      }, finished ? sawTheEnd : null);
     }
     return answer(updated ?? test, {
       test: updated ?? test, state: current.state, engine: current, filed, coverage: current.coverage ?? carried,
-    }, finished);
+    }, finished ? sawTheEnd : null);
   }));
 
   /**
@@ -4510,7 +4658,9 @@ export function registerRoutes(app: Express): void {
 
   // What the adoption sync works with (server/backend-adoption.ts): this
   // dashboard's rows, the scan route's own counting and snapshot of a record,
-  // one bounded direct read of a run by this dashboard's engine key, and the log.
+  // one bounded direct read of a run by this dashboard's engine key, which rows
+  // are at an end here, the one path a record is filed into a row by
+  // (fileRecordIntoRow), and the log.
   const adoptionDeps: AdoptionDeps = {
     storage,
     countSeverities,
@@ -4524,9 +4674,11 @@ export function registerRoutes(app: Express): void {
         return cause instanceof engine.EngineRunNotFound ? "not_found" : "unread";
       }
     },
+    finishedHere: (status) => FINISHED_RUN_STATES.has(status),
+    fileRecord: fileRecordIntoRow,
     async log(entry) {
       await storage.createActivityLog({
-        action: "adopted_from_backend_record", entityType: "test", entityId: entry.testId, details: entry.details,
+        action: entry.action, entityType: "test", entityId: entry.testId, details: entry.details,
         userId: entry.userId, ipAddress: entry.ipAddress,
       });
     },

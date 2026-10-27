@@ -433,7 +433,23 @@ Two preconditions when deploying:
    reaches the run -- the backend's own Stop on the scan's record, the kill
    switch (which sends the stop by id and mirrors it into the record) and the
    failsafes. The first direct read that succeeds clears the mark and brings
-   the Stop back.
+   the Stop back. Such a row is not left "running" for ever either: once the
+   engine's 404 to its reads stands -- five reads in a row over at least
+   thirty seconds (`notKnown` in `server/routes.ts`; one 404 is an engine that
+   restarted, or a registry not yet caught up) -- the collect watch is started
+   for that reason (logged `collect_watch_started_run_not_readable`), and
+   Athena-Backend, whose key launched the run, is asked for its record: pending
+   while the run goes on. The record's end -- completed, stopped (`aborted`
+   here) or failed, spelled by `STATUS_HERE` in `server/backend-adoption.ts` --
+   ends the row through the one path every record is filed by
+   (`fileRecordIntoRow`), with the record's results, counts and collection
+   time. A row a direct read already ended keeps the engine's own word; the
+   record's end stands beside it in the snapshot. The adoption sync is the
+   backstop for a run longer than the watch's hour: a known row still
+   unfinished here whose record the backend lists as ended is ended from the
+   record's detail the same way, counted in the sync's answer as
+   `endedFromRecord` and logged `ended_from_backend_record`. No 404 ever
+   writes a status: nothing here invents an end.
 
 Also: authenticated scanning (a login block on the Penetration Testing page)
 is refused with `auth_not_carried_by_backend`, since the backend's launch
@@ -534,6 +550,7 @@ and `tests/a-running-retest-keeps-its-stop-on-every-screen.test.tsx` stand uncha
 
 Tests: `tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts`,
 `tests/a-finished-hybrid-scan-is-collected-into-its-backend-record.test.ts`,
+`tests/a-hybrid-run-this-key-never-reads-ends-with-its-record.test.ts`,
 `tests/a-backend-record-is-collected-once-across-a-restart.test.ts`,
 `tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts`,
 `tests/a-testing-window-is-renewed-only-by-a-person-s-act.test.ts` and
@@ -581,7 +598,10 @@ the backend's population to its own.
   abort, and the kill switch stops it as it stops every other. The sync is
   asked once per sign-in from the app's shell and again when the Engagements
   page loads, is throttled per session on the server, adopts at most 25 rows
-  per sync (the rest wait for the next), and is never on a stop's path: a Stop
+  per sync (the rest wait for the next), ends from the record's detail each
+  known row still unfinished here whose record the list shows ended (at most
+  25 a sync, counted as `endedFromRecord`; see the hybrid's precondition 2),
+  and is never on a stop's path: a Stop
   and the kill switch are each answered while a sync is held at the backend's
   list. Nothing is filed into this dashboard's own findings ledger by it.
 - **The Engagements page** (`/engagements`, beside Assurance). Each engagement

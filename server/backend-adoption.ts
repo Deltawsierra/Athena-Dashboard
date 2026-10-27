@@ -29,6 +29,16 @@
  * read: next time, whole. Nothing is filed into this dashboard's own findings
  * ledger: a backend scan's record is the backend's (decision 1).
  *
+ * THE BACKSTOP. A KNOWN row still unfinished here whose record the backend
+ * lists as ended -- completed, stopped or failed -- has the record's detail
+ * read and filed into it through the one path the collect watch files by
+ * (AdoptionDeps.fileRecord), which writes the record's end as the row's status
+ * (STATUS_HERE). Such a row is one whose run this dashboard's engine key could
+ * never read (decision 7: every direct read answers 404, so no read here sees
+ * the end), or whose collect watch ran past its deadline. A row a direct read
+ * already ended keeps the engine's own word. Counted as `endedFromRecord`;
+ * every other field of the outcome keeps its meaning.
+ *
  * IDEMPOTENT. One row per backend scan: the rows are read first, and storage
  * refuses a second row naming a scan (DuplicateBackendScan: a unique index on
  * SQLite), so two dashboards, or two syncs at once, cannot adopt a scan twice.
@@ -59,8 +69,24 @@ export const adoption = { minIntervalMs: 15_000, perSync: 25 };
 /** The record's status words that are a run's end; anything else is read as the engine's live word on the next poll. */
 const FINISHED = new Set(["completed", "stopped", "failed"]);
 
-/** The record's status word as this dashboard's rows spell a run's state. */
-const STATUS_HERE: Record<string, string> = { pending: "running", unknown: "running", completed: "completed", stopped: "aborted", failed: "failed" };
+/**
+ * The record's status word as this dashboard's rows spell a run's state. The
+ * one mapping: an adopted row's status is spelled from it, and so is the end a
+ * record gives a known row (recordEnd: the collect watch, and the sync's
+ * backstop). Never copied.
+ */
+export const STATUS_HERE: Record<string, string> = { pending: "running", unknown: "running", completed: "completed", stopped: "aborted", failed: "failed" };
+
+/**
+ * The end a backend record gives a row here: the record's status word as this
+ * dashboard spells it (STATUS_HERE) and when the record was collected (`now`
+ * when it gave no time this reads). Null while the record is not at an end
+ * (pending, unknown): nothing is derived from it.
+ */
+export function recordEnd(record: { status: string; collectedAt: string | null }, now: Date): { status: string; completedAt: Date } | null {
+  if (!FINISHED.has(record.status)) return null;
+  return { status: STATUS_HERE[record.status], completedAt: dateOf(record.collectedAt) ?? now };
+}
 
 export interface AdoptionDeps {
   storage: IStorage;
@@ -74,8 +100,21 @@ export interface AdoptionDeps {
   hostOf(url: string): string | null;
   /** One direct read of a run by this dashboard's engine key: "read" when it answered, "not_found" for its 404, "unread" for anything else. Never throws. */
   readRun(runId: string): Promise<"read" | "not_found" | "unread">;
+  /** Whether a row's status here is a run's end (server/routes.ts FINISHED_RUN_STATES): such a row's status is never written over by a record. */
+  finishedHere(status: string): boolean;
+  /**
+   * File a finished record into a known row (server/routes.ts fileRecordIntoRow,
+   * the path the collect watch files by): its snapshot, results, coverage and
+   * counts, and -- for a row not at an end here -- the record's end as its
+   * status. The end it wrote; null when it wrote none (the row had ended here
+   * meanwhile, or is gone).
+   */
+  fileRecord(testId: string, record: backendScans.BackendScanRecord): Promise<{ status: string; completedAt: Date } | null>;
   /** The audit log, best-effort: a line that could not be written changes nothing else. */
-  log(entry: { testId: string; details: Record<string, unknown>; userId: string | null; ipAddress: string | null }): Promise<void>;
+  log(entry: {
+    action: "adopted_from_backend_record" | "ended_from_backend_record";
+    testId: string; details: Record<string, unknown>; userId: string | null; ipAddress: string | null;
+  }): Promise<void>;
 }
 
 export interface AdoptedRow {
@@ -103,10 +142,16 @@ export interface AdoptionOutcome {
   unlinked: number;
   /** Candidates left for the next sync (adoption.perSync). */
   remaining: number;
-  /** Finished scans whose detail could not be read now: adopted whole next time. */
+  /** Finished scans whose detail could not be read now: adopted (or, a known row, ended: `endedFromRecord`) whole next time. */
   detailUnread: Array<{ backendScanId: string; reason: string }>;
   /** A row that could not be written stopped the sync here; the rows before it stand. Null when every row was written. */
   writeFailed: string | null;
+  /**
+   * Known rows still unfinished here whose record the backend lists as ended,
+   * that this sync ended from the record's detail (the backstop; see the head
+   * of this file). At most adoption.perSync a sync; the rest next time.
+   */
+  endedFromRecord: number;
 }
 
 function causeOf(cause: unknown): string {
@@ -206,7 +251,7 @@ async function sync(deps: AdoptionDeps, who: { userId: string | null; ipAddress:
   );
   const outcome: AdoptionOutcome = {
     at: now.toISOString(), throttled: false, listed: rows.length, adopted: [], alreadyRecorded: 0, awaitingRun: 0, unlinked: 0,
-    remaining: 0, detailUnread: [], writeFailed: null,
+    remaining: 0, detailUnread: [], writeFailed: null, endedFromRecord: 0,
   };
   const candidates: backendScans.BackendScanRow[] = [];
   for (const row of rows) {
@@ -255,6 +300,7 @@ async function sync(deps: AdoptionDeps, who: { userId: string | null; ipAddress:
     if (client === null) outcome.unlinked += 1;
     outcome.adopted.push({ testId: test.id, backendScanId: row.uuid, engineRunId: row.engineRunId, status: test.status, clientId: test.clientId });
     await deps.log({
+      action: "adopted_from_backend_record",
       testId: test.id,
       details: {
         backendScanId: row.uuid, backendEngagementId: engagementId, engineRunId: row.engineRunId, recordStatus: row.status,
@@ -264,7 +310,63 @@ async function sync(deps: AdoptionDeps, who: { userId: string | null; ipAddress:
       ipAddress: who.ipAddress,
     }).catch(() => undefined);
   }
+  // Nothing more is written to a storage that just refused a row.
+  if (outcome.writeFailed === null) await endKnownRowsFromRecord(deps, who, rows, tests, outcome, now);
   return outcome;
+}
+
+/**
+ * The backstop (see the head of this file): each KNOWN row still unfinished
+ * here whose record the backend's list says ended has the record's detail read
+ * -- the record's bytes, never the list row's word alone -- and filed into it
+ * by deps.fileRecord, which writes the record's end as the row's status. At
+ * most adoption.perSync a sync, the rest next time. A detail that could not be
+ * read is said (`detailUnread`) and left for the next sync; a detail that says
+ * the run is not at an end after all writes nothing; a row that could not be
+ * written stops this here (`writeFailed`).
+ */
+async function endKnownRowsFromRecord(
+  deps: AdoptionDeps, who: { userId: string | null; ipAddress: string | null },
+  rows: backendScans.BackendScanRow[], tests: Test[], outcome: AdoptionOutcome, now: Date,
+): Promise<void> {
+  const byScan = new Map<string, Test>();
+  for (const test of tests) {
+    const id = backendScanIdOf(test.findings);
+    if (id !== null) byScan.set(id, test);
+  }
+  const ending = rows.flatMap((row) => {
+    const test = byScan.get(row.uuid);
+    return test !== undefined && FINISHED.has(row.status) && !deps.finishedHere(test.status) ? [{ row, test }] : [];
+  });
+  for (const { row, test } of ending.slice(0, adoption.perSync)) {
+    let record: backendScans.BackendScanRecord;
+    try {
+      record = await backendScans.readScan(row.uuid);
+    } catch (cause) {
+      outcome.detailUnread.push({ backendScanId: row.uuid, reason: causeOf(cause) });
+      continue;
+    }
+    if (recordEnd(record, now) === null) continue;
+    let ended: { status: string; completedAt: Date } | null;
+    try {
+      ended = await deps.fileRecord(test.id, record);
+    } catch (cause) {
+      outcome.writeFailed = causeOf(cause);
+      return;
+    }
+    if (ended === null) continue;
+    outcome.endedFromRecord += 1;
+    await deps.log({
+      action: "ended_from_backend_record",
+      testId: test.id,
+      details: {
+        backendScanId: row.uuid, backendEngagementId: row.engagement?.id ?? null, engineRunId: row.engineRunId,
+        recordStatus: record.status, status: ended.status, statusBefore: test.status, filedBy: "record_sync",
+      },
+      userId: who.userId,
+      ipAddress: who.ipAddress,
+    }).catch(() => undefined);
+  }
 }
 
 /**
