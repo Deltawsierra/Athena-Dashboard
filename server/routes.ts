@@ -7456,6 +7456,30 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The authority screens (client/src/pages/Authority.tsx): a deployment's approved
+  // workflows -- the tools each approval binds, the contract each was approved
+  // under against the one in force -- and its recorded authority chains, every hop
+  // with its verdict, beside the effects the approvals cover. Reads, as the person,
+  // behind requireAuth like the rest. The backend routes also take a write (a PUT of
+  // the approved set, a POST of chains); neither is relayed: these are GETs only.
+  app.get("/api/assurance/deployments/:uuid/approved-workflows", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.approvedWorkflows(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/deployments/:uuid/authority-chains", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.authorityChains(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change
   // invalidated and must re-run, and everything that stays current and need not
   // be re-run. A read, behind requireAuth like the rest of the assurance reads.
