@@ -309,7 +309,7 @@ export function AuthorityChainsView({ data }: { data: AuthorityChains }) {
 
 export default function AuthorityChainsScreen({ deployment }: { deployment: string }) {
   const source = served(
-    useQuery<AuthorityChains>({ queryKey: [`/api/assurance/deployments/${deployment}/authority-chains`] }),
+    useQuery<AuthorityChains>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/authority-chains`] }),
   );
   if (source.state !== "ready") return <NotInHand source={source} what="the authority chains" />;
   return <AuthorityChainsView data={source.data} />;

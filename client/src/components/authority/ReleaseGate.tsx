@@ -292,7 +292,7 @@ export function ReleaseGateView({ data }: { data: DecisionSupport }) {
 
 export default function ReleaseGateScreen({ deployment }: { deployment: string }) {
   const source = served(
-    useQuery<DecisionSupport>({ queryKey: [`/api/assurance/deployments/${deployment}/decision-support`] }),
+    useQuery<DecisionSupport>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/decision-support`] }),
   );
   if (source.state !== "ready") return <NotInHand source={source} what="the release decision" />;
   return <ReleaseGateView data={source.data} />;

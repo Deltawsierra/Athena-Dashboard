@@ -239,7 +239,7 @@ export function ToolContractsView({
 export default function ToolContractsScreen({ deployment }: { deployment: string }) {
   const assets = served(useQuery<ToolAsset[]>({ queryKey: ["/api/assurance/assets", { deployment }] }));
   const workflows = served(
-    useQuery<ApprovedWorkflows>({ queryKey: [`/api/assurance/deployments/${deployment}/approved-workflows`] }),
+    useQuery<ApprovedWorkflows>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/approved-workflows`] }),
   );
   if (assets.state !== "ready") return <NotInHand source={assets} what="the tool registrations" />;
   return (

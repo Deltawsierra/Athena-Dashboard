@@ -644,6 +644,18 @@ describe("the authority page", () => {
     expect(requested.filter((url) => url.startsWith("/api/assurance/deployments/"))).toEqual([]);
   });
 
+  it("reads nothing for a link whose deployment id would walk the read onto another route", async () => {
+    for (const crafted of ["../../kill-switch", "..", "dep-1/../../users", "dep-1?x=1", "dep-1#x", "%2e%2e%2fusers"]) {
+      const requested = serve({ "/api/assurance/status": STATUS, "/api/assurance/deployments": DEPLOYMENTS });
+      mount(`/authority/release?deployment=${encodeURIComponent(crafted)}`);
+      await waitFor(() => expect(screen.getByTestId("choose-deployment")).toBeTruthy());
+      expect(screen.getByTestId("deployment-id-refused")).toBeTruthy();
+      // Only the status and the list are read: no path built from the link's id.
+      expect(new Set(requested)).toEqual(new Set(["/api/assurance/status", "/api/assurance/deployments"]));
+      cleanup();
+    }
+  });
+
   it("says why it is not reading, and offers the Athena-Backend sign-in, when the person has none", async () => {
     const requested = serve({
       "/api/assurance/status": {

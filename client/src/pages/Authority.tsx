@@ -67,6 +67,14 @@ interface DeploymentRow {
 
 const SIGN_IN_REQUIRED = "backend_sign_in_required";
 
+/**
+ * A deployment id as this page will put it in a read's path: letters, digits,
+ * '-' and '_' only (Athena-Backend's are UUIDs). ?deployment= is whatever the link
+ * says, so anything else -- "..", "/", "?", "#", "%" -- would walk the read off this
+ * deployment's record onto another route; such a link reads nothing.
+ */
+const DEPLOYMENT_ID = /^[0-9A-Za-z][0-9A-Za-z_-]*$/;
+
 function hrefFor(screen: ScreenKey, deployment: string): string {
   return deployment ? `/authority/${screen}?deployment=${encodeURIComponent(deployment)}` : `/authority/${screen}`;
 }
@@ -149,7 +157,8 @@ function ScreenFor({ screen, deployment }: { screen: ScreenKey; deployment: stri
 
 export default function Authority({ params }: { params?: { screen?: string } }) {
   const screen = screenOf(params?.screen);
-  const deployment = new URLSearchParams(useSearch()).get("deployment") ?? "";
+  const asked = new URLSearchParams(useSearch()).get("deployment") ?? "";
+  const deployment = DEPLOYMENT_ID.test(asked) ? asked : "";
   const [, navigate] = useLocation();
 
   const status$ = loaded(useQuery<AssuranceStatus>({ queryKey: ["/api/assurance/status"], refetchInterval: 30_000 }));
@@ -205,6 +214,11 @@ export default function Authority({ params }: { params?: { screen?: string } }) 
               selected={deployment}
               onChoose={(uuid) => navigate(hrefFor(screen, uuid))}
             />
+          )}
+          {asked && !deployment && (
+            <Absent testId="deployment-id-refused">
+              This link does not name a deployment id Athena-Backend issues, so no record is read for it.
+            </Absent>
           )}
           {deployment ? (
             <ScreenFor screen={screen} deployment={deployment} />

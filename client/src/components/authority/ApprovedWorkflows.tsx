@@ -210,7 +210,7 @@ export function ApprovedWorkflowsView({ data }: { data: ApprovedWorkflows }) {
 
 export default function ApprovedWorkflowsScreen({ deployment }: { deployment: string }) {
   const source = served(
-    useQuery<ApprovedWorkflows>({ queryKey: [`/api/assurance/deployments/${deployment}/approved-workflows`] }),
+    useQuery<ApprovedWorkflows>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/approved-workflows`] }),
   );
   if (source.state !== "ready") return <NotInHand source={source} what="the approved workflows" />;
   return <ApprovedWorkflowsView data={source.data} />;
