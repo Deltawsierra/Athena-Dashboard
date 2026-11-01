@@ -4703,10 +4703,35 @@ export interface DecisionSupport {
   // Null when unassessed (never silently read as ready).
   decision: string | null;
   decisionLabel: string | null;
+  /**
+   * The monotonic revision the whole answer was read at (athena-backend
+   * decision_support `revision`); null when the backend served none. The only
+   * history of the decision the backend serves is this number: its transitions
+   * (DecisionTransition) are recorded and not served.
+   */
+  revision: number | null;
   // The finding-based signal before the claim cap; null when paused/unassessed.
   fromFindings: string | null;
   // The cap current claims impose, or null when no claim holds the decision back.
   claimCap: string | null;
+  /**
+   * The cap an incomplete audit imposes (always "audit_incomplete" when set), or
+   * null when none: no critical-path gap, no check a scan fell short of -- or no
+   * declared baseline to measure one against, which is not a judgment that
+   * coverage is complete (athena-backend assurance/coverage.py). Nulled under the
+   * failsafe pause.
+   */
+  coverageCap: string | null;
+  /** The cap the risks a person accepted impose, or null when none does. Nulled under the pause. */
+  acceptedRiskCap: string | null;
+  /** The pinned assurance-policy version the decision is made under; null when not served. */
+  policyVersion: string | null;
+  /**
+   * The approved-workflow chains' composition, as the backend publishes it beside
+   * the decision; null when the answer carried none. Its signal is nulled under
+   * the pause; its census never is.
+   */
+  composition: WorkflowComposition | null;
   paused: boolean;
   claims: {
     hasClaims: boolean;
@@ -4715,6 +4740,14 @@ export interface DecisionSupport {
     stale: ClaimBrief[];
     unknown: ClaimBrief[];
     supporting: ClaimBrief[];
+    /** Approvals and claims bound to a tool contract that has since moved. */
+    supersededToolContracts: SupersededToolContract[];
+    /** Authority chains in force whose hops the record contradicts, and those with a hop nothing proves. */
+    authorityChainsBroken: ChainBrief[];
+    authorityChainsUnproven: ChainBrief[];
+    /** Consequential effects no chain in force names, and approved tools whose effect class is unknown. */
+    authorityChainsMissing: ConsequentialEffect[];
+    effectClassesUnknown: ConsequentialEffect[];
   };
   note: string;
 }
@@ -4736,8 +4769,13 @@ function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
   return {
     decision: strOrNull(raw.decision),
     decisionLabel: strOrNull(raw.decision_label),
+    revision: numOrNull(raw.revision),
     fromFindings: strOrNull(raw.from_findings),
     claimCap: strOrNull(raw.claim_cap),
+    coverageCap: strOrNull(raw.coverage_cap),
+    acceptedRiskCap: strOrNull(raw.accepted_risk_cap),
+    policyVersion: strOrNull(raw.policy_version),
+    composition: workflowComposition(raw.composition),
     paused: bool(raw.paused),
     claims: {
       hasClaims: bool(claims.has_claims),
@@ -4746,6 +4784,11 @@ function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
       stale: claimBriefs(claims.stale),
       unknown: claimBriefs(claims.unknown),
       supporting: claimBriefs(claims.supporting),
+      supersededToolContracts: rowsOf(claims.superseded_tool_contracts).map(supersededToolContract),
+      authorityChainsBroken: rowsOf(claims.authority_chains_broken).map(chainBrief),
+      authorityChainsUnproven: rowsOf(claims.authority_chains_unproven).map(chainBrief),
+      authorityChainsMissing: rowsOf(claims.authority_chains_missing).map(consequentialEffect),
+      effectClassesUnknown: rowsOf(claims.effect_classes_unknown).map(consequentialEffect),
     },
     note: str(raw.note),
   };
@@ -5463,5 +5506,422 @@ export async function pushConnector(
     },
     // The answer the first push with this key got: nothing was filed by this one.
     replayed: key !== undefined && response.headers.get(REPLAYED_HEADER) === "true",
+  };
+}
+
+// ==== Approved workflows, authority chains, tool contracts (the authority screens) ====
+//
+// What the four read-only authority screens show (client/src/pages/Authority.tsx):
+// the deployment's approved workflows and the tools each approval binds, the
+// authority chains recorded behind its effects, and -- beside the assets read and
+// the decision-support read above -- each tool's contract and the release decision.
+// Two backend routes are read here and nowhere else (athena-backend
+// assurance/views.py DeploymentViewSet):
+//
+//   GET /api/assurance/deployments/<uuid>/approved-workflows/   (`approved_workflows`)
+//   GET /api/assurance/deployments/<uuid>/authority-chains/     (`authority_chains`)
+//
+// Both routes also take a write (a PUT that replaces the approved set, a POST that
+// appends chains; admin-only there). This console relays NEITHER: the screens are
+// display, and every request here is a GET, made as the signed-in person
+// (server/person-credential.ts), so the backend's tenant scoping applies. Nothing
+// here is on a stop path.
+//
+// Honest by construction: a count the backend did not serve is null, never 0; a
+// null the backend serves on purpose (`workflows_expected`: nobody recorded the
+// approved set; `current_digest`: the tool is no longer registered; `approved_by`:
+// the approver's account was removed) stays null; a verdict or status outside the
+// vocabulary is carried as served, and the screens read it as none of theirs.
+
+/** Every element of a list that is a plain object, or [] when the value is not a list. */
+function rowsOf(raw: unknown): Record<string, unknown>[] {
+  return Array.isArray(raw)
+    ? raw.filter((one): one is Record<string, unknown> => !!one && typeof one === "object" && !Array.isArray(one))
+    : [];
+}
+
+/** A list of numbers, dropping anything that is not one. */
+function numList(raw: unknown): number[] {
+  return Array.isArray(raw) ? raw.filter((v): v is number => typeof v === "number") : [];
+}
+
+/** A map of name -> string, dropping anything that is not one. */
+function strRecord(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(objOf(raw))) {
+    if (typeof value === "string") out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The approved-workflow chains' composition, as the backend publishes it
+ * (athena-backend assurance/workflow_chains.py `composition_payload`), or null
+ * when the answer carried none.
+ */
+export interface WorkflowComposition {
+  /** What the chains contribute to the decision; null when they contribute nothing (or under the pause). */
+  signal: string | null;
+  /** The rule's own verdict over the outcomes it was handed. */
+  ruleDecision: string | null;
+  /** Standing outcomes per status (held, violated, incomplete, not_demonstrated), every status with its zeros, as served. */
+  census: Record<string, number>;
+  /** The workflows that place the decision where it is. */
+  deciding: string[];
+  workflowsAssessed: number | null;
+  /** null: nobody has recorded the approved set -- never read as a set of zero. */
+  workflowsExpected: number | null;
+  workflowsUnreported: number | null;
+  workflowsUnapproved: number | null;
+  workflowsUnexercised: number | null;
+  unexercised: string[];
+  authorizationChecked: string[];
+  offRoute: string[];
+  explanation: string;
+}
+
+function workflowComposition(raw: unknown): WorkflowComposition | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const c = raw as Record<string, unknown>;
+  return {
+    signal: strOrNull(c.signal),
+    ruleDecision: strOrNull(c.rule_decision),
+    census: numRecord(c.census),
+    deciding: strList(c.deciding),
+    workflowsAssessed: numOrNull(c.workflows_assessed),
+    workflowsExpected: numOrNull(c.workflows_expected),
+    workflowsUnreported: numOrNull(c.workflows_unreported),
+    workflowsUnapproved: numOrNull(c.workflows_unapproved),
+    workflowsUnexercised: numOrNull(c.workflows_unexercised),
+    unexercised: strList(c.unexercised),
+    authorizationChecked: strList(c.authorization_checked),
+    offRoute: strList(c.off_route),
+    explanation: str(c.explanation),
+  };
+}
+
+/** One tool an approval binds (athena-backend assurance/tool_contract.py `approved_tools`). */
+export interface ApprovedTool {
+  kind: string;
+  identifier: string;
+  /** The contract digest the approval was bound under. */
+  approvedDigest: string | null;
+  /** When the approval was bound to that contract. */
+  boundAt: string | null;
+  /** The contract digest in force now; null when the tool is no longer registered. */
+  currentDigest: string | null;
+  /** true: the contract moved since the approval, or the tool left. null: the backend did not say. */
+  superseded: boolean | null;
+}
+
+/** One approved workflow (athena-backend assurance/serializers.py `ApprovedWorkflowSerializer`). */
+export interface ApprovedWorkflow {
+  uuid: string;
+  slug: string;
+  name: string;
+  /**
+   * What the workflow is approved TO DO -- which agent may use which information,
+   * under whose authority, to produce which effects: the approval's own prose. The
+   * backend holds no structured agent or scope field on an approval.
+   */
+  description: string;
+  /** The approver's username; null when the backend names none (the approver's account was removed). */
+  approvedBy: string | null;
+  /** When the approval was last declared: a declaration that keeps a workflow re-stamps it. */
+  approvedAt: string | null;
+  tools: ApprovedTool[];
+}
+
+export interface ApprovedWorkflows {
+  approved: ApprovedWorkflow[];
+  returned: number | null;
+  truncated: boolean | null;
+  pageSize: number | null;
+  /** How many approvals are recorded, whether or not all were returned. */
+  approvedCount: number | null;
+  composition: WorkflowComposition | null;
+}
+
+function approvedTool(raw: Record<string, unknown>): ApprovedTool {
+  return {
+    kind: str(raw.kind),
+    identifier: str(raw.identifier),
+    approvedDigest: strOrNull(raw.contract_digest),
+    boundAt: strOrNull(raw.bound_at),
+    currentDigest: strOrNull(raw.current_digest),
+    superseded: boolOrNull(raw.superseded),
+  };
+}
+
+function approvedWorkflow(raw: Record<string, unknown>): ApprovedWorkflow {
+  return {
+    uuid: str(raw.uuid),
+    slug: str(raw.slug),
+    name: str(raw.name),
+    description: str(raw.description),
+    approvedBy: strOrNull(raw.approved_by),
+    approvedAt: strOrNull(raw.approved_at),
+    tools: rowsOf(raw.tools).map(approvedTool),
+  };
+}
+
+/**
+ * A deployment's approved workflows, each with the tools its approval binds and
+ * the contract each was approved under against the one in force, beside the live
+ * composition. A GET only: the route's PUT (which replaces the set) is never sent.
+ */
+export async function approvedWorkflows(uuid: string): Promise<ApprovedWorkflows> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/approved-workflows/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const raw = await readObject(response);
+  return {
+    approved: rowsOf(raw.approved).map(approvedWorkflow),
+    returned: numOrNull(raw.returned),
+    truncated: boolOrNull(raw.truncated),
+    pageSize: numOrNull(raw.page_size),
+    approvedCount: numOrNull(raw.approved_count),
+    composition: workflowComposition(raw.composition),
+  };
+}
+
+/** A node of a chain: its kind, its reference and, for a policy node, the approval version it names. */
+export interface ChainNode {
+  kind: string;
+  ref: string;
+  version: string | null;
+}
+
+/** One thing a check found about a hop: its verdict, the backend's code, and the sentence naming what it found. */
+export interface ChainReading {
+  verdict: string;
+  code: string;
+  detail: string;
+}
+
+/** One hop of a recorded chain, with its verdict and why (athena-backend authority_chain_records.py `hop_payload`). */
+export interface ChainHop {
+  index: number | null;
+  from: ChainNode;
+  relation: string;
+  to: ChainNode;
+  /** proven | unproven | broken. Anything else is carried as served and read as none of them. */
+  verdict: string;
+  provenBy: ChainReading[];
+  reasons: ChainReading[];
+}
+
+/** One recorded authority chain (athena-backend authority_chain_records.py `chain_payload`). */
+export interface AuthorityChainView {
+  uuid: string;
+  workflow: string;
+  effect: string;
+  digest: string;
+  /** Whether it is the chain in force for its effect; null when not said. */
+  standing: boolean | null;
+  verdict: string;
+  /** How it was recorded: "attested" (typed in) or "demonstrated" (signed by an engine). */
+  basis: string;
+  /** What it rests on NOW: a signature that no longer verifies reads "attested". */
+  basisInForce: string;
+  signed: boolean | null;
+  observerEngine: string | null;
+  outcomeId: string | null;
+  gateOutcomeId: string | null;
+  effectOutcomeId: string | null;
+  /** Whether it was recorded against the route serving now (current / moved / unrecorded). */
+  route: string | null;
+  observedAt: string | null;
+  recordedAt: string | null;
+  recordedBy: string | null;
+  source: string;
+  note: string;
+  unprovenHops: number[];
+  brokenHops: number[];
+  hops: ChainHop[];
+}
+
+/** One effect an approval covers (athena-backend authority_chain_records.py `effect_brief`). */
+export interface ConsequentialEffect {
+  digest: string;
+  /** null for a registered tool no approval binds. */
+  workflow: string | null;
+  toolKind: string;
+  toolIdentifier: string;
+  /** The effect class the tool's contract declares, as written; null when it declares none. */
+  effectClass: string | null;
+  /** consequential | read_only | unknown, as the backend reads it. */
+  effectKind: string;
+  /** covered | missing | unknown | not_required. */
+  status: string;
+  reasons: string[];
+  chains: string[];
+  toDo: string | null;
+}
+
+/** A chain as the decision-support view names it: which one, and the hops that are not proven. */
+export interface ChainBrief {
+  uuid: string;
+  workflow: string;
+  effect: string;
+  digest: string;
+  verdict: string;
+  hops: Array<{ index: number | null; relation: string; from: ChainNode; to: ChainNode; verdict: string; reasons: string[] }>;
+}
+
+/** An approval or claim bound to a tool contract that has since moved (athena-backend tool_contract.py `brief`). */
+export interface SupersededToolContract {
+  subject: string;
+  claimFingerprint: string | null;
+  workflow: string | null;
+  toolKind: string;
+  toolIdentifier: string;
+  boundDigest: string | null;
+  /** null: the tool is no longer registered. */
+  currentDigest: string | null;
+}
+
+export interface AuthorityChains {
+  /** Newest first, a page of them. */
+  chains: AuthorityChainView[];
+  returned: number | null;
+  truncated: boolean | null;
+  pageSize: number | null;
+  recorded: number | null;
+  standing: number | null;
+  superseded: number | null;
+  /** The chains in force by verdict, every verdict with its zeros, as served. */
+  verdictCensus: Record<string, number>;
+  /** Each approved workflow's approval version in force (what a chain's policy node names), by slug. */
+  approvalsInForce: Record<string, string>;
+  effects: ConsequentialEffect[];
+  /** The effects by status, every status with its zeros, as served. */
+  effectCensus: Record<string, number>;
+}
+
+function chainNode(raw: unknown): ChainNode {
+  const n = objOf(raw);
+  return { kind: str(n.kind), ref: str(n.ref), version: strOrNull(n.version) };
+}
+
+function chainReading(raw: Record<string, unknown>): ChainReading {
+  return { verdict: str(raw.verdict), code: str(raw.code), detail: str(raw.detail) };
+}
+
+function chainHop(raw: Record<string, unknown>): ChainHop {
+  return {
+    index: numOrNull(raw.index),
+    from: chainNode(raw.from),
+    relation: str(raw.relation),
+    to: chainNode(raw.to),
+    verdict: str(raw.verdict),
+    provenBy: rowsOf(raw.proven_by).map(chainReading),
+    reasons: rowsOf(raw.reasons).map(chainReading),
+  };
+}
+
+function authorityChain(raw: Record<string, unknown>): AuthorityChainView {
+  return {
+    uuid: str(raw.uuid),
+    workflow: str(raw.workflow),
+    effect: str(raw.effect),
+    digest: str(raw.digest),
+    standing: boolOrNull(raw.standing),
+    verdict: str(raw.verdict),
+    basis: str(raw.basis),
+    basisInForce: str(raw.basis_in_force),
+    signed: boolOrNull(raw.signed),
+    observerEngine: strOrNull(raw.observer_engine),
+    outcomeId: strOrNull(raw.outcome_id),
+    gateOutcomeId: strOrNull(raw.gate_outcome_id),
+    effectOutcomeId: strOrNull(raw.effect_outcome_id),
+    route: strOrNull(raw.route),
+    observedAt: strOrNull(raw.observed_at),
+    recordedAt: strOrNull(raw.recorded_at),
+    recordedBy: strOrNull(raw.recorded_by),
+    source: str(raw.source),
+    note: str(raw.note),
+    unprovenHops: numList(raw.unproven_hops),
+    brokenHops: numList(raw.broken_hops),
+    hops: rowsOf(raw.hops).map(chainHop),
+  };
+}
+
+/** A declared effect class as written: a string as itself, null as null, anything else as its JSON. */
+function declaredValue(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  return typeof raw === "string" ? raw : JSON.stringify(raw);
+}
+
+function consequentialEffect(raw: Record<string, unknown>): ConsequentialEffect {
+  return {
+    digest: str(raw.digest),
+    workflow: strOrNull(raw.workflow),
+    toolKind: str(raw.tool_kind),
+    toolIdentifier: str(raw.tool_identifier),
+    effectClass: declaredValue(raw.effect_class),
+    effectKind: str(raw.class),
+    status: str(raw.status),
+    reasons: strList(raw.reasons),
+    chains: strList(raw.chains),
+    toDo: strOrNull(raw.to_do),
+  };
+}
+
+function chainBrief(raw: Record<string, unknown>): ChainBrief {
+  return {
+    uuid: str(raw.uuid),
+    workflow: str(raw.workflow),
+    effect: str(raw.effect),
+    digest: str(raw.digest),
+    verdict: str(raw.verdict),
+    hops: rowsOf(raw.hops).map((hop) => ({
+      index: numOrNull(hop.index),
+      relation: str(hop.relation),
+      from: chainNode(hop.from),
+      to: chainNode(hop.to),
+      verdict: str(hop.verdict),
+      reasons: strList(hop.reasons),
+    })),
+  };
+}
+
+function supersededToolContract(raw: Record<string, unknown>): SupersededToolContract {
+  return {
+    subject: str(raw.subject),
+    claimFingerprint: strOrNull(raw.claim_fingerprint),
+    workflow: strOrNull(raw.workflow),
+    toolKind: str(raw.tool_kind),
+    toolIdentifier: str(raw.tool_identifier),
+    boundDigest: strOrNull(raw.bound_digest),
+    currentDigest: strOrNull(raw.current_digest),
+  };
+}
+
+/**
+ * A deployment's recorded authority chains -- every hop with its verdict and why,
+ * and which chain is in force for its effect -- with the approval versions in
+ * force and every effect the approvals cover. A GET only: the route's POST (which
+ * appends a chain) is never sent.
+ */
+export async function authorityChains(uuid: string): Promise<AuthorityChains> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/authority-chains/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const raw = await readObject(response);
+  return {
+    chains: rowsOf(raw.chains).map(authorityChain),
+    returned: numOrNull(raw.returned),
+    truncated: boolOrNull(raw.truncated),
+    pageSize: numOrNull(raw.page_size),
+    recorded: numOrNull(raw.recorded),
+    standing: numOrNull(raw.standing),
+    superseded: numOrNull(raw.superseded),
+    verdictCensus: numRecord(raw.verdict_census),
+    approvalsInForce: strRecord(raw.approvals_in_force),
+    effects: rowsOf(raw.effects).map(consequentialEffect),
+    effectCensus: numRecord(raw.effect_census),
   };
 }

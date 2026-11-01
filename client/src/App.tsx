@@ -35,6 +35,7 @@ import DeletionManagement from "@/pages/DeletionManagement";
 import Classifiers from "@/pages/Classifiers";
 import Failsafe from "@/pages/Failsafe";
 import Assurance from "@/pages/Assurance";
+import Authority from "@/pages/Authority";
 import Engagements from "@/pages/Engagements";
 import Economics from "@/pages/Economics";
 import NotFound from "@/pages/not-found";
@@ -66,6 +67,8 @@ function AppRoutes({ admin }: { admin: boolean }) {
       <Route path="/pentest" component={PentestScan} />
       <Route path="/findings" component={Risks} />
       <Route path="/assurance">{() => <Assurance admin={admin} />}</Route>
+      {/* Approved workflows, authority chains, tool contracts, release gate: read-only. */}
+      <Route path="/authority/:screen?" component={Authority} />
       <Route path="/engagements" component={Engagements} />
       <Route path="/economics" component={Economics} />
       <Route path="/compliance" component={Compliance} />

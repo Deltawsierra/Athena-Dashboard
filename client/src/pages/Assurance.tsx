@@ -1551,7 +1551,7 @@ export function asSeverity(s: string): Severity {
  * the backend errored are three different facts, and saying "not answering" for
  * all of them is a lie about a backend that answered.
  */
-function bannerHeadline(status: AssuranceStatus): string {
+export function bannerHeadline(status: AssuranceStatus): string {
   if (!status.configured) return "No control plane is configured.";
   if (status.code === SIGN_IN_REQUIRED) return "You are not signed in to Athena-Backend.";
   if (status.reachable === false) return "The control plane is not answering.";
@@ -1566,7 +1566,7 @@ function bannerHeadline(status: AssuranceStatus): string {
  * sign-in once and keeps only the session it answers with -- never in this page.
  * Stops never need it: the kill switch and every failsafe stop work without it.
  */
-function BackendSignIn() {
+export function BackendSignIn() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const signIn = useMutation({

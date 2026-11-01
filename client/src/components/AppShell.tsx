@@ -22,6 +22,7 @@ import {
   ShieldHalf,
   ShieldAlert,
   ShieldQuestion,
+  Waypoints,
   ClipboardList,
   Landmark,
   ListChecks,
@@ -89,6 +90,7 @@ const PRIMARY: NavItem[] = [
 const TOOLS: NavItem[] = [
   { path: "/assurance", label: "Assurance", icon: ShieldQuestion },
   { path: "/engagements", label: "Engagements", icon: ClipboardList },
+  { path: "/authority", label: "Authority", icon: Waypoints },
   { path: "/economics", label: "Economics", icon: Landmark },
   { path: "/pentest", label: "Pentest", icon: ShieldHalf },
   { path: "/tests", label: "Tests", icon: ListChecks },
