@@ -357,6 +357,11 @@ describe("every page query key is a request its route accepts", () => {
     expect(all).toContain(`/api/scans/${SAMPLE}`);
     expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/cloud-posture`);
     expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/retest-requirements?all=true`);
+    // The authority screens' history pages: a filter and the offset each, as the query string.
+    expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/approval-history?workflow=${SAMPLE}&offset=1`);
+    expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/tool-contracts?kind=${SAMPLE}&identifier=${SAMPLE}&offset=1`);
+    expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/tool-contract-bindings?kind=${SAMPLE}&identifier=${SAMPLE}&offset=1`);
+    expect(all).toContain(`/api/assurance/deployments/${SAMPLE}/decision-history?offset=1`);
   });
 
   it("the server accepts every URL those keys become", async () => {

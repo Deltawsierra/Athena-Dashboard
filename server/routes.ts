@@ -7480,6 +7480,88 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The histories behind those screens (athena-backend assurance/history_reads.py):
+  // every version of each approval, every tool contract recorded and every binding to
+  // one, every accepted change of the decision. Each is one page, newest first, read
+  // as the person, behind requireAuth like the rest; GETs only, as the backend routes
+  // them. `?offset=` is checked here before anything is relayed -- plain digits up to
+  // 2^31 - 1, as the backend takes it, or a 400 here -- and each filter is taken once
+  // (a repeated one is a 400, never read as no filter) and passed on encoded. A filter
+  // the backend refuses is its 400, passed on with its words.
+  const historyQuery = (req: Request, res: Response, filters: ReadonlyArray<"workflow" | "kind" | "identifier">): assurance.HistoryQuery | null => {
+    const query: assurance.HistoryQuery = {};
+    for (const key of filters) {
+      const value = req.query[key];
+      if (badQueryParam(res, value)) return null;
+      if (typeof value === "string") query[key] = value;
+    }
+    const raw = req.query.offset;
+    if (badQueryParam(res, raw)) return null;
+    if (typeof raw === "string") {
+      const offset = assurance.historyOffset(raw);
+      if (offset === null) {
+        res.status(400).json({
+          error: `?offset= must be plain digits, a whole number from 0 to ${assurance.HISTORY_MAX_OFFSET}`,
+          code: "invalid_offset",
+        });
+        return null;
+      }
+      query.offset = offset;
+    }
+    return query;
+  };
+  const historyUnavailable = (res: Response, cause: unknown): boolean => {
+    if (cause instanceof assurance.HistoryQueryRefused) {
+      res.status(400).json({ error: cause.message, code: "backend_refused" });
+      return true;
+    }
+    return assuranceUnavailable(res, cause);
+  };
+
+  app.get("/api/assurance/deployments/:uuid/approval-history", asyncHandler(async (req, res) => {
+    const query = historyQuery(req, res, ["workflow"]);
+    if (query === null) return;
+    try {
+      res.json(await assurance.approvalHistory(req.params.uuid, query));
+    } catch (cause) {
+      if (historyUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/deployments/:uuid/tool-contracts", asyncHandler(async (req, res) => {
+    const query = historyQuery(req, res, ["kind", "identifier"]);
+    if (query === null) return;
+    try {
+      res.json(await assurance.toolContractHistory(req.params.uuid, query));
+    } catch (cause) {
+      if (historyUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/deployments/:uuid/tool-contract-bindings", asyncHandler(async (req, res) => {
+    const query = historyQuery(req, res, ["kind", "identifier"]);
+    if (query === null) return;
+    try {
+      res.json(await assurance.toolContractBindings(req.params.uuid, query));
+    } catch (cause) {
+      if (historyUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/deployments/:uuid/decision-history", asyncHandler(async (req, res) => {
+    const query = historyQuery(req, res, []);
+    if (query === null) return;
+    try {
+      res.json(await assurance.decisionHistory(req.params.uuid, query));
+    } catch (cause) {
+      if (historyUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change
   // invalidated and must re-run, and everything that stays current and need not
   // be re-run. A read, behind requireAuth like the rest of the assurance reads.

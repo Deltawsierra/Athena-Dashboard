@@ -24,12 +24,20 @@ import { makeApp, signIn, signInToBackend } from "./helpers";
  *     relayed: this server serves no such route, and the backend sees none.
  *   - A backend refusal reaches the screen as itself: 404 not_found, 403
  *     backend_refused.
+ *   - The four recorded histories (approval-history, tool-contracts,
+ *     tool-contract-bindings, decision-history; athena-backend
+ *     assurance/history_reads.py) are relayed the same way: GETs as the person,
+ *     every served null kept null, the page's returned / truncated / page size /
+ *     offset and its whole count read as served and null when not, each filter
+ *     passed on encoded, and `?offset=` checked HERE -- plain digits up to
+ *     2^31 - 1 -- before anything is relayed. None of them relays a write.
  */
 
 const A = "a".repeat(64);
 const B = "b".repeat(64);
 const C = "c".repeat(64);
 const D = "d".repeat(64);
+const E = "e".repeat(64);
 
 const APPROVED = {
   approved: [
@@ -139,7 +147,109 @@ const DECISION = {
   note: "Held at 'audit incomplete': 1 critical-path component was never assessed.",
 };
 
-interface Seen { method: string; path: string; authorization: string }
+const HISTORY_UUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
+
+/** athena-backend history_reads.approval_history, as the backend test pins it (one version declared_by, one null, one without the field). */
+const APPROVAL_HISTORY = {
+  deployment: HISTORY_UUID,
+  workflow: null,
+  versions: [
+    {
+      version: "41", workflow: "export", digest: null, withdrawn: true,
+      in_force_from: "2026-10-30T00:00:00Z", in_force_until: null, recorded_at: "2026-10-30T00:00:00Z",
+      tools: [], declared_by: null,
+    },
+    {
+      version: "40", workflow: "refund", digest: B, withdrawn: false,
+      in_force_from: "2026-10-20T00:00:00Z", in_force_until: null, recorded_at: "2026-10-21T00:00:00Z",
+      declared_by: "carol",
+      tools: [{
+        kind: "tool", identifier: "refund@payments", contract_digest: C, bound_at: "2026-10-20T00:00:00Z",
+        bound_by: null, released_at: null, invalidated_at: null, invalidation_reason: null,
+      }],
+    },
+    {
+      version: "39", workflow: "refund", digest: A, withdrawn: false,
+      in_force_from: "2026-10-10T00:00:00Z", in_force_until: "2026-10-20T00:00:00Z", recorded_at: "2026-10-10T00:00:00Z",
+      tools: [{
+        kind: "tool", identifier: "refund@payments", contract_digest: D, bound_at: "2026-10-10T00:00:00Z",
+        bound_by: "binder", released_at: "2026-10-20T00:00:00Z", invalidated_at: "2026-10-15T00:00:00Z",
+        invalidation_reason: "Tool contract changed: refund@payments",
+      }],
+    },
+  ],
+  version_count: 3, returned: 3, truncated: false, page_size: 50, offset: 0,
+};
+
+const CONTRACT_HISTORY = {
+  deployment: HISTORY_UUID, kind: null, identifier: null,
+  contracts: [
+    {
+      kind: "tool", identifier: "refund@payments", digest: B,
+      contract: { contract_version: 1, kind: "tool", identifier: "refund@payments", effect_class: "write", input_schema: null, output_schema: null, annotations: null, permissions: ["payments:refund"], server: null },
+      recorded_at: "2026-10-20T00:00:00Z", superseded_at: null, current_digest: B, in_force: true,
+    },
+    {
+      kind: "tool", identifier: "refund@payments", digest: A,
+      contract: { contract_version: 1, kind: "tool", identifier: "refund@payments", effect_class: "read" },
+      recorded_at: "2026-10-01T00:00:00Z", superseded_at: "2026-10-20T00:00:00Z", current_digest: B, in_force: false,
+    },
+    {
+      kind: "skill", identifier: "retired-skill", digest: C, contract: null,
+      recorded_at: "2026-09-01T00:00:00Z", superseded_at: null, current_digest: null, in_force: false,
+    },
+  ],
+  contract_count: 3, returned: 3, truncated: false, page_size: 100, offset: 0,
+};
+
+const BINDINGS = {
+  deployment: HISTORY_UUID, kind: null, identifier: null,
+  bindings: [
+    {
+      subject: "workflow", workflow: "refund", claim_fingerprint: null, kind: "tool", identifier: "refund@payments",
+      contract_digest: B, current_digest: B, live: true, superseded: false, bound_at: "2026-10-20T00:00:00Z",
+      bound_by: null, released_at: null, invalidated_at: null, invalidation_reason: null,
+    },
+    {
+      subject: "workflow", workflow: "refund", claim_fingerprint: null, kind: "tool", identifier: "refund@payments",
+      contract_digest: A, current_digest: B, live: false, superseded: null, bound_at: "2026-10-01T00:00:00Z",
+      bound_by: "binder", released_at: "2026-10-20T00:00:00Z", invalidated_at: "2026-10-15T00:00:00Z",
+      invalidation_reason: "Tool contract changed: refund@payments",
+    },
+    {
+      subject: "claim", workflow: null, claim_fingerprint: "f".repeat(64), kind: "skill", identifier: "retired-skill",
+      contract_digest: C, current_digest: null, live: true, superseded: true, bound_at: "2026-09-01T00:00:00Z",
+      bound_by: null, released_at: null, invalidated_at: null, invalidation_reason: null,
+    },
+  ],
+  binding_count: 3, returned: 3, truncated: false, page_size: 100, offset: 0,
+};
+
+const DECISIONS = {
+  deployment: HISTORY_UUID,
+  transitions: [
+    { revision: 3, from_decision: "ready", to_decision: "audit_incomplete", basis_digest: null, created_at: "2026-10-22T00:00:00Z", delivered_at: null },
+    { revision: 2, from_decision: "needs_more_evidence", to_decision: "ready", basis_digest: E, created_at: "2026-10-12T00:00:00Z", delivered_at: "2026-10-12T00:01:00Z" },
+    { revision: 1, from_decision: null, to_decision: "needs_more_evidence", basis_digest: null, created_at: "2026-10-01T00:00:00Z", delivered_at: "2026-10-01T00:01:00Z" },
+  ],
+  transition_count: 3, returned: 3, truncated: false, page_size: 100, offset: 0,
+};
+
+const HISTORY_ROUTES = ["approval-history", "tool-contracts", "tool-contract-bindings", "decision-history"] as const;
+
+/** A history page for `offset`, of `total` decision changes, a page of `size`: what the backend's paging answers. */
+function decisionPage(offset: number, total: number, size: number) {
+  const revisions = Array.from({ length: Math.max(0, Math.min(size, total - offset)) }, (_, i) => total - offset - i);
+  return {
+    deployment: "dep-paged",
+    transitions: revisions.map((revision) => ({
+      revision, from_decision: null, to_decision: "ready", basis_digest: null, created_at: "2026-10-01T00:00:00Z", delivered_at: null,
+    })),
+    transition_count: total, returned: revisions.length, truncated: offset + revisions.length < total, page_size: size, offset,
+  };
+}
+
+interface Seen { method: string; path: string; query: string; authorization: string }
 
 describe("the authority screens' reads", () => {
   let app: Express;
@@ -154,7 +264,7 @@ describe("the authority screens' reads", () => {
       req.on("data", (c) => { raw += c; });
       req.on("end", () => {
         const method = req.method ?? "GET";
-        const path = (req.url ?? "").split("?")[0];
+        const [path, query = ""] = (req.url ?? "").split("?");
         const json = (code: number, payload: unknown) => {
           res.writeHead(code, { "Content-Type": "application/json" });
           res.end(JSON.stringify(payload));
@@ -166,7 +276,27 @@ describe("the authority screens' reads", () => {
           return json(200, { access: `access-for-${username}`, refresh: `refresh-for-${username}` });
         }
         if (path === "/api/token/revoke/") return json(200, { revoked: true });
-        seen.push({ method, path, authorization: req.headers.authorization ?? "" });
+        // A read answered 401 is retried once with the person's renewed token: renewed as the same person.
+        if (path === "/api/token/refresh/") return json(200, { access: "access-for-admin", refresh: "refresh-for-admin" });
+        seen.push({ method, path, query, authorization: req.headers.authorization ?? "" });
+        const history = `/api/assurance/deployments/${HISTORY_UUID}/`;
+        if (method === "GET" && path.startsWith(history)) {
+          const route = path.slice(history.length).replace(/\/$/, "");
+          const page = { "approval-history": APPROVAL_HISTORY, "tool-contracts": CONTRACT_HISTORY, "tool-contract-bindings": BINDINGS, "decision-history": DECISIONS }[route];
+          if (page) return json(200, page);
+        }
+        if (method === "GET" && path === "/api/assurance/deployments/dep-paged/decision-history/") {
+          const offset = Number(new URLSearchParams(query).get("offset") ?? "0");
+          return json(200, decisionPage(offset, 250, 100));
+        }
+        // A filter the backend does not take: its 400, in its words.
+        if (method === "GET" && path === "/api/assurance/deployments/dep-1/tool-contracts/" && new URLSearchParams(query).get("kind") === "model") {
+          return json(400, { kind: ["must be one of ['mcp_server', 'skill', 'tool'], not 'model'."] });
+        }
+        if (method === "GET" && /^\/api\/assurance\/deployments\/dep-(?:1|bare|echo%2F1)\/(?:approval-history|tool-contracts|tool-contract-bindings|decision-history)\/$/.test(path)) {
+          // The filters and offset reach `seen` as the backend received them, for the test to read back.
+          return json(200, path.includes("dep-bare") ? {} : { deployment: "dep-1" });
+        }
         const answers: Record<string, [number, unknown]> = {
           "/api/assurance/deployments/dep-1/approved-workflows/": [200, APPROVED],
           "/api/assurance/deployments/dep-empty/approved-workflows/": [200, NOTHING_APPROVED],
@@ -177,6 +307,15 @@ describe("the authority screens' reads", () => {
           "/api/assurance/deployments/dep-forbidden/authority-chains/": [403, { detail: "You do not have permission to perform this action." }],
           "/api/assurance/deployments/dep-1/decision-support/": [200, DECISION],
           "/api/assurance/deployments/dep-bare/decision-support/": [200, {}],
+          "/api/assurance/deployments/dep-hidden/approval-history/": [404, { detail: "No Deployment matches the given query." }],
+          "/api/assurance/deployments/dep-hidden/tool-contracts/": [404, { detail: "No Deployment matches the given query." }],
+          "/api/assurance/deployments/dep-hidden/tool-contract-bindings/": [404, { detail: "No Deployment matches the given query." }],
+          "/api/assurance/deployments/dep-hidden/decision-history/": [404, { detail: "No Deployment matches the given query." }],
+          "/api/assurance/deployments/dep-forbidden/approval-history/": [403, { detail: "You do not have permission to perform this action." }],
+          "/api/assurance/deployments/dep-forbidden/tool-contracts/": [403, { detail: "You do not have permission to perform this action." }],
+          "/api/assurance/deployments/dep-forbidden/tool-contract-bindings/": [403, { detail: "You do not have permission to perform this action." }],
+          "/api/assurance/deployments/dep-forbidden/decision-history/": [403, { detail: "You do not have permission to perform this action." }],
+          "/api/assurance/deployments/dep-signed-out/decision-history/": [401, { detail: "Given token not valid for any token type" }],
         };
         const answer = answers[path];
         if (answer && method === "GET") return json(answer[0], answer[1]);
@@ -315,7 +454,238 @@ describe("the authority screens' reads", () => {
     expect((await request(app).get("/api/assurance/deployments/dep-1/authority-chains")).status).toBe(401);
   });
 
-  it("relays no write of either route: this server serves none, and the backend sees none", async () => {
+  // ---- the recorded histories ----
+
+  it("maps the approval history: every version, its tools and the binding live then, with every null kept null", async () => {
+    const res = await user.get(`/api/assurance/deployments/${HISTORY_UUID}/approval-history`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      deployment: HISTORY_UUID, workflow: null, versionCount: 3, returned: 3, truncated: false, pageSize: 50, offset: 0,
+      versions: [
+        {
+          // Withdrawn: its digest is null, never "" and never the version before it. Declared by null: not recorded.
+          version: "41", workflow: "export", digest: null, withdrawn: true,
+          inForceFrom: "2026-10-30T00:00:00Z", inForceUntil: null, recordedAt: "2026-10-30T00:00:00Z",
+          declaredBy: null, tools: [],
+        },
+        {
+          version: "40", workflow: "refund", digest: B, withdrawn: false,
+          inForceFrom: "2026-10-20T00:00:00Z", inForceUntil: null, recordedAt: "2026-10-21T00:00:00Z",
+          // Served by a backend that records it: carried as served.
+          declaredBy: "carol",
+          tools: [{
+            kind: "tool", identifier: "refund@payments", contractDigest: C, boundAt: "2026-10-20T00:00:00Z",
+            boundBy: null, releasedAt: null, invalidatedAt: null, invalidationReason: null,
+          }],
+        },
+        {
+          version: "39", workflow: "refund", digest: A, withdrawn: false,
+          inForceFrom: "2026-10-10T00:00:00Z", inForceUntil: "2026-10-20T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z",
+          // The field absent (a backend that does not record it): null, as an explicit null is.
+          declaredBy: null,
+          tools: [{
+            kind: "tool", identifier: "refund@payments", contractDigest: D, boundAt: "2026-10-10T00:00:00Z",
+            boundBy: "binder", releasedAt: "2026-10-20T00:00:00Z", invalidatedAt: "2026-10-15T00:00:00Z",
+            invalidationReason: "Tool contract changed: refund@payments",
+          }],
+        },
+      ],
+    });
+  });
+
+  it("maps the tool contract history: the descriptor as recorded, superseded_at, in_force and the digest in force -- null for a tool no longer registered", async () => {
+    const res = await user.get(`/api/assurance/deployments/${HISTORY_UUID}/tool-contracts`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      deployment: HISTORY_UUID, kind: null, identifier: null, contractCount: 3, returned: 3, truncated: false, pageSize: 100, offset: 0,
+    });
+    expect(res.body.contracts).toEqual([
+      {
+        kind: "tool", identifier: "refund@payments", digest: B, contract: CONTRACT_HISTORY.contracts[0].contract,
+        recordedAt: "2026-10-20T00:00:00Z", supersededAt: null, currentDigest: B, inForce: true,
+      },
+      {
+        kind: "tool", identifier: "refund@payments", digest: A, contract: CONTRACT_HISTORY.contracts[1].contract,
+        recordedAt: "2026-10-01T00:00:00Z", supersededAt: "2026-10-20T00:00:00Z", currentDigest: B, inForce: false,
+      },
+      {
+        kind: "skill", identifier: "retired-skill", digest: C, contract: null,
+        recordedAt: "2026-09-01T00:00:00Z", supersededAt: null, currentDigest: null, inForce: false,
+      },
+    ]);
+  });
+
+  it("maps the bindings: live and released, invalidation and release kept, superseded null on a released binding", async () => {
+    const res = await user.get(`/api/assurance/deployments/${HISTORY_UUID}/tool-contract-bindings`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ deployment: HISTORY_UUID, bindingCount: 3, returned: 3, truncated: false, pageSize: 100, offset: 0 });
+    expect(res.body.bindings).toEqual([
+      {
+        subject: "workflow", workflow: "refund", claimFingerprint: null, kind: "tool", identifier: "refund@payments",
+        contractDigest: B, currentDigest: B, live: true, superseded: false, boundAt: "2026-10-20T00:00:00Z",
+        boundBy: null, releasedAt: null, invalidatedAt: null, invalidationReason: null,
+      },
+      {
+        // Released: it holds nothing, so superseded is null -- never false.
+        subject: "workflow", workflow: "refund", claimFingerprint: null, kind: "tool", identifier: "refund@payments",
+        contractDigest: A, currentDigest: B, live: false, superseded: null, boundAt: "2026-10-01T00:00:00Z",
+        boundBy: "binder", releasedAt: "2026-10-20T00:00:00Z", invalidatedAt: "2026-10-15T00:00:00Z",
+        invalidationReason: "Tool contract changed: refund@payments",
+      },
+      {
+        subject: "claim", workflow: null, claimFingerprint: "f".repeat(64), kind: "skill", identifier: "retired-skill",
+        contractDigest: C, currentDigest: null, live: true, superseded: true, boundAt: "2026-09-01T00:00:00Z",
+        boundBy: null, releasedAt: null, invalidatedAt: null, invalidationReason: null,
+      },
+    ]);
+  });
+
+  it("maps the decision history: the first change from none, a basis nobody supplied and a change not yet confirmed all null", async () => {
+    const res = await user.get(`/api/assurance/deployments/${HISTORY_UUID}/decision-history`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      deployment: HISTORY_UUID, transitionCount: 3, returned: 3, truncated: false, pageSize: 100, offset: 0,
+      transitions: [
+        { revision: 3, fromDecision: "ready", toDecision: "audit_incomplete", basisDigest: null, createdAt: "2026-10-22T00:00:00Z", deliveredAt: null },
+        { revision: 2, fromDecision: "needs_more_evidence", toDecision: "ready", basisDigest: E, createdAt: "2026-10-12T00:00:00Z", deliveredAt: "2026-10-12T00:01:00Z" },
+        { revision: 1, fromDecision: null, toDecision: "needs_more_evidence", basisDigest: null, createdAt: "2026-10-01T00:00:00Z", deliveredAt: "2026-10-01T00:01:00Z" },
+      ],
+    });
+  });
+
+  it("reads an answer that serves nothing as nothing: every list empty, every count, flag and offset null -- never 0 or false", async () => {
+    const expected = {
+      "approval-history": { deployment: null, workflow: null, versions: [], versionCount: null, returned: null, truncated: null, pageSize: null, offset: null },
+      "tool-contracts": { deployment: null, kind: null, identifier: null, contracts: [], contractCount: null, returned: null, truncated: null, pageSize: null, offset: null },
+      "tool-contract-bindings": { deployment: null, kind: null, identifier: null, bindings: [], bindingCount: null, returned: null, truncated: null, pageSize: null, offset: null },
+      "decision-history": { deployment: null, transitions: [], transitionCount: null, returned: null, truncated: null, pageSize: null, offset: null },
+    };
+    for (const route of HISTORY_ROUTES) {
+      const res = await user.get(`/api/assurance/deployments/dep-bare/${route}`);
+      expect(res.status, route).toBe(200);
+      expect(res.body, route).toEqual(expected[route]);
+    }
+  });
+
+  it("passes each filter and the offset on, encoded, and encodes the deployment's path segment", async () => {
+    const asked = async (url: string) => {
+      const before = seen.length;
+      const res = await user.get(url);
+      expect(res.status, url).toBe(200);
+      const sent = seen.slice(before);
+      expect(sent.length, url).toBe(1);
+      return sent[0];
+    };
+    const approvals = await asked("/api/assurance/deployments/dep-1/approval-history?workflow=refund&offset=50");
+    expect(approvals.path).toBe("/api/assurance/deployments/dep-1/approval-history/");
+    expect(Object.fromEntries(new URLSearchParams(approvals.query))).toEqual({ workflow: "refund", offset: "50" });
+
+    // A value that would break out of the query is sent as a value: encoded, and read back as itself.
+    const odd = "a b&kind=skill#x?y/z";
+    const contracts = await asked(`/api/assurance/deployments/dep-1/tool-contracts?kind=tool&identifier=${encodeURIComponent(odd)}&offset=0`);
+    expect(contracts.query).not.toContain("#");
+    expect(contracts.query).not.toContain("&kind=skill");
+    expect(Array.from(new URLSearchParams(contracts.query).entries())).toEqual([["kind", "tool"], ["identifier", odd], ["offset", "0"]]);
+
+    const bindings = await asked("/api/assurance/deployments/dep-1/tool-contract-bindings?kind=mcp_server&identifier=files-mcp");
+    expect(Object.fromEntries(new URLSearchParams(bindings.query))).toEqual({ kind: "mcp_server", identifier: "files-mcp" });
+
+    // Nothing asked, nothing sent: no filter and no offset is invented.
+    const decisions = await asked("/api/assurance/deployments/dep-1/decision-history");
+    expect(decisions.query).toBe("");
+
+    // Leading zeros are digits: the backend takes them, and is sent the number.
+    const zeros = await asked("/api/assurance/deployments/dep-1/decision-history?offset=007");
+    expect(zeros.query).toBe("offset=7");
+    // The furthest offset the backend takes is relayed.
+    const furthest = await asked("/api/assurance/deployments/dep-1/decision-history?offset=2147483647");
+    expect(furthest.query).toBe("offset=2147483647");
+
+    // A deployment id carrying a slash is one encoded path segment, never a second one.
+    const slashed = await asked("/api/assurance/deployments/dep-echo%2F1/approval-history");
+    expect(slashed.path).toBe("/api/assurance/deployments/dep-echo%2F1/approval-history/");
+  });
+
+  it("refuses an offset that is not plain digits up to 2^31 - 1 with a 400 here, and relays nothing for it", async () => {
+    const malformed = ["-1", "+1", " 1", "1 ", "1.0", "1e3", "0x10", "\uFF11", "", "1_000", "1,000", "2147483648", "9999999999999", "abc"];
+    for (const route of HISTORY_ROUTES) {
+      for (const offset of malformed) {
+        const before = seen.length;
+        const res = await user.get(`/api/assurance/deployments/dep-1/${route}?offset=${encodeURIComponent(offset)}`);
+        expect(res.status, `${route} ${JSON.stringify(offset)}`).toBe(400);
+        expect(res.body.code, `${route} ${JSON.stringify(offset)}`).toBe("invalid_offset");
+        expect(seen.slice(before), `${route} ${JSON.stringify(offset)} reached the backend`).toEqual([]);
+      }
+      // Given twice, it is neither: refused, never read as no offset.
+      const before = seen.length;
+      const twice = await user.get(`/api/assurance/deployments/dep-1/${route}?offset=1&offset=2`);
+      expect(twice.status, route).toBe(400);
+      expect(seen.slice(before)).toEqual([]);
+    }
+  });
+
+  it("refuses a filter given twice, rather than reading it as no filter, and relays nothing for it", async () => {
+    for (const url of [
+      "/api/assurance/deployments/dep-1/approval-history?workflow=refund&workflow=export",
+      "/api/assurance/deployments/dep-1/tool-contracts?kind=tool&kind=skill",
+      "/api/assurance/deployments/dep-1/tool-contract-bindings?identifier=a&identifier=b",
+    ]) {
+      const before = seen.length;
+      const res = await user.get(url);
+      expect(res.status, url).toBe(400);
+      expect(seen.slice(before), url).toEqual([]);
+    }
+  });
+
+  it("passes on a filter the backend refuses as its 400, in its words -- never as an outage", async () => {
+    const res = await user.get("/api/assurance/deployments/dep-1/tool-contracts?kind=model");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("backend_refused");
+    expect(res.body.error).toContain("must be one of");
+  });
+
+  it("reads on from offset + returned while the backend says there is more, every row once", async () => {
+    const revisions: number[] = [];
+    let offset = 0;
+    for (let page = 0; page < 5; page += 1) {
+      const res = await user.get(`/api/assurance/deployments/dep-paged/decision-history?offset=${offset}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ transitionCount: 250, pageSize: 100, offset });
+      revisions.push(...res.body.transitions.map((t: { revision: number }) => t.revision));
+      if (res.body.truncated !== true) break;
+      offset += res.body.returned;
+    }
+    expect(revisions).toEqual(Array.from({ length: 250 }, (_, i) => 250 - i));
+    const asked = seen.filter((one) => one.path === "/api/assurance/deployments/dep-paged/decision-history/").map((one) => one.query);
+    expect(asked).toEqual(["offset=0", "offset=100", "offset=200"]);
+  });
+
+  it("passes a history refusal on as itself: 404 not_found, 403 backend_refused, a person's ended sign-in as 503 backend_sign_in_required", async () => {
+    for (const route of HISTORY_ROUTES) {
+      const hidden = await user.get(`/api/assurance/deployments/dep-hidden/${route}`);
+      expect(hidden.status, route).toBe(404);
+      expect(hidden.body.code, route).toBe("not_found");
+      const forbidden = await user.get(`/api/assurance/deployments/dep-forbidden/${route}?offset=0`);
+      expect(forbidden.status, route).toBe(403);
+      expect(forbidden.body.code, route).toBe("backend_refused");
+    }
+    // The backend refuses the person's token, renewed and all: their sign-in to it ended. Never 401
+    // here, which would send the browser to this console's sign-in, away from the kill switch.
+    const signedOut = await user.get("/api/assurance/deployments/dep-signed-out/decision-history");
+    expect(signedOut.status).toBe(503);
+    expect(signedOut.body.code).toBe("backend_sign_in_required");
+  });
+
+  it("refuses the history reads to anyone not signed in to this console, and relays nothing for them", async () => {
+    const before = seen.length;
+    for (const route of HISTORY_ROUTES) {
+      expect((await request(app).get(`/api/assurance/deployments/${HISTORY_UUID}/${route}`)).status, route).toBe(401);
+      expect((await request(app).get(`/api/assurance/deployments/${HISTORY_UUID}/${route}?offset=x`)).status, route).toBe(401);
+    }
+    expect(seen.slice(before)).toEqual([]);
+  });
+
+  it("relays no write of any route: this server serves none, and the backend sees none", async () => {
     const before = seen.length;
     for (const send of [
       () => user.put("/api/assurance/deployments/dep-1/approved-workflows").send({ workflows: [] }),
@@ -323,6 +693,12 @@ describe("the authority screens' reads", () => {
       () => user.post("/api/assurance/deployments/dep-1/authority-chains").send({ workflow: "refunds", hops: [] }),
       () => user.patch("/api/assurance/deployments/dep-1/authority-chains").send({}),
       () => user.delete("/api/assurance/deployments/dep-1/approved-workflows"),
+      ...HISTORY_ROUTES.flatMap((route) => [
+        () => user.post(`/api/assurance/deployments/${HISTORY_UUID}/${route}`).send({ versions: [], transitions: [] }),
+        () => user.put(`/api/assurance/deployments/${HISTORY_UUID}/${route}`).send({}),
+        () => user.patch(`/api/assurance/deployments/${HISTORY_UUID}/${route}`).send({}),
+        () => user.delete(`/api/assurance/deployments/${HISTORY_UUID}/${route}`),
+      ]),
     ]) {
       const res = await send();
       expect(res.status).toBe(404);
@@ -332,8 +708,12 @@ describe("the authority screens' reads", () => {
   });
 
   it("went to the backend as the signed-in person every time, never as the service account", async () => {
-    const reads = seen.filter((one) => /\/(approved-workflows|authority-chains|decision-support)\/$/.test(one.path));
+    const reads = seen.filter((one) =>
+      /\/(approved-workflows|authority-chains|decision-support|approval-history|tool-contracts|tool-contract-bindings|decision-history)\/$/.test(one.path),
+    );
     expect(reads.length).toBeGreaterThan(5);
+    // Each history route among them, so none is left out of the check.
+    for (const route of HISTORY_ROUTES) expect(reads.some((one) => one.path.endsWith(`/${route}/`)), route).toBe(true);
     expect(reads.filter((one) => one.authorization !== "Bearer access-for-admin").map((one) => `${one.path} ${one.authorization}`)).toEqual([]);
   });
 });

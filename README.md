@@ -840,15 +840,25 @@ deployments it lists for you (`?deployment=<uuid>`):
 
 | Screen | Route here | Read from Athena-Backend (as you) |
 |---|---|---|
-| Approved workflows: what is approved, the tools each approval binds, the contract each was approved under against the one in force, and the chains reported against the set | `/authority/workflows` | `GET /api/assurance/deployments/<uuid>/approved-workflows/` |
+| Approved workflows: what is approved, the tools each approval binds, the contract each was approved under against the one in force, and the chains reported against the set; each approval's version history, and every version together | `/authority/workflows` | `GET /api/assurance/deployments/<uuid>/approved-workflows/`, and `approval-history/` (`?workflow=`) |
 | Authority chains: each recorded chain, every hop with its verdict and why, unproven and broken hops named, the effects the approvals cover, the approval versions in force | `/authority/chains` | `GET /api/assurance/deployments/<uuid>/authority-chains/` |
-| Tool contracts: each tool's contract as its registration declares it (schemas, declared effect class, annotations, permissions, server) and each approval's binding to it | `/authority/contracts` | `GET /api/assurance/assets/?deployment=<uuid>`, and the approved-workflows read |
-| Release gate: the deployment's decision, its revision and policy, and every input the backend combines into it (findings, claims, coverage, accepted risk, workflow chains) with what holds it | `/authority/release` | `GET /api/assurance/deployments/<uuid>/decision-support/` |
+| Tool contracts: each tool's contract as its registration declares it (schemas, declared effect class, annotations, permissions, server) and each approval's binding to it; each registration's contract history and every binding to it, live or released | `/authority/contracts` | `GET /api/assurance/assets/?deployment=<uuid>`, the approved-workflows read, and `tool-contracts/` and `tool-contract-bindings/` (`?kind=&identifier=`) |
+| Release gate: the deployment's decision, its revision and policy, and every input the backend combines into it (findings, claims, coverage, accepted risk, workflow chains) with what holds it; how the decision changed, revision by revision | `/authority/release` | `GET /api/assurance/deployments/<uuid>/decision-support/`, and `decision-history/` |
 
 Every read goes through this server as the signed-in person, like the Assurance
 page's. The backend's approved-workflows and authority-chains routes also take a
 write (a PUT of the approved set, a POST of chains); neither is relayed. Nothing on
 these screens is on a stop path.
+
+The histories (`approval-history/`, `tool-contracts/`, `tool-contract-bindings/`,
+`decision-history/`, under `/api/assurance/deployments/<uuid>/`) are GETs only, here
+and there. Each answers one page, newest first, with the whole count beside it; a
+screen reads the first page and "Load more" reads the next from `offset + returned`
+while the backend says there is more. This server checks `?offset=` before relaying
+it (plain digits up to 2^31 - 1, or a 400 here), takes each filter once, and passes
+them on encoded. An approval's or a tool's history is read only when it is opened;
+the decision's is read with the release gate. Nothing read for one deployment is
+drawn under another, the pages read included.
 
 What is absent is said, never filled in. An approved set nobody recorded reads as
 not recorded, not as zero. A field a tool's registration does not declare reads
@@ -858,14 +868,14 @@ coverage cap of none can mean no declared architecture to measure a gap against.
 positive result, and no input to the decision is. A verdict or state this console
 does not know is shown as served and read as none of its own.
 
-Not shown, because Athena-Backend records it and serves no route for it here: an
-approval's earlier versions, a tool contract's change history, and the decision's
-earlier revisions (only the one in force, with its revision number). A per-build
-release decision with a result for each gate is Minotaur-Backend's, which this
-console does not read. Each screen says so where the record would be.
+Who declared each approval version is shown where Athena-Backend serves it
+(`declared_by`) and reads "not recorded" where it does not. A per-build release
+decision with a result for each gate is Minotaur-Backend's, which this console does
+not read; the screen says so where it would be.
 
-Tests: `tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts`
-and `tests/the-authority-screens-show-what-the-backend-serves.test.tsx`.
+Tests: `tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts`,
+`tests/the-authority-screens-show-what-the-backend-serves.test.tsx` and
+`tests/the-authority-histories-show-what-the-backend-recorded.test.tsx`.
 
 ## Retries and duplicates
 

@@ -35,9 +35,10 @@ import { getQueryFn, queryClient as appQueryClient } from "@/lib/queryClient";
  *     drawn as positive, no input to the decision is ever drawn positive, an input
  *     that places no cap says only that, and under the failsafe pause the inputs
  *     the backend does not read say so;
- *   - what the backend records and does not serve (approval history, contract
- *     history, the decision's earlier revisions, a per-build release decision) is
- *     named on the screen that would show it.
+ *   - what the backend does not serve (a per-build release decision) is named on
+ *     the screen that would show it; the histories it now serves (approval,
+ *     contract and decision history) are read, and are no longer named as not
+ *     served (tests/the-authority-histories-show-what-the-backend-recorded.test.tsx).
  */
 
 beforeAll(() => {
@@ -153,11 +154,14 @@ describe("approved workflows", () => {
     expect(screen.getByTestId("composition-census").textContent).toBe("no status census was served");
   });
 
-  it("names the approval history the backend records and does not serve", () => {
+  it("says where the approval history is read, and no longer names it as not served", () => {
     render(<ApprovedWorkflowsView data={APPROVED} />);
-    expect(screen.getByTestId("approval-history-not-served").textContent).toMatch(
-      /^Approval history: Athena-Backend records each earlier version of an approval and does not serve it to this console\./,
-    );
+    const note = screen.getByTestId("approval-history-note").textContent ?? "";
+    expect(note).toMatch(/^Approval history: each approval's earlier versions are read from Athena-Backend's record/);
+    expect(note).toContain("approvals since withdrawn included");
+    expect(note).toContain("reads not recorded where it does not");
+    expect(note).not.toMatch(/does not serve/);
+    expect(screen.queryByTestId("approval-history-not-served")).toBeNull();
   });
 
   it("says when the backend returned only a page of the approvals", () => {
@@ -373,21 +377,28 @@ describe("tool contracts", () => {
     const binding = refund.querySelector('[data-binding="refunds"]') as HTMLElement;
     expect(within(binding).getByTestId("contract-standing").textContent).toBe("Contract changed since approval");
     expect(within(binding).getByTestId("binding-bound-at").textContent).toBe("2026-10-20T09:00:00Z");
-    // No approval binds it: the digest in force is not served for it, and that is said.
+    // No approval binds it: its digest in force is served with its contract history, read when opened.
     const summarise = within(tool(container, "skill:summarise"));
     expect(summarise.getByTestId("no-bindings").textContent).toBe("No approval binds this tool.");
-    expect(summarise.getByTestId("digest-in-force").textContent).toBe("not served for a tool no approval binds");
+    expect(summarise.getByTestId("digest-in-force").textContent).toBe("not read: no approval binds this tool");
+    cleanup();
+    const withDeployment = render(<ToolContractsView assets={ASSETS} workflows={APPROVED} deployment="dep-1" />).container;
+    expect(within(tool(withDeployment, "skill:summarise")).getByTestId("digest-in-force").textContent).toBe(
+      "no approval binds this tool: read with its contract history",
+    );
     // A retired registration carries no contract in force.
-    expect(within(tool(container, "mcp_server:ledger")).getByTestId("tool-retired").textContent).toMatch(/no contract in force/);
+    expect(within(tool(withDeployment, "mcp_server:ledger")).getByTestId("tool-retired").textContent).toMatch(/no contract in force/);
     // An approved tool no registration answers to now is listed apart, not dropped.
-    expect(container.querySelector('[data-unregistered-tool="skill:gone-skill"]')).not.toBeNull();
+    expect(withDeployment.querySelector('[data-unregistered-tool="skill:gone-skill"]')).not.toBeNull();
   });
 
-  it("names the contract history the backend records and does not serve", () => {
-    render(<ToolContractsView assets={ASSETS} workflows={APPROVED} />);
-    expect(screen.getByTestId("contract-history-not-served").textContent).toMatch(
-      /^When a contract changed: Athena-Backend records each new contract of a registration, and when it was recorded, and does not serve that history to this console\./,
-    );
+  it("no longer names the contract history as not served, and offers each registration's history", () => {
+    const { container } = render(<ToolContractsView assets={ASSETS} workflows={APPROVED} deployment="dep-1" />);
+    expect(screen.queryByTestId("contract-history-not-served")).toBeNull();
+    expect(container.textContent).not.toMatch(/does not serve that history/);
+    for (const key of ["tool:refund@payments", "skill:summarise", "mcp_server:ledger"]) {
+      expect(within(tool(container, key)).getByTestId("tool-contract-history-toggle").textContent, key).toBe("Show contract history");
+    }
   });
 
   it("says the approvals could not be read, rather than that none binds a tool", () => {
@@ -534,11 +545,14 @@ describe("release gate", () => {
     expect(screen.getByTestId("nothing-named").textContent).toBe("The backend names no claim, chain, effect or contract here.");
   });
 
-  it("names the release history and the per-build release decision it cannot show", () => {
-    render(<ReleaseGateView data={decision()} />);
-    const notice = screen.getByTestId("release-history-not-served").textContent ?? "";
-    expect(notice).toMatch(/^Release decisions over time: Athena-Backend records each change of this decision and serves only the one in force/);
-    expect(notice).toContain("Minotaur-Backend, which this console does not read, so none is shown");
+  it("names the per-build release decision it cannot show, and no longer names the decision's history as not served", () => {
+    const { container } = render(<ReleaseGateView data={decision()} />);
+    const notice = screen.getByTestId("release-per-build-not-served").textContent ?? "";
+    expect(notice).toBe(
+      "A per-build release decision with a result for each of its gates is kept by Minotaur-Backend, which this console does not read, so none is shown.",
+    );
+    expect(screen.queryByTestId("release-history-not-served")).toBeNull();
+    expect(container.textContent).not.toMatch(/serves only the one in force/);
   });
 });
 
@@ -617,9 +631,11 @@ describe("the authority page", () => {
       expect(tab.getAttribute("href")).toBe(`/authority/${key}?deployment=dep-1`);
     }
     expect(screen.getByTestId("authority-tab-release").getAttribute("aria-current")).toBe("page");
-    // Reads only: nothing but GETs of the status, the list and the chosen deployment's decision.
+    // Reads only: nothing but GETs of the status, the list, the chosen deployment's decision and its history's first page.
+    await waitFor(() => expect(requested).toContain("/api/assurance/deployments/dep-1/decision-history?offset=0"));
     expect(new Set(requested)).toEqual(new Set([
       "/api/assurance/status", "/api/assurance/deployments", "/api/assurance/deployments/dep-1/decision-support",
+      "/api/assurance/deployments/dep-1/decision-history?offset=0",
     ]));
   });
 
