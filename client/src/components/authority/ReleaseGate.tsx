@@ -16,16 +16,24 @@
  * undecided deployment, are never drawn as a positive result: only a READY
  * decision is.
  *
- * What is not here because the backend does not serve it: the decision's earlier
- * revisions (recorded, not served), the cap a scan that stopped short imposes
- * (folded into the decision and named in its note, not served on its own), and a
- * per-build release decision with per-gate results, which Minotaur-Backend keeps
- * and this console does not read.
+ * How it changed: every accepted change of the decision, newest first by revision,
+ * from GET /api/assurance/deployments/<uuid>/decision-history/ (through
+ * /api/assurance/deployments/:uuid/decision-history on this server), a page at a
+ * time (components/authority/history.tsx): from what, to what, on what basis, when,
+ * and whether a downstream consumer confirmed it. Drawn in neutral tones, every
+ * decision named in words: a past READY is a fact about the record, not a result
+ * drawn on this screen.
+ *
+ * What is not here because the backend does not serve it: the cap a scan that
+ * stopped short imposes (folded into the decision and named in its note, not served
+ * on its own), and a per-build release decision with per-gate results, which
+ * Minotaur-Backend keeps and this console does not read.
  */
 import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Scale } from "lucide-react";
+import { History, Scale } from "lucide-react";
 import { VerdictChip } from "./AuthorityChains";
+import { HistoryPageFrame, HistoryPages, type PageSlot } from "./history";
 import {
   Absent,
   Chip,
@@ -35,11 +43,12 @@ import {
   NotServed,
   Section,
   ToolName,
+  When,
   decisionLabel,
   decisionTone,
   served,
 } from "./parts";
-import type { DecisionSupport } from "./types";
+import type { DecisionHistory, DecisionSupport, DecisionTransitionRecord } from "./types";
 
 /** The decision itself. Only READY reads positive; an undecided deployment reads "Not assessed". */
 export function ReleaseDecisionChip({ decision, label }: { decision: string | null; label?: string | null }) {
@@ -153,7 +162,99 @@ function Named({ title, count, children, testId }: { title: string; count: numbe
   );
 }
 
-export function ReleaseGateView({ data }: { data: DecisionSupport }) {
+/** A decision a transition names, in words and a neutral tone: the history is a record, never a result drawn here. */
+function PastDecision({ state, none, testId }: { state: string | null; none: string; testId: string }) {
+  if (state === null) return <Absent testId={testId}>{none}</Absent>;
+  return (
+    <Chip tone="neutral" testId={testId}>
+      {decisionLabel(state)}
+    </Chip>
+  );
+}
+
+/** One accepted change of the decision. */
+export function DecisionTransitionRow({ transition }: { transition: DecisionTransitionRecord }) {
+  return (
+    <li
+      className="space-y-1 rounded-md border border-border/50 bg-surface-1/40 p-2"
+      data-transition={transition.revision === null ? "" : String(transition.revision)}
+    >
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        {transition.revision === null ? (
+          <Absent testId="transition-revision">revision not served</Absent>
+        ) : (
+          <span className="font-mono text-foreground" data-testid="transition-revision">r{transition.revision}</span>
+        )}
+        <PastDecision state={transition.fromDecision} none="none before" testId="transition-from" />
+        <span className="text-muted-foreground" aria-label="to">→</span>
+        <PastDecision state={transition.toDecision} none="none after" testId="transition-to" />
+      </div>
+      <Fact label="Computed from">
+        <Digest value={transition.basisDigest} absent="no basis digest supplied" testId="transition-basis" />
+      </Fact>
+      <Fact label="Accepted at">
+        <When iso={transition.createdAt} testId="transition-created-at" />
+      </Fact>
+      <Fact label="Confirmed downstream at">
+        <When iso={transition.deliveredAt} absent="not yet confirmed" testId="transition-delivered-at" />
+      </Fact>
+    </li>
+  );
+}
+
+/** A page of decision changes, newest first; an empty first page says none is recorded. */
+export function DecisionTransitionList({ transitions, first }: { transitions: DecisionTransitionRecord[]; first: boolean }) {
+  if (transitions.length === 0) {
+    return first ? (
+      <p className="text-[12px]" data-testid="no-transitions">
+        <Absent>No change of this deployment&apos;s decision is recorded.</Absent>
+      </p>
+    ) : null;
+  }
+  return (
+    <ul className="space-y-1.5">
+      {transitions.map((transition, index) => (
+        <DecisionTransitionRow key={transition.revision ?? `at-${index}`} transition={transition} />
+      ))}
+    </ul>
+  );
+}
+
+function DecisionHistoryPage({ deployment, slot }: { deployment: string; slot: PageSlot }) {
+  const offset = slot.offset;
+  const source = served(
+    useQuery<DecisionHistory>({
+      queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/decision-history`, { offset }],
+    }),
+  );
+  return (
+    <HistoryPageFrame
+      source={source}
+      deployment={deployment}
+      slot={slot}
+      what="the decision history"
+      count={(page) => page.transitionCount}
+      rows={(page) => page.transitions.length}
+    >
+      {(page) => <DecisionTransitionList transitions={page.transitions} first={offset === 0} />}
+    </HistoryPageFrame>
+  );
+}
+
+/** How the decision changed, revision by revision, read for one deployment. */
+export function DecisionHistorySection({ deployment }: { deployment: string }) {
+  return (
+    <Section title="How the decision changed" icon={<History className="h-4 w-4 text-muted-foreground" />} testId="decision-history-section">
+      <p className="text-[12px] text-muted-foreground">
+        Every accepted change of this deployment&apos;s decision, newest first by revision, as Athena-Backend records
+        it. A record of the past, read as it stands: the decision in force is the one above.
+      </p>
+      <HistoryPages key={deployment} page={(slot) => <DecisionHistoryPage deployment={deployment} slot={slot} />} />
+    </Section>
+  );
+}
+
+export function ReleaseGateView({ data, history }: { data: DecisionSupport; history?: ReactNode }) {
   const claims = data.claims;
   const named =
     claims.contradicted.length + claims.stale.length + claims.unknown.length +
@@ -281,10 +382,11 @@ export function ReleaseGateView({ data }: { data: DecisionSupport }) {
         )}
       </Section>
 
-      <NotServed testId="release-history-not-served">
-        Release decisions over time: Athena-Backend records each change of this decision and serves only the one in
-        force, with its revision. A per-build release decision with a result for each of its gates is kept by
-        Minotaur-Backend, which this console does not read, so none is shown.
+      {history}
+
+      <NotServed testId="release-per-build-not-served">
+        A per-build release decision with a result for each of its gates is kept by Minotaur-Backend, which this
+        console does not read, so none is shown.
       </NotServed>
     </div>
   );
@@ -295,5 +397,5 @@ export default function ReleaseGateScreen({ deployment }: { deployment: string }
     useQuery<DecisionSupport>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/decision-support`] }),
   );
   if (source.state !== "ready") return <NotInHand source={source} what="the release decision" />;
-  return <ReleaseGateView data={source.data} />;
+  return <ReleaseGateView data={source.data} history={<DecisionHistorySection deployment={deployment} />} />;
 }

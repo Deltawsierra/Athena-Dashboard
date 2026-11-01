@@ -4705,9 +4705,8 @@ export interface DecisionSupport {
   decisionLabel: string | null;
   /**
    * The monotonic revision the whole answer was read at (athena-backend
-   * decision_support `revision`); null when the backend served none. The only
-   * history of the decision the backend serves is this number: its transitions
-   * (DecisionTransition) are recorded and not served.
+   * decision_support `revision`); null when the backend served none. The
+   * transitions that led to it are the decision-history read's (decisionHistory).
    */
   revision: number | null;
   // The finding-based signal before the claim cap; null when paused/unassessed.
@@ -5923,5 +5922,375 @@ export async function authorityChains(uuid: string): Promise<AuthorityChains> {
     approvalsInForce: strRecord(raw.approvals_in_force),
     effects: rowsOf(raw.effects).map(consequentialEffect),
     effectCensus: numRecord(raw.effect_census),
+  };
+}
+
+// ==== The recorded histories behind the authority screens ====
+//
+// Four reads Athena-Backend serves beside the current-state reads above (athena-backend
+// assurance/history_reads.py, as actions of DeploymentViewSet), read here and nowhere else:
+//
+//   GET /api/assurance/deployments/<uuid>/approval-history/        ?workflow= ?offset=   (a page of 50)
+//   GET /api/assurance/deployments/<uuid>/tool-contracts/          ?kind= ?identifier= ?offset=   (100)
+//   GET /api/assurance/deployments/<uuid>/tool-contract-bindings/  ?kind= ?identifier= ?offset=   (100)
+//   GET /api/assurance/deployments/<uuid>/decision-history/        ?offset=   (100)
+//
+// GET only, there and here: the backend answers any other method 405, and this server
+// routes none. Each is read as the signed-in person, like every read above, so the
+// backend's per-user access applies and a deployment the person cannot read is its 404.
+// Each answers one bounded page, newest first, and `?offset=` pages the rest; the offset
+// is checked here (historyOffset) before anything is relayed, and every query value is
+// encoded.
+//
+// Honest by construction: every null the backend serves stays null -- a withdrawn
+// version's digest, the decision before a deployment's first, a basis digest nobody
+// supplied, an invalidation that never happened, a binder whose account is gone, a tool
+// no longer registered -- and a count, flag or offset it did not serve is null, never 0
+// or false.
+
+/** The largest `?offset=` the history reads take (athena-backend HISTORY_MAX_OFFSET, 2^31 - 1). */
+export const HISTORY_MAX_OFFSET = 2 ** 31 - 1;
+
+/**
+ * `?offset=` as the history reads take it -- plain ASCII digits, no sign, space,
+ * separator, decimal point, exponent or full-width digit, at most HISTORY_MAX_OFFSET
+ * (athena-backend DeploymentViewSet._history_offset) -- or null when `raw` is not one.
+ */
+export function historyOffset(raw: string): number | null {
+  if (!/^[0-9]{1,12}$/.test(raw)) return null;
+  const value = Number(raw);
+  return value <= HISTORY_MAX_OFFSET ? value : null;
+}
+
+/**
+ * A history read Athena-Backend refused as asked: a 400, for a filter it does not take
+ * (a `?workflow=` that is not a slug, a `?kind=` that carries no contract). Passed on
+ * as the 400 it is, with the backend's words, rather than read as an outage.
+ */
+export class HistoryQueryRefused extends ControlPlaneUnavailable {
+  readonly status = 400;
+}
+
+async function refusedHistoryRead(response: Response): Promise<ControlPlaneUnavailable> {
+  if (response.status === 400) {
+    return new HistoryQueryRefused(`the Athena control plane answered 400: ${await body(response)}`);
+  }
+  return refusedRead(response);
+}
+
+/** The filters a history read can be asked with. Each is sent only when given, encoded. */
+export interface HistoryQuery {
+  offset?: number;
+  workflow?: string;
+  kind?: string;
+  identifier?: string;
+}
+
+/**
+ * The query string of a history read: each filter given, and the offset, encoded;
+ * "" when none is. An offset that is not a whole number the backend takes is never
+ * sent (the routes check it first; this is the last word).
+ */
+function historySearch(query: HistoryQuery): string {
+  if (query.offset !== undefined && !(Number.isInteger(query.offset) && query.offset >= 0 && query.offset <= HISTORY_MAX_OFFSET)) {
+    throw new RangeError(`a history read's offset must be a whole number from 0 to ${HISTORY_MAX_OFFSET}`);
+  }
+  const q = new URLSearchParams();
+  for (const key of ["workflow", "kind", "identifier", "offset"] as const) {
+    const value = query[key];
+    if (value !== undefined) q.set(key, String(value));
+  }
+  const search = q.toString();
+  return search ? `?${search}` : "";
+}
+
+/** GET one page of a history route, as the signed-in person, as the JSON object it answers. */
+async function readHistory(path: string): Promise<Record<string, unknown>> {
+  const response = await call(path);
+  if (!response.ok) {
+    throw await refusedHistoryRead(response);
+  }
+  return readObject(response);
+}
+
+/** The page every history read answers with: what it was read for, and how much of it this is. */
+export interface HistoryPage {
+  /** The deployment the backend answered for, as it names it; null when it named none. */
+  deployment: string | null;
+  /** How many rows this page holds. */
+  returned: number | null;
+  /** true: the history holds more than this page; `offset + returned` reads on. null: not said. */
+  truncated: boolean | null;
+  /** The most rows one page returns. */
+  pageSize: number | null;
+  /** Where this page starts, newest first. */
+  offset: number | null;
+}
+
+function historyPage(raw: Record<string, unknown>): HistoryPage {
+  return {
+    deployment: strOrNull(raw.deployment),
+    returned: numOrNull(raw.returned),
+    truncated: boolOrNull(raw.truncated),
+    pageSize: numOrNull(raw.page_size),
+    offset: numOrNull(raw.offset),
+  };
+}
+
+/** A tool one approval version bound, with the binding live when the version came into force. */
+export interface ApprovalVersionTool {
+  kind: string | null;
+  identifier: string | null;
+  /** The contract digest the version bound the tool under. */
+  contractDigest: string | null;
+  /** The binding live then: when it was bound, by whom (null: no binder on record), released and invalidated. */
+  boundAt: string | null;
+  boundBy: string | null;
+  releasedAt: string | null;
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+}
+
+/** One recorded version of a workflow approval (athena-backend ApprovalVersion). */
+export interface ApprovalVersion {
+  /** The version's id: the one Achilles' gate route names. */
+  version: string | null;
+  workflow: string | null;
+  /** The approval's digest; null once withdrawn. */
+  digest: string | null;
+  withdrawn: boolean | null;
+  inForceFrom: string | null;
+  /** The next version's in_force_from; null while no later version is recorded. */
+  inForceUntil: string | null;
+  recordedAt: string | null;
+  /**
+   * Who declared this version, once Athena-Backend records it (`declared_by`, added by
+   * a later backend change). null when it serves none: the field absent, or null.
+   */
+  declaredBy: string | null;
+  tools: ApprovalVersionTool[];
+}
+
+export interface ApprovalHistory extends HistoryPage {
+  /** The `?workflow=` the backend answered for; null: every approval's. */
+  workflow: string | null;
+  versions: ApprovalVersion[];
+  /** How many versions are recorded, whether or not all were returned. */
+  versionCount: number | null;
+}
+
+function approvalVersionTool(raw: Record<string, unknown>): ApprovalVersionTool {
+  return {
+    kind: strOrNull(raw.kind),
+    identifier: strOrNull(raw.identifier),
+    contractDigest: strOrNull(raw.contract_digest),
+    boundAt: strOrNull(raw.bound_at),
+    boundBy: strOrNull(raw.bound_by),
+    releasedAt: strOrNull(raw.released_at),
+    invalidatedAt: strOrNull(raw.invalidated_at),
+    invalidationReason: strOrNull(raw.invalidation_reason),
+  };
+}
+
+function approvalVersion(raw: Record<string, unknown>): ApprovalVersion {
+  return {
+    version: strOrNull(raw.version),
+    workflow: strOrNull(raw.workflow),
+    digest: strOrNull(raw.digest),
+    withdrawn: boolOrNull(raw.withdrawn),
+    inForceFrom: strOrNull(raw.in_force_from),
+    inForceUntil: strOrNull(raw.in_force_until),
+    recordedAt: strOrNull(raw.recorded_at),
+    declaredBy: strOrNull(raw.declared_by),
+    tools: rowsOf(raw.tools).map(approvalVersionTool),
+  };
+}
+
+/**
+ * Every recorded version of a deployment's workflow approvals -- or of one workflow's
+ * (`workflow`) -- newest first, one page from `offset`. A GET only.
+ */
+export async function approvalHistory(uuid: string, filters: Pick<HistoryQuery, "workflow" | "offset"> = {}): Promise<ApprovalHistory> {
+  const query = historySearch({ workflow: filters.workflow, offset: filters.offset });
+  const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/approval-history/${query}`);
+  return {
+    ...historyPage(raw),
+    workflow: strOrNull(raw.workflow),
+    versions: rowsOf(raw.versions).map(approvalVersion),
+    versionCount: numOrNull(raw.version_count),
+  };
+}
+
+/** One tool contract recorded for a registration (athena-backend ToolContract, append-only). */
+export interface ToolContractRecord {
+  kind: string | null;
+  identifier: string | null;
+  digest: string | null;
+  /** The canonical descriptor as recorded, verbatim; null when none was served. */
+  contract: Record<string, unknown> | null;
+  recordedAt: string | null;
+  /** When the registration's next contract was recorded; null while none later is. */
+  supersededAt: string | null;
+  /** The registration's contract in force now; null: the tool is no longer registered. */
+  currentDigest: string | null;
+  /** Whether this row is the contract in force now. */
+  inForce: boolean | null;
+}
+
+export interface ToolContractHistory extends HistoryPage {
+  /** The `?kind=` and `?identifier=` the backend answered for; null: not narrowed by it. */
+  kind: string | null;
+  identifier: string | null;
+  contracts: ToolContractRecord[];
+  contractCount: number | null;
+}
+
+function toolContractRecord(raw: Record<string, unknown>): ToolContractRecord {
+  const contract = raw.contract;
+  return {
+    kind: strOrNull(raw.kind),
+    identifier: strOrNull(raw.identifier),
+    digest: strOrNull(raw.digest),
+    contract: contract && typeof contract === "object" && !Array.isArray(contract) ? (contract as Record<string, unknown>) : null,
+    recordedAt: strOrNull(raw.recorded_at),
+    supersededAt: strOrNull(raw.superseded_at),
+    currentDigest: strOrNull(raw.current_digest),
+    inForce: boolOrNull(raw.in_force),
+  };
+}
+
+/**
+ * Every tool contract recorded on a deployment -- or for one registration (`kind`,
+ * `identifier`) -- newest first, one page from `offset`, for every tool, whether or
+ * not an approval binds it. A GET only.
+ */
+export async function toolContractHistory(
+  uuid: string,
+  filters: Pick<HistoryQuery, "kind" | "identifier" | "offset"> = {},
+): Promise<ToolContractHistory> {
+  const query = historySearch({ kind: filters.kind, identifier: filters.identifier, offset: filters.offset });
+  const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/tool-contracts/${query}`);
+  return {
+    ...historyPage(raw),
+    kind: strOrNull(raw.kind),
+    identifier: strOrNull(raw.identifier),
+    contracts: rowsOf(raw.contracts).map(toolContractRecord),
+    contractCount: numOrNull(raw.contract_count),
+  };
+}
+
+/** One binding of an approval or a claim to a tool contract, live or released (athena-backend ToolContractBinding). */
+export interface ToolContractBindingRecord {
+  /** "workflow" (an approval) or "claim" (an assurance claim), as served. */
+  subject: string | null;
+  workflow: string | null;
+  claimFingerprint: string | null;
+  kind: string | null;
+  identifier: string | null;
+  /** The contract digest it was bound under. */
+  contractDigest: string | null;
+  /** The contract in force now; null: the tool is no longer registered. */
+  currentDigest: string | null;
+  /** Not released. */
+  live: boolean | null;
+  /** For a live binding, whether the contract moved or the tool left; null on a released one, which holds nothing. */
+  superseded: boolean | null;
+  boundAt: string | null;
+  /** null: no binder on record (bound by code, or the account is gone). */
+  boundBy: string | null;
+  releasedAt: string | null;
+  /** When the invalidation engine first found it superseded, and why; null when it never has. */
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+}
+
+export interface ToolContractBindings extends HistoryPage {
+  kind: string | null;
+  identifier: string | null;
+  bindings: ToolContractBindingRecord[];
+  bindingCount: number | null;
+}
+
+function toolContractBindingRecord(raw: Record<string, unknown>): ToolContractBindingRecord {
+  return {
+    subject: strOrNull(raw.subject),
+    workflow: strOrNull(raw.workflow),
+    claimFingerprint: strOrNull(raw.claim_fingerprint),
+    kind: strOrNull(raw.kind),
+    identifier: strOrNull(raw.identifier),
+    contractDigest: strOrNull(raw.contract_digest),
+    currentDigest: strOrNull(raw.current_digest),
+    live: boolOrNull(raw.live),
+    superseded: boolOrNull(raw.superseded),
+    boundAt: strOrNull(raw.bound_at),
+    boundBy: strOrNull(raw.bound_by),
+    releasedAt: strOrNull(raw.released_at),
+    invalidatedAt: strOrNull(raw.invalidated_at),
+    invalidationReason: strOrNull(raw.invalidation_reason),
+  };
+}
+
+/**
+ * Every binding of an approval or a claim to a tool contract on a deployment -- or on
+ * one registration -- live, released and invalidated alike, newest first, one page
+ * from `offset`. A GET only.
+ */
+export async function toolContractBindings(
+  uuid: string,
+  filters: Pick<HistoryQuery, "kind" | "identifier" | "offset"> = {},
+): Promise<ToolContractBindings> {
+  const query = historySearch({ kind: filters.kind, identifier: filters.identifier, offset: filters.offset });
+  const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/tool-contract-bindings/${query}`);
+  return {
+    ...historyPage(raw),
+    kind: strOrNull(raw.kind),
+    identifier: strOrNull(raw.identifier),
+    bindings: rowsOf(raw.bindings).map(toolContractBindingRecord),
+    bindingCount: numOrNull(raw.binding_count),
+  };
+}
+
+/** One accepted change of the deployment's decision (athena-backend DecisionTransition). */
+export interface DecisionTransitionRecord {
+  revision: number | null;
+  /** null: there was no decision before (the deployment's first). */
+  fromDecision: string | null;
+  /** null: no decision after it. */
+  toDecision: string | null;
+  /** What the decision was computed from; null when the writer supplied none. */
+  basisDigest: string | null;
+  createdAt: string | null;
+  /** When a downstream consumer confirmed it; null: not yet. */
+  deliveredAt: string | null;
+}
+
+export interface DecisionHistory extends HistoryPage {
+  transitions: DecisionTransitionRecord[];
+  transitionCount: number | null;
+}
+
+function decisionTransitionRecord(raw: Record<string, unknown>): DecisionTransitionRecord {
+  return {
+    revision: numOrNull(raw.revision),
+    fromDecision: strOrNull(raw.from_decision),
+    toDecision: strOrNull(raw.to_decision),
+    basisDigest: strOrNull(raw.basis_digest),
+    createdAt: strOrNull(raw.created_at),
+    deliveredAt: strOrNull(raw.delivered_at),
+  };
+}
+
+/**
+ * Every accepted change of a deployment's decision, newest first by revision, one page
+ * from `offset`: the transition log as the backend keeps it. The decision in force
+ * stays decision-support's to publish. A GET only.
+ */
+export async function decisionHistory(uuid: string, filters: Pick<HistoryQuery, "offset"> = {}): Promise<DecisionHistory> {
+  const query = historySearch({ offset: filters.offset });
+  const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/decision-history/${query}`);
+  return {
+    ...historyPage(raw),
+    transitions: rowsOf(raw.transitions).map(decisionTransitionRecord),
+    transitionCount: numOrNull(raw.transition_count),
   };
 }

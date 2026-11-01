@@ -193,3 +193,112 @@ export interface ToolAsset {
   firstSeen: string | null;
   lastSeen: string | null;
 }
+
+// ---- the recorded histories (server/assurance.ts: ApprovalHistory, ToolContractHistory,
+// ToolContractBindings, DecisionHistory) ----
+
+/** The page every history read answers with: what it was read for, and how much of it this is. */
+export interface HistoryPage {
+  /** The deployment the backend answered for; null when it named none. */
+  deployment: string | null;
+  returned: number | null;
+  /** true: the history holds more than this page. null: not said. */
+  truncated: boolean | null;
+  pageSize: number | null;
+  offset: number | null;
+}
+
+export interface ApprovalVersionTool {
+  kind: string | null;
+  identifier: string | null;
+  contractDigest: string | null;
+  boundAt: string | null;
+  /** null: no binder on record. */
+  boundBy: string | null;
+  releasedAt: string | null;
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+}
+
+export interface ApprovalVersion {
+  version: string | null;
+  workflow: string | null;
+  /** null once withdrawn. */
+  digest: string | null;
+  withdrawn: boolean | null;
+  inForceFrom: string | null;
+  /** null while no later version is recorded. */
+  inForceUntil: string | null;
+  recordedAt: string | null;
+  /** null: Athena-Backend serves no declarer for the version (the field absent, or null). */
+  declaredBy: string | null;
+  tools: ApprovalVersionTool[];
+}
+
+export interface ApprovalHistory extends HistoryPage {
+  workflow: string | null;
+  versions: ApprovalVersion[];
+  versionCount: number | null;
+}
+
+export interface ToolContractRecord {
+  kind: string | null;
+  identifier: string | null;
+  digest: string | null;
+  contract: Record<string, unknown> | null;
+  recordedAt: string | null;
+  /** null while no later contract of the registration is recorded. */
+  supersededAt: string | null;
+  /** null: the tool is no longer registered. */
+  currentDigest: string | null;
+  inForce: boolean | null;
+}
+
+export interface ToolContractHistory extends HistoryPage {
+  kind: string | null;
+  identifier: string | null;
+  contracts: ToolContractRecord[];
+  contractCount: number | null;
+}
+
+export interface ToolContractBindingRecord {
+  subject: string | null;
+  workflow: string | null;
+  claimFingerprint: string | null;
+  kind: string | null;
+  identifier: string | null;
+  contractDigest: string | null;
+  currentDigest: string | null;
+  live: boolean | null;
+  /** null on a released binding, which holds nothing. */
+  superseded: boolean | null;
+  boundAt: string | null;
+  boundBy: string | null;
+  releasedAt: string | null;
+  invalidatedAt: string | null;
+  invalidationReason: string | null;
+}
+
+export interface ToolContractBindings extends HistoryPage {
+  kind: string | null;
+  identifier: string | null;
+  bindings: ToolContractBindingRecord[];
+  bindingCount: number | null;
+}
+
+export interface DecisionTransitionRecord {
+  revision: number | null;
+  /** null: no decision before (the deployment's first). */
+  fromDecision: string | null;
+  toDecision: string | null;
+  /** null: the writer supplied none. */
+  basisDigest: string | null;
+  createdAt: string | null;
+  /** null: not yet confirmed downstream. */
+  deliveredAt: string | null;
+}
+
+export interface DecisionHistory extends HistoryPage {
+  transitions: DecisionTransitionRecord[];
+  transitionCount: number | null;
+}

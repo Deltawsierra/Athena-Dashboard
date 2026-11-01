@@ -9,9 +9,16 @@
  * agent may use what, and to what effect, is the approval's own prose: the backend
  * holds no structured agent or scope field on it, so none is drawn here.
  *
- * Its history: the backend serves the approval as it stands now -- who last
- * declared it and when, and when each tool was bound -- and records each earlier
- * version without serving it to this console. The screen says so.
+ * Its history: every recorded version of each approval, newest first, read from
+ * GET /api/assurance/deployments/<uuid>/approval-history/ (through
+ * /api/assurance/deployments/:uuid/approval-history on this server) -- under the
+ * approval it belongs to (?workflow=<slug>), or every approval's together, approvals
+ * since withdrawn included. Each version: its digest, or that it was withdrawn; from
+ * when and until when it was in force; who declared it, where the backend records
+ * that (`declared_by`), and "not recorded" where it does not; and every tool it bound,
+ * with the contract it was approved under and the binding live when it came into
+ * force. Each is read only when a person opens it, a page at a time
+ * (components/authority/history.tsx).
  */
 import { useQuery } from "@tanstack/react-query";
 import { ClipboardCheck } from "lucide-react";
@@ -23,7 +30,6 @@ import {
   Digest,
   Fact,
   NotInHand,
-  NotServed,
   Section,
   ToolName,
   When,
@@ -32,7 +38,16 @@ import {
   decisionTone,
   served,
 } from "./parts";
-import type { ApprovedTool, ApprovedWorkflow, ApprovedWorkflows, WorkflowComposition } from "./types";
+import { HistoryPageFrame, HistoryPages, OnDemand, type PageSlot } from "./history";
+import type {
+  ApprovalHistory,
+  ApprovalVersion,
+  ApprovalVersionTool,
+  ApprovedTool,
+  ApprovedWorkflow,
+  ApprovedWorkflows,
+  WorkflowComposition,
+} from "./types";
 
 /** Whether an approval still binds the contract in force, in words. Unchanged is a fact, not a clear result. */
 export function ContractStanding({ tool }: { tool: ApprovedTool }) {
@@ -73,7 +88,212 @@ function ToolRow({ tool }: { tool: ApprovedTool }) {
   );
 }
 
-function WorkflowCard({ workflow }: { workflow: ApprovedWorkflow }) {
+// ---- the approval history ----
+
+/** Whether a version's tool names a binding at all: none on record serves every binding field null. */
+function bindingOnRecord(tool: ApprovalVersionTool): boolean {
+  return (
+    tool.boundAt !== null || tool.boundBy !== null || tool.releasedAt !== null ||
+    tool.invalidatedAt !== null || tool.invalidationReason !== null
+  );
+}
+
+/** One tool a version bound: the contract it was approved under, and the binding live when the version came into force. */
+export function VersionToolRow({ tool }: { tool: ApprovalVersionTool }) {
+  return (
+    <li
+      className="space-y-1 rounded-md border border-border/50 bg-surface-1/40 p-2"
+      data-version-tool={`${tool.kind ?? ""}:${tool.identifier ?? ""}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        {tool.kind === null && tool.identifier === null ? (
+          <Absent testId="version-tool-name">the tool is not recorded on this version</Absent>
+        ) : (
+          <ToolName kind={tool.kind ?? "kind not recorded"} identifier={tool.identifier ?? ""} />
+        )}
+        {tool.invalidatedAt !== null && (
+          <Chip tone="caution" testId="version-tool-invalidated">
+            Binding invalidated
+          </Chip>
+        )}
+      </div>
+      <Fact label="Approved under contract">
+        <Digest value={tool.contractDigest} testId="version-tool-digest" />
+      </Fact>
+      {bindingOnRecord(tool) ? (
+        <>
+          <Fact label="Bound at">
+            <When iso={tool.boundAt} testId="version-tool-bound-at" />
+          </Fact>
+          <Fact label="Bound by">
+            {tool.boundBy ? (
+              <span className="text-foreground" data-testid="version-tool-bound-by">{tool.boundBy}</span>
+            ) : (
+              <Absent testId="version-tool-bound-by">not on record</Absent>
+            )}
+          </Fact>
+          <Fact label="Released at">
+            <When iso={tool.releasedAt} absent="not released" testId="version-tool-released-at" />
+          </Fact>
+          <Fact label="Invalidated">
+            {tool.invalidatedAt !== null ? (
+              <span data-testid="version-tool-invalidation">
+                <When iso={tool.invalidatedAt} />{" "}
+                {tool.invalidationReason ? (
+                  <span className="text-foreground">{tool.invalidationReason}</span>
+                ) : (
+                  <Absent>no reason recorded</Absent>
+                )}
+              </span>
+            ) : (
+              <Absent testId="version-tool-invalidation">not invalidated</Absent>
+            )}
+          </Fact>
+        </>
+      ) : (
+        <p className="text-[12px]">
+          <Absent testId="version-tool-no-binding">
+            No binding of it is on record for when this version came into force.
+          </Absent>
+        </p>
+      )}
+    </li>
+  );
+}
+
+/** One recorded version of an approval. Withdrawn is a fact about the approval, drawn neutral. */
+export function ApprovalVersionRow({ version, showWorkflow }: { version: ApprovalVersion; showWorkflow: boolean }) {
+  const withdrawn = version.withdrawn === true;
+  return (
+    <li className="space-y-1.5 rounded-md border border-border/60 bg-surface-1/30 p-2.5" data-approval-version={version.version ?? ""}>
+      <div className="flex flex-wrap items-center gap-2 text-[12px]">
+        {showWorkflow &&
+          (version.workflow ? (
+            <code className="font-mono text-[12px] text-foreground" data-testid="version-workflow">{version.workflow}</code>
+          ) : (
+            <Absent testId="version-workflow">workflow not recorded</Absent>
+          ))}
+        <span className="text-muted-foreground">
+          Version{" "}
+          {version.version ? <code className="font-mono text-[11px]">{version.version}</code> : <Absent>id not served</Absent>}
+        </span>
+        {withdrawn && (
+          <Chip tone="neutral" testId="version-withdrawn">
+            Withdrawn
+          </Chip>
+        )}
+        {version.withdrawn === null && <Absent testId="version-withdrawn">whether it was withdrawn was not said</Absent>}
+      </div>
+      <Fact label="Approval digest">
+        {withdrawn ? (
+          <Absent testId="version-digest">none: withdrawn</Absent>
+        ) : (
+          <Digest value={version.digest} testId="version-digest" />
+        )}
+      </Fact>
+      <Fact label="In force from">
+        <When iso={version.inForceFrom} testId="version-from" />
+      </Fact>
+      <Fact label="In force until">
+        <When iso={version.inForceUntil} absent="no later version is recorded" testId="version-until" />
+      </Fact>
+      <Fact label="Recorded at">
+        <When iso={version.recordedAt} testId="version-recorded-at" />
+      </Fact>
+      <Fact label="Declared by">
+        {version.declaredBy ? (
+          <span className="text-foreground" data-testid="version-declared-by">{version.declaredBy}</span>
+        ) : (
+          <Absent testId="version-declared-by">not recorded</Absent>
+        )}
+      </Fact>
+      {version.tools.length === 0 ? (
+        <p className="text-[12px]" data-testid="version-no-tools">
+          <Absent>{withdrawn ? "A withdrawn approval binds no tools." : "This version bound no tools."}</Absent>
+        </p>
+      ) : (
+        <ul className="space-y-1.5">
+          {version.tools.map((tool, index) => (
+            <VersionToolRow key={`${tool.kind}:${tool.identifier}:${index}`} tool={tool} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+/** A page of approval versions, newest first; an empty first page says no version is recorded. */
+export function ApprovalVersionList({
+  versions,
+  showWorkflow,
+  empty,
+}: {
+  versions: ApprovalVersion[];
+  showWorkflow: boolean;
+  /** What an empty page says; null for a later page, which says nothing. */
+  empty: string | null;
+}) {
+  if (versions.length === 0) {
+    return empty === null ? null : (
+      <p className="text-[12px]" data-testid="no-versions">
+        <Absent>{empty}</Absent>
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-2">
+      {versions.map((version, index) => (
+        <ApprovalVersionRow key={version.version ?? `at-${index}`} version={version} showWorkflow={showWorkflow} />
+      ))}
+    </ul>
+  );
+}
+
+/** One page of the approval history: one approval's (`workflow`), or every approval's. */
+function ApprovalHistoryPage({ deployment, workflow, slot }: { deployment: string; workflow?: string; slot: PageSlot }) {
+  const offset = slot.offset;
+  const source = served(
+    useQuery<ApprovalHistory>({
+      queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/approval-history`, { workflow, offset }],
+    }),
+  );
+  return (
+    <HistoryPageFrame
+      source={source}
+      deployment={deployment}
+      slot={slot}
+      what={workflow ? "this approval's version history" : "the approval history"}
+      count={(page) => page.versionCount}
+      rows={(page) => page.versions.length}
+    >
+      {(page) => (
+        <ApprovalVersionList
+          versions={page.versions}
+          showWorkflow={!workflow}
+          empty={
+            offset !== 0
+              ? null
+              : workflow
+                ? "No version of this approval is recorded."
+                : "No approval version is recorded for this deployment."
+          }
+        />
+      )}
+    </HistoryPageFrame>
+  );
+}
+
+/** A history of approval versions, from its first page, kept per deployment and workflow. */
+export function ApprovalHistoryPages({ deployment, workflow }: { deployment: string; workflow?: string }) {
+  return (
+    <HistoryPages
+      key={`${deployment}:${workflow ?? ""}`}
+      page={(slot) => <ApprovalHistoryPage deployment={deployment} workflow={workflow} slot={slot} />}
+    />
+  );
+}
+
+function WorkflowCard({ workflow, deployment }: { workflow: ApprovedWorkflow; deployment?: string }) {
   return (
     <li className="space-y-2 rounded-lg border border-border/60 bg-surface-1/30 p-3" data-workflow={workflow.slug}>
       <div className="flex flex-wrap items-baseline gap-2">
@@ -111,6 +331,11 @@ function WorkflowCard({ workflow }: { workflow: ApprovedWorkflow }) {
           </ul>
         )}
       </div>
+      {deployment && workflow.slug && (
+        <OnDemand label="version history" testId="approval-version-history">
+          {() => <ApprovalHistoryPages deployment={deployment} workflow={workflow.slug} />}
+        </OnDemand>
+      )}
     </li>
   );
 }
@@ -167,7 +392,14 @@ export function CompositionFacts({ composition }: { composition: WorkflowComposi
   );
 }
 
-export function ApprovedWorkflowsView({ data }: { data: ApprovedWorkflows }) {
+export function ApprovedWorkflowsView({
+  data,
+  deployment,
+}: {
+  data: ApprovedWorkflows;
+  /** The deployment the approvals are of; with it, each approval offers its version history. */
+  deployment?: string;
+}) {
   const shownAll = data.truncated !== true;
   return (
     <div className="space-y-4" data-screen="approved-workflows">
@@ -191,16 +423,27 @@ export function ApprovedWorkflowsView({ data }: { data: ApprovedWorkflows }) {
         ) : (
           <ul className="space-y-3">
             {data.approved.map((workflow) => (
-              <WorkflowCard key={workflow.uuid || workflow.slug} workflow={workflow} />
+              <WorkflowCard key={workflow.uuid || workflow.slug} workflow={workflow} deployment={deployment} />
             ))}
           </ul>
         )}
-        <NotServed testId="approval-history-not-served">
-          Approval history: Athena-Backend records each earlier version of an approval and does not serve it to this
-          console. Shown is each approval as it stands now: who last declared it and when, and when each tool was
-          bound to its contract.
-        </NotServed>
+        <p className="text-[12px] leading-relaxed text-muted-foreground" data-testid="approval-history-note">
+          Approval history: each approval&apos;s earlier versions are read from Athena-Backend&apos;s record, under the
+          approval, or every approval&apos;s together below, approvals since withdrawn included. A version names who
+          declared it where the backend records that, and reads not recorded where it does not; who bound each tool,
+          and when, is on record.
+        </p>
       </Section>
+      {deployment && (
+        <Section title="Every recorded approval version" testId="approval-history-section">
+          <p className="text-[12px] text-muted-foreground">
+            Every version of every approval on this deployment, newest first, including approvals since withdrawn.
+          </p>
+          <OnDemand label="every recorded version" testId="every-approval-version">
+            {() => <ApprovalHistoryPages deployment={deployment} />}
+          </OnDemand>
+        </Section>
+      )}
       <Section title="Chains reported against the approved set" testId="composition-section">
         <CompositionFacts composition={data.composition} />
       </Section>
@@ -213,5 +456,5 @@ export default function ApprovedWorkflowsScreen({ deployment }: { deployment: st
     useQuery<ApprovedWorkflows>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/approved-workflows`] }),
   );
   if (source.state !== "ready") return <NotInHand source={source} what="the approved workflows" />;
-  return <ApprovedWorkflowsView data={source.data} />;
+  return <ApprovedWorkflowsView data={source.data} deployment={deployment} />;
 }
