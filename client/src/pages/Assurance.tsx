@@ -73,6 +73,7 @@ import {
   type Severity,
 } from "@/components/mythos/atoms";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { revokeBlobUrlLater } from "@/lib/appFile";
 import { isKeyBug, saysOutcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -2120,7 +2121,7 @@ function AssetNode({
  * construction — every fact shows how strongly it is known, and shadow supply
  * chain is flagged, never smoothed over.
  */
-function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<AiBom>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/ai-bom`],
@@ -2142,7 +2143,7 @@ function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
               a.href = url;
               a.download = `ai-bom-${data.deployment.name || data.deployment.uuid}.json`;
               a.click();
-              URL.revokeObjectURL(url);
+              revokeBlobUrlLater(url);
             } catch {
               toast({ title: "Could not export the AI-BOM", variant: "destructive" });
             }
@@ -3730,7 +3731,7 @@ export function AssuranceReceiptPanel({ deploymentUuid }: { deploymentUuid: stri
                 a.href = url;
                 a.download = `assurance-receipt-${data.system.name || data.system.uuid}.json`;
                 a.click();
-                URL.revokeObjectURL(url);
+                revokeBlobUrlLater(url);
               } catch {
                 toast({ title: "Could not download the receipt", variant: "destructive" });
               }
@@ -7964,7 +7965,7 @@ export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
       a.href = url;
       a.download = `incident-pack-${data.identity.finding.uuid}.json`;
       a.click();
-      URL.revokeObjectURL(url);
+      revokeBlobUrlLater(url);
     } catch {
       toast({ title: "Could not download the incident pack", variant: "destructive" });
     }

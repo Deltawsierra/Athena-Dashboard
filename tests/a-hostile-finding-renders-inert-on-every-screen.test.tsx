@@ -304,7 +304,8 @@ describe("the incident pack's export carries the hostile finding as data, never 
       expect(reachedOut()).toEqual([]);
     } finally {
       delete (URL as { createObjectURL?: unknown }).createObjectURL;
-      delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+      // Left as a no-op, not removed: the download's revoke runs a minute after it (lib/appFile.ts revokeBlobUrlLater).
+      Object.defineProperty(URL, "revokeObjectURL", { value: () => undefined, configurable: true });
     }
   }, BOUND);
 });
