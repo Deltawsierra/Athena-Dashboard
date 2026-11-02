@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 import GlassCard from "@/components/GlassCard";
 import PageHeader from "@/components/PageHeader";
+import TargetUrl from "@/components/TargetUrl";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { invalidateTestsAndFindings } from "@/lib/invalidate";
@@ -194,6 +195,7 @@ export default function Findings() {
               {shown.map((finding) => {
                 const meta = STATUS[finding.status] ?? STATUS.open;
                 const Icon = meta.icon;
+                const place = finding.endpoint ?? finding.header ?? finding.target;
                 return (
                   <li key={finding.id}>
                     <GlassCard data-testid={`finding-${finding.id}`}>
@@ -219,8 +221,9 @@ export default function Findings() {
                               {ratingOf(finding.severity) ?? "not rated"}
                             </span>
                           </div>
+                          {/* Where the target said it is: text with a copy button, never a link (TargetUrl). */}
                           <div className="mt-1 truncate text-sm">
-                            {finding.endpoint ?? finding.header ?? finding.target}
+                            {place ? <TargetUrl value={place} /> : null}
                           </div>
                           {finding.message && (
                             <p className="text-sm text-muted-foreground">{finding.message}</p>

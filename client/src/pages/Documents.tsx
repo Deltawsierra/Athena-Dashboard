@@ -26,6 +26,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import SampleDataNotice from "@/components/SampleDataNotice";
+import StoredUrl from "@/components/StoredUrl";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { Document, Client, InsertDocument } from "@shared/schema";
@@ -393,19 +394,18 @@ export default function Documents() {
                       </div>
                     </div>
 
+                    {/* A file of this app's is saved in the app with the session; any other URL is text (StoredUrl). */}
                     {doc.fileUrl && (
-                      <div className="pt-2 border-t">
-                        <a
-                          href={doc.fileUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                      <div className="pt-2 border-t text-sm" data-testid={`file-${doc.id}`}>
+                        <StoredUrl
+                          url={doc.fileUrl}
+                          fileName={doc.title}
                           className="inline-flex items-center gap-2 text-sm text-primary hover:underline"
-                          onClick={(e) => e.stopPropagation()}
-                          data-testid={`link-download-${doc.id}`}
+                          testId={`link-download-${doc.id}`}
                         >
                           <Download className="w-4 h-4" />
                           Download File
-                        </a>
+                        </StoredUrl>
                       </div>
                     )}
                   </div>

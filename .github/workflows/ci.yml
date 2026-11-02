@@ -64,7 +64,9 @@ jobs:
   # the tests for ending the dev server's process tree (taskkill, by its full
   # path) and for a Stop reaching the engine, the test files that remove the
   # SQLite files they used (Windows refuses to remove a file that is still open),
-  # and the tests of a scan whose run the engine does not know. Not the whole suite and not the packaged build, which stay on the Linux job
+  # the tests of a scan whose run the engine does not know, and the desktop
+  # window's lock with the target-content tests (a target URL is text; a hostile
+  # finding renders inert; an app file is saved in the app). Not the whole suite and not the packaged build, which stay on the Linux job
   # above.
   windows:
     runs-on: windows-latest
@@ -127,3 +129,7 @@ jobs:
           tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts
           tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx
           tests/not-known-copy-lints-clean.test.ts
+          tests/the-desktop-window-is-locked-and-opens-no-target-url.test.ts
+          tests/a-target-url-is-text-with-a-copy-button-on-every-screen.test.tsx
+          tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx
+          tests/an-app-file-is-saved-in-the-app-and-a-stored-url-is-text.test.tsx

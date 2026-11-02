@@ -12,8 +12,9 @@
  * follow. Every authored word is in client/src/lib/backendRecordCopy.ts, held
  * to the persona lint by test.
  */
-import { ExternalLink, FileText } from "lucide-react";
+import { FileDown, FileText } from "lucide-react";
 
+import StoredUrl from "@/components/StoredUrl";
 import { Label, StatusPill, type StatusTone } from "@/components/mythos/atoms";
 import {
   BACKEND_RECORD_TITLE, COLLECTING, DIFFERS_FROM_DIRECT, MIRRORED, NOT_MIRRORED, NOT_YET_IN_RECORD, NO_LONGER_ASKED,
@@ -108,16 +109,19 @@ export default function BackendRecordPanel({ backend, target, className }: {
           {differs && (
             <p className="text-[12px] text-sev-medium" data-testid="text-backend-differs">{DIFFERS_FROM_DIRECT}</p>
           )}
+          {/* The report, through this dashboard's relay: read in the app with the session and saved,
+              never a navigation away from the page (StoredUrl -> AppFileLink). */}
           {backend.pdfUrl && (
-            <a
-              href={backend.pdfUrl}
+            <StoredUrl
+              url={backend.pdfUrl}
+              fileName={`scan-${backend.scanId}-report.pdf`}
               className="inline-flex items-center gap-1.5 text-[12px] font-medium text-primary hover:underline"
-              data-testid="link-backend-pdf"
+              testId="link-backend-pdf"
             >
               <FileText className="h-3.5 w-3.5" />
               {PDF_LINK}
-              <ExternalLink className="h-3 w-3" />
-            </a>
+              <FileDown className="h-3 w-3" />
+            </StoredUrl>
           )}
         </div>
       )}

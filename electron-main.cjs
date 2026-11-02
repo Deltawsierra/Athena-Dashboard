@@ -7,7 +7,7 @@ if (!process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '16';
 }
 
-const { app, BrowserWindow, Menu, shell, net, dialog } = require('electron');
+const { app, BrowserWindow, Menu, net, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -186,7 +186,7 @@ function createWindow() {
   buildMenu();
 
   // Content Security Policy. `file:` is deliberately absent: everything the
-  // renderer needs is served over app:// or from the local API.
+  // renderer needs is served by the local server, the page's own origin.
   const pageOrigin = `'self' ${SERVER_ORIGIN}`;
   const cspPolicy = [
     `default-src ${pageOrigin}`,
@@ -209,16 +209,14 @@ function createWindow() {
     });
   });
 
-  // Open external links in the real browser, never in an app window.
+  // No window opens, in the app or outside it. This handler used to hand any
+  // http(s) URL to the system browser, so a link the scanned target planted in
+  // a finding opened outside the app on one click. The app links to no page of
+  // its own outside this origin, so nothing is allowed out: a target URL is
+  // shown as text with a copy button (client/src/components/TargetUrl.tsx).
   // (`new-window` was removed in Electron 22; this is its replacement.)
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      void shell.openExternal(url);
-    }
-    return { action: 'deny' };
-  });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
-  // Block in-page navigation away from the app's own origins.
   // Block in-page navigation away from the app's own origins. Comparing string
   // prefixes let "http://127.0.0.1:5000@evil.com/" through, because the part
   // that looks like the allowed origin is userinfo, not the host.
@@ -243,6 +241,29 @@ function createWindow() {
   });
   mainWindow.webContents.on('will-redirect', blockForeignNavigation);
 
+  // Permissions: denied, every one, unless the app demonstrably uses it. Electron
+  // grants a request no handler answers, so without these the page -- which
+  // shows text the scanned target wrote -- could be given the camera, the
+  // microphone, the location, notifications or the clipboard's contents. The one
+  // permission allowed is the clipboard WRITE the app's copy buttons use (a
+  // target URL's, a receipt's, the failsafe's bytes to sign), and only to the
+  // app's own origins. Reading the clipboard is denied.
+  const ALLOWED_PERMISSIONS = ['clipboard-sanitized-write'];
+  const originOf = (url) => {
+    try {
+      return new URL(url).origin;
+    } catch {
+      return null;
+    }
+  };
+  const mayUse = (permission, url) =>
+    ALLOWED_PERMISSIONS.includes(permission) && allowedOrigins.includes(originOf(url));
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    callback(mayUse(permission, details && details.requestingUrl));
+  });
+  mainWindow.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
+    mayUse(permission, requestingOrigin));
+
   // Load the root, not /index.html: the client router matches on the pathname,
   // and "/index.html" matched no route, which is why the packaged app opened
   // on the 404 screen.
@@ -259,8 +280,8 @@ function createWindow() {
 }
 
 /**
- * Serves the built client over app://, confined to dist/public, with an
- * index.html fallback so client-side routes resolve.
+ * Starts the server, then opens the window on it. The server serves the built
+ * client and the API from one origin (SERVER_ORIGIN).
  */
 app.whenReady().then(async () => {
   try {
