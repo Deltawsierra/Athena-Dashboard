@@ -25,10 +25,11 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { Boxes, CalendarClock, ClipboardList, ExternalLink, Handshake, ListChecks, Radar } from "lucide-react";
+import { Boxes, CalendarClock, ClipboardList, FileDown, Handshake, ListChecks, Radar } from "lucide-react";
 import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
+import AppFileLink from "@/components/AppFileLink";
 import { Divider } from "@/components/mythos/Ornament";
 import { DecisionPill, Label, StatusPill, type Decision, type StatusTone } from "@/components/mythos/atoms";
 import { ApiError } from "@/lib/queryClient";
@@ -180,17 +181,17 @@ function ScanRow({ scan }: { scan: RecordScan }) {
             {OPEN_SCAN}
           </Link>
         ) : null}
+        {/* The report, read in the app with the person's session and saved: no window, no system browser (AppFileLink). */}
         {scan.pdfUrl !== null && scan.test !== null ? (
-          <a
-            href={`/api/scans/${encodeURIComponent(scan.test.id)}/backend-pdf`}
-            target="_blank"
-            rel="noreferrer"
+          <AppFileLink
+            path={`/api/scans/${encodeURIComponent(scan.test.id)}/backend-pdf`}
+            fileName={`scan-${scan.test.id}-report.pdf`}
             className="inline-flex items-center gap-1 text-[12px] text-gold underline-offset-2 hover:underline"
-            data-testid="link-record-pdf"
+            testId="link-record-pdf"
           >
-            <ExternalLink className="h-3 w-3" />
+            <FileDown className="h-3 w-3" />
             {PDF_LINK}
-          </a>
+          </AppFileLink>
         ) : null}
         {scan.pdfUrl !== null && scan.test === null ? (
           <span className="text-[11px] text-muted-foreground" data-testid="text-report-after-adoption">{REPORT_AFTER_ADOPTION}</span>

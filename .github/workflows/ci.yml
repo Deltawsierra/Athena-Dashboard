@@ -66,7 +66,7 @@ jobs:
   # SQLite files they used (Windows refuses to remove a file that is still open),
   # the tests of a scan whose run the engine does not know, and the desktop
   # window's lock with the target-content tests (a target URL is text; a hostile
-  # finding renders inert). Not the whole suite and not the packaged build, which stay on the Linux job
+  # finding renders inert; an app file is saved in the app). Not the whole suite and not the packaged build, which stay on the Linux job
   # above.
   windows:
     runs-on: windows-latest
@@ -132,3 +132,4 @@ jobs:
           tests/the-desktop-window-is-locked-and-opens-no-target-url.test.ts
           tests/a-target-url-is-text-with-a-copy-button-on-every-screen.test.tsx
           tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx
+          tests/an-app-file-is-saved-in-the-app-and-a-stored-url-is-text.test.tsx

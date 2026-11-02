@@ -35,6 +35,7 @@ import PageHero from "@/components/mythos/PageHero";
 import StatCard from "@/components/mythos/StatCard";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
+import StoredUrl from "@/components/StoredUrl";
 import { Divider } from "@/components/mythos/Ornament";
 import { StatusPill, Avatar } from "@/components/mythos/atoms";
 import { figure, loaded, notInHand } from "@/lib/loaded";
@@ -114,7 +115,6 @@ export default function Evidence() {
     (typeF === "all" || d.documentType === typeF) &&
     (q === "" || d.title.toLowerCase().includes(q) || (d.description ?? "").toLowerCase().includes(q)),
   );
-  const openDoc = (url: string | null) => { if (url) window.open(url, "_blank", "noopener,noreferrer"); };
 
   // The latest COMPLETED test: the only kind whose counts are a result. A
   // running, pending or failed one has zero counts because it has none.
@@ -204,8 +204,24 @@ export default function Evidence() {
                           <td className="px-4 py-3 text-[12px] text-muted-foreground">{new Date(d.createdAt).toLocaleDateString()}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1.5">
-                              <button onClick={() => openDoc(d.fileUrl)} disabled={!d.fileUrl} className="rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground hover:border-primary/50 disabled:opacity-40">View</button>
-                              <button onClick={() => openDoc(d.fileUrl)} disabled={!d.fileUrl} title="Download" className="rounded-md border border-border/60 p-1.5 text-muted-foreground hover:text-foreground disabled:opacity-40"><Download className="h-3.5 w-3.5" /></button>
+                              {/* A file of this app's is saved in the app with the session; any other URL is text (StoredUrl).
+                                  No window opens: the desktop app opens none, and "View" could show nothing in-app under its CSP. */}
+                              {d.fileUrl ? (
+                                <StoredUrl
+                                  url={d.fileUrl}
+                                  fileName={d.title}
+                                  className="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground hover:border-primary/50"
+                                  testId={`link-evidence-file-${d.id}`}
+                                >
+                                  <Download className="h-3.5 w-3.5" />
+                                  Download
+                                </StoredUrl>
+                              ) : (
+                                <button disabled className="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground disabled:opacity-40">
+                                  <Download className="h-3.5 w-3.5" />
+                                  Download
+                                </button>
+                              )}
                               <button className="p-1 text-muted-foreground"><MoreHorizontal className="h-4 w-4" /></button>
                             </div>
                           </td>
