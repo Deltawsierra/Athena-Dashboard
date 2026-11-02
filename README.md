@@ -202,6 +202,9 @@ written by older builds are verified once and transparently upgraded.
   and user administration additionally requires the `admin` role.
 - The Electron renderer runs with `contextIsolation`, `sandbox`, no
   `nodeIntegration`, and a CSP without `unsafe-eval`.
+- Target URLs are text, with a copy button: a URL the scanned target supplied (a
+  finding's endpoint or location) is never a link, and the desktop app opens no
+  window and hands no URL to the system browser.
 - `athena.db` and pasted developer logs are not tracked in git.
 - The **Failsafe console** (admin-only, `/failsafe`) can pause, stand down, or
   terminate an engine, but holds no signing key. It drafts a command and shows

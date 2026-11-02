@@ -62,6 +62,7 @@ import {
 import { useSearch } from "wouter";
 import PageHero from "@/components/mythos/PageHero";
 import GlassCard from "@/components/GlassCard";
+import TargetUrl from "@/components/TargetUrl";
 import { Divider } from "@/components/mythos/Ornament";
 import {
   AssetClassChip,
@@ -1904,7 +1905,12 @@ function FindingRow({
         {showAsset && f.assetName && (
           <span className="text-[11px] text-muted-foreground">· {f.assetName}</span>
         )}
-        {f.location && <span className="text-[11px] text-muted-foreground">· {f.location}</span>}
+        {/* Where the target said the finding is: text with a copy button, never a link (TargetUrl). */}
+        {f.location && (
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-[11px] text-muted-foreground">
+            · <TargetUrl value={f.location} />
+          </span>
+        )}
         {f.receipt?.digest && <FindingReceiptMark receipt={f.receipt} />}
       </div>
       <DispositionCaveat text={f.statusMustNotImply} />
@@ -8025,7 +8031,7 @@ export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
       {data.surface.asset && (
         <p>
           Surface: <span className="text-foreground">{data.surface.asset.name}</span> · {data.surface.asset.kindLabel}
-          {data.surface.location ? ` · ${data.surface.location}` : ""}
+          {data.surface.location ? <> · <TargetUrl value={data.surface.location} /></> : null}
         </p>
       )}
       <p className="text-amber-400/90">

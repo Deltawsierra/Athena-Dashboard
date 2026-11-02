@@ -25,6 +25,7 @@ import { AlertTriangle, Loader2, RotateCcw, ShieldCheck, ShieldX, Square } from 
 
 import { Button } from "@/components/ui/button";
 import GlassCard from "@/components/GlassCard";
+import TargetUrl from "@/components/TargetUrl";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, keptStops, mayStillBeRunning } from "@/lib/queryClient";
 import { isKeyBug, useKeyedPress } from "@/lib/keyedPress";
@@ -593,7 +594,8 @@ export default function RetestPanel({ testId }: { testId: string }) {
                       {ratingOf(twin.severity) ?? "not rated"}
                     </span>
                   </div>
-                  <div className="truncate text-sm">{twin.endpoint ?? twin.target}</div>
+                  {/* Where the target said it is: text with a copy button, never a link (TargetUrl). */}
+                  <div className="truncate text-sm"><TargetUrl value={twin.endpoint ?? twin.target} /></div>
                   {twin.detail && (
                     <p className="mt-1 text-sm text-muted-foreground">{twin.detail}</p>
                   )}
