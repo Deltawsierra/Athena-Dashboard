@@ -7,7 +7,7 @@ if (!process.env.UV_THREADPOOL_SIZE) {
   process.env.UV_THREADPOOL_SIZE = '16';
 }
 
-const { app, BrowserWindow, Menu, shell, net, dialog } = require('electron');
+const { app, BrowserWindow, Menu, net, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -209,14 +209,13 @@ function createWindow() {
     });
   });
 
-  // Open external links in the real browser, never in an app window.
+  // No window opens, in the app or outside it. This handler used to hand any
+  // http(s) URL to the system browser, so a link the scanned target planted in
+  // a finding opened outside the app on one click. The app links to no page of
+  // its own outside this origin, so nothing is allowed out: a target URL is
+  // shown as text with a copy button (client/src/components/TargetUrl.tsx).
   // (`new-window` was removed in Electron 22; this is its replacement.)
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      void shell.openExternal(url);
-    }
-    return { action: 'deny' };
-  });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   // Block in-page navigation away from the app's own origins.
   // Block in-page navigation away from the app's own origins. Comparing string
