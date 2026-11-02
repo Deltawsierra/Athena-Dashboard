@@ -11,6 +11,11 @@
  * Only a path on this app's own origin is such a file. A URL to anywhere else,
  * stored in the app's data, is text with a copy button (components/StoredUrl.tsx,
  * components/TargetUrl.tsx), never a one-click open.
+ *
+ * Every file the app saves from a Blob URL -- these, and the JSON the pages
+ * build (the AI-BOM's export, the assurance receipt's view, the incident pack,
+ * the signed Financial Exposure Receipt) -- has that URL revoked here, by
+ * revokeBlobUrlLater, and nowhere else.
  */
 import { throwIfResNotOk } from "@/lib/queryClient";
 
@@ -57,6 +62,16 @@ export function fileNameOf(path: string, fallback: string): string {
 export const BLOB_URL_KEPT_MS = 60_000;
 
 /**
+ * Revoke a saved file's Blob URL BLOB_URL_KEPT_MS from now, never now. The
+ * download a link's click starts reads the Blob URL after the click returns,
+ * and in Chromium (so in the desktop app) a URL revoked at once can leave the
+ * save failed or empty. Each in-app download revokes its Blob URL through this.
+ */
+export function revokeBlobUrlLater(url: string): void {
+  setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_KEPT_MS);
+}
+
+/**
  * Read `path` from this app's origin with the session's cookie and save it as
  * `fileName`. A refusal is thrown with the server's sentence (a 401 also sends
  * the person to sign in, as every read does). An answer that is the app's own
@@ -80,6 +95,6 @@ export async function saveAppFile(path: string, fileName: string): Promise<void>
   } finally {
     // Later, not now: the download the click starts reads the Blob URL after
     // this returns, and a URL revoked at once can leave the save failed or empty.
-    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_KEPT_MS);
+    revokeBlobUrlLater(url);
   }
 }

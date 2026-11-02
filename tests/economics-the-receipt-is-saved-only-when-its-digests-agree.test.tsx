@@ -66,7 +66,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   delete (URL as unknown as Record<string, unknown>).createObjectURL;
-  delete (URL as unknown as Record<string, unknown>).revokeObjectURL;
+  // Left as a no-op, not removed: a save's revoke runs a minute after it (lib/appFile.ts revokeBlobUrlLater).
+  Object.defineProperty(URL, "revokeObjectURL", { configurable: true, writable: true, value: () => undefined });
 });
 
 async function press(answer: Answer | typeof STALLED, shown: Answer = bytesOf(graded, "report")) {

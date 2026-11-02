@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SHA256_DIGEST, hexOf, receiptFileName, receiptIdOf, signedDocumentSpelling } from "@shared/economics-receipt";
 import { ApiError, throwIfResNotOk } from "@/lib/queryClient";
+import { revokeBlobUrlLater } from "@/lib/appFile";
 import { text, type Doc } from "@/lib/economics";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -65,7 +66,8 @@ function save(bytes: Uint8Array, name: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  // Later, not now: the save the click starts reads the Blob URL after this returns.
+  revokeBlobUrlLater(url);
 }
 
 type State =
