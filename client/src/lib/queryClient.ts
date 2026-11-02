@@ -1,11 +1,8 @@
 import { QueryClient, QueryFunction, keepPreviousData } from "@tanstack/react-query";
 
-// In the packaged Electron app the renderer is served from app://athena, so API
-// calls need an absolute URL. In the browser they are same-origin.
-// 127.0.0.1, not localhost: the packaged app's Content-Security-Policy names a
-// host literally, and the two spellings do not match each other.
-// The page and the API are served from the same origin, in development
-// and in the packaged app alike, so requests are relative.
+// The page and the API are served from the same origin, in development and in
+// the packaged app alike (the desktop window loads the local server's own
+// origin, electron-main.cjs), so requests are relative.
 const API_BASE = "";
 
 function getApiUrl(url: string): string {

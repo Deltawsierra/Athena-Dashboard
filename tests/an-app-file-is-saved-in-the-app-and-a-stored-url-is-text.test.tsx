@@ -2,20 +2,24 @@
 /**
  * A file of the app's own is saved inside the app with the person's session,
  * and a URL stored in the app's data is text, never a one-click open (D-RF N5,
- * round 2).
+ * rounds 2 and 3).
  *
  * The desktop app's window-open handler opens nothing (electron-main.cjs). Three
  * links leaned on it: the Engagements page's backend report (target="_blank"),
  * the Documents page's "Download File" (target="_blank") and the Evidence
  * page's "View"/"Download" (window.open). In the desktop app they would now do
  * nothing. Before, they went to the system browser, which holds no session, so
- * the report's relay answered 401. Now:
+ * the report's relay answered 401. A fourth, the scan screens' backend record
+ * panel's report, navigated the window away from the page. Now:
  *
  *   - a file on the app's own origin (the report's relay, a document stored as a
  *     path here) is read in the app, on its origin, with the session's cookie
  *     (credentials "include"), and saved from a Blob. No window opens, nothing
  *     navigates, and the save link is never put on the page. A refusal is said in
- *     the server's words, and an answer that is the app's own page is no file;
+ *     the server's words, and an answer that is the app's own page is no file.
+ *     The Blob URL is revoked later, never with the click: the download the click
+ *     starts reads it after the click returns, and revoking at once can leave the
+ *     save failed or empty (jsdom cannot show that race; the timing is pinned);
  *   - an http(s) URL to anywhere else, stored as a document's file URL, is text
  *     with a copy button that writes exactly it;
  *   - any other scheme (javascript:, file:, a protocol-relative or backslashed
@@ -29,6 +33,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import Engagements from "@/pages/Engagements";
 import Documents from "@/pages/Documents";
 import Evidence from "@/pages/Evidence";
+import BackendRecordPanel from "@/components/BackendRecordPanel";
+import { BLOB_URL_KEPT_MS, saveAppFile } from "@/lib/appFile";
 import { Toaster } from "@/components/ui/toaster";
 import { PDF_LINK } from "@/lib/backendRecordCopy";
 import { queryClient } from "@/lib/queryClient";
@@ -80,8 +86,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   queryClient.clear();
-  delete (URL as { createObjectURL?: unknown }).createObjectURL;
-  delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+  // Left as no-ops, not removed: a save's revoke runs a minute after the save, after this test.
+  Object.defineProperty(URL, "createObjectURL", { value: () => "", configurable: true });
+  Object.defineProperty(URL, "revokeObjectURL", { value: () => undefined, configurable: true });
 });
 
 /** A page over a seeded cache, with the toaster that says a refusal. */
@@ -250,5 +257,57 @@ describe("the Evidence page's documents", () => {
       fireEvent.click(button);
     }
     expect(opened).not.toHaveBeenCalled();
+  });
+});
+
+/* ---- the scan screens' backend record panel: the same report --------------------- */
+
+const PANEL = {
+  scanId: "s1", engagementId: 7, collected: true, watch: "collected", status: "completed", verdict: "PASS", verdictLabel: "Passed",
+  detail: "", collectedAt: NOW, pdfUrl: "/api/scans/t9/backend-pdf", engagement: null, engineRunId: "run-1",
+  differsFromDirect: null, mirror: null, lastAnswer: null, lastReadAt: null, lastReadError: null,
+} as const;
+
+describe("the backend record panel's report", () => {
+  it("is read in the app with the session and saved: the page is never navigated away from", async () => {
+    render(<><BackendRecordPanel backend={PANEL as never} target="https://app.customer.example/" /><Toaster /></>);
+    const link = screen.getByTestId("link-backend-pdf");
+    expect(link.textContent).toContain(PDF_LINK);
+    await expectSavedInTheApp(link, "/api/scans/t9/backend-pdf", "scan-s1-report.pdf");
+  });
+
+  it("would show a report URL that is not this app's as text, never a link or a request", async () => {
+    render(<BackendRecordPanel backend={{ ...PANEL, pdfUrl: `https://${OUTSIDE}/report.pdf` } as never} target={null} />);
+    expect(screen.queryByTestId("link-backend-pdf")).toBeNull();
+    expect(Array.from(document.querySelectorAll("a")).filter((a) => (a.getAttribute("href") ?? "").includes(OUTSIDE))).toEqual([]);
+    expect(screen.getByTestId("text-target-url").textContent).toBe(`https://${OUTSIDE}/report.pdf`);
+    expect(requests.filter((one) => one.url.includes(OUTSIDE))).toEqual([]);
+  });
+});
+
+/* ---- the saved file's Blob URL is revoked later, never with the click ------------- */
+
+describe("the saved file's Blob URL", () => {
+  it("is not revoked with the click, nor when the save returns, and is revoked once its time is up", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const revoke = vi.mocked(URL.revokeObjectURL);
+      let revokedByTheClick: number | null = null;
+      vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function click(this: HTMLAnchorElement) {
+        saved.push(this);
+        revokedByTheClick = revoke.mock.calls.length;
+      });
+      await saveAppFile("/api/scans/t9/backend-pdf", "scan-t9-report.pdf");
+      expect(saved).toHaveLength(1);
+      expect(revokedByTheClick, "revoked before the click").toBe(0);
+      expect(revoke, "revoked with the click, before the download read it").not.toHaveBeenCalled();
+      vi.advanceTimersByTime(BLOB_URL_KEPT_MS - 1);
+      expect(revoke).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(revoke.mock.calls).toEqual([["blob:http://localhost/saved"]]);
+      expect(BLOB_URL_KEPT_MS).toBeGreaterThanOrEqual(10_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

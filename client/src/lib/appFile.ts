@@ -53,6 +53,9 @@ export function fileNameOf(path: string, fallback: string): string {
   return /\.[A-Za-z0-9]{1,8}$/.test(name) ? name : fallback;
 }
 
+/** How long a saved file's Blob URL is kept before it is revoked: long enough for the download to have read it. */
+export const BLOB_URL_KEPT_MS = 60_000;
+
 /**
  * Read `path` from this app's origin with the session's cookie and save it as
  * `fileName`. A refusal is thrown with the server's sentence (a 401 also sends
@@ -69,11 +72,14 @@ export async function saveAppFile(path: string, fileName: string): Promise<void>
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   try {
+    // Never put on the page: a detached link's click starts the download in Chromium.
     const link = document.createElement("a");
     link.href = url;
     link.download = fileName;
     link.click();
   } finally {
-    URL.revokeObjectURL(url);
+    // Later, not now: the download the click starts reads the Blob URL after
+    // this returns, and a URL revoked at once can leave the save failed or empty.
+    setTimeout(() => URL.revokeObjectURL(url), BLOB_URL_KEPT_MS);
   }
 }
