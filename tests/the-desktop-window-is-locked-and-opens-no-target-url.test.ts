@@ -13,6 +13,10 @@
  *     target URL is now text with a copy button (client/src/components/TargetUrl.tsx).
  *   - Navigation stays on the app's own origins, compared as origins: the
  *     "http://127.0.0.1:5000@<host>/" a prefix comparison let through is refused.
+ *   - Permissions are denied, every one, asked or checked, before the page
+ *     loads: Electron grants a request no handler answers. The one allowed is
+ *     the clipboard write the app's copy buttons use (a target URL's, a
+ *     receipt's, the failsafe's bytes to sign), and only to the app's own origins.
  *
  * The file is run as the packaged app runs it (app.isPackaged true): no dev
  * server is spawned, and the server bundle it requires is stood in for.
@@ -32,17 +36,24 @@ type Handler = (...args: unknown[]) => unknown;
 /** electron-main.cjs, run to its window with `electron` stood in; what it set up, and the shell's spies. */
 async function openTheWindow() {
   const shell = { openExternal: vi.fn(async () => undefined), openPath: vi.fn(async () => ""), showItemInFolder: vi.fn() };
-  const opened: { options?: Record<string, unknown>; windowOpen?: Handler; headers?: Handler; loaded?: string } = {};
+  const opened: {
+    options?: Record<string, unknown>; windowOpen?: Handler; headers?: Handler; loaded?: string;
+    permissionRequest?: Handler; permissionCheck?: Handler; order: string[];
+  } = { order: [] };
   const events = new Map<string, Handler>();
   class BrowserWindow {
     webContents = {
-      session: { webRequest: { onHeadersReceived: (handler: Handler) => { opened.headers = handler; } } },
+      session: {
+        webRequest: { onHeadersReceived: (handler: Handler) => { opened.headers = handler; } },
+        setPermissionRequestHandler: (handler: Handler) => { opened.permissionRequest = handler; opened.order.push("permission-request"); },
+        setPermissionCheckHandler: (handler: Handler) => { opened.permissionCheck = handler; opened.order.push("permission-check"); },
+      },
       setWindowOpenHandler: (handler: Handler) => { opened.windowOpen = handler; },
       on: (event: string, handler: Handler) => { events.set(event, handler); },
       openDevTools: () => {}, toggleDevTools: () => {},
     };
     constructor(options: Record<string, unknown>) { opened.options = options; }
-    loadURL(url: string) { opened.loaded = url; }
+    loadURL(url: string) { opened.loaded = url; opened.order.push("load"); }
     once() {}
     on() {}
     show() {}
@@ -199,5 +210,56 @@ describe("in-page navigation", () => {
 
   it.each(REFUSED)("is refused for %j", async (url) => {
     expect(await guarded(url)).toEqual({ "will-navigate": false, "will-redirect": false, "will-frame-navigate": false });
+  });
+});
+
+describe("permissions", () => {
+  /** Every permission Electron names for the request and check handlers, and one it does not. */
+  const DENIED = [
+    "clipboard-read", "media", "display-capture", "geolocation", "notifications", "midi", "midiSysex", "pointerLock",
+    "keyboardLock", "fullscreen", "openExternal", "mediaKeySystem", "idle-detection", "window-management",
+    "speaker-selection", "storage-access", "top-level-storage-access", "fileSystem", "hid", "serial", "usb",
+    "background-sync", "persistent-storage", "unknown", "a-permission-not-yet-named",
+  ];
+  const APP = [ORIGIN, "http://localhost:5000"];
+  const ELSEWHERE = [`http://${OUTSIDE}`, `${ORIGIN}@${OUTSIDE}`, "https://127.0.0.1:5000", "file://", "null", "", "not a url"];
+
+  /** The request handler's answer to `permission` asked from `url`. */
+  function asked(handler: Handler, permission: string, url: string): unknown[] {
+    const answers: unknown[] = [];
+    handler({}, permission, (granted: unknown) => answers.push(granted), { requestingUrl: url, isMainFrame: true });
+    return answers;
+  }
+
+  it("are answered by the window's own handlers, set before the page loads", async () => {
+    const { opened } = await openTheWindow();
+    expect(opened.permissionRequest).toBeTypeOf("function");
+    expect(opened.permissionCheck).toBeTypeOf("function");
+    expect(opened.order.indexOf("permission-request")).toBeLessThan(opened.order.indexOf("load"));
+    expect(opened.order.indexOf("permission-check")).toBeLessThan(opened.order.indexOf("load"));
+  });
+
+  it.each(DENIED)("denies %j, asked or checked, even from the app's own origin", async (permission) => {
+    const { opened } = await openTheWindow();
+    for (const origin of [...APP, ...ELSEWHERE]) {
+      expect(asked(opened.permissionRequest!, permission, `${origin}/athena`), `${permission} asked from ${origin}`).toEqual([false]);
+      expect(opened.permissionCheck!({}, permission, origin, {}), `${permission} checked from ${origin}`).toBe(false);
+    }
+  });
+
+  it("allows the clipboard write the copy buttons use to the app's own origins, and to nothing else", async () => {
+    const { opened } = await openTheWindow();
+    for (const origin of APP) {
+      expect(asked(opened.permissionRequest!, "clipboard-sanitized-write", `${origin}/findings`), origin).toEqual([true]);
+      expect(opened.permissionCheck!({}, "clipboard-sanitized-write", origin, {}), origin).toBe(true);
+    }
+    for (const origin of ELSEWHERE) {
+      expect(asked(opened.permissionRequest!, "clipboard-sanitized-write", `${origin}/x`), origin).toEqual([false]);
+      expect(opened.permissionCheck!({}, "clipboard-sanitized-write", origin, {}), origin).toBe(false);
+    }
+    // A request with no details names no origin, so it is the app's to nobody.
+    const answers: unknown[] = [];
+    opened.permissionRequest!({}, "clipboard-sanitized-write", (granted: unknown) => answers.push(granted));
+    expect(answers).toEqual([false]);
   });
 });
