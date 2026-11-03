@@ -127,7 +127,7 @@ screen's tests. The full suite and the packaged build run on Linux only.
 | `ATHENA_ENGINE_KEY`       | unset                          | The engine's operator key. Same two places. |
 | `ATHENA_ASSISTANT_URL`, `ATHENA_ASSISTANT_KEY`, `ATHENA_ASSISTANT_MODEL` | unset | An OpenAI-compatible endpoint, its key and its model, for AI Chat. With none set, AI Chat records the message and answers nothing. Same two places. |
 | `ATHENA_MAX_INFLIGHT_RETESTS` | `4`                        | The most retests this dashboard asks of the engine at once. |
-| `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console, the assurance screens and the financial views. Each person reaches it as themselves: see [Each person reaches Athena-Backend as themselves](#each-person-reaches-athena-backend-as-themselves). |
+| `ATHENA_FAILSAFE_URL`     | unset                          | Base URL of the failsafe control plane (Athena-Backend). Enables the Failsafe console, the assurance screens, the financial views and the backend health strip on every screen (see [Athena-Backend's health on every screen](#athena-backends-health-on-every-screen)). Each person reaches it as themselves: see [Each person reaches Athena-Backend as themselves](#each-person-reaches-athena-backend-as-themselves). |
 | `ATHENA_FAILSAFE_USER`    | unset                          | The stop credential's username: the service account every stop goes as (beside the service token, or alone without it). Nothing else uses it: every read and every other write goes as the signed-in person. |
 | `ATHENA_FAILSAFE_PASSWORD`| unset                          | The stop credential's password. Analyst-role to draft pause/stand-down; admin-role to draft terminate. Its token is renewed with the refresh token; the password is used again only when a refresh is refused. Used only by stops. |
 | `ATHENA_FAILSAFE_SERVICE_TOKEN` | unset                    | The control plane's failsafe service token (its `FAILSAFE_SERVICE_TOKEN`). Every stop this server relays presents it and waits on no sign-in; see [Stops and the failsafe service token](#stops-and-the-failsafe-service-token). Read once at start-up; never logged or sent to the browser. |
@@ -779,6 +779,43 @@ deadline: 20 s, headers and body together** (`server/read-deadline.ts`).
   - The failsafe console's reads, which the control plane judges stops, are not
     under it. `server/failsafe.ts` bounds each of them itself.
   - Stops in the browser are mutations (`apiRequest`), which take no signal.
+
+## Athena-Backend's health on every screen
+
+Athena-Backend's `GET /api/health/` (Athena-Backend #217) says whether the process
+that answers lost or refused anything an operator must act on, with three counts:
+stderr lines lost, log records dropped, and unrecorded dispatches refused. With
+`ATHENA_FAILSAFE_URL` set, every screen carries it in a strip under the top bar
+(`client/src/components/BackendHealthStrip.tsx`), with the state and every
+non-zero count by name. The reading is strict (`shared/backend-health.ts`):
+
+| The backend answered | The strip shows |
+|---|---|
+| `"ok"` with every count reported, each a whole number and zero | **ok** |
+| `"degraded"` | **degraded**, with each count it named |
+| `"unknown"`; no status, or one the console does not know; a count missing or not a whole number; an HTTP status other than 200; a body that is not JSON | **unknown**, with what could not be read |
+| nothing: the connection refused, or no answer within 5 s | **unreachable** |
+| its plain status and no counts (a backend from before #217, and #217's own `"ok"`, which names no count) | **counts not reported**: "counts not reported by this backend", never all-zero |
+| `"error"` | **error** |
+
+So against #217 as it stands the strip never shows **ok**: #217 sends counts
+only when they are not all zero. A backend that sends every count (zeros
+included, under `counts` or `degraded`) is shown **ok** when they are all zero.
+Fields the console does not recognise are shown as sent, and so are a `workers`
+list and acknowledgement fields (AB-HEALTH-SHARED); there is no acknowledge
+button yet. A reading older than 3 minutes is never shown as **ok**, and a
+reading the page cannot read, or a server it cannot ask, is **unknown**.
+
+The read is off every stop path (`server/backend-health.ts`). `GET
+/api/backend-health` answers from memory, at once, and never reads the backend
+itself, so it holds none of the browser's connections while the backend is
+slow. The backend is read on a timer, one read at a time, each bounded to 5 s
+(headers and body): every 15 s while it answers 200, and after each read in a
+row that does not, a wait twice as long as the one before (up to 2 minutes);
+and only while someone has the console open (it stops 2 minutes after the last
+ask). It sends no credential: the
+backend serves its health to anyone. No stop, kill switch or failsafe action
+waits on it (`tests/a-stop-goes-while-the-backend-s-health-read-hangs.test.ts`).
 
 ## Economic Exposure (financial views)
 

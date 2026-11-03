@@ -42,6 +42,7 @@ import type {
 } from "@shared/schema";
 import type { BackendRecordView, RetestCheckRecordView } from "@shared/backend-record";
 import { RetestCheckWatcher, backendStandingOf, type RetestCheckHooks } from "./retest-check-watch";
+import { backendHealth } from "./backend-health";
 import {
   insertClientSchema, insertSiteSchema, createTestSchema,
   insertDocumentSchema, insertAIHealthMetricSchema,
@@ -5589,6 +5590,15 @@ export function registerRoutes(app: Express): void {
     }
     res.json(await storage.getAllActivityLogs());
   }));
+
+  // ==== ATHENA-BACKEND HEALTH (the console's health strip) ====
+  // The backend's own health and its counts (server/backend-health.ts), served
+  // from memory: this route never reads the backend, so it holds no connection
+  // while the backend is slow, and no stop, kill switch or failsafe action
+  // waits on it or on the background read behind it.
+  app.get("/api/backend-health", (_req, res) => {
+    res.json(backendHealth());
+  });
 
   // ==== AI HEALTH ====
   app.get("/api/ai-health/latest", asyncHandler(async (_req, res) => {

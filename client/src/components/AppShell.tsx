@@ -42,6 +42,7 @@ import {
 } from "lucide-react";
 import { ReactNode } from "react";
 import ThemeToggle from "./ThemeToggle";
+import BackendHealthStrip from "./BackendHealthStrip";
 import { isSampleMode, SAMPLE_LABEL, shellSample } from "@/sample";
 import { cn } from "@/lib/utils";
 import athenaStatue from "@assets/mythos/athena-statue.webp";
@@ -308,6 +309,9 @@ export default function AppShell({ children, onLogout, isAdmin, username }: AppS
             </DropdownMenu>
           </div>
         </header>
+
+        {/* Athena-Backend's own health and its counts, on every screen (off every stop path). */}
+        <BackendHealthStrip />
 
         {/* Page */}
         <main className="min-w-0 flex-1">{children}</main>

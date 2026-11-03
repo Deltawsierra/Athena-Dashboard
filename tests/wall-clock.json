@@ -18,5 +18,6 @@
   "tests/a-stop-from-an-account-that-must-change-its-password-waits-on-nothing.test.ts",
   "tests/backend-launched-scans-are-adopted-into-the-record-index.test.ts",
   "tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts",
-  "tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts"
+  "tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts",
+  "tests/a-stop-goes-while-the-backend-s-health-read-hangs.test.ts"
 ]

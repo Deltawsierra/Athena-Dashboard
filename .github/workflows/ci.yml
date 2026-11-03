@@ -67,8 +67,9 @@ jobs:
   # the tests of a scan whose run the engine does not know, and the desktop
   # window's lock with the target-content tests (a target URL is text; a hostile
   # finding renders inert; an app file is saved in the app; every in-app download
-  # keeps its Blob URL until the save has read it), and the recovery screen's
-  # relay and render tests. Not the whole suite and not the packaged build, which
+  # keeps its Blob URL until the save has read it), the recovery screen's
+  # relay and render tests, and the backend health strip's tests (a stop while
+  # the backend's health read hangs among them). Not the whole suite and not the packaged build, which
   # stay on the Linux job above.
   windows:
     runs-on: windows-latest
@@ -150,3 +151,7 @@ jobs:
           tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts
           tests/the-authority-screens-show-what-the-backend-serves.test.tsx
           tests/the-authority-histories-show-what-the-backend-recorded.test.tsx
+          tests/a-stop-goes-while-the-backend-s-health-read-hangs.test.ts
+          tests/the-console-reads-the-backend-s-health-strictly-and-never-as-ok-unless-it-is.test.ts
+          tests/the-backend-health-reading-is-strict-and-its-reads-back-off.test.ts
+          tests/the-console-shows-a-degraded-backend-with-its-counts-and-never-ok-unless-it-is.test.tsx

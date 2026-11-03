@@ -7,6 +7,7 @@ import path from "path";
 import { createApp, errorHandler } from "./app";
 import { initializeDefaultData, flagLegacyDefaultPasswords } from "./init-data";
 import { startSampling } from "./health";
+import { startBackendHealthReads } from "./backend-health";
 import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
 import { loadServiceToken } from "./failsafe-service-token";
 import * as settings from "./settings";
@@ -30,6 +31,9 @@ function serveStatic(app: express.Application): void {
   // Take a reading now and every minute after, so the health screen draws a
   // real trend rather than reading one row somebody wrote at install time.
   startSampling();
+  // Athena-Backend's own health, for the console's strip: read in the
+  // background while the console is open, off every stop path.
+  startBackendHealthReads();
   // The failsafe service token every stop presents, read from the environment
   // once, now: a stop sent with it waits on no sign-in.
   loadServiceToken();
