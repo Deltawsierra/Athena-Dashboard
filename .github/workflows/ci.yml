@@ -101,6 +101,8 @@ jobs:
           node scripts/test.mjs
           tests/a-stop-goes-on-no-connection-the-engine-is-closing-and-follows-a-redirect.test.ts
           tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts
+          tests/two-writes-to-a-scan-row-never-drop-each-others-findings.test.ts
+          tests/a-test-row-is-changed-from-the-row-as-it-lands-on-both-storage-backends.test.ts
           tests/a-failed-write-never-holds-back-or-hides-a-stop.test.ts
           tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts
           tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts

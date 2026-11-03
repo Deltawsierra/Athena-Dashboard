@@ -862,11 +862,13 @@ async function mirrorStopToBackend(
   const mirror = await backendScans.mirrorStop(backendScanId, reason);
   const reading: BackendMirrorReading = { at: new Date().toISOString(), mirrored: mirror.mirrored, via: mirror.via, detail: mirror.detail };
   try {
-    // The row as it is now -- the live poll writes it too; a row deleted since keeps no reading.
-    const current = await storage.getTest(test.id);
-    if (current) {
-      await storage.updateTest(test.id, { findings: { ...((current.findings ?? {}) as Record<string, unknown>), backendMirror: reading } });
-    }
+    // Onto the row as it is when the write lands, in one storage step -- the
+    // live poll and the collect watch write its findings too, and a read taken
+    // before this write would put back the row as it was before theirs. A row
+    // deleted since keeps no reading.
+    await storage.updateTestWith(test.id, (current) => ({
+      findings: { ...((current.findings ?? {}) as Record<string, unknown>), backendMirror: reading },
+    }));
   } catch (cause) {
     console.error(logLine(`[abort] the reading of the stop mirror for backend scan ${backendScanId} could not be written: ${causeOf(cause)}`));
   }
@@ -2634,28 +2636,36 @@ function snapshotOfRecord(record: backendScans.BackendScanRecord, direct: { resu
  * a record the watch collected but could not file, and the adoption sync's
  * backstop. A hybrid scan is never filed into this dashboard's own findings
  * ledger. Answers the end it wrote, or null when it wrote none.
+ *
+ * Written onto the row as it is when the write lands, in one storage step
+ * (updateTestWith): a Stop's mirror and the live poll write the row's findings
+ * too, and a read taken before an await would write back the row as it was
+ * before theirs.
  */
 async function fileRecordIntoRow(testId: string, record: backendScans.BackendScanRecord): Promise<{ status: string; completedAt: Date } | null> {
-  const test = await storage.getTest(testId);
-  if (!test) return null;
-  const recorded = (test.findings ?? {}) as Record<string, unknown>;
   const results = backendScans.recordResults(record);
   const coverage = backendScans.recordCoverage(record);
-  const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
-  const end = FINISHED_RUN_STATES.has(test.status) ? null : endOfRecord(record, new Date());
-  await storage.updateTest(test.id, {
-    findings: {
-      ...recorded,
-      backend: snapshot,
-      ...(results !== null ? { results } : {}),
-      ...(coverage !== null ? { coverage } : {}),
-    },
-    ...(results !== null ? countSeverities(results) : {}),
-    ...(end !== null ? { status: end.status, completedAt: end.completedAt } : {}),
+  const wrote: { end: { status: string; completedAt: Date } | null } = { end: null };
+  const test = await storage.updateTestWith(testId, (row) => {
+    const recorded = (row.findings ?? {}) as Record<string, unknown>;
+    const snapshot = snapshotOfRecord(record, { results: recorded.results, coverage: recorded.coverage });
+    const end = FINISHED_RUN_STATES.has(row.status) ? null : endOfRecord(record, new Date());
+    wrote.end = end;
+    return {
+      findings: {
+        ...recorded,
+        backend: snapshot,
+        ...(results !== null ? { results } : {}),
+        ...(coverage !== null ? { coverage } : {}),
+      },
+      ...(results !== null ? countSeverities(results) : {}),
+      ...(end !== null ? { status: end.status, completedAt: end.completedAt } : {}),
+    };
   });
+  if (!test) return null;
   // Ended: the row's reads of its run are counted no more.
-  if (end !== null) forgetRunNotKnown(test.id);
-  return end;
+  if (wrote.end !== null) forgetRunNotKnown(test.id);
+  return wrote.end;
 }
 
 /**
@@ -4557,13 +4567,19 @@ export function registerRoutes(app: Express): void {
       // A record the watch collected while this read was on its way was filed
       // into the row after this read took it (fileRecordIntoRow), its end with
       // it: answered from the row as it is now, as the next read would answer
-      // it -- never "running" beside a collected record. A read of storage, on
-      // no stop's path.
+      // it -- never "running" beside a collected record. So is a record this
+      // read filed itself (backendRecordView: the watch collected it, and its
+      // own write did not land): the row this read took has no record on it,
+      // and the row as it is now does -- never a collected record beside a row
+      // without it. A read of storage, on no stop's path.
       let current = row;
       let said = payload;
-      if (backend?.collected === true && !FINISHED_RUN_STATES.has(row.status)) {
+      const filedHere = backendSnapshotOf(((row.findings ?? {}) as Record<string, unknown>).backend) === null;
+      if (backend?.collected === true && (!FINISHED_RUN_STATES.has(row.status) || filedHere)) {
         const latest = await storage.getTest(row.id);
-        if (latest && FINISHED_RUN_STATES.has(latest.status)) {
+        const ended = latest !== undefined && FINISHED_RUN_STATES.has(latest.status) && !FINISHED_RUN_STATES.has(row.status);
+        const filed = latest !== undefined && filedHere && backendSnapshotOf(((latest.findings ?? {}) as Record<string, unknown>).backend) !== null;
+        if (latest && (ended || filed)) {
           current = latest;
           said = recordedPayload(latest, true);
         }
@@ -4659,28 +4675,33 @@ export function registerRoutes(app: Express): void {
       ? countSeverities(current.findings)
       : finished ? UNREAD_COUNTS : {};
 
-    // A direct read that succeeded clears the mark of a run this dashboard's
-    // engine key could not read on the first try (decision 7): the run is
-    // readable by this key after all, so its direct Stop is offered again.
-    const { stop: _marked, ...unmarked } = recorded;
-    const readable = stoppedOnlyAtBackend(recorded) ? unmarked : recorded;
-    // So does it clear the reading that the engine did not know the run
-    // (markRunNotKnown): it has just answered for it.
-    const { [NOT_KNOWN_KEY]: _reading, ...kept } = readable;
-    // A Stop's mirror reading written to the row while the engine was being
-    // read (mirrorStopToBackend) is kept, not written over by this poll.
-    const latest = storage.peekTest(test.id);
-    const mirror = backendMirrorOf(((latest?.findings ?? {}) as Record<string, unknown>).backendMirror);
-    const updated = await storage.updateTest(test.id, {
-      status: current.state,
-      completedAt: finished ? new Date() : null,
-      // The engine's coverage manifest rides with the run's end
-      // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
-      findings: {
-        ...kept, ...(mirror ? { backendMirror: mirror } : {}),
-        results: current.findings, ...(current.coverage ? { coverage: current.coverage } : {}),
-      },
-      ...counts,
+    // Written onto the row as it is when the write lands, in one storage step
+    // (updateTestWith), never from the read this route began with: a Stop's
+    // mirror reading (mirrorStopToBackend) and the backend's record (the
+    // collect watch, fileRecordIntoRow) may have been written while the engine
+    // was being read, and are kept, not written over by this poll.
+    const polled = current;
+    const updated = await storage.updateTestWith(test.id, (row) => {
+      const now = (row.findings ?? {}) as Record<string, unknown>;
+      // The record was filed meanwhile: it is the row's record of the run now
+      // (the read above answers from it), and this poll writes nothing over it.
+      if (backendScanId !== null && backendSnapshotOf(now.backend) !== null) return null;
+      // A direct read that succeeded clears the mark of a run this dashboard's
+      // engine key could not read on the first try (decision 7): the run is
+      // readable by this key after all, so its direct Stop is offered again.
+      const { stop: _marked, ...unmarked } = now;
+      const readable = stoppedOnlyAtBackend(now) ? unmarked : now;
+      // So does it clear the reading that the engine did not know the run
+      // (markRunNotKnown): it has just answered for it.
+      const { [NOT_KNOWN_KEY]: _reading, ...kept } = readable;
+      return {
+        status: polled.state,
+        completedAt: finished ? new Date() : null,
+        // The engine's coverage manifest rides with the run's end
+        // (shared/scan-coverage.ts); a poll that sent none leaves what is recorded.
+        findings: { ...kept, results: polled.findings, ...(polled.coverage ? { coverage: polled.coverage } : {}) },
+        ...counts,
+      };
     });
 
     // Filed once the run has stopped moving. Filing a scan still in flight

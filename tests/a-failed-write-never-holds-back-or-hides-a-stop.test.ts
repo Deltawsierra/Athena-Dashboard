@@ -133,7 +133,7 @@ async function runningScan() {
 async function diskFull() {
   const { storage } = await import("../server/storage-unified");
   const full = () => Promise.reject(new Error("SQLITE_FULL: database or disk is full"));
-  for (const write of ["updateAIControlSettings", "createActivityLog", "updateTest", "createTest", "deleteTest", "deleteClient"] as const) {
+  for (const write of ["updateAIControlSettings", "createActivityLog", "updateTest", "updateTestWith", "createTest", "deleteTest", "deleteClient"] as const) {
     vi.spyOn(storage, write).mockImplementation(full as never);
   }
 }

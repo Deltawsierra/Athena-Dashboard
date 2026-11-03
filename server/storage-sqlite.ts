@@ -553,6 +553,23 @@ export class SqliteStorage implements IStorage {
     }
     return this.readBack(() => this.getTest(id));
   }
+  async updateTestWith(id: string, change: (test: Test) => Partial<InsertTest> | null): Promise<Test | undefined> {
+    // One IMMEDIATE transaction: the row is read, changed and read back under
+    // the write lock, so a write another writer -- or another dashboard on
+    // this file -- made a moment ago is in the row `change` is handed, never
+    // lost to a read taken before it. A busy database refuses it at BEGIN,
+    // before anything is written, and withBusyRetry tries it again off the
+    // loop; no statement here waits on the lock.
+    const run = sqlite.transaction((): Test | undefined => {
+      const row = db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
+      if (!row) return undefined;
+      const updates = change({ ...row });
+      if (updates === null || definedKeys(updates).length === 0) return row;
+      db.update(schema.tests).set(updates).where(eq(schema.tests.id, id)).run();
+      return db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
+    });
+    return this.remember(run.immediate());
+  }
   async deleteTest(id: string): Promise<boolean> {
     const removed = db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
     this.testCache.delete(id);
