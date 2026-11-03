@@ -20,5 +20,6 @@
   "tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts",
   "tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts",
   "tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts",
-  "tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts"
+  "tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts",
+  "tests/no-failsafe-command-is-lost-past-the-first-page.test.ts"
 ]

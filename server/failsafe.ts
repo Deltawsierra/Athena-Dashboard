@@ -72,6 +72,8 @@ const FAILSAFE_ENGINE_ID_ENV = "ATHENA_FAILSAFE_ENGINE_ID";
 interface ControlPlaneResponse {
   readonly status: number;
   readonly ok: boolean;
+  /** A response header's value (several values joined by commas), or undefined when it was not sent. */
+  header(name: string): string | undefined;
   text(): Promise<string>;
   readonly body: { cancel(): Promise<void> };
 }
@@ -108,6 +110,10 @@ function send(target: string, init: { method?: string; headers?: Record<string, 
       resolve({
         status,
         ok: status >= 200 && status < 300,
+        header(name: string): string | undefined {
+          const value = res.headers[name.toLowerCase()];
+          return Array.isArray(value) ? value.join(",") : value;
+        },
         text(): Promise<string> {
           if (reading === null) {
             reading = new Promise<string>((resolveText, rejectText) => {
@@ -757,6 +763,14 @@ export interface DraftedCommand {
   signingBytes: string;
   /** The document to sign, ready to paste into `mythos-failsafe sign --draft -`. */
   draft: CommandDraft;
+  /**
+   * Only when the control plane's answer to a draft named no command id (a
+   * non-empty string uuid): why the command cannot be opened here by its id
+   * (DASH-FAILSAFE-3). The command was drafted all the same, and is never
+   * hidden: the console shows it with this reason, finds it among the commands
+   * in flight by its nonce when it can, and says how to act on it otherwise.
+   */
+  unopenable?: string;
 }
 
 export interface FailsafeAuditEvent {
@@ -794,6 +808,15 @@ export interface FailsafeStateView {
    * may be awaiting a signature on the control plane -- never nothing.
    */
   possibleStops?: Record<string, number>;
+  /**
+   * Whether the lists in flight (`awaitingSignatures`, `ready`) are all there
+   * is (DASH-FAILSAFE-3; morePastThePage). `true`: the control plane said it
+   * left commands out, past its row or byte limit -- a stop awaiting a
+   * signature may be among them. `null`: it did not say whether it left any
+   * out. Absent only when it said, in so many words, that it left none out.
+   * A list that may not be whole is never shown as whole.
+   */
+  more?: true | null;
 }
 
 /**
@@ -807,6 +830,41 @@ export interface FailsafeCommandList {
   unreadable?: UnreadableRows;
   /** Of the rows that could not be read, how many may be a stop (as FailsafeStateView.possibleStops). */
   possibleStops?: Record<string, number>;
+  /** Whether the list is all there is, as FailsafeStateView.more: `true` cut, `null` not said, absent whole. */
+  more?: true | null;
+}
+
+/** The header the control plane's two stop-lane reads carry: "true" when a read left a command out (athena-backend failsafe/views.py MORE_HEADER). */
+export const FAILSAFE_MORE_HEADER = "X-Failsafe-More";
+
+/**
+ * Whether the control plane left commands out of a stop-lane read, past its
+ * page (athena-backend failsafe/views.py `_Page`: its row and byte limits),
+ * from the state's `more` field (`body`; undefined for the list, whose body is
+ * a bare array) and the X-Failsafe-More header. It has no next page to follow:
+ * the read takes no cursor or offset, only `engine_id` and `status`. So what
+ * it says is said on, never dropped (DASH-FAILSAFE-3):
+ *
+ *   - true when either says true: a command was left out;
+ *   - false only when one says exactly false and neither says true, and
+ *     neither is odd;
+ *   - null otherwise -- missing from both, or an odd value ("yes", 1, a
+ *     header that is neither "true" nor "false"): whether any was left out is
+ *     not known, so the list is never read as whole (as DASH-FAILSAFE-2 reads
+ *     every missing or odd field: never as the less strict answer).
+ */
+function morePastThePage(body: unknown, header: string | undefined): boolean | null {
+  const values = header === undefined ? [] : header.split(",").map((one) => one.trim().toLowerCase());
+  if (body === true || values.includes("true")) return true;
+  const bodyOdd = body !== undefined && typeof body !== "boolean";
+  const headerOdd = values.some((one) => one !== "false");
+  if (bodyOdd || headerOdd) return null;
+  return body === false || values.length > 0 ? false : null;
+}
+
+/** `more` as a read carries it: absent when the list is whole. */
+function moreField(more: boolean | null): { more?: true | null } {
+  return more === false ? {} : { more: more === true ? true : null };
 }
 
 /** The audit trail, every row that could be read; and, only when one could not, how many (`unreadable.events`). */
@@ -836,7 +894,8 @@ function requiredSignaturesOf(raw: unknown): number | null {
 
 function command(raw: Record<string, unknown>): FailsafeCommand {
   return {
-    uuid: String(raw.uuid ?? ""),
+    // A uuid is a string or none: a number (7) is no id the control plane finds a command by.
+    uuid: typeof raw.uuid === "string" ? raw.uuid : "",
     engineId: String(raw.engine_id ?? ""),
     action: String(raw.action ?? ""),
     nonce: String(raw.nonce ?? ""),
@@ -983,6 +1042,8 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   const ready = commandRows(payload.ready, unreadable, "ready", possibleStops);
   // The history: the newest commands, in flight or not (empty under the service token). Counted, not stops.
   const recent = commandRows(payload.recent, unreadable, "recent");
+  // A list the control plane cut at its page is said to be cut, never shown as whole (DASH-FAILSAFE-3).
+  const more = morePastThePage(payload.more, response.header(FAILSAFE_MORE_HEADER));
   return {
     engineId: typeof payload.engine_id === "string" ? payload.engine_id : null,
     engineState: typeof payload.engine_state === "string" ? payload.engine_state : null,
@@ -992,6 +1053,7 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
     recent,
     ...withUnreadable(unreadable),
     ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}),
+    ...moreField(more),
   };
 }
 
@@ -1016,7 +1078,14 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   const unreadable: UnreadableRows = {};
   const possibleStops: Record<string, number> = {};
   const commands = commandRows(payload, unreadable, "commands", possibleStops);
-  return { commands, ...withUnreadable(unreadable), ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}) };
+  // The list's body is a bare array: whether the control plane cut it rides in its header only (DASH-FAILSAFE-3).
+  const more = morePastThePage(undefined, response.header(FAILSAFE_MORE_HEADER));
+  return {
+    commands,
+    ...withUnreadable(unreadable),
+    ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}),
+    ...moreField(more),
+  };
 }
 
 /**
@@ -1046,12 +1115,19 @@ export async function draftCommand(input: {
   // A stop's draft has been made by now: its answer is waited for no longer than a stop's.
   const bodyMs = STOP_ACTIONS.has(input.action) ? failsafeTimeouts.stopBodyMs : failsafeTimeouts.bodyMs;
   const payload = asRecord(await jsonWithin(response, bodyMs, "the draft"));
+  const drafted = remember(command(payload));
   return {
     ok: true,
     drafted: {
-      command: remember(command(payload)),
+      command: drafted,
       signingBytes: typeof payload.signing_bytes === "string" ? payload.signing_bytes : "",
       draft: draftFrom(payload),
+      // Drafted, but with no id to open it by: said, never hidden (DASH-FAILSAFE-3). Nothing here reads the
+      // control plane again for it -- the draft has gone, and is answered now.
+      ...(drafted.uuid === "" ? {
+        unopenable: "the control plane's answer to the draft named no command id (uuid), so this console cannot read " +
+          "the command, relay a signature to it or withdraw it by its id",
+      } : {}),
     },
   };
 }

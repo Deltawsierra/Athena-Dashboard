@@ -160,4 +160,6 @@ jobs:
           tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts
           tests/a-missing-or-odd-failsafe-field-is-said-on-the-console-never-read-as-fewer.test.tsx
           tests/a-stored-kill-switch-flag-that-is-not-false-reads-engaged-on-both-storage-backends.test.ts
+          tests/no-failsafe-command-is-lost-past-the-first-page.test.ts
+          tests/a-cut-failsafe-list-and-a-stop-drafted-with-no-id-are-said-on-the-console.test.tsx
           tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx

@@ -5881,6 +5881,16 @@ export function registerRoutes(app: Express): void {
               (list.possibleStops ? `, ${list.possibleStops.commands} of them possibly a stop` : "") +
               "; a command not known here is read when its signature is relayed, as a possible stop");
           }
+          // A list the control plane cut at its page (DASH-FAILSAFE-3): what it listed is learnt, and the rest
+          // is said -- never read as all there is. It has no next page to read (no cursor), and nothing waits
+          // on one: the stops went first, and a command not learnt here is relayed as a possible stop.
+          if (list.more !== undefined) {
+            console.warn(`[failsafe] the kill switch's read of the failsafe commands learnt ${list.commands.length}, ` +
+              (list.more === true
+                ? "but the control plane left more out past its page (X-Failsafe-More: true): more commands exist than were read"
+                : "but the control plane did not say whether it left any out (no X-Failsafe-More): more commands may exist than were read") +
+              "; a command not learnt here is read when its signature is relayed, as a possible stop");
+          }
         }, (cause) => {
           console.warn(`[failsafe] the kill switch's read of the failsafe commands failed (${causeOf(cause)}); ` +
             "a command not known here is read when its signature is relayed");
@@ -6325,6 +6335,9 @@ export function registerRoutes(app: Express): void {
       // The body stays the array it always was; a row that could not be read is counted in a header.
       const list = await failsafe.listCommands({ engineId, status });
       sendUnreadableRows(res, list.unreadable);
+      // Whether the control plane cut the list at its page, in its own header's words (DASH-FAILSAFE-3):
+      // "true", "false", or "unknown" when it did not say. The body stays the bare array.
+      res.setHeader(failsafe.FAILSAFE_MORE_HEADER, list.more === undefined ? "false" : list.more === true ? "true" : "unknown");
       res.json(list.commands);
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;
@@ -6352,6 +6365,8 @@ export function registerRoutes(app: Express): void {
     // plane had drafted, and the page never received the uuid it signs.
     await recordFailsafeAct(req, "drafted", result.drafted.command.uuid, {
       failsafeAction: data.action, engineId: data.engineId, reason: data.reason,
+      // Drafted with no id (DASH-FAILSAFE-3): recorded with the nonce it can be found by, and why.
+      ...(result.drafted.unopenable !== undefined ? { nonce: result.drafted.command.nonce, unopenable: result.drafted.unopenable } : {}),
     });
     res.status(201).json(result.drafted);
   }));
