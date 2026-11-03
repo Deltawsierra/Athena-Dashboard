@@ -385,10 +385,13 @@ export async function firstDirectReads(deps: AdoptionDeps, adopted: AdoptedRow[]
     .map(async (one) => {
       try {
         if ((await deps.readRun(one.engineRunId as string)) !== "read") return;
-        const test = await deps.storage.getTest(one.testId);
-        if (!test || !stoppedOnlyAtBackend(test.findings)) return;
-        const { stop: _marked, ...unmarked } = test.findings as Record<string, unknown>;
-        await deps.storage.updateTest(test.id, { findings: unmarked });
+        // Cleared on the row as it is when the write lands (updateTestWith):
+        // the record, a Stop's mirror or any other key written meanwhile stays.
+        await deps.storage.updateTestWith(one.testId, (test) => {
+          if (!stoppedOnlyAtBackend(test.findings)) return null;
+          const { stop: _marked, ...unmarked } = test.findings as Record<string, unknown>;
+          return { findings: unmarked };
+        });
       } catch {
         // Left marked: the next read of the scan clears it when it succeeds.
       }
