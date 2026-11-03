@@ -5878,17 +5878,22 @@ export function registerRoutes(app: Express): void {
           if (list.unreadable) {
             console.warn(`[failsafe] the kill switch's read of the failsafe commands could not read some rows ` +
               `(${JSON.stringify(list.unreadable)})` +
-              (list.possibleStops ? `, ${list.possibleStops.commands} of them possibly a stop` : "") +
+              (list.possibleStops?.commands ? `, ${list.possibleStops.commands} of them possibly a stop` : "") +
+              // A command the control plane passed over as too large for any page (DASH-FAILSAFE-PAGES): by its id.
+              (list.tooLarge ? `; too large to read: ${list.tooLarge.map((id) => id || "(no id given)").join(", ")}` +
+                (list.possibleStops?.tooLarge ? `, ${list.possibleStops.tooLarge} of them possibly a stop` : "") : "") +
               "; a command not known here is read when its signature is relayed, as a possible stop");
           }
-          // A list the control plane cut at its page (DASH-FAILSAFE-3): what it listed is learnt, and the rest
-          // is said -- never read as all there is. It has no next page to read (no cursor), and nothing waits
-          // on one: the stops went first, and a command not learnt here is relayed as a possible stop.
+          // A list the control plane cut at its page (DASH-FAILSAFE-3): its pages are followed to the end when
+          // it gives the next one (failsafe.listCommands, within FAILSAFE_PAGES), and every row of every page is
+          // learnt. One that could not be read to its end is said -- never read as all there is. Nothing waits on
+          // a page: the stops went first, and a command not learnt here is relayed as a possible stop.
           if (list.more !== undefined) {
             console.warn(`[failsafe] the kill switch's read of the failsafe commands learnt ${list.commands.length}, ` +
               (list.more === true
                 ? "but the control plane left more out past its page (X-Failsafe-More: true): more commands exist than were read"
                 : "but the control plane did not say whether it left any out (no X-Failsafe-More): more commands may exist than were read") +
+              (list.pages?.unfinished ? ` (read ${list.pages.read} pages, then stopped: ${list.pages.unfinished})` : "") +
               "; a command not learnt here is read when its signature is relayed, as a possible stop");
           }
         }, (cause) => {
@@ -6338,6 +6343,9 @@ export function registerRoutes(app: Express): void {
       // Whether the control plane cut the list at its page, in its own header's words (DASH-FAILSAFE-3):
       // "true", "false", or "unknown" when it did not say. The body stays the bare array.
       res.setHeader(failsafe.FAILSAFE_MORE_HEADER, list.more === undefined ? "false" : list.more === true ? "true" : "unknown");
+      // The commands the control plane passed over as too large for any page, by id (DASH-FAILSAFE-PAGES); each is
+      // counted in the unreadable rows' header too ("tooLarge").
+      if (list.tooLarge) res.setHeader(failsafe.FAILSAFE_TOO_LARGE_HEADER, list.tooLarge.join(","));
       res.json(list.commands);
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;

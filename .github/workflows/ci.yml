@@ -162,4 +162,6 @@ jobs:
           tests/a-stored-kill-switch-flag-that-is-not-false-reads-engaged-on-both-storage-backends.test.ts
           tests/no-failsafe-command-is-lost-past-the-first-page.test.ts
           tests/a-cut-failsafe-list-and-a-stop-drafted-with-no-id-are-said-on-the-console.test.tsx
+          tests/a-failsafe-read-follows-every-page-and-no-stop-waits-on-one.test.ts
+          tests/a-failsafe-command-too-large-to-read-and-a-walk-cut-short-are-said-on-the-console.test.tsx
           tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx

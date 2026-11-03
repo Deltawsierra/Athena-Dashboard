@@ -817,6 +817,28 @@ export interface FailsafeStateView {
    * A list that may not be whole is never shown as whole.
    */
   more?: true | null;
+  /**
+   * The commands the control plane passed over as too large for any page
+   * (X-Failsafe-Too-Large), by id: each is "a command too large to read". Each
+   * is counted in `unreadable.tooLarge`, and in `possibleStops.tooLarge` unless
+   * it is known here to be a resume or a release. Only when there was one.
+   */
+  tooLarge?: string[];
+  /**
+   * Only when a next page was given (X-Failsafe-Next, the state's `next`): how
+   * many pages were read, and, when the walk stopped before the last page
+   * (FAILSAFE_PAGES: its page or time bound, a page that failed, or a cursor
+   * that could not be followed), why. Such a walk leaves `more` true.
+   */
+  pages?: PagesRead;
+}
+
+/** How a read followed the control plane's pages (followPages). */
+export interface PagesRead {
+  /** The pages read, the first included. */
+  read: number;
+  /** Why the walk stopped before the control plane's last page; absent when it read them all. */
+  unfinished?: string;
 }
 
 /**
@@ -832,6 +854,10 @@ export interface FailsafeCommandList {
   possibleStops?: Record<string, number>;
   /** Whether the list is all there is, as FailsafeStateView.more: `true` cut, `null` not said, absent whole. */
   more?: true | null;
+  /** The commands too large for any page, by id (as FailsafeStateView.tooLarge). */
+  tooLarge?: string[];
+  /** How the pages were followed (as FailsafeStateView.pages). */
+  pages?: PagesRead;
 }
 
 /** The header the control plane's two stop-lane reads carry: "true" when a read left a command out (athena-backend failsafe/views.py MORE_HEADER). */
@@ -841,9 +867,10 @@ export const FAILSAFE_MORE_HEADER = "X-Failsafe-More";
  * Whether the control plane left commands out of a stop-lane read, past its
  * page (athena-backend failsafe/views.py `_Page`: its row and byte limits),
  * from the state's `more` field (`body`; undefined for the list, whose body is
- * a bare array) and the X-Failsafe-More header. It has no next page to follow:
- * the read takes no cursor or offset, only `engine_id` and `status`. So what
- * it says is said on, never dropped (DASH-FAILSAFE-3):
+ * a bare array) and the X-Failsafe-More header, page by page. A control plane
+ * that gives a next page (X-Failsafe-Next) is followed to its end
+ * (followPages); one that gives none -- an older one -- is not, and what it
+ * says is said on, never dropped (DASH-FAILSAFE-3):
  *
  *   - true when either says true: a command was left out;
  *   - false only when one says exactly false and neither says true, and
@@ -865,6 +892,192 @@ function morePastThePage(body: unknown, header: string | undefined): boolean | n
 /** `more` as a read carries it: absent when the list is whole. */
 function moreField(more: boolean | null): { more?: true | null } {
   return more === false ? {} : { more: more === true ? true : null };
+}
+
+// ==== Following the control plane's pages (DASH-FAILSAFE-PAGES) ====
+//
+// The two stop-lane reads give the next page when they cut one (athena-backend
+// failsafe/views.py, #218): its cursor in X-Failsafe-Next (and the state's
+// `next`), sent back as `?cursor=` with the same engine_id and status. In-flight
+// rows come first, stops first. Past 500 awaiting stops a later page relists
+// every awaiting stop, so rows are deduped by uuid. A row too large for any page
+// is passed over and named in X-Failsafe-Too-Large.
+//
+// SAFETY: following the pages is a READ, and nothing that stops waits on it. The
+// stop paths -- a stop's draft, a signature relay, a withdrawal, the kill
+// switch's sweep -- never call state() or listCommands(): the console's own
+// reads and the kill switch's background read (setImmediate, after its stops,
+// never awaited) do. A page holds no lock, no token and no queue a stop takes:
+// each is its own request, and node:http's agent has no socket limit. So a
+// pressed stop goes first, never after or behind any page.
+
+/**
+ * The bounds on one walk of the pages. Constants, on purpose: not settings, not
+ * read from the environment, and never retuned at run time.
+ *
+ *   - `maxPages` (10, the first page included). The control plane's largest
+ *     page is about 1,000 rows: the 500 awaiting stops it lists first
+ *     (AWAITING_STOP_LIMIT) and the 500 ready stops of a service token's page.
+ *     So a walk learns at most about 10,000 commands -- KNOWN_ACTIONS_MAX, the
+ *     most this server remembers -- and never makes memory forget a command it
+ *     learnt itself: the stops of page 1 are still known when page 10 is read.
+ *     It also bounds a walk's transfer to 10 of the control plane's byte caps
+ *     (stop_lane_read_bytes(), 1 MB by default). Under a session's 50-row pages
+ *     it reaches 450 rows past the first page, in flight first.
+ *   - `totalMs` (4 s, for the pages after the first; the first keeps its own
+ *     bounds, exactly as before). The console re-reads the state every 5 s
+ *     (client Failsafe.tsx), so a walk that cannot finish is cut, and said to
+ *     be cut, before the next read starts: reads never pile up behind a slow
+ *     control plane. The kill switch's background read holds a connection no
+ *     longer either. Each page is bounded work on the control plane (a few
+ *     index range reads), so a healthy one's ten pages finish well inside it.
+ *
+ * A walk that hits either bound, meets a page that fails, or is given a cursor
+ * it cannot follow, keeps what it read and says more exist (`more: true`):
+ * never a partial list shown as complete.
+ */
+export const FAILSAFE_PAGES = Object.freeze({ maxPages: 10, totalMs: 4_000 });
+
+/** The header the control plane gives its next page's cursor in (athena-backend failsafe/views.py). */
+export const FAILSAFE_NEXT_HEADER = "X-Failsafe-Next";
+/** The header naming a command the control plane passed over as too large for any page. */
+export const FAILSAFE_TOO_LARGE_HEADER = "X-Failsafe-Too-Large";
+
+/** A cursor as the control plane makes one: URL-safe base64 of at most 1,024 characters (views.py `_cursor`). */
+const CURSOR_SHAPE = /^[A-Za-z0-9_=-]{1,1024}$/;
+
+/** A page's next cursor: one to follow, one that cannot be followed (and why), or none (the last page, or an older control plane). */
+type NextPage = { cursor: string } | { odd: string } | null;
+
+/**
+ * The next page's cursor, from the X-Failsafe-Next header and (for the state)
+ * the body's `next`. None when neither gives one. One that is not a cursor's
+ * shape, or two that differ, cannot be followed: the walk stops there, and
+ * says more exist.
+ */
+function nextPageOf(header: string | undefined, body: unknown): NextPage {
+  const fromBody = body === undefined || body === null ? undefined : body;
+  if (header === undefined && fromBody === undefined) return null;
+  if (fromBody !== undefined && typeof fromBody !== "string") return { odd: "the state's next cursor was not a string" };
+  if (header !== undefined && fromBody !== undefined && header !== fromBody) {
+    return { odd: `the ${FAILSAFE_NEXT_HEADER} header and the state's next cursor differed` };
+  }
+  const cursor = (header ?? fromBody) as string;
+  if (!CURSOR_SHAPE.test(cursor)) return { odd: "the next cursor was not one the control plane makes" };
+  return { cursor };
+}
+
+/** The ids X-Failsafe-Too-Large names; [""] when it is there but names none (a row was passed over all the same). */
+function tooLargeIds(header: string | undefined): string[] {
+  if (header === undefined) return [];
+  const ids = header.split(",").map((one) => one.trim()).filter((one) => one !== "");
+  return ids.length > 0 ? ids : [""];
+}
+
+/**
+ * What a read has gathered over its pages: the rows (deduped by uuid after the
+ * first page), the unreadable counts and possible stops, and the commands too
+ * large for any page.
+ */
+class Gathered {
+  readonly seen = new Set<string>();
+  readonly unreadable: UnreadableRows = {};
+  readonly possibleStops: Record<string, number> = {};
+  readonly tooLarge: string[] = [];
+
+  /**
+   * A page's rows of `list`, every one learnt (remember) and counted as
+   * commandRows does; on a page after the first, a uuid already read is
+   * dropped (the control plane relists awaiting stops: readers dedupe by
+   * uuid). The first page is kept exactly as it came.
+   */
+  rows(raw: unknown, list: string, into: FailsafeCommand[], dedupe: boolean, stops = true): void {
+    const pageStops: Record<string, number> = {};
+    for (const one of commandRows(raw, this.unreadable, list, stops ? pageStops : undefined)) {
+      if (dedupe && this.seen.has(one.uuid)) continue;
+      this.seen.add(one.uuid);
+      into.push(one);
+    }
+    for (const [name, count] of Object.entries(pageStops)) this.possibleStops[name] = (this.possibleStops[name] ?? 0) + count;
+  }
+
+  /**
+   * The commands a page passed over as too large for any page: each said by
+   * its id, counted as unreadable, and -- unless it is known here to be a
+   * resume or a release -- as a possible stop. It is not read here (it is too
+   * large for a page); a signature for it is relayed as a possible stop.
+   */
+  passedOver(header: string | undefined): void {
+    for (const id of tooLargeIds(header)) {
+      if (id !== "" && this.seen.has(id)) continue;
+      if (id !== "") this.seen.add(id);
+      this.tooLarge.push(id);
+      this.unreadable.tooLarge = unreadCount(this.unreadable, "tooLarge") + 1;
+      const known = id === "" ? undefined : knownActions.get(id);
+      if (!(known !== undefined && START_ACTIONS.has(known))) this.possibleStops.tooLarge = (this.possibleStops.tooLarge ?? 0) + 1;
+    }
+  }
+
+  fields(): { unreadable?: UnreadableRows; possibleStops?: Record<string, number>; tooLarge?: string[] } {
+    return {
+      ...withUnreadable(this.unreadable),
+      ...(Object.keys(this.possibleStops).length > 0 ? { possibleStops: this.possibleStops } : {}),
+      ...(this.tooLarge.length > 0 ? { tooLarge: this.tooLarge } : {}),
+    };
+  }
+}
+
+/** One page after the first, as a read takes it: whether it says more, and its next page. */
+type PageTaken = { more: boolean | null; next: NextPage };
+
+/**
+ * Follow the control plane's pages from the first page's `next`, within
+ * FAILSAFE_PAGES, handing each to `take`. The result: whether the list is all
+ * there is (the last page's `more` when the walk reached it; `true` when it
+ * stopped short, since a next page was given and not read), and the pages read.
+ * Never throws: a page that fails ends the walk, and is said.
+ */
+async function followPages(
+  path: string, params: URLSearchParams, what: string, firstMore: boolean | null, first: NextPage,
+  take: (payload: unknown, response: ControlPlaneResponse) => PageTaken,
+): Promise<{ more: boolean | null; pages?: PagesRead }> {
+  if (first === null) return { more: firstMore }; // No next page given: exactly as before.
+  const deadline = Date.now() + FAILSAFE_PAGES.totalMs;
+  const followed = new Set<string>();
+  let next: NextPage = first;
+  let more = firstMore;
+  let read = 1;
+  const cut = (why: string) => ({ more: true as const, pages: { read, unfinished: why } });
+  while (next !== null) {
+    if ("odd" in next) return cut(next.odd);
+    if (read >= FAILSAFE_PAGES.maxPages) return cut(`the page bound (${FAILSAFE_PAGES.maxPages} pages) was reached`);
+    if (followed.has(next.cursor)) return cut("the control plane gave a next cursor it had given before");
+    followed.add(next.cursor);
+    const left = deadline - Date.now();
+    const late = `the time bound (${FAILSAFE_PAGES.totalMs} ms for the pages after the first) was reached`;
+    if (left <= 0) return cut(late);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), left);
+    let payload: unknown;
+    let response: ControlPlaneResponse;
+    try {
+      params.set("cursor", next.cursor);
+      // The stop lane's read, as the first page is: a page is never a stop's own call.
+      response = await call(`${path}?${params.toString()}`, { stop: true }, true, controller.signal);
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
+        return cut(`page ${read + 1} was answered ${response.status}`);
+      }
+      payload = await jsonWithin(response, Math.max(1, deadline - Date.now()), what);
+    } catch (cause) {
+      return cut(controller.signal.aborted || Date.now() >= deadline ? late : `page ${read + 1} could not be read (${cause instanceof Error ? cause.message : String(cause)})`);
+    } finally {
+      clearTimeout(timer);
+    }
+    read += 1;
+    ({ more, next } = take(payload, response));
+  }
+  return { more, pages: { read } };
 }
 
 /** The audit trail, every row that could be read; and, only when one could not, how many (`unreadable.events`). */
@@ -1022,6 +1235,8 @@ function commandRows(raw: unknown, unreadable: UnreadableRows, list: string, sto
 }
 
 export async function state(engineId?: string): Promise<FailsafeStateView> {
+  const params = new URLSearchParams();
+  if (engineId) params.set("engine_id", engineId);
   const query = engineId ? `?engine_id=${encodeURIComponent(engineId)}` : "";
   // The stop lane's read (failsafe:state): where a second operator finds the stop awaiting their signature.
   const response = await call(`/api/failsafe/state/${query}`, { stop: true });
@@ -1036,14 +1251,30 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   // shown, and its action learnt (remember). A list that is not one is "not a list", never none.
   // A row with no uuid is counted too, never drawn as a command nobody can open; and one that may be a stop
   // is said as one (possibleStops), so the console never reads the stop awaiting a signature as nothing.
-  const unreadable: UnreadableRows = {};
-  const possibleStops: Record<string, number> = {};
-  const awaitingSignatures = commandRows(payload.awaiting_signatures, unreadable, "awaitingSignatures", possibleStops);
-  const ready = commandRows(payload.ready, unreadable, "ready", possibleStops);
+  const got = new Gathered();
+  const awaitingSignatures: FailsafeCommand[] = [];
+  const ready: FailsafeCommand[] = [];
+  const recent: FailsafeCommand[] = [];
+  got.rows(payload.awaiting_signatures, "awaitingSignatures", awaitingSignatures, false);
+  got.rows(payload.ready, "ready", ready, false);
   // The history: the newest commands, in flight or not (empty under the service token). Counted, not stops.
-  const recent = commandRows(payload.recent, unreadable, "recent");
-  // A list the control plane cut at its page is said to be cut, never shown as whole (DASH-FAILSAFE-3).
-  const more = morePastThePage(payload.more, response.header(FAILSAFE_MORE_HEADER));
+  got.rows(payload.recent, "recent", recent, false, false);
+  got.passedOver(response.header(FAILSAFE_TOO_LARGE_HEADER));
+  // A list the control plane cut at its page is followed to its end when it gives the next page, and said to
+  // be cut when it cannot be: never shown as whole (DASH-FAILSAFE-3, DASH-FAILSAFE-PAGES). A later page holds
+  // the commands in flight only (its `recent` is empty), each learnt as the first page's are.
+  const first = morePastThePage(payload.more, response.header(FAILSAFE_MORE_HEADER));
+  const walk = await followPages("/api/failsafe/state/", params, "a page of the failsafe state", first,
+    nextPageOf(response.header(FAILSAFE_NEXT_HEADER), payload.next), (raw, page) => {
+      const later = asRecord(raw);
+      got.rows(later.awaiting_signatures, "awaitingSignatures", awaitingSignatures, true);
+      got.rows(later.ready, "ready", ready, true);
+      got.passedOver(page.header(FAILSAFE_TOO_LARGE_HEADER));
+      return {
+        more: morePastThePage(later.more, page.header(FAILSAFE_MORE_HEADER)),
+        next: nextPageOf(page.header(FAILSAFE_NEXT_HEADER), later.next),
+      };
+    });
   return {
     engineId: typeof payload.engine_id === "string" ? payload.engine_id : null,
     engineState: typeof payload.engine_state === "string" ? payload.engine_state : null,
@@ -1051,9 +1282,9 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
     awaitingSignatures,
     ready,
     recent,
-    ...withUnreadable(unreadable),
-    ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}),
-    ...moreField(more),
+    ...got.fields(),
+    ...moreField(walk.more),
+    ...(walk.pages ? { pages: walk.pages } : {}),
   };
 }
 
@@ -1075,16 +1306,27 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   // out, with the switch engaged, as a possible stop (then withdrawn). A command that could not be read stays
   // not known here: its signature is relayed as a possible stop, never refused as absent.
   // A row with no uuid is counted too, and one that may be a stop is said as one (possibleStops).
-  const unreadable: UnreadableRows = {};
-  const possibleStops: Record<string, number> = {};
-  const commands = commandRows(payload, unreadable, "commands", possibleStops);
-  // The list's body is a bare array: whether the control plane cut it rides in its header only (DASH-FAILSAFE-3).
-  const more = morePastThePage(undefined, response.header(FAILSAFE_MORE_HEADER));
+  const got = new Gathered();
+  const commands: FailsafeCommand[] = [];
+  got.rows(payload, "commands", commands, false);
+  got.passedOver(response.header(FAILSAFE_TOO_LARGE_HEADER));
+  // The list's body is a bare array: whether the control plane cut it, and its next page, ride in its headers
+  // only (DASH-FAILSAFE-3). Every page's rows are learnt as the first page's are, deduped by uuid.
+  const first = morePastThePage(undefined, response.header(FAILSAFE_MORE_HEADER));
+  const walk = await followPages("/api/failsafe/commands/", params, "a page of the list of commands", first,
+    nextPageOf(response.header(FAILSAFE_NEXT_HEADER), undefined), (raw, page) => {
+      got.rows(raw, "commands", commands, true);
+      got.passedOver(page.header(FAILSAFE_TOO_LARGE_HEADER));
+      return {
+        more: morePastThePage(undefined, page.header(FAILSAFE_MORE_HEADER)),
+        next: nextPageOf(page.header(FAILSAFE_NEXT_HEADER), undefined),
+      };
+    });
   return {
     commands,
-    ...withUnreadable(unreadable),
-    ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}),
-    ...moreField(more),
+    ...got.fields(),
+    ...moreField(walk.more),
+    ...(walk.pages ? { pages: walk.pages } : {}),
   };
 }
 
