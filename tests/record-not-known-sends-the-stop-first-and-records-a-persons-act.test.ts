@@ -230,6 +230,12 @@ describe("the act", () => {
       if (id === testId) throw new Error("SQLITE_FULL: database or disk is full");
       return real(id, data);
     });
+    // The act is written onto the row as it lands (updateTestWith): refused the same way.
+    const realWith = storage.updateTestWith.bind(storage);
+    vi.spyOn(storage, "updateTestWith").mockImplementation(async (id, change) => {
+      if (id === testId) throw new Error("SQLITE_FULL: database or disk is full");
+      return realWith(id, change);
+    });
     const failed = await record(testId);
     expect(failed.status).toBe(500);
     expect(failed.body).toMatchObject({ reason: "not_recorded", stop: { runId, stopped: false, unknownRun: true } });

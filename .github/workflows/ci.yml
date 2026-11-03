@@ -103,6 +103,8 @@ jobs:
           tests/a-stop-is-mirrored-to-the-backend-record-after-its-answer.test.ts
           tests/two-writes-to-a-scan-row-never-drop-each-others-findings.test.ts
           tests/a-test-row-is-changed-from-the-row-as-it-lands-on-both-storage-backends.test.ts
+          tests/every-findings-writer-writes-onto-the-row-as-it-lands.test.ts
+          tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts
           tests/a-failed-write-never-holds-back-or-hides-a-stop.test.ts
           tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts
           tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts

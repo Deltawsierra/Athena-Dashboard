@@ -38,7 +38,7 @@ import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
 import type {
-  AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test,
+  AIControlSetting, BackendMirrorReading, BackendRecordSnapshot, CollectWatch, Finding, RetestWatch, Test, InsertTest,
 } from "@shared/schema";
 import type { BackendRecordView, RetestCheckRecordView } from "@shared/backend-record";
 import { RetestCheckWatcher, backendStandingOf, type RetestCheckHooks } from "./retest-check-watch";
@@ -513,10 +513,13 @@ function markRunNotKnown(testId: string, now = Date.now()): void {
   if (!count || (count.markedAt != null && now - count.markedAt < notKnown.persistEveryMs)) return;
   count.markedAt = now;
   void (async () => {
-    const latest = await storage.getTest(testId);
-    if (!latest || FINISHED_RUN_STATES.has(latest.status) || runNotKnownCounts.get(testId) !== count) return;
-    const findings = (latest.findings ?? {}) as Record<string, unknown>;
-    await storage.updateTest(testId, { findings: { ...findings, [NOT_KNOWN_KEY]: notKnownMark(count, now) } });
+    // Onto the row as it is when the write lands (updateTestWith): another
+    // writer's part of its findings written meanwhile stays.
+    await storage.updateTestWith(testId, (latest) => {
+      if (FINISHED_RUN_STATES.has(latest.status) || runNotKnownCounts.get(testId) !== count) return null;
+      const findings = (latest.findings ?? {}) as Record<string, unknown>;
+      return { findings: { ...findings, [NOT_KNOWN_KEY]: notKnownMark(count, now) } };
+    });
   })().catch((cause) => {
     // Tried again on the next standing read.
     if (runNotKnownCounts.get(testId) === count) count.markedAt = null;
@@ -1665,6 +1668,28 @@ function engineRecordEdited(
     data.findings = typeof notes === "string" && notes.trim() !== "" ? { ...kept, [HUMAN_FINDINGS_KEY]: notes } : kept;
   }
   return false;
+}
+
+/**
+ * A person's edit, as written onto the row as it is when the write lands
+ * (updateTestWith), after engineRecordEdited checked it against the row read
+ * before. An engine scan's run keeps writing its row meanwhile -- the live
+ * poll, a Stop's mirror, the collect watch, the not-known reading -- so for
+ * one, nothing the check read from that earlier row is written back: its
+ * findings are the row's own, as they are now, with the person's notes; and
+ * the fields the engine owns, which the edit could only send back unchanged,
+ * are not written at all. Any other test is written as edited.
+ */
+function editOnto(row: Test, edit: Partial<InsertTest>): Partial<InsertTest> {
+  if (!isEngineRecord(row.findings)) return edit;
+  const onto: Record<string, unknown> = { ...edit };
+  for (const field of ENGINE_OWNED_TEST_FIELDS) delete onto[field];
+  if (edit.findings !== undefined) {
+    const { [HUMAN_FINDINGS_KEY]: _notes, ...kept } = row.findings as Record<string, unknown>;
+    const notes = (edit.findings as Record<string, unknown> | null)?.[HUMAN_FINDINGS_KEY];
+    onto.findings = notes !== undefined ? { ...kept, [HUMAN_FINDINGS_KEY]: notes } : kept;
+  }
+  return onto as Partial<InsertTest>;
 }
 
 /**
@@ -3693,7 +3718,8 @@ export function registerRoutes(app: Express): void {
     if (!before) return notFound(res, "Test");
     if (engineRecordEdited(res, before, data)) return;
     if (suppliedNotKnownStatus(res, data, before)) return;
-    const test = await storage.updateTest(req.params.id, { ...data, ...completionStamp(data, before) });
+    const edit = { ...data, ...completionStamp(data, before) };
+    const test = await storage.updateTestWith(req.params.id, (row) => editOnto(row, edit));
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
       await storage.createActivityLog({ action: "updated", entityType: "test", entityId: test.id, details: null, ...actor(req) });
@@ -4259,9 +4285,11 @@ export function registerRoutes(app: Express): void {
         if (!(cause instanceof engine.EngineUnavailable)) throw cause;
         directRead = { ok: false, notFound: cause instanceof engine.EngineRunNotFound, detail: cause.message };
         if (cause instanceof engine.EngineRunNotFound) {
-          const marked = await storage.updateTest(test.id, {
-            findings: { ...(test.findings as Record<string, unknown>), stop: "backend" },
-          }).catch(() => undefined);
+          // Onto the row as it is when the mark lands, not `test` as the
+          // start wrote it before this read: a write made meanwhile stays.
+          const marked = await storage.updateTestWith(test.id, (row) => ({
+            findings: { ...((row.findings ?? {}) as Record<string, unknown>), stop: "backend" },
+          })).catch(() => undefined);
           if (marked) test = marked;
         }
       }
@@ -4480,14 +4508,18 @@ export function registerRoutes(app: Express): void {
     let updated: Test | undefined;
     let reading: unknown;
     try {
-      const latest = (await storage.getTest(test.id)) ?? test;
-      const findings = (latest.findings ?? {}) as Record<string, unknown>;
-      reading = findings[NOT_KNOWN_KEY];
-      const kept = reading && typeof reading === "object" && !Array.isArray(reading) ? (reading as Record<string, unknown>) : {};
-      updated = await storage.updateTest(test.id, {
-        status: NOT_KNOWN_STATUS,
-        completedAt: at,
-        findings: { ...findings, [NOT_KNOWN_KEY]: { ...kept, recorded } },
+      // Onto the row as it is when the record lands (updateTestWith): the
+      // reading kept, and every other writer's part of its findings, are the
+      // row's at that moment, not a read taken before the write.
+      updated = await storage.updateTestWith(test.id, (latest) => {
+        const findings = (latest.findings ?? {}) as Record<string, unknown>;
+        reading = findings[NOT_KNOWN_KEY];
+        const kept = reading && typeof reading === "object" && !Array.isArray(reading) ? (reading as Record<string, unknown>) : {};
+        return {
+          status: NOT_KNOWN_STATUS,
+          completedAt: at,
+          findings: { ...findings, [NOT_KNOWN_KEY]: { ...kept, recorded } },
+        };
       });
     } catch (cause) {
       return void res.status(500).json({

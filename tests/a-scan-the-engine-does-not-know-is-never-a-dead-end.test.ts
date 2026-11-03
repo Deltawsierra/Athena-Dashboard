@@ -206,6 +206,12 @@ describe("a legacy scan whose run the engine answers 404", () => {
       if (id === testId) throw new Error("database is locked");
       return real(id, data);
     });
+    // The reading is written onto the row as it lands (updateTestWith): refused the same way.
+    const realWith = storage.updateTestWith.bind(storage);
+    const spyWith = vi.spyOn(storage, "updateTestWith").mockImplementation(async (id, change) => {
+      if (id === testId) throw new Error("database is locked");
+      return realWith(id, change);
+    });
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await read(testId);
     const standing = await read(testId);
@@ -215,6 +221,7 @@ describe("a legacy scan whose run the engine answers 404", () => {
     expect((await rowOf(testId)).findings).not.toHaveProperty("notKnown");
 
     spy.mockRestore();
+    spyWith.mockRestore();
     const later = await read(testId);
     expect(later.notKnown).toMatchObject({ reads: 3 });
     await vi.waitFor(async () => expect((await rowOf(testId)).findings).toMatchObject({ notKnown: { reads: 3 } }));
@@ -227,10 +234,12 @@ describe("a legacy scan whose run the engine answers 404", () => {
     await read(testId);
     await vi.waitFor(async () => expect((await rowOf(testId)).findings).toMatchObject({ notKnown: { reads: 2 } }));
     const spy = vi.spyOn(storage, "updateTest");
+    const spyWith = vi.spyOn(storage, "updateTestWith");
     await read(testId);
     await read(testId);
     await pause(50);
     expect(spy.mock.calls.filter(([id]) => id === testId)).toEqual([]);
+    expect(spyWith.mock.calls.filter(([id]) => id === testId)).toEqual([]);
     expect((await read(testId)).notKnown).toMatchObject({ reads: 5 });
   });
 });

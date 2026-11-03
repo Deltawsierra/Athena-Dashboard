@@ -427,6 +427,15 @@ its headers exactly as before.
   its own write did not land) answers with the row as it is after that filing,
   record and all. None of these writes is on a stop's path: the Stop is
   answered first.
+- **Every other writer, the same way.** The not-known reading of a legacy
+  row (`findings.notKnown`), the start's `stop: "backend"` mark, the
+  adoption's first direct read that clears it, a person's Record as not
+  known, and a person's edit of an engine scan also write onto the row as it
+  lands. An edit of an engine scan writes the person's notes, summary and
+  test type onto the run's findings as they are then, and never writes back
+  the status or counts it was checked against. Server code names the plain
+  `updateTest` only where the storage defines it
+  (`tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts`).
 - **No break-glass** (decision 11). No direct launch path remains for a
   person-initiated scan: with the backend unreachable, refusing, or the person
   not signed in to it, a start is refused with the reason, and nothing is sent
