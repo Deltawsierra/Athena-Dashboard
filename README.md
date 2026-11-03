@@ -938,7 +938,10 @@ TypeScript compiler and keeps a short, reasoned list of the exceptions
 (`tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts`).
 The bare lists (deployments, findings, unknowns, assets, providers, claims and
 retest requirements) are answered as arrays, which have nowhere to carry a count
-yet; they are on that list until they do.
+yet; they are on that list until they do. So are the stop lane's own reads in
+`server/failsafe.ts` (the failsafe state, its commands and audit trail): one
+null row still fails them, and they are left unchanged here, since nothing in
+this change may sit on a stop's path.
 
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release

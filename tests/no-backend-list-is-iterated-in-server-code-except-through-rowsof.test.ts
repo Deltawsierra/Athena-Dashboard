@@ -14,7 +14,7 @@ import ts from "typescript";
  * records and counts the rest, so a screen says "N rows could not be read".
  *
  * So in every server file that reads the backend (one that imports `call` from
- * ./control-plane), no `.map`, `.filter`, `.reduce`, `.forEach`, `.some`,
+ * ./control-plane, or sends to the control plane itself), no `.map`, `.filter`, `.reduce`, `.forEach`, `.some`,
  * `.every`, `.find`, `.flatMap` or `for…of` runs over a list whose rows are
  * still unread -- typed `unknown`, `any` or `Record<string, unknown>` -- unless
  * the list is rowsOf's own answer, written at the call. Found with the
@@ -30,6 +30,7 @@ import ts from "typescript";
 
 const ROOT = path.resolve(__dirname, "..");
 
+const STOP_LANE = "on the stop lane. command() and auditEvent() throw on a null row, so one fails the read. NOT CHANGED by DASH-ROWS: the SAFETY RULE keeps that change off every stop path; it needs its own brief (DASH-ROWS report)";
 const PLANNED = "PLANNED (DASH-ROWS phase 2): a bare-list read whose answer is an array, so it has nowhere to carry a count yet; the shape is the lead's decision";
 
 /** Where a list of unread rows may be iterated other than through rowsOf, and how often. */
@@ -62,6 +63,10 @@ const ALLOWED: Record<string, { times: number; why: string }> = {
   "server/backend-scans.ts for…of rows": { times: 1, why: "the scans list: each row read with objectOf, cannot throw; one it cannot read is left out. PLANNED (DASH-ROWS phase 2): counted" },
   "server/backend-scans.ts for…of parsed": { times: 1, why: "the scans list read whole: readScanRow reads each as unknown, cannot throw; one it cannot read is left out. PLANNED (DASH-ROWS phase 2): counted" },
   "server/backend-scans.ts for…of pageOf.results": { times: 1, why: "the same, page by page" },
+  // failsafe.ts: the stop lane's own reads, which this guard reports and does not change.
+  "server/failsafe.ts raw.signers.map": { times: 1, why: "a command's signers: String(s) on each, cannot throw" },
+  "server/failsafe.ts payload[key].map": { times: 1, why: `the failsafe state's command lists (awaiting signatures, ready, recent): ${STOP_LANE}` },
+  "server/failsafe.ts payload.map": { times: 2, why: `the failsafe command list and its audit trail: ${STOP_LANE}` },
 };
 
 const ITERATORS = new Set(["map", "filter", "reduce", "reduceRight", "forEach", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "flatMap"]);
@@ -121,12 +126,19 @@ function unreadIterationsIn(checker: ts.TypeChecker, file: ts.SourceFile): { lin
   return found;
 }
 
-/** Whether a file reads the backend: it imports `call` from ./control-plane. */
+/**
+ * Whether a file reads the backend: it imports `call` from ./control-plane, or it
+ * sends to the control plane itself, as ./control-plane and the failsafe module
+ * do (each imports ./failsafe-service-token to present the stop credential).
+ */
 function readsTheBackend(source: ts.SourceFile): boolean {
-  return source.statements.some((one) => ts.isImportDeclaration(one)
-    && ts.isStringLiteral(one.moduleSpecifier) && one.moduleSpecifier.text === "./control-plane"
-    && one.importClause?.namedBindings !== undefined && ts.isNamedImports(one.importClause.namedBindings)
-    && one.importClause.namedBindings.elements.some((name) => (name.propertyName ?? name.name).text === "call"));
+  return source.statements.some((one) => {
+    if (!ts.isImportDeclaration(one) || !ts.isStringLiteral(one.moduleSpecifier)) return false;
+    if (one.moduleSpecifier.text === "./failsafe-service-token") return true;
+    const names = one.importClause?.namedBindings;
+    return one.moduleSpecifier.text === "./control-plane" && names !== undefined && ts.isNamedImports(names)
+      && names.elements.some((name) => (name.propertyName ?? name.name).text === "call");
+  });
 }
 
 function serverFiles(dir: string): string[] {
@@ -231,7 +243,7 @@ describe("no list the backend served is iterated in server code except through r
   });
 
   it("the walk covers every file that reads the backend, and opens no file named for settings", () => {
-    expect(files).toEqual(expect.arrayContaining(["server/assurance.ts", "server/backend-scans.ts", "server/economics.ts"]));
+    expect(files).toEqual(expect.arrayContaining(["server/assurance.ts", "server/backend-scans.ts", "server/economics.ts", "server/failsafe.ts", "server/control-plane.ts"]));
     expect(program.getSourceFiles().map((one) => one.fileName).filter((name) => /settings/i.test(path.basename(name))), "no file named for settings is opened").toEqual([]);
   });
 
