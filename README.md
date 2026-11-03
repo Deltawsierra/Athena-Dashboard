@@ -415,6 +415,15 @@ its headers exactly as before.
   mirrored (`abort_mirrored` / `abort_mirror_failed` in the log). A stop the
   engine refused is mirrored too, since the backend's own stop may reach the
   run; one the engine said had already ended is not.
+- **One row, three writers.** The mirror's reading (`findings.backendMirror`),
+  the collect watch's record (`findings.backend`) and the status read's live
+  poll (the run's status, results and coverage) can land on a scan's row
+  within moments of each other once its run is stopped. Each is written onto
+  the row as it is when the write lands, in one storage step
+  (`updateTestWith`: one IMMEDIATE transaction on SQLite), never from a read
+  taken before an await, so none writes back another's field as it was before
+  it landed; a poll that finds the record already filed writes nothing over
+  it. None of these writes is on a stop's path: the Stop is answered first.
 - **No break-glass** (decision 11). No direct launch path remains for a
   person-initiated scan: with the backend unreachable, refusing, or the person
   not signed in to it, a start is refused with the reason, and nothing is sent

@@ -77,6 +77,20 @@ export interface IStorage {
    */
   createTest(test: NewTest): Promise<Test>;
   updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined>;
+  /**
+   * Change a test from the row as it is when the change lands: `change` is
+   * handed the row read in the same step as the write (one IMMEDIATE
+   * transaction on SQLite; one synchronous step in memory) and answers what to
+   * write, or null to write nothing. So a writer that sets its own part of
+   * `findings` never writes back another writer's part as it was before that
+   * one's write landed: the row's findings have more than one writer (the
+   * live poll, a Stop's mirror, the collect watch), and each read the row
+   * before an await. `change` must be synchronous and may be run again (a
+   * busy database is tried again from the start). Answers the row as it now
+   * stands -- unchanged when `change` answered null -- or undefined when there
+   * is no such test.
+   */
+  updateTestWith(id: string, change: (test: Test) => Partial<InsertTest> | null): Promise<Test | undefined>;
   deleteTest(id: string): Promise<boolean>;
 
   // Findings
@@ -661,6 +675,16 @@ export class MemStorage implements IStorage {
   async updateTest(id: string, updates: Partial<InsertTest>) {
     const test = this.tests.get(id);
     if (!test) return undefined;
+    const updated: Test = { ...test, ...updates };
+    this.tests.set(id, updated);
+    return updated;
+  }
+  async updateTestWith(id: string, change: (test: Test) => Partial<InsertTest> | null) {
+    // Synchronous from the read to the write: no other write of the row lands between.
+    const test = this.tests.get(id);
+    if (!test) return undefined;
+    const updates = change({ ...test });
+    if (updates === null) return test;
     const updated: Test = { ...test, ...updates };
     this.tests.set(id, updated);
     return updated;
