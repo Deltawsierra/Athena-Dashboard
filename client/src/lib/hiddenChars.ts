@@ -26,7 +26,17 @@
  *     SVG <title> or <desc>), it is written out as "[U+202E]", so a target string
  *     cannot hide in a tooltip either.
  *
- * Pinned by tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx.
+ * A library component (a Radix primitive: a select's items, a dialog's title, a
+ * toast, a tooltip) draws its text through the library's own build, which this
+ * runtime never sees. So each module that wraps one registers the library with
+ * `drawsTargetText` (client/src/components/ui/*.tsx), and the props handed to a
+ * registered component are guarded at that boundary exactly as an element's are.
+ * A chart draws its text into SVG through Recharts' own build too: its axis,
+ * tooltip and legend text goes through ./chartText, which writes each character
+ * out.
+ *
+ * Pinned by tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx and
+ * tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx.
  */
 import { createElement, Fragment, type ReactNode } from "react";
 
@@ -107,6 +117,38 @@ const PLAIN_TEXT_ELEMENTS = new Set(["option", "title", "desc"]);
 /** Elements whose text is code or an edited value: left exactly as it is. */
 const RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "text", "tspan", "textPath"]);
 
+/**
+ * The library components whose props are guarded as an element's are: each draws
+ * the text it is handed through its library's own build, past this runtime.
+ *
+ * Kept on the global object under a registered symbol, not in this module alone:
+ * the development server pre-bundles the JSX runtime (and its copy of this
+ * module) apart from the app's own modules, so a wrapper's registration and the
+ * runtime's check can reach two copies of this module. Both find the one set.
+ */
+const REGISTRY = Symbol.for("athena-dashboard.hidden-chars.text-drawing-library-components");
+const TEXT_DRAWING_LIBRARY_COMPONENTS: WeakSet<object> =
+  ((globalThis as Record<symbol, unknown>)[REGISTRY] as WeakSet<object> | undefined)
+  ?? ((globalThis as Record<symbol, unknown>)[REGISTRY] = new WeakSet<object>()) as WeakSet<object>;
+
+/**
+ * Registers every component a library exports (a Radix primitive's namespace,
+ * `import * as SelectPrimitive`) as one that draws the text it is handed, so the
+ * props this app hands it are guarded at that boundary: its text marked and its
+ * read attributes written out (guardHostProps). Called once by each module that
+ * wraps such a library, before anything is drawn.
+ */
+export function drawsTargetText(library: Readonly<Record<string, unknown>>): void {
+  for (const one of Object.values(library)) {
+    if (typeof one === "function" || (typeof one === "object" && one !== null)) TEXT_DRAWING_LIBRARY_COMPONENTS.add(one);
+  }
+}
+
+/** Whether `type` is a library component registered with drawsTargetText. */
+export function isTextDrawingLibraryComponent(type: unknown): boolean {
+  return (typeof type === "function" || (typeof type === "object" && type !== null)) && TEXT_DRAWING_LIBRARY_COMPONENTS.has(type);
+}
+
 /** Children with every string marked; the same object when nothing changed. */
 function markChildren(children: unknown, plain: boolean, key?: number): unknown {
   if (typeof children === "string") {
@@ -125,11 +167,12 @@ function markChildren(children: unknown, plain: boolean, key?: number): unknown 
 }
 
 /**
- * The props of an element the app draws (or a fragment), with every hidden
- * character in its text marked and every one in an attribute a person reads
- * written out. A component's props are left as they are (it may read a string as
- * a string): what it draws reaches an element, and is marked there. The same
- * object when nothing changed.
+ * The props of an element the app draws (or a fragment, or a library component
+ * registered with drawsTargetText), with every hidden character in its text
+ * marked and every one in an attribute a person reads written out. The app's own
+ * component's props are left as they are (it may read a string as a string):
+ * what it draws reaches an element, and is marked there. The same object when
+ * nothing changed.
  */
 export function guardHostProps(type: unknown, props: Record<string, unknown>): Record<string, unknown> {
   if (props === null || typeof props !== "object") return props;
@@ -138,7 +181,7 @@ export function guardHostProps(type: unknown, props: Record<string, unknown>): R
     const children = markChildren(props.children, false);
     return children === props.children ? props : { ...props, children };
   }
-  if (typeof type !== "string") return props;
+  if (typeof type !== "string" && !isTextDrawingLibraryComponent(type)) return props;
   // A box this module drew: already marked.
   if (props["data-hidden-char"] !== undefined) return props;
   let guarded: Record<string, unknown> | null = null;
@@ -146,8 +189,9 @@ export function guardHostProps(type: unknown, props: Record<string, unknown>): R
     const value = props[name];
     if (typeof value === "string" && hasHiddenChars(value)) (guarded ??= { ...props })[name] = escapeHidden(value);
   }
-  if (!RAW_TEXT_ELEMENTS.has(type) && "children" in props) {
-    const children = markChildren(props.children, PLAIN_TEXT_ELEMENTS.has(type));
+  const tag = typeof type === "string" ? type : "";
+  if (!RAW_TEXT_ELEMENTS.has(tag) && "children" in props) {
+    const children = markChildren(props.children, PLAIN_TEXT_ELEMENTS.has(tag));
     if (children !== props.children) (guarded ??= { ...props }).children = children;
   }
   return guarded ?? props;

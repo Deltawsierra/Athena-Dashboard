@@ -3,6 +3,7 @@
 import * as React from "react"
 import * as LabelPrimitive from "@radix-ui/react-label"
 import { Slot } from "@radix-ui/react-slot"
+import * as SlotPrimitive from "@radix-ui/react-slot"
 import {
   Controller,
   FormProvider,
@@ -14,6 +15,11 @@ import {
 
 import { cn } from "@/lib/utils"
 import { Label } from "@/components/ui/label"
+import { drawsTargetText } from "@/lib/hiddenChars"
+
+// Its primitives draw the text they are handed past this app's JSX runtime: guarded where it is handed over (lib/hiddenChars.ts).
+drawsTargetText(LabelPrimitive)
+drawsTargetText(SlotPrimitive)
 
 const Form = FormProvider
 

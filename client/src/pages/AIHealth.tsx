@@ -35,6 +35,7 @@ import {
   Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from "recharts";
+import { AXIS_TEXT, TOOLTIP_TEXT } from "@/lib/chartText";
 
 import GlassCard from "@/components/GlassCard";
 import PageHeader from "@/components/PageHeader";
@@ -483,9 +484,9 @@ export default function AIHealth() {
                       <ResponsiveContainer width="100%" height="100%">
                         <AreaChart data={series}>
                           <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" />
-                          <XAxis dataKey="time" tick={AXIS} axisLine={false} tickLine={false} />
-                          <YAxis tick={AXIS} axisLine={false} tickLine={false} domain={[0, 100]} />
-                          <Tooltip contentStyle={TOOLTIP} />
+                          <XAxis dataKey="time" tick={AXIS} axisLine={false} tickLine={false} {...AXIS_TEXT} />
+                          <YAxis tick={AXIS} axisLine={false} tickLine={false} domain={[0, 100]} {...AXIS_TEXT} />
+                          <Tooltip contentStyle={TOOLTIP} {...TOOLTIP_TEXT} />
                           <Area
                             type="monotone" dataKey="cpu" name="CPU %"
                             stroke="hsl(var(--primary))"
@@ -517,9 +518,9 @@ export default function AIHealth() {
                       <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={series}>
                           <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" />
-                          <XAxis dataKey="time" tick={AXIS} axisLine={false} tickLine={false} />
-                          <YAxis tick={AXIS} axisLine={false} tickLine={false} />
-                          <Tooltip contentStyle={TOOLTIP} />
+                          <XAxis dataKey="time" tick={AXIS} axisLine={false} tickLine={false} {...AXIS_TEXT} />
+                          <YAxis tick={AXIS} axisLine={false} tickLine={false} {...AXIS_TEXT} />
+                          <Tooltip contentStyle={TOOLTIP} {...TOOLTIP_TEXT} />
                           <Line
                             type="monotone" dataKey="response" name="ms"
                             stroke="hsl(var(--gold))" dot={false}

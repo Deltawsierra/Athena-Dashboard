@@ -27,7 +27,7 @@ import { useState } from "react";
 import { FileCode2 } from "lucide-react";
 import { ContractStanding } from "./ApprovedWorkflows";
 import { HistoryPageFrame, HistoryPages, OnDemand, answeredFor, type PageSlot } from "./history";
-import { Absent, Chip, Digest, Fact, NotInHand, Section, ToolName, UnreadableRows, When, served, toolKindLabel, TOOL_KINDS, unreadableIn } from "./parts";
+import { Absent, Chip, Digest, Fact, NotInHand, Section, ToolName, UnreadableRows, When, notAListIn, served, toolKindLabel, TOOL_KINDS, unreadableIn } from "./parts";
 import type {
   ApprovedTool,
   ApprovedWorkflows,
@@ -37,6 +37,7 @@ import type {
   ToolContractHistory,
   ToolContractRecord,
 } from "./types";
+import { NOT_A_LIST } from "./types";
 
 /** The fields a tool's contract is made of, in the backend's order, with what each is called here. */
 export const CONTRACT_FIELDS: ReadonlyArray<readonly [string, string]> = [
@@ -93,9 +94,14 @@ function bindingsByTool(workflows: ApprovedWorkflows | null): Map<string, Bindin
   return out;
 }
 
-/** Rows of the approvals (the approved set, or an approval's tools) the server could not read. */
-function approvalsUnread(workflows: ApprovedWorkflows | null): number {
+/**
+ * Rows of the approvals (the approved set, or an approval's tools) the server
+ * could not read; NOT_A_LIST when one of those lists was not a list at all, so
+ * how many is not known.
+ */
+function approvalsUnread(workflows: ApprovedWorkflows | null): number | typeof NOT_A_LIST {
   if (workflows === null) return 0;
+  if (notAListIn(workflows, "approved") || workflows.approved.some((workflow) => notAListIn(workflow, "tools"))) return NOT_A_LIST;
   return unreadableIn(workflows, "approved") + workflows.approved.reduce((sum, workflow) => sum + unreadableIn(workflow, "tools"), 0);
 }
 
@@ -461,8 +467,8 @@ function ToolCard({
   bindings: Binding[];
   bindingsSource: { state: "loading" } | { state: "error"; message: string } | { state: "ready" };
   deployment?: string;
-  /** Rows of the approvals that could not be read: one of them may bind this tool. */
-  unread?: number;
+  /** Rows of the approvals that could not be read (or NOT_A_LIST): one of them may bind this tool. */
+  unread?: number | typeof NOT_A_LIST;
 }) {
   const retired = Boolean(asset.metadata.retired);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -518,7 +524,7 @@ function ToolCard({
         {bindingsSource.state === "ready" &&
           (bindings.length === 0 ? (
             <Absent testId="no-bindings">
-              {unread > 0 ? "No approval that could be read binds this tool." : "No approval binds this tool."}
+              {unread !== 0 ? "No approval that could be read binds this tool." : "No approval binds this tool."}
             </Absent>
           ) : (
             <BindingList bindings={bindings} />
