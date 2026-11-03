@@ -67,8 +67,9 @@ jobs:
   # the tests of a scan whose run the engine does not know, and the desktop
   # window's lock with the target-content tests (a target URL is text; a hostile
   # finding renders inert; an app file is saved in the app; every in-app download
-  # keeps its Blob URL until the save has read it). Not the whole suite and not
-  # the packaged build, which stay on the Linux job above.
+  # keeps its Blob URL until the save has read it), and the recovery screen's
+  # relay and render tests. Not the whole suite and not the packaged build, which
+  # stay on the Linux job above.
   windows:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -135,3 +136,5 @@ jobs:
           tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx
           tests/an-app-file-is-saved-in-the-app-and-a-stored-url-is-text.test.tsx
           tests/every-in-app-download-revokes-its-blob-url-later-never-with-the-click.test.tsx
+          tests/the-recovery-records-are-read-as-the-person-and-never-written.test.ts
+          tests/a-recovery-record-shows-every-state-with-what-supports-it-and-never-a-clean-badge.test.tsx

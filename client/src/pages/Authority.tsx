@@ -1,5 +1,5 @@
 /**
- * Authority: four read-only screens over the assurance records Athena-Backend
+ * Authority: five read-only screens over the assurance records Athena-Backend
  * keeps for a deployment, each at its own route.
  *
  *   /authority/workflows   Approved workflows: what is approved, the tools each
@@ -10,6 +10,9 @@
  *                          contract each approval of it was bound under.
  *   /authority/release     Release gate: the deployment's release decision and every
  *                          input the backend combines into it.
+ *   /authority/recovery    Recovery records: each incident's recovery steps, every
+ *                          state with what supports it (SPINE SP-1); ?finding=<uuid>
+ *                          reads one incident's.
  *
  * The deployment is chosen from the deployments Athena-Backend lists for you
  * (?deployment=<uuid>). Every read goes there as you, through this console's
@@ -28,6 +31,7 @@ import ApprovedWorkflowsScreen from "@/components/authority/ApprovedWorkflows";
 import AuthorityChainsScreen from "@/components/authority/AuthorityChains";
 import ToolContractsScreen from "@/components/authority/ToolContracts";
 import ReleaseGateScreen from "@/components/authority/ReleaseGate";
+import RecoveryRecordsScreen from "@/components/authority/RecoveryRecords";
 import { Absent, decisionLabel } from "@/components/authority/parts";
 import { loaded } from "@/lib/loaded";
 import { BACKEND_RECORD } from "@/lib/sourceLabels";
@@ -38,6 +42,7 @@ export const SCREENS = [
   { key: "chains", label: "Authority chains" },
   { key: "contracts", label: "Tool contracts" },
   { key: "release", label: "Release gate" },
+  { key: "recovery", label: "Recovery records" },
 ] as const;
 
 export type ScreenKey = (typeof SCREENS)[number]["key"];
@@ -141,9 +146,11 @@ function DeploymentPicker({
   );
 }
 
-function ScreenFor({ screen, deployment }: { screen: ScreenKey; deployment: string }) {
+function ScreenFor({ screen, deployment, finding }: { screen: ScreenKey; deployment: string; finding: string }) {
   // Keyed by the deployment, so nothing read for one deployment is ever drawn under another.
   switch (screen) {
+    case "recovery":
+      return <RecoveryRecordsScreen key={deployment} deployment={deployment} finding={finding || undefined} />;
     case "chains":
       return <AuthorityChainsScreen key={deployment} deployment={deployment} />;
     case "contracts":
@@ -157,8 +164,12 @@ function ScreenFor({ screen, deployment }: { screen: ScreenKey; deployment: stri
 
 export default function Authority({ params }: { params?: { screen?: string } }) {
   const screen = screenOf(params?.screen);
-  const asked = new URLSearchParams(useSearch()).get("deployment") ?? "";
+  const search = new URLSearchParams(useSearch());
+  const asked = search.get("deployment") ?? "";
   const deployment = DEPLOYMENT_ID.test(asked) ? asked : "";
+  // One incident of the recovery screen (?finding=), held to the same id rule as the deployment.
+  const askedFinding = screen === "recovery" ? search.get("finding") ?? "" : "";
+  const finding = DEPLOYMENT_ID.test(askedFinding) ? askedFinding : "";
   const [, navigate] = useLocation();
 
   const status$ = loaded(useQuery<AssuranceStatus>({ queryKey: ["/api/assurance/status"], refetchInterval: 30_000 }));
@@ -172,7 +183,7 @@ export default function Authority({ params }: { params?: { screen?: string } }) 
       <PageHeader
         title={title}
         icon={<Waypoints className="h-8 w-8" />}
-        description="Approvals, the authority behind each effect, the contracts tools are approved under, and the release decision: read-only, as Athena-Backend records them."
+        description="Approvals, the authority behind each effect, the contracts tools are approved under, the release decision, and each incident's recovery record: read-only, as Athena-Backend records them."
         actions={<ScreenTabs current={screen} deployment={deployment} />}
       />
       <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground" data-testid="text-authority-source">
@@ -220,8 +231,13 @@ export default function Authority({ params }: { params?: { screen?: string } }) 
               This link does not name a deployment id Athena-Backend issues, so no record is read for it.
             </Absent>
           )}
+          {askedFinding && !finding && (
+            <Absent testId="finding-id-refused">
+              This link does not name a finding id Athena-Backend issues, so no incident is read for it.
+            </Absent>
+          )}
           {deployment ? (
-            <ScreenFor screen={screen} deployment={deployment} />
+            <ScreenFor screen={screen} deployment={deployment} finding={finding} />
           ) : (
             deployments$.state === "ready" && (
               <p className="text-[13px] text-muted-foreground" data-testid="choose-deployment">
