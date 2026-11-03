@@ -3718,8 +3718,11 @@ export function registerRoutes(app: Express): void {
     if (!before) return notFound(res, "Test");
     if (engineRecordEdited(res, before, data)) return;
     if (suppliedNotKnownStatus(res, data, before)) return;
-    const edit = { ...data, ...completionStamp(data, before) };
-    const test = await storage.updateTestWith(req.params.id, (row) => editOnto(row, edit));
+    // Stamped and written onto the row as it is when the write lands
+    // (updateTestWith): whether the edit completes the test is the row's
+    // status then, not the status `before` read -- a write made meanwhile that
+    // completed it keeps the time it has.
+    const test = await storage.updateTestWith(req.params.id, (row) => editOnto(row, { ...data, ...completionStamp(data, row) }));
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
       await storage.createActivityLog({ action: "updated", entityType: "test", entityId: test.id, details: null, ...actor(req) });
@@ -4717,7 +4720,7 @@ export function registerRoutes(app: Express): void {
       const now = (row.findings ?? {}) as Record<string, unknown>;
       // The record was filed meanwhile: it is the row's record of the run now
       // (the read above answers from it), and this poll writes nothing over it.
-      if (backendScanId !== null && backendSnapshotOf(now.backend) !== null) return null;
+      if (backendScanIdOf(now) !== null && backendSnapshotOf(now.backend) !== null) return null;
       // A direct read that succeeded clears the mark of a run this dashboard's
       // engine key could not read on the first try (decision 7): the run is
       // readable by this key after all, so its direct Stop is offered again.

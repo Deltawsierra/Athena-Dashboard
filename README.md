@@ -434,8 +434,12 @@ its headers exactly as before.
   lands. An edit of an engine scan writes the person's notes, summary and
   test type onto the run's findings as they are then, and never writes back
   the status or counts it was checked against. Server code names the plain
-  `updateTest` only where the storage defines it
-  (`tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts`).
+  `updateTest` only where the storage defines it, and no `updateTestWith`
+  change builds the row from a row read before the call: it reads a row only
+  through the one it is handed, never closing over an earlier `getTest`, a
+  row an outer function was handed, or what was made of either (the same
+  test, with the TypeScript compiler API;
+  `tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts`).
 - **No break-glass** (decision 11). No direct launch path remains for a
   person-initiated scan: with the backend unreachable, refusing, or the person
   not signed in to it, a start is refused with the reason, and nothing is sent
