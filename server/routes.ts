@@ -4567,13 +4567,19 @@ export function registerRoutes(app: Express): void {
       // A record the watch collected while this read was on its way was filed
       // into the row after this read took it (fileRecordIntoRow), its end with
       // it: answered from the row as it is now, as the next read would answer
-      // it -- never "running" beside a collected record. A read of storage, on
-      // no stop's path.
+      // it -- never "running" beside a collected record. So is a record this
+      // read filed itself (backendRecordView: the watch collected it, and its
+      // own write did not land): the row this read took has no record on it,
+      // and the row as it is now does -- never a collected record beside a row
+      // without it. A read of storage, on no stop's path.
       let current = row;
       let said = payload;
-      if (backend?.collected === true && !FINISHED_RUN_STATES.has(row.status)) {
+      const filedHere = backendSnapshotOf(((row.findings ?? {}) as Record<string, unknown>).backend) === null;
+      if (backend?.collected === true && (!FINISHED_RUN_STATES.has(row.status) || filedHere)) {
         const latest = await storage.getTest(row.id);
-        if (latest && FINISHED_RUN_STATES.has(latest.status)) {
+        const ended = latest !== undefined && FINISHED_RUN_STATES.has(latest.status) && !FINISHED_RUN_STATES.has(row.status);
+        const filed = latest !== undefined && filedHere && backendSnapshotOf(((latest.findings ?? {}) as Record<string, unknown>).backend) !== null;
+        if (latest && (ended || filed)) {
           current = latest;
           said = recordedPayload(latest, true);
         }

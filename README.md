@@ -423,7 +423,10 @@ its headers exactly as before.
   (`updateTestWith`: one IMMEDIATE transaction on SQLite), never from a read
   taken before an await, so none writes back another's field as it was before
   it landed; a poll that finds the record already filed writes nothing over
-  it. None of these writes is on a stop's path: the Stop is answered first.
+  it. A status read that files the record itself (the watch collected it and
+  its own write did not land) answers with the row as it is after that filing,
+  record and all. None of these writes is on a stop's path: the Stop is
+  answered first.
 - **No break-glass** (decision 11). No direct launch path remains for a
   person-initiated scan: with the backend unreachable, refusing, or the person
   not signed in to it, a start is refused with the reason, and nothing is sent

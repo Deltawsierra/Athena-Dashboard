@@ -116,6 +116,8 @@ afterEach(() => {
   held.clear();
   landed.length = 0;
   after.length = 0;
+  failNext.clear();
+  refused.length = 0;
   watched = "";
   hybrid.releaseCollects();
   hybrid.releaseStops();
@@ -164,6 +166,9 @@ const held = new Set<Writer>();
 const landed: Writer[] = [];
 /** The row as each landed write left it. */
 const after: Array<{ writer: Writer; row: Test | undefined }> = [];
+/** Writers whose next write is refused, as a full disk would refuse it; and those refused so far. */
+const failNext = new Set<Writer>();
+const refused: Writer[] = [];
 let watched = "";
 
 /**
@@ -205,6 +210,10 @@ function gateRowWrites(testId: string): void {
         held.add(writer);
         await until(() => gate(storage.peekTest(String(id))));
         held.delete(writer);
+      }
+      if (writer && failNext.delete(writer)) {
+        refused.push(writer);
+        throw new Error("SQLITE_FULL: database or disk is full");
       }
       const out = await real(id, arg);
       if (writer) {
@@ -310,5 +319,28 @@ describe("two writes to a stopped scan's row never drop each other's findings", 
     expect(row?.findings).toEqual(filed?.findings);
     expect(findingsOf(row).backend).toMatchObject({ status: "stopped" });
     expect(findingsOf(row).backendMirror).toMatchObject({ mirrored: true });
+  });
+
+  it("the collect watch's own filing did not land: the status read that files it answers with the record on its row", async () => {
+    const { testId } = await aRunningScan();
+    gateRowWrites(testId);
+    // The watch's write of the record is refused once; the record stays on the watch.
+    failNext.add("file");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const stopped = await admin.post(`/api/scans/${testId}/abort`);
+    expect(stopped.status).toBe(200);
+    expect((await read(testId)).state).toBe("aborted");
+    expect(await until(() => refused.includes("file")), "the watch's filing was not made").toBe(true);
+    await vi.waitFor(() => expect(errors.mock.calls.some(([line]) => String(line).includes("could not be filed into test"))).toBe(true));
+    expect(hasRecord(storage.peekTest(testId)), "the refused filing landed").toBe(false);
+
+    // This read finds the watch collected and no record on the row, files it, and answers with it.
+    const answered = await read(testId);
+    expect(landed.filter((one) => one === "file"), "the read did not file the record").toEqual(["file"]);
+    expect(answered.backend).toMatchObject({ collected: true, status: "stopped" });
+    expect(answered.state).toBe("aborted");
+    expect(answered.test.findings.backend, "the read answered with the row it took before its own filing").toMatchObject({ status: "stopped", verdict: null });
+    expect(findingsOf(await storage.getTest(testId)).backend).toMatchObject({ status: "stopped" });
   });
 });

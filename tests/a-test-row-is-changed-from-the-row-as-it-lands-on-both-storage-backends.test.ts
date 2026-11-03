@@ -151,3 +151,18 @@ describe("a test row changed from the row as it lands, with another dashboard on
     }
   });
 });
+
+describe("a full disk refuses every write of a test row", () => {
+  it("the stop tests' full-disk helper refuses every storage call that writes a test row, updateTestWith included", async () => {
+    // tests/a-failed-write-never-holds-back-or-hides-a-stop.test.ts diskFull(): a write method it leaves out
+    // still lands on a "full" disk, and its stops are then proven against a disk that is not full.
+    const source = fs.readFileSync(path.join(__dirname, "a-failed-write-never-holds-back-or-hides-a-stop.test.ts"), "utf8");
+    const helper = /async function diskFull\(\)[\s\S]*?for \(const write of \[([^\]]*)\] as const\)/.exec(source);
+    expect(helper, "the full-disk helper was not found").not.toBeNull();
+    const refused = Array.from(helper![1].matchAll(/"([A-Za-z]+)"/g), (one) => one[1]);
+    const { MemStorage } = await import("../server/storage");
+    const writesATestRow = Object.getOwnPropertyNames(MemStorage.prototype).filter((name) => /^(create|update|delete)Test(With)?$/.test(name));
+    expect(writesATestRow.sort()).toEqual(["createTest", "deleteTest", "updateTest", "updateTestWith"]);
+    for (const name of writesATestRow) expect(refused, `diskFull() does not refuse ${name}`).toContain(name);
+  });
+});
