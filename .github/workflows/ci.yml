@@ -155,4 +155,6 @@ jobs:
           tests/no-assurance-read-fails-whole-on-one-bad-row-of-any-list.test.ts
           tests/a-bad-row-of-any-assurance-list-is-said-on-its-panel.test.tsx
           tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts
+          tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts
+          tests/a-bad-failsafe-row-is-said-on-the-console-never-read-as-none.test.tsx
           tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx
