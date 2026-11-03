@@ -995,8 +995,9 @@ opened, or is said with why not:
 - The control plane's two stop-lane reads, the state and the command list, are
   bounded by row and byte limits (Athena-Backend `failsafe/views.py` `_Page`).
   They say when they left a command out: the state's `more` field, and both
-  reads' `X-Failsafe-More` header. They take no cursor or offset, so there is
-  no next page to follow, and the cut is said instead. The state carries
+  reads' `X-Failsafe-More` header. A control plane that gives the next page
+  is followed to its end (see below). One that gives none (an older one) is
+  not, and the cut is said instead. The state carries
   `more: true` when either says true. It carries `more: null` when neither
   says, or when either is odd. It carries no `more` only when the control plane
   said, in so many words, that it left nothing out.
@@ -1019,6 +1020,40 @@ opened, or is said with why not:
 
 (`tests/no-failsafe-command-is-lost-past-the-first-page.test.ts`,
 `tests/a-cut-failsafe-list-and-a-stop-drafted-with-no-id-are-said-on-the-console.test.tsx`).
+
+Every page of a failsafe read is followed, off the stop path:
+
+- When the control plane cuts a read, it gives the next page: a cursor in
+  `X-Failsafe-Next` (and the state's `next`). The dashboard sends it back as
+  `?cursor=`, with the same engine and status, until a page says no more
+  (Athena-Backend #218). Rows are deduped by uuid: past 500 awaiting stops, a
+  later page relists every awaiting stop.
+- Every command on every page is learnt as one on page 1 is. So a signature
+  for a stand-down on page 3 goes as a stop from memory, and a resume on page 3
+  is refused from memory while the kill switch is engaged.
+- A walk is bounded by `FAILSAFE_PAGES` in `server/failsafe.ts`. These are
+  constants, not settings:
+  - 10 pages. At about 1,000 rows a page, that is the 10,000 commands this
+    server remembers, so a walk never makes it forget a stop it learnt.
+  - 4 s for the pages after the first. The console re-reads every 5 s.
+- A list is shown as whole only when its last page said no more. A walk cut
+  short keeps what it read and says more exist (`more: true`). It is cut by
+  either bound, a page that fails (a bad cursor's 400 included), or a cursor
+  that cannot be followed. The state's `pages` says how far it read and why it
+  stopped, and the console shows that beside the cut. A control plane that
+  gives no next page reads exactly as before.
+- A command too large for any page (`X-Failsafe-Too-Large`) is shown as "a
+  command too large to read", with its id. It is counted in
+  `unreadable.tooLarge`. It is also counted in `possibleStops.tooLarge`, unless
+  it is known here to be a resume or a release. Its signature is relayed as a
+  possible stop. The list route passes its id on in `X-Failsafe-Too-Large`.
+- Stops always go. Paging runs only in the console's reads and in the kill
+  switch's background read, which runs after its stops and is never awaited.
+  With every page 800 ms slow, the kill switch's stop, a pause's draft and a
+  stand-down's signature each arrive within the 300 ms bound.
+
+(`tests/a-failsafe-read-follows-every-page-and-no-stop-waits-on-one.test.ts`,
+`tests/a-failsafe-command-too-large-to-read-and-a-walk-cut-short-are-said-on-the-console.test.tsx`).
 
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release
