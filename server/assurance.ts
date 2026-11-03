@@ -26,6 +26,10 @@ import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
 import { runIdFrom } from "@shared/engine-record";
 import type { RetestCheckView } from "@shared/backend-record";
+import type {
+  CoverageGap, CoverageInterval, CoverageSource, FindingRecoveryRecord, RecoveryCondition, RecoveryCoverage,
+  RecoveryIncident, RecoveryRecords, RecoveryStep, ResidualUncertainty,
+} from "@shared/recovery-record";
 import { readRetestCheck } from "./backend-scans";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
@@ -6293,4 +6297,162 @@ export async function decisionHistory(uuid: string, filters: Pick<HistoryQuery, 
     transitions: rowsOf(raw.transitions).map(decisionTransitionRecord),
     transitionCount: numOrNull(raw.transition_count),
   };
+}
+
+// ==== The recovery records (SPINE SP-1, the recovery screen) ====
+//
+// Two reads Athena-Backend serves (athena-backend assurance/recovery_record.py, routed in
+// assurance/views.py), read here and nowhere else:
+//
+//   GET /api/assurance/deployments/<uuid>/recovery-records/   ?offset=   (a page of 50 incidents)
+//   GET /api/assurance/findings/<uuid>/recovery-record/                  (one incident)
+//
+// An incident is a finding with a recovery record; each step is one S1 recovery state with
+// the conditions that support it, each with its witness, its gaps, restrictions and release,
+// the coverage it rests on, its residual uncertainty with the sources of each item, and the
+// owner's acceptance as recorded. Each read goes as the signed-in person, like every read
+// above, so the backend's per-user access applies and a deployment or finding the person
+// cannot read is its 404, exactly as one that does not exist. GET only: the finding route
+// also takes a POST there (the next steps, the owner's acceptance), and this server relays
+// none -- the screen writes, accepts and offers nothing.
+//
+// Read whole or not at all: an incident, a step, or an item of a step's lists that is not
+// what the backend serves is not dropped -- a step left out, or a gap, would read as one
+// the record does not have -- and the read is answered as unavailable instead. A field the
+// backend did not serve is null, never an empty list or a false.
+
+/** A recovery record this server cannot read whole: answered as unavailable, never shown in part. */
+function recoveryUnreadable(what: string): ControlPlaneUnavailable {
+  return new ControlPlaneUnavailable(
+    `the Athena control plane answered a recovery record whose ${what} cannot be read whole, so none of it is shown`,
+  );
+}
+
+/** A plain object, or a refusal naming `what`. */
+function recoveryObject(raw: unknown, what: string): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw recoveryUnreadable(what);
+  return raw as Record<string, unknown>;
+}
+
+/** A list read whole by `read`: null when the backend served none, a refusal when it served something else. */
+function recoveryList<T>(raw: unknown, what: string, read: (one: unknown) => T): T[] | null {
+  if (raw === undefined || raw === null) return null;
+  if (!Array.isArray(raw)) throw recoveryUnreadable(what);
+  return raw.map(read);
+}
+
+/** A string kept exactly as served (a gap, a restriction): anything else is a refusal. */
+function recoveryText(raw: unknown, what: string): string {
+  if (typeof raw !== "string") throw recoveryUnreadable(what);
+  return raw;
+}
+
+function coverageInterval(raw: Record<string, unknown>): CoverageInterval {
+  return { start: strOrNull(raw.start), end: strOrNull(raw.end) };
+}
+
+function recoveryCoverage(raw: unknown): RecoveryCoverage | null {
+  if (raw === undefined || raw === null) return null;
+  const coverage = recoveryObject(raw, "coverage");
+  const manifest = coverage.manifest === undefined || coverage.manifest === null ? null : recoveryObject(coverage.manifest, "coverage manifest");
+  let missing: Record<string, CoverageInterval[]> | null = null;
+  if (coverage.missing !== undefined && coverage.missing !== null) {
+    missing = {};
+    for (const [source, left] of Object.entries(recoveryObject(coverage.missing, "coverage missing"))) {
+      const intervals = recoveryList(left, "coverage missing", (one) => coverageInterval(recoveryObject(one, "coverage missing")));
+      if (intervals === null) throw recoveryUnreadable("coverage missing");
+      missing[source] = intervals;
+    }
+  }
+  return {
+    sources: manifest === null ? null : recoveryList(manifest.sources, "coverage sources", (one): CoverageSource => {
+      const source = recoveryObject(one, "coverage sources");
+      return { source: strOrNull(source.source), kind: strOrNull(source.kind), ...coverageInterval(source) };
+    }),
+    declaredGaps: manifest === null ? null : recoveryList(manifest.gaps, "coverage gaps", (one): CoverageGap => {
+      const gap = recoveryObject(one, "coverage gaps");
+      return { kind: strOrNull(gap.kind), subject: strOrNull(gap.subject), detail: strOrNull(gap.detail), ...coverageInterval(gap) };
+    }),
+    observedSources: numOrNull(coverage.observed_sources),
+    requiredSources: numOrNull(coverage.required_sources),
+    complete: boolOrNull(coverage.complete),
+    missing,
+    unknownInventory: recoveryList(coverage.unknown_inventory, "coverage unknown inventory", (one) => recoveryText(one, "coverage unknown inventory")),
+  };
+}
+
+function recoveryCondition(raw: unknown): RecoveryCondition {
+  const condition = recoveryObject(raw, "conditions");
+  const witness = condition.witness === undefined || condition.witness === null ? null : recoveryObject(condition.witness, "witness");
+  return {
+    condition: strOrNull(condition.condition),
+    witness: witness === null ? null : { kind: strOrNull(witness.kind), ref: strOrNull(witness.ref) },
+  };
+}
+
+function residualUncertainty(raw: unknown): ResidualUncertainty {
+  const item = recoveryObject(raw, "residual uncertainty");
+  return {
+    statement: strOrNull(item.statement),
+    sources: recoveryList(item.sources, "residual uncertainty sources", (one) => {
+      const source = recoveryObject(one, "residual uncertainty sources");
+      return { kind: strOrNull(source.kind), ref: strOrNull(source.ref) };
+    }),
+  };
+}
+
+function recoveryStep(raw: unknown): RecoveryStep {
+  const step = recoveryObject(raw, "steps");
+  return {
+    ref: strOrNull(step.ref),
+    version: numOrNull(step.version),
+    state: strOrNull(step.state),
+    reopens: strOrNull(step.reopens),
+    conditions: recoveryList(step.conditions, "conditions", recoveryCondition),
+    gaps: recoveryList(step.gaps, "gaps", (one) => recoveryText(one, "gaps")),
+    restrictions: recoveryList(step.restrictions, "restrictions", (one) => recoveryText(one, "restrictions")),
+    release: strOrNull(step.release),
+    residualUncertainty: recoveryList(step.residual_uncertainty, "residual uncertainty", residualUncertainty),
+    coverage: recoveryCoverage(step.coverage),
+    acceptedBy: strOrNull(step.accepted_by),
+    acceptedUntil: strOrNull(step.accepted_until),
+    recordedBy: strOrNull(step.recorded_by),
+    recordedAt: strOrNull(step.recorded_at),
+  };
+}
+
+function recoveryIncident(raw: unknown): RecoveryIncident {
+  const incident = recoveryObject(raw, "incidents");
+  const current = incident.current === undefined || incident.current === null ? null : recoveryObject(incident.current, "current step");
+  const steps = recoveryList(incident.steps, "steps", recoveryStep);
+  if (steps === null) throw recoveryUnreadable("steps");
+  return {
+    finding: strOrNull(incident.finding),
+    title: strOrNull(incident.title),
+    severity: strOrNull(incident.severity),
+    current: current === null ? null : { version: numOrNull(current.version), state: strOrNull(current.state), release: strOrNull(current.release) },
+    steps,
+  };
+}
+
+/**
+ * One page of a deployment's recovery records, from `offset`: each incident with every
+ * step, oldest first, and how many incidents there are. A GET only.
+ */
+export async function recoveryRecords(uuid: string, filters: Pick<HistoryQuery, "offset"> = {}): Promise<RecoveryRecords> {
+  const query = historySearch({ offset: filters.offset });
+  const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/recovery-records/${query}`);
+  const incidents = recoveryList(raw.incidents, "list of incidents", recoveryIncident);
+  if (incidents === null) throw recoveryUnreadable("list of incidents");
+  return { ...historyPage(raw), incidents, incidentCount: numOrNull(raw.incident_count) };
+}
+
+/** One incident's recovery record, read by its finding: every step, oldest first. A GET only. */
+export async function findingRecoveryRecord(uuid: string): Promise<FindingRecoveryRecord> {
+  const response = await call(`/api/assurance/findings/${encodeURIComponent(uuid)}/recovery-record/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const raw = await readObject(response);
+  return { deployment: strOrNull(raw.deployment), ...recoveryIncident(raw) };
 }
