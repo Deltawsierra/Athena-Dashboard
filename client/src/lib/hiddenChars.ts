@@ -21,12 +21,10 @@
  *     code point ("U+202E"; the `.hidden-char` rule in client/src/index.css), boxed
  *     off so it reorders nothing outside the box. The character itself stays in
  *     the text: what a person copies, searches or exports is the string as served;
- *   - in text that cannot hold a box (an <option>, an SVG <title> or <desc>), it
- *     is written out as "[U+202E]".
- *
- * Attributes are left exactly as they are: a tooltip that repeats a string the
- * screen shows (a finding's confidence basis, tests/a-finding-s-confidence-is-
- * read-with-the-engine-s-basis.test.tsx) carries it verbatim.
+ *   - in an attribute a person reads or hears (a tooltip, an aria-label, an alt
+ *     text, a placeholder), and in text that cannot hold a box (an <option>, an
+ *     SVG <title> or <desc>), it is written out as "[U+202E]", so a target string
+ *     cannot hide in a tooltip either.
  *
  * Pinned by tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx.
  */
@@ -72,7 +70,7 @@ export function hasHiddenChars(value: string): boolean {
   return ANY_HIDDEN.test(value);
 }
 
-/** `value` with each hidden character written out as "[U+202E]": for text that cannot hold a box. */
+/** `value` with each hidden character written out as "[U+202E]": for an attribute, or text that cannot hold a box. */
 export function escapeHidden(value: string): string {
   return hasHiddenChars(value) ? value.replace(EACH_HIDDEN, (char) => `[${codePointOf(char)}]`) : value;
 }
@@ -100,6 +98,9 @@ export function markHidden(value: string, key?: string | number): ReactNode {
   return createElement(Fragment, key === undefined ? null : { key }, ...parts);
 }
 
+/** Attributes a person reads or hears: a hidden character in one is written out. */
+const READ_ATTRIBUTES = ["title", "aria-label", "aria-description", "aria-roledescription", "aria-valuetext", "alt", "placeholder"];
+
 /** Elements whose text is drawn as written, never as boxes: written out instead. */
 const PLAIN_TEXT_ELEMENTS = new Set(["option", "title", "desc"]);
 
@@ -125,9 +126,10 @@ function markChildren(children: unknown, plain: boolean, key?: number): unknown 
 
 /**
  * The props of an element the app draws (or a fragment), with every hidden
- * character in its text marked. A component's props are left as they are (it may
- * read a string as a string): what it draws reaches an element, and is marked
- * there. The same object when nothing changed.
+ * character in its text marked and every one in an attribute a person reads
+ * written out. A component's props are left as they are (it may read a string as
+ * a string): what it draws reaches an element, and is marked there. The same
+ * object when nothing changed.
  */
 export function guardHostProps(type: unknown, props: Record<string, unknown>): Record<string, unknown> {
   if (props === null || typeof props !== "object") return props;
@@ -139,7 +141,14 @@ export function guardHostProps(type: unknown, props: Record<string, unknown>): R
   if (typeof type !== "string") return props;
   // A box this module drew: already marked.
   if (props["data-hidden-char"] !== undefined) return props;
-  if (RAW_TEXT_ELEMENTS.has(type) || !("children" in props)) return props;
-  const children = markChildren(props.children, PLAIN_TEXT_ELEMENTS.has(type));
-  return children === props.children ? props : { ...props, children };
+  let guarded: Record<string, unknown> | null = null;
+  for (const name of READ_ATTRIBUTES) {
+    const value = props[name];
+    if (typeof value === "string" && hasHiddenChars(value)) (guarded ??= { ...props })[name] = escapeHidden(value);
+  }
+  if (!RAW_TEXT_ELEMENTS.has(type) && "children" in props) {
+    const children = markChildren(props.children, PLAIN_TEXT_ELEMENTS.has(type));
+    if (children !== props.children) (guarded ??= { ...props }).children = children;
+  }
+  return guarded ?? props;
 }

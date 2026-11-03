@@ -15,7 +15,8 @@
  *     code point, the text around it unchanged, and the string's characters all
  *     still there (textContent is the string as served);
  *   - in a fragment's text, the same;
- *   - in an <option>, which cannot hold a box, it is written out as "[U+202E]";
+ *   - in an <option>, which cannot hold a box, it is written out as "[U+202E]",
+ *     and so it is in a tooltip, an aria-label, an alt text and a placeholder;
  *   - a <textarea>'s text (a value a person edits) is left exactly as it is;
  *   - a component is handed its props as they are: a component that reads a
  *     string reads the string;
@@ -63,6 +64,23 @@ describe("a character that hides or reorders text", () => {
     const option = container.querySelector("option")!;
     expect(option.textContent).toBe("invoice[U+202E]fdp.exe[U+200B]!");
     expect(option.value).toBe("v");
+  });
+
+  it("is written out in an attribute a person reads or hears: a tooltip, a label, an alt text, a placeholder", () => {
+    const { container } = render(
+      <div title={SPOOF} aria-label={SPOOF} data-note={SPOOF}>
+        <img alt={SPOOF} src="" />
+        <input placeholder={SPOOF} />
+      </div>,
+    );
+    const written = "invoice[U+202E]fdp.exe[U+200B]!";
+    const div = container.querySelector("div")!;
+    expect(div.getAttribute("title")).toBe(written);
+    expect(div.getAttribute("aria-label")).toBe(written);
+    expect(container.querySelector("img")!.getAttribute("alt")).toBe(written);
+    expect(container.querySelector("input")!.getAttribute("placeholder")).toBe(written);
+    // An attribute nobody reads (data the page itself uses) is left as served.
+    expect(div.getAttribute("data-note")).toBe(SPOOF);
   });
 
   it("is left exactly as it is in a <textarea>, a value a person edits", () => {

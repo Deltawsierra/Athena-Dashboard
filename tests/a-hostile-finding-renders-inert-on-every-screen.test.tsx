@@ -33,8 +33,9 @@
  *     an on* attribute, and no href is a javascript: URL;
  *   - the payload is on the screen as the characters it is, the long string in full;
  *   - every right-to-left override or zero-width character in it is drawn marked:
- *     alone in a box naming its code point (client/src/lib/hiddenChars.ts), so
- *     the text cannot read reordered or hide a character;
+ *     alone in a box naming its code point (client/src/lib/hiddenChars.ts), or
+ *     written out as "[U+202E]" in a tooltip or label, so the text cannot read
+ *     reordered or hide a character;
  *   - nothing is fetched from the outside host: fetch and XMLHttpRequest are
  *     spied, and so is every element created (an <img> or <iframe> fetches as
  *     soon as it has a src) and every innerHTML written;
@@ -226,9 +227,9 @@ const HIDDEN = /[\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206
 
 /**
  * Every place on the page a hidden character is drawn without its mark: a text node that holds one and is not
- * alone in its own marked box (`data-hidden-char` naming its code point, class `hidden-char`). Each would show
- * the text reordered, or with a character no one can see. (Attributes are left verbatim: client/src/lib/
- * hiddenChars.ts.)
+ * alone in its own marked box (`data-hidden-char` naming its code point, class `hidden-char`), or an attribute a
+ * person reads or hears (a tooltip, an aria-label, an alt text, a placeholder) that carries one bare instead of
+ * written out as "[U+202E]". Each would show the text reordered, or with a character no one can see.
  */
 function unmarkedHidden(): string[] {
   const found: string[] = [];
@@ -250,6 +251,12 @@ function unmarkedHidden(): string[] {
     const marked = box !== null && text.length === 1 && box.getAttribute("data-hidden-char") === code
       && box.classList.contains("hidden-char") && box.childNodes.length === 1;
     if (!marked) found.push(`${where(box)}: ${JSON.stringify(text.slice(0, 24))}`);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("*"))) {
+    for (const name of ["title", "aria-label", "aria-description", "alt", "placeholder"]) {
+      const value = element.getAttribute(name);
+      if (value !== null && HIDDEN.test(value)) found.push(`${where(element)} ${name}=${JSON.stringify(value.slice(0, 40))}`);
+    }
   }
   return found;
 }

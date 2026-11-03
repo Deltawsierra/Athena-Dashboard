@@ -215,8 +215,8 @@ written by older builds are verified once and transparently upgraded.
   drawn marked, in a box naming its code point (`U+202E`), so a name cannot read
   reversed or hide a character. The app's JSX runtime does this wherever an
   element draws text (`client/src/lib/hiddenChars.ts`, named in `vite.config.ts`),
-  and keeps the string as served for copy, search and export; an attribute such
-  as a tooltip keeps it verbatim.
+  and keeps the string as served for copy, search and export; in a tooltip, a
+  label, an alt text or a placeholder it is written out as `[U+202E]`.
 - `athena.db` and pasted developer logs are not tracked in git.
 - The **Failsafe console** (admin-only, `/failsafe`) can pause, stand down, or
   terminate an engine, but holds no signing key. It drafts a command and shows
