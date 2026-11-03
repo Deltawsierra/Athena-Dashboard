@@ -319,6 +319,35 @@ describe("every writer of a scan row's findings writes onto the row as it lands"
   });
 });
 
+describe("two people's edits of one test, at once", () => {
+  it("6. both complete it: the first to land stamps completedAt, the second keeps that time and neither drops the other's field", async () => {
+    // A person's test: no engine run stands behind it, so an edit writes its status and completedAt.
+    const test = await storage.createTest({ clientId, testType: "manual-review", status: "pending", findings: null } as never);
+    const gate = gateTheWrite(storage, (_row, patch) => patch.summary === "first");
+    const writes = () => vi.mocked(storage.updateTestWith).mock.calls.length;
+
+    const first = admin.patch(`/api/tests/${test.id}`).send({ status: "completed", summary: "first" }).then((res) => res);
+    expect(await until(() => gate.held), "the first edit's write was not made").toBe(true);
+    // The second edit is read and stamped while the first is held: its read sees the test still pending.
+    await new Promise((r) => setTimeout(r, 25));
+    const second = admin.patch(`/api/tests/${test.id}`).send({ status: "completed", severity: "high" }).then((res) => res);
+    expect(await until(() => writes() >= 2), "the second edit's write was not made").toBe(true);
+    await new Promise((r) => setTimeout(r, 25));
+    gate.release();
+
+    const [one, two] = [await first, await second];
+    expect(one.status, JSON.stringify(one.body)).toBe(200);
+    expect(two.status, JSON.stringify(two.body)).toBe(200);
+    expect(one.body.completedAt).toEqual(expect.any(String));
+    const row = await storage.getTest(test.id);
+    expect(row?.status).toBe("completed");
+    expect(row?.completedAt?.toISOString(), "the second edit stamped a completion over the first's").toBe(one.body.completedAt);
+    expect(two.body.completedAt).toBe(one.body.completedAt);
+    expect(row?.summary, "the second edit dropped the first's summary").toBe("first");
+    expect(row?.severity, "the second edit's severity was not written").toBe("high");
+  });
+});
+
 describe("the adoption's first direct read of an adopted run", () => {
   it("4. clears the stop: \"backend\" mark onto the row as it lands: a Stop's mirror reading written while it is held stays", async () => {
     const { MemStorage } = await import("../server/storage");
