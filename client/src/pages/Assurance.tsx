@@ -78,7 +78,7 @@ import { isKeyBug, saysOutcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { ASSURANCE_SCOPE, BACKEND_RECORD } from "@/lib/sourceLabels";
-import { UnreadableRows, unreadableIn } from "@/components/authority/parts";
+import { UnreadableLists, UnreadableRows, unreadableIn } from "@/components/authority/parts";
 import type { UnreadableRows as UnreadableCounts } from "@/components/authority/types";
 
 interface AssuranceStatus {
@@ -172,6 +172,8 @@ interface RemediationDetail {
   stateLabel: string;
   assignee: string | null;
   events: RemediationEvent[];
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface Asset {
   uuid: string;
@@ -240,6 +242,8 @@ interface CapabilityMap {
   capabilities: Capability[];
   categories: { category: string; count: number; maxRisk: string }[];
   summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface RouteNode {
   uuid: string;
@@ -293,6 +297,8 @@ interface RouteMap {
     layersPresent: string[];
     logsObserved: boolean;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface BomComponent {
   uuid: string;
@@ -338,6 +344,8 @@ interface AiBom {
   };
   receipt: { algorithm: string; digest: string };
   generatedAt: string | null;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface BoundaryPosture {
   value: string;
@@ -373,6 +381,8 @@ interface DataBoundary {
   flows: BoundaryFlow[];
   shadowDestinations: BoundaryShadow[];
   summary: { approved: number; violations: number; unknowns: number; shadowDestinations: number };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface ComplianceControl {
   controlId: string;
@@ -418,6 +428,8 @@ interface Compliance {
     controlsWithActiveFindings: number;
     worstSeverity: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 interface BusinessImpactDimension {
@@ -451,6 +463,8 @@ interface BusinessImpact {
     worstSeverity: string | null;
     worstExposureBand: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 // The full, versioned Assurance Receipt (spine): the roadmap tuple — system,
@@ -549,6 +563,8 @@ interface VendorAssurance {
     unmanagedDependencies: number;
     worstPostureBand: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 // Executive summary (commercial spine): the assurance graph rolled up for a
@@ -675,6 +691,8 @@ interface Pack {
 interface PacksCatalog {
   packs: Pack[];
   summary: { packs: number };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface RegulatoryRegime {
   name: string;
@@ -694,6 +712,8 @@ interface PackApplied {
     resolvedFindings: number;
     unmappedFindingTypes: number;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 // ==== Access & Blast Radius (Phase 3.1 + 2.5) ====
@@ -757,6 +777,8 @@ interface EffectiveAccess {
     unresolvedReferences: number | null;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface RippleFinding {
   uuid: string;
@@ -803,6 +825,8 @@ interface RippleEffect {
     byCategory: Record<string, number>;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 // ==== Posture, credential-gated (Phase 3.2 / 3.3 / 3.4) ====
@@ -813,6 +837,8 @@ interface PostureDomainRef {
 }
 interface PostureCatalog {
   domains: PostureDomainRef[];
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface PostureCheckCatalog {
   check: string;
@@ -851,6 +877,8 @@ interface PostureDomain {
     maxRisk: string;
     weakestEvidence: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 // ==== Data & Context (Phase 3.5) ====
@@ -903,6 +931,8 @@ interface PersonalContext {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface LifecycleComponent {
   name: string;
@@ -939,6 +969,8 @@ interface DataLifecycle {
     controlGaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface ReusePosture {
   field: string;
@@ -990,6 +1022,8 @@ interface TrainingReuse {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface LogCategory {
   category: string;
@@ -1037,6 +1071,8 @@ interface MetadataLogging {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 type ViewMode = "graph" | "list";
@@ -2182,6 +2218,7 @@ export function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {summary.componentCount === 0 ? (
         <p className="text-[12px] text-muted-foreground">
@@ -2292,7 +2329,7 @@ export function AiBomPanel({ deploymentUuid }: { deploymentUuid: string }) {
  * spine), and surfaces the gaps: a dangling tool reference, a shadow node, and
  * whether anyone can even say where the logs go.
  */
-function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<RouteMap>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/route-map`],
   });
@@ -2333,6 +2370,7 @@ function RouteMapPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {summary.nodeCount === 0 ? (
         <p className="text-[12px] text-muted-foreground">
@@ -2686,7 +2724,7 @@ function CapabilityRiskChip({ risk }: { risk: string | null }) {
  * components, which nobody approved — surfacing it with its risk raised, never
  * hiding it.
  */
-function CapabilityPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function CapabilityPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<CapabilityMap>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/capabilities`],
   });
@@ -2723,6 +2761,7 @@ function CapabilityPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {/* The scoreboard: how much power, how concerning, and how much of it is
           shadow — a power no approved component accounts for. */}
@@ -2743,7 +2782,7 @@ function CapabilityPanel({ deploymentUuid }: { deploymentUuid: string }) {
         )}
       </div>
 
-      {data.capabilities.length === 0 ? (
+      {data.capabilities.length === 0 && unreadableIn(data, "capabilities") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No capabilities derived yet — no components discovered for this deployment.
         </p>
@@ -2941,7 +2980,7 @@ function invalidateAssuranceComputed(uuid?: string): void {
  * rule) and an unknown (a posture nobody declared — a gap, never a pass), and it
  * never lets an undeclared boundary read as permission.
  */
-function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
 
@@ -3023,6 +3062,7 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {!data.declared && (
         <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
@@ -3092,7 +3132,7 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
       )}
 
       {/* Each actual data flow, reconciled against the boundary. */}
-      {data.flows.length === 0 ? (
+      {data.flows.length === 0 && unreadableIn(data, "flows") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No third-party data destinations resolved for this deployment yet.
         </p>
@@ -3170,7 +3210,7 @@ function DataBoundaryPanel({ deploymentUuid, admin }: { deploymentUuid: string; 
  * framework claims (unmapped) and the raw engine taxonomy references
  * (CWE/OWASP-by-id) are surfaced, never smoothed over.
  */
-function CompliancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function CompliancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<Compliance>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/compliance`],
   });
@@ -3207,6 +3247,7 @@ function CompliancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {summary.totalFindings === 0 ? (
         <p className="text-[12px] text-muted-foreground">
@@ -3411,7 +3452,7 @@ function ExposureBandChip({ band }: { band: string | null }) {
  * never "safe"; the finding types no dimension claims (unmapped) are surfaced,
  * never smoothed over.
  */
-function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<BusinessImpact>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/business-impact`],
   });
@@ -3448,6 +3489,7 @@ function BusinessImpactPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
       {summary.totalFindings === 0 ? (
         <p className="text-[12px] text-muted-foreground">
@@ -3982,7 +4024,7 @@ function MaturityChip({ maturity }: { maturity: string }) {
  * concern signal derived from the weakest evidence — never a claim the vendor is
  * secure or compliant.
  */
-function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<VendorAssurance>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/vendor-assurance`],
   });
@@ -4019,8 +4061,9 @@ function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
 
-      {summary.vendors === 0 && data.ungovernedDependencies.length === 0 ? (
+      {summary.vendors === 0 && data.ungovernedDependencies.length === 0 && unreadableIn(data, "vendors") + unreadableIn(data, "ungovernedDependencies") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No vendors resolved for this deployment yet — nothing on record to assess.
         </p>
@@ -4192,7 +4235,7 @@ function VendorAssurancePanel({ deploymentUuid }: { deploymentUuid: string }) {
  * "passed"), while its REGULATORY REGIMES are carried as CONTEXT — each with its
  * "not computed coverage" note rendered visibly, never as scored/passing coverage.
  */
-function VerticalPacksPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function VerticalPacksPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const [selected, setSelected] = useState<string | null>(null);
   const catalog = useQuery<PacksCatalog>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/assurance-packs`],
@@ -4235,6 +4278,7 @@ function VerticalPacksPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={catalog.data} />
 
       <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
         A pack narrows the compliance lens to one vertical. Its{" "}
@@ -4297,6 +4341,7 @@ function VerticalPacksPanel({ deploymentUuid }: { deploymentUuid: string }) {
           )}
           {applied.data && (
             <>
+              <UnreadableLists from={applied.data} />
               {/* Emphasized frameworks — real, honest coverage. */}
               <div className="mt-3">
                 <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px]">
@@ -4895,7 +4940,7 @@ function PrivilegeChip({ level }: { level: string }) {
 // total in view so nothing reads as hidden or complete.
 const PRINCIPAL_RENDER_CAP = 50;
 
-function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<EffectiveAccess>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/effective-access`],
   });
@@ -4933,7 +4978,8 @@ function EffectiveAccessPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
-      {data.principals.length === 0 ? (
+      <UnreadableLists from={data} />
+      {data.principals.length === 0 && unreadableIn(data, "principals") === 0 ? (
         <>
           <p className="text-[12px] text-muted-foreground">
             No principals resolved for this deployment yet — no identity that can act is on record.
@@ -5157,6 +5203,7 @@ export function RippleEffectPanel({ deploymentUuid }: { deploymentUuid: string }
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       {summary.origins === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No origins worth tracing — no active high/critical finding on a component and no privileged
@@ -5289,7 +5336,7 @@ function PostureStatusChip({ status }: { status: string }) {
 /** One posture domain (cloud / secrets / repo): connected vs honestly not-connected,
  *  and, when connected, its checks/findings. An inert domain reads as "Not connected
  *  — no credentials configured", NEVER "all clear". */
-function PostureDomainCard({
+export function PostureDomainCard({
   icon: Icon,
   deploymentUuid,
   domain,
@@ -5310,6 +5357,7 @@ function PostureDomainCard({
         <Icon className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="text-[12px] font-semibold text-foreground">{label ?? domain}</span>
       </div>
+      <UnreadableLists from={data} />
       {children}
     </div>
   );
@@ -5407,7 +5455,7 @@ function PostureDomainCard({
  * inert. Self-fetching (mounted only inside an expanded deployment). An inert domain
  * never reads as "all clear": nothing was read, so nothing is asserted.
  */
-function PosturePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function PosturePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<PostureCatalog>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/posture`],
   });
@@ -5444,6 +5492,7 @@ function PosturePanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
         These domains read a customer&apos;s cloud, secret store, or source-control through granted
         credentials. With none configured a domain is{" "}
@@ -5477,7 +5526,7 @@ function PosturePanel({ deploymentUuid }: { deploymentUuid: string }) {
  * expanded deployment). An unclassified store reads as UNKNOWN — personal-data
  * exposure cannot be ruled out, never "no PII" — and no data value is shown.
  */
-function PersonalContextPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function PersonalContextPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<PersonalContext>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/personal-context`],
   });
@@ -5514,7 +5563,8 @@ function PersonalContextPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
-      {data.stores.length === 0 ? (
+      <UnreadableLists from={data} />
+      {data.stores.length === 0 && unreadableIn(data, "stores") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No data-bearing components discovered for this deployment yet.
         </p>
@@ -5659,6 +5709,7 @@ export function DataLifecyclePanel({ deploymentUuid }: { deploymentUuid: string 
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
         An <span className="text-foreground">unevidenced</span> stage reads &quot;not evidenced&quot;,
         never &quot;compliant&quot;; a control evidenced only weakly (vendor-asserted) is still a gap.
@@ -5783,7 +5834,7 @@ function ReusePostureChip({ posture, verified }: { posture: string; verified: bo
  * data" reads as vendor-asserted, never verified; an unstated policy is a gap, never
  * "safe".
  */
-function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<TrainingReuse>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/training-reuse`],
   });
@@ -5820,7 +5871,8 @@ function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
-      {data.providers.length === 0 ? (
+      <UnreadableLists from={data} />
+      {data.providers.length === 0 && unreadableIn(data, "providers") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No providers resolved for this deployment yet — nothing on record to assess.
         </p>
@@ -5894,7 +5946,7 @@ function TrainingReusePanel({ deploymentUuid }: { deploymentUuid: string }) {
  * deployment). No sensitive value is ever shown — only the presence of a category
  * and its lineage; an unknown reads unknown.
  */
-function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<MetadataLogging>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/metadata-logging`],
   });
@@ -5931,6 +5983,7 @@ function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
         Only logging the graph <span className="text-foreground">evidences</span> is flagged, and{" "}
         <span className="text-foreground">no sensitive value is shown</span> — only the presence of a
@@ -5952,7 +6005,7 @@ function MetadataLoggingPanel({ deploymentUuid }: { deploymentUuid: string }) {
         </div>
       )}
 
-      {data.sinks.length === 0 ? (
+      {data.sinks.length === 0 && unreadableIn(data, "sinks") === 0 ? (
         <p className="text-[12px] text-muted-foreground">
           No logging sinks evidenced in the asset graph for this deployment.
         </p>
@@ -6690,6 +6743,8 @@ interface RevalidationPlan {
   outstandingUnknowns: { claimUuid: string; claimType: string; statement: string; status: string }[];
   stillCurrent: { claimUuid: string; claimType: string; status: string }[];
   note: string;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 /**
@@ -6699,7 +6754,7 @@ interface RevalidationPlan {
  * need not be re-run. This is "what must re-run because of this change", not "run
  * it all again". Self-fetching.
  */
-function RevalidationPlanPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function RevalidationPlanPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<RevalidationPlan>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/revalidation-plan`],
   });
@@ -6730,6 +6785,7 @@ function RevalidationPlanPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <div className="mb-2 flex flex-wrap gap-2 text-[11px]">
         <span className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-amber-400">
           {data.summary.required} need revalidation
@@ -6960,6 +7016,8 @@ interface OperationalRisk {
     unmapped: string[];
   };
   overall: { status: string; risk: string | null; unmappedClasses: number; note: string };
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 /** An operational-risk band, or "unmapped" when there is no basis — never a
@@ -6991,7 +7049,7 @@ function RiskBandChip({ risk }: { risk: string | null }) {
  * outage), each an ordinal band with a real basis or honestly `unmapped` (risk
  * null, never a fabricated 0). Distinct from operational-ASSURANCE. Self-fetching.
  */
-function OperationalRiskPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function OperationalRiskPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<OperationalRisk>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/operational-risk`],
   });
@@ -7022,6 +7080,7 @@ function OperationalRiskPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <span className="text-[11px] text-muted-foreground">Overall:</span>
         <RiskBandChip risk={data.overall.risk} />
@@ -7081,6 +7140,8 @@ interface BomDrift {
   undeclaredProviders: string[];
   missing: { declaredUuid: string; kind: string; kindLabel: string; name: string; identifier: string; providerName: string | null }[];
   note: string;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 interface DeclaredComponent {
   uuid: string;
@@ -7094,6 +7155,8 @@ interface DeclaredComponent {
 interface DeclaredArchitecture {
   declared: DeclaredComponent[];
   drift: BomDrift;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 const DECLARED_KINDS: { value: string; label: string }[] = [
@@ -7223,6 +7286,8 @@ interface CoverageManifest {
   highRiskUnassessed: CoverageEntityRow[];
   unassessed: CoverageEntityRow[];
   summary: string;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 const COVERAGE_VERDICT: Record<string, { cls: string; label: string }> = {
@@ -7275,7 +7340,7 @@ function CheckRows({ rows, tone }: { rows: CoverageCheckRow[]; tone: string }) {
  * says so in words and prints no counts. A zero or a "0/0" there would read as a
  * measurement, and nobody measured anything.
  */
-function CoverageManifestPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function CoverageManifestPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<CoverageManifest>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/coverage-manifest`],
   });
@@ -7311,6 +7376,7 @@ function CoverageManifestPanel({ deploymentUuid }: { deploymentUuid: string }) {
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <p className="text-[11px] text-muted-foreground">
         A findings list is only as good as the list of questions behind it. This is the second
         list: which components were assessed, and which checks actually ran.
@@ -7424,7 +7490,7 @@ function CoverageManifestPanel({ deploymentUuid }: { deploymentUuid: string }) {
   );
 }
 
-function BomDriftPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function BomDriftPanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const { data, isLoading, isError, error } = useQuery<BomDrift>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/bom-drift`],
@@ -7480,6 +7546,7 @@ function BomDriftPanel({ deploymentUuid, admin }: { deploymentUuid: string; admi
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <DriftBody drift={data} />
     </section>
   );
@@ -7500,7 +7567,7 @@ interface DeclaredRow {
  * the whole declared set, so the editor loads the current declaration and submits
  * the full list. Self-fetching.
  */
-function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
+export function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: string; admin: boolean }) {
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
   const [rows, setRows] = useState<DeclaredRow[]>([]);
@@ -7584,6 +7651,8 @@ function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: 
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
+      <UnreadableLists from={data.drift} />
       {editing ? (
         <div className="space-y-2 rounded-lg border border-primary/30 bg-surface-1/40 p-3">
           <p className="text-[11px] text-muted-foreground">
@@ -7653,7 +7722,7 @@ function DeclaredArchitecturePanel({ deploymentUuid, admin }: { deploymentUuid: 
             </button>
           </div>
         </div>
-      ) : data.declared.length === 0 ? (
+      ) : data.declared.length === 0 && unreadableIn(data, "declared") === 0 ? (
         <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
           No architecture declared. Until one is, BOM drift cannot be computed and the observed supply chain reads
           as an <span className="text-amber-400">unassessed gap</span>, never an all-clear.
@@ -7681,6 +7750,8 @@ interface ConnectorRef {
 }
 interface ConnectorsView {
   connectors: ConnectorRef[];
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 /**
@@ -7689,7 +7760,7 @@ interface ConnectorsView {
  * An admin can push one of the deployment's findings out to a connector; an inert
  * connector reports not-configured and makes no network call. Self-fetching.
  */
-function ConnectorsPanel({
+export function ConnectorsPanel({
   deploymentUuid,
   admin,
   findings,
@@ -7764,6 +7835,7 @@ function ConnectorsPanel({
   return (
     <section>
       {heading}
+      <UnreadableLists from={data} />
       <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">
         The integrations this deployment can push evidence to. A connector with no credentials configured is inert —
         it reads as not configured, never as a live integration, and a push against it makes no network call.
@@ -7863,6 +7935,8 @@ interface IncidentPack {
   /** As the backend reported it; absent or null when it said nothing. */
   signed?: boolean | null;
   unsignedReason?: string | null;
+  /** Rows of its lists the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+  unreadable?: UnreadableCounts;
 }
 
 /**
@@ -7890,7 +7964,7 @@ function whenLabel(iso: string | null): string {
  * ticket being closed, never as the finding being securely fixed; a missing
  * actor or timestamp reads as a dash, never an invented value.
  */
-function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
+export function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<RemediationDetail>({
     queryKey: [`/api/assurance/findings/${findingUuid}/remediation`],
   });
@@ -7917,10 +7991,11 @@ function RemediationDetailView({ findingUuid }: { findingUuid: string }) {
           {data.assignee ? data.assignee : "unassigned"}
         </span>
       </div>
+      <UnreadableLists from={data} />
       <p className="text-[10px] text-muted-foreground/80">
         The human process of getting this finding fixed — not its security status.
       </p>
-      {events.length === 0 ? (
+      {events.length === 0 && unreadableIn(data, "events") === 0 ? (
         <p className="text-[11px] text-muted-foreground">No workflow history recorded yet.</p>
       ) : (
         <ol className="space-y-1.5">
@@ -7992,6 +8067,7 @@ export function IncidentPackView({ findingUuid }: { findingUuid: string }) {
           Download this view (JSON)
         </button>
       </div>
+      <UnreadableLists from={data} />
       {/* It used to say "Attests integrity and provenance ..." beside two
           unsigned digests. A bare digest attests nothing: whoever changes the
           content can recompute it. So the pack says what its digests can show,
