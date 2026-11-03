@@ -7583,6 +7583,35 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // The recovery records (SPINE SP-1; athena-backend assurance/recovery_record.py): a
+  // deployment's incidents, a page of them, each with every step -- its S1 state, the
+  // conditions with their witnesses, its gaps, restrictions and release, its coverage and
+  // its residual uncertainty with each source, and the owner's acceptance as recorded --
+  // and one incident's, read by its finding. Reads, as the person, behind requireAuth like
+  // the rest; `?offset=` is checked here as the history reads check it. The backend's
+  // finding route also takes a POST (the next steps, an acceptance): it is not relayed.
+  // A deployment or finding the person cannot read is the backend's 404, passed on as
+  // not_found.
+  app.get("/api/assurance/deployments/:uuid/recovery-records", asyncHandler(async (req, res) => {
+    const query = historyQuery(req, res, []);
+    if (query === null) return;
+    try {
+      res.json(await assurance.recoveryRecords(req.params.uuid, query));
+    } catch (cause) {
+      if (historyUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  app.get("/api/assurance/findings/:uuid/recovery-record", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.findingRecoveryRecord(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change
   // invalidated and must re-run, and everything that stays current and need not
   // be re-run. A read, behind requireAuth like the rest of the assurance reads.
