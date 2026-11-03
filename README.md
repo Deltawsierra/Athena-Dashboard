@@ -959,6 +959,36 @@ as a possible stop, never refused as absent
 (`tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts`,
 `tests/a-bad-failsafe-row-is-said-on-the-console-never-read-as-none.test.tsx`).
 
+No missing or odd field makes the failsafe less strict, and none delays a stop:
+
+- A command whose `required_signatures` is missing, or not a whole number of at
+  least one, has a `requiredSignatures` of null: unknown, never 1. The console
+  reads "1/? signed" and "how many operator signatures it needs is not known",
+  never "1/1". Nothing here acts on the count: a command is ready when the
+  control plane says so, and a stop is signable while it awaits signatures.
+- A command row with no uuid (or an empty or non-string one) cannot be opened,
+  so it is counted with its list's unreadable rows, never drawn as a command.
+  Each unreadable row of the in-flight lists that may be a stop -- its action is
+  a stop's or cannot be read, or the row is not a command at all -- is counted
+  on the state's `possibleStops`, and the console says it may be a stop to find
+  on the control plane. The kill switch's read of the command list logs the
+  count.
+- A stored kill-switch flag that is not exactly `false` ("true", 1, null, a
+  record, "false", 0, or missing from the row) reads as engaged everywhere:
+  ordinary writes are held, a resume or a release is refused, and the AI Control
+  page is told it is engaged. On SQLite the flag is read as stored: only an
+  integer 0 is off (`shared/kill-switch-flag.ts`). Stops pass the switch before
+  it is read.
+- "Commands in flight" says the unreadable rows of the lists it draws (awaiting
+  signatures, ready). The state's `recent` list is the control plane's history,
+  served empty under the service token this console reads with, and the page
+  never draws it, so its count stays on the state's answer and is not said
+  there.
+
+(`tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts`,
+`tests/a-missing-or-odd-failsafe-field-is-said-on-the-console-never-read-as-fewer.test.tsx`,
+`tests/a-stored-kill-switch-flag-that-is-not-false-reads-engaged-on-both-storage-backends.test.ts`).
+
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release
 decision with a result for each gate is Minotaur-Backend's, which this console does

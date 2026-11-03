@@ -42,7 +42,7 @@ import https from "node:https";
 import * as dnsCache from "./dns-cache";
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
 import { PersonCredentialUnavailable, PersonSignInRequired, personAccessToken, renewPersonToken } from "./person-credential";
-import { rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
+import { NOT_A_LIST, rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
 
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -723,7 +723,16 @@ export interface FailsafeCommand {
   expiresAt: string;
   reason: string;
   signers: string[];
-  requiredSignatures: number;
+  /**
+   * How many signatures the command needs, as the control plane said: a whole
+   * number of at least one. Null when the control plane did not say (missing,
+   * or not such a number): the count is unknown, never read as fewer -- a
+   * stand-down needing two is never shown "1/1 signed" (DASH-FAILSAFE-2).
+   * Nothing here acts on it: a command is ready when the control plane says
+   * so (its status), and a stop is signable while it awaits signatures,
+   * whatever this count.
+   */
+  requiredSignatures: number | null;
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
@@ -776,6 +785,15 @@ export interface FailsafeStateView {
    * awaiting its second signature may be the row it could not read.
    */
   unreadable?: UnreadableRows;
+  /**
+   * Of the rows of `awaitingSignatures` and `ready` that could not be read, how
+   * many may be a stop, by list: a row with no uuid whose action is a stop, or
+   * names none a start could be told from; or a row that is not a command at
+   * all, whose action cannot be read. Only when one may be. Such a row cannot
+   * be opened here (it has no uuid to sign it by), so the console says a stop
+   * may be awaiting a signature on the control plane -- never nothing.
+   */
+  possibleStops?: Record<string, number>;
 }
 
 /**
@@ -787,6 +805,8 @@ export interface FailsafeStateView {
 export interface FailsafeCommandList {
   commands: FailsafeCommand[];
   unreadable?: UnreadableRows;
+  /** Of the rows that could not be read, how many may be a stop (as FailsafeStateView.possibleStops). */
+  possibleStops?: Record<string, number>;
 }
 
 /** The audit trail, every row that could be read; and, only when one could not, how many (`unreadable.events`). */
@@ -804,6 +824,16 @@ export interface FailsafeStatus {
   detail: string;
 }
 
+/**
+ * A command's required-signature count as the control plane served it: a whole
+ * number of at least one; null when it is missing or not one (a string, 0, a
+ * fraction). Never a default: a missing count read as 1 showed a stand-down
+ * needing two as fully signed by one (DASH-FAILSAFE-2).
+ */
+function requiredSignaturesOf(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 1 ? raw : null;
+}
+
 function command(raw: Record<string, unknown>): FailsafeCommand {
   return {
     uuid: String(raw.uuid ?? ""),
@@ -814,7 +844,7 @@ function command(raw: Record<string, unknown>): FailsafeCommand {
     expiresAt: String(raw.expires_at ?? ""),
     reason: typeof raw.reason === "string" ? raw.reason : "",
     signers: Array.isArray(raw.signers) ? raw.signers.map((s) => String(s)) : [],
-    requiredSignatures: typeof raw.required_signatures === "number" ? raw.required_signatures : 1,
+    requiredSignatures: requiredSignaturesOf(raw.required_signatures),
     status: String(raw.status ?? "unknown"),
     createdAt: typeof raw.created_at === "string" ? raw.created_at : null,
     updatedAt: typeof raw.updated_at === "string" ? raw.updated_at : null,
@@ -897,6 +927,41 @@ export async function status(): Promise<FailsafeStatus> {
   }
 }
 
+/** A list's count of unreadable rows as a number: 0 when none, or when the list was not a list. */
+function unreadCount(unreadable: UnreadableRows, list: string): number {
+  const count = unreadable[list];
+  return typeof count === "number" ? count : 0;
+}
+
+/**
+ * The commands of a list the control plane served, every one that can be read:
+ * an object (rowsOf) with a uuid it can be signed and found by, a non-empty
+ * string. A row with none is counted with the list's unreadable rows, never
+ * drawn as a command nobody can open, and never dropped unsaid
+ * (DASH-FAILSAFE-2). When `stops` is given, every unreadable row that may be a
+ * stop is counted there too: one whose action is not a start (a stop's, or
+ * none that can be read), and one that is not a command at all.
+ */
+function commandRows(raw: unknown, unreadable: UnreadableRows, list: string, stops?: Record<string, number>): FailsafeCommand[] {
+  const before = unreadCount(unreadable, list);
+  let possibleStops = 0;
+  let noUuid = 0;
+  const commands: FailsafeCommand[] = [];
+  for (const row of rowsOf(raw, unreadable, list)) {
+    if (typeof row.uuid === "string" && row.uuid !== "") {
+      commands.push(remember(command(row)));
+      continue;
+    }
+    noUuid += 1;
+    if (!(typeof row.action === "string" && START_ACTIONS.has(row.action))) possibleStops += 1;
+  }
+  // A row that is not a command at all (counted by rowsOf): its action cannot be read, so it may be a stop.
+  possibleStops += unreadCount(unreadable, list) - before;
+  if (noUuid > 0 && unreadable[list] !== NOT_A_LIST) unreadable[list] = unreadCount(unreadable, list) + noUuid;
+  if (stops && possibleStops > 0) stops[list] = possibleStops;
+  return commands;
+}
+
 export async function state(engineId?: string): Promise<FailsafeStateView> {
   const query = engineId ? `?engine_id=${encodeURIComponent(engineId)}` : "";
   // The stop lane's read (failsafe:state): where a second operator finds the stop awaiting their signature.
@@ -910,11 +975,14 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   // SAFETY: a row that is not a command is counted under its list, never thrown on: one null row failed the
   // whole read (500), and took with it the stop awaiting a second operator's signature. Every good row is
   // shown, and its action learnt (remember). A list that is not one is "not a list", never none.
+  // A row with no uuid is counted too, never drawn as a command nobody can open; and one that may be a stop
+  // is said as one (possibleStops), so the console never reads the stop awaiting a signature as nothing.
   const unreadable: UnreadableRows = {};
-  const list = (key: string, name: string): FailsafeCommand[] => rowsOf(payload[key], unreadable, name).map(command).map(remember);
-  const awaitingSignatures = list("awaiting_signatures", "awaitingSignatures");
-  const ready = list("ready", "ready");
-  const recent = list("recent", "recent");
+  const possibleStops: Record<string, number> = {};
+  const awaitingSignatures = commandRows(payload.awaiting_signatures, unreadable, "awaitingSignatures", possibleStops);
+  const ready = commandRows(payload.ready, unreadable, "ready", possibleStops);
+  // The history: the newest commands, in flight or not (empty under the service token). Counted, not stops.
+  const recent = commandRows(payload.recent, unreadable, "recent");
   return {
     engineId: typeof payload.engine_id === "string" ? payload.engine_id : null,
     engineState: typeof payload.engine_state === "string" ? payload.engine_state : null,
@@ -923,6 +991,7 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
     ready,
     recent,
     ...withUnreadable(unreadable),
+    ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}),
   };
 }
 
@@ -943,9 +1012,11 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   // on. A null row threw, so the kill switch's read learnt none of the list -- and a resume listed there went
   // out, with the switch engaged, as a possible stop (then withdrawn). A command that could not be read stays
   // not known here: its signature is relayed as a possible stop, never refused as absent.
+  // A row with no uuid is counted too, and one that may be a stop is said as one (possibleStops).
   const unreadable: UnreadableRows = {};
-  const commands = rowsOf(payload, unreadable, "commands").map(command).map(remember);
-  return { commands, ...withUnreadable(unreadable) };
+  const possibleStops: Record<string, number> = {};
+  const commands = commandRows(payload, unreadable, "commands", possibleStops);
+  return { commands, ...withUnreadable(unreadable), ...(Object.keys(possibleStops).length > 0 ? { possibleStops } : {}) };
 }
 
 /**

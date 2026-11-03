@@ -77,11 +77,12 @@ describe("the failsafe console says a row it could not read, and never reads its
     expect(tile("Awaiting signatures")?.textContent).toMatch(/1 row could not be read/);
     expect(tile("Ready for engine")?.textContent).toMatch(/2 rows could not be read/);
     expect(text()).not.toMatch(/No commands awaiting signatures or waiting on the engine/);
-    expect(unreadable()).toEqual(expect.arrayContaining([
+    // The in-flight lists' counts are said under "Commands in flight"; the history's (recent) is not, since the
+    // page never draws that list (DASH-FAILSAFE-2).
+    expect(unreadable()).toEqual([
       ["awaitingSignatures", "1", "1 row could not be read: awaiting signatures"],
       ["ready", "2", "2 rows could not be read: ready"],
-      ["recent", "3", "3 rows could not be read: recent"],
-    ]));
+    ]);
     // Every stop is still offered.
     for (const key of ["pause", "stand_down", "terminate"]) {
       expect((screen.getByTestId(`button-draft-${key}`) as HTMLButtonElement).disabled, key).toBe(false);
