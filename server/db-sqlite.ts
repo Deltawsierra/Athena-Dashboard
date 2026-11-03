@@ -109,10 +109,17 @@ function connect(): Connection {
   // loss; its stops had already gone to the engine before its flag was
   // written.
   //
-  // And one sync is still made on the loop: the first commit after a
-  // checkpoint that emptied the log starts the log over, and SQLite syncs the
-  // log's new header then, on the committing connection -- at most once per
-  // checkpoint, once a second; it does not make that commit durable.
+  // And no commit on the loop syncs anything. The first commit after a
+  // checkpoint that moved the whole log into the database starts the log
+  // over, and SQLite syncs the log's new header then, on the committing
+  // connection, whatever `synchronous` says. That commit used to be the
+  // loop's: Windows' FlushFileBuffers held the loop 54-73 ms at the start of
+  // a burst of writes draining after a lock was let go. So the checkpointer
+  // thread starts the log over itself, with a one-row write of its own
+  // (log_restarts) made right after such a checkpoint, and the loop's
+  // commits only ever append. If the thread cannot take the write lock at
+  // once it skips that second -- it never waits on the lock -- and a commit
+  // here may then start the log over and sync, as before.
   handle.pragma("synchronous = NORMAL");
   if (dbPath !== ":memory:") startCheckpointer(handle, dbPath);
   connection = { sqlite: handle, db: drizzle(handle, { schema }) };
@@ -140,14 +147,25 @@ export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = 
 const checkpointerThreads = new Map<Worker, { intentional: boolean }>();
 
 /**
- * Move the write-ahead log into the database from a thread of its own, on a
- * connection of its own (a PASSIVE checkpoint: it waits on no lock, and
- * holds up no reader or writer), so the checkpoint's writes and its fsync
- * never run on the event loop. SQLite's own checkpoints -- made by whichever
- * commit crosses 1000 pages of log, on the loop -- are switched off only once
- * the thread is running, and back on if it fails.
+ * Move the write-ahead log into the database from a thread of its own, on
+ * connections of its own (a PASSIVE checkpoint: it waits on no lock, and
+ * holds up no reader), so the checkpoint's writes and its fsyncs never run
+ * on the event loop. SQLite's own checkpoints -- made by whichever commit
+ * crosses 1000 pages of log, on the loop -- are switched off only once the
+ * thread is running, and back on if it fails.
+ *
+ * The thread also starts the log over itself (CHECKPOINTER_SOURCE), so that
+ * the sync SQLite makes then is made on the thread, never by a commit on the
+ * loop (see connect()). For that it holds the write lock while it
+ * checkpoints, when anything was committed since its last turn: a write on
+ * the loop meanwhile is refused at once and waits its turn off the loop
+ * (storage-sqlite.ts withBusyRetry), as under any other connection's lock.
+ * A Stop waits on no write.
+ *
+ * `holdForTestsMs`, for tests only: how much longer the thread holds the
+ * write lock on each such turn, so a test can press a Stop while it does.
  */
-export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePathForTests?: string): void {
+export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePathForTests?: string, holdForTestsMs = 0): void {
   const loopCheckpoints = (why: string) => {
     checkpointer.state = "failed";
     checkpointer.detail = why;
@@ -167,7 +185,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
     const modulePath = modulePathForTests ?? createRequire(here).resolve("better-sqlite3");
     worker = new Worker(CHECKPOINTER_SOURCE, {
       eval: true,
-      workerData: { modulePath, dbPath, everyMs: CHECKPOINT_EVERY_MS },
+      workerData: { modulePath, dbPath, everyMs: CHECKPOINT_EVERY_MS, holdForTestsMs },
     });
   } catch (cause) {
     loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
@@ -235,23 +253,81 @@ export async function closeDatabase(): Promise<void> {
   }
 }
 
-/** The checkpointer's thread: a connection of its own, a PASSIVE checkpoint every `everyMs`. */
+/**
+ * The checkpointer's thread: two connections of its own (`db` checkpoints,
+ * `lock` takes the write lock and writes); once a second, a PASSIVE
+ * checkpoint, and then the log started over by a write of its own.
+ *
+ *   - Idle, nothing: when no other connection has committed since the thread
+ *     last left the log with nothing to do (`PRAGMA data_version` on `lock`
+ *     is unchanged), it neither checkpoints nor writes. An idle server writes
+ *     nothing.
+ *   - It never waits on the lock (busy_timeout 0): `lock` takes the write
+ *     lock at once, or this second is skipped. A checkpoint made while
+ *     another connection held it would move the whole log while only that
+ *     connection could write, leaving the log to be started over by its next
+ *     commit -- the loop's, once a held lock is let go.
+ *   - Holding the write lock, `db` checkpoints. No commit lands between the
+ *     checkpoint and the write that starts the log over: a write on the loop
+ *     meanwhile was refused, and waits 10-30 ms off the loop before it tries
+ *     again.
+ *   - After a checkpoint that moved every frame of a log holding more than
+ *     one, `lock` lets the lock go and takes it again at once (a transaction
+ *     begun after the checkpoint is the one SQLite lets start the log over)
+ *     and writes its one row (log_restarts). That write starts the log over,
+ *     and SQLite syncs the new log header on this thread; the commits that
+ *     follow on the loop append to the log, and sync nothing. If the lock was
+ *     taken in between, it skips (that commit may start the log over, as
+ *     before).
+ *   - A log of one frame is not started over again: a log just started over
+ *     by a checkpointer -- this one, or another dashboard's on the same file
+ *     -- holds one frame, and two dashboards that started each other's log
+ *     over would write to each other every second for ever.
+ */
 const CHECKPOINTER_SOURCE = `
 const { parentPort, workerData } = require("worker_threads");
 let db;
+let lock;
+let restart = null;
 try {
   const Database = require(workerData.modulePath);
   db = new Database(workerData.dbPath, { fileMustExist: true });
   db.pragma("busy_timeout = 0");
   db.pragma("synchronous = NORMAL");
+  lock = new Database(workerData.dbPath, { fileMustExist: true });
+  lock.pragma("busy_timeout = 0");
+  lock.pragma("synchronous = NORMAL");
   parentPort.postMessage("running");
 } catch (cause) {
   parentPort.postMessage({ failed: cause && cause.message ? cause.message : String(cause) });
   process.exit(1);
 }
+try {
+  restart = lock.prepare("INSERT INTO log_restarts (id, restarted_at) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET restarted_at = excluded.restarted_at");
+} catch {
+  // A database without the table (not one this dashboard made): checkpoints only.
+}
+const held = new Int32Array(new SharedArrayBuffer(4));
+let settled = null;
 setInterval(() => {
   try {
-    db.pragma("wal_checkpoint(PASSIVE)");
+    const version = lock.pragma("data_version", { simple: true });
+    if (version === settled) return;
+    lock.exec("BEGIN IMMEDIATE");
+    try {
+      if (workerData.holdForTestsMs > 0) Atomics.wait(held, 0, 0, workerData.holdForTestsMs);
+      const [done] = db.pragma("wal_checkpoint(PASSIVE)");
+      lock.exec("ROLLBACK");
+      if (done.busy !== 0 || done.checkpointed < done.log) return;
+      if (done.log > 1 && restart) {
+        lock.exec("BEGIN IMMEDIATE");
+        restart.run(Date.now());
+        lock.exec("COMMIT");
+      }
+    } finally {
+      if (lock.inTransaction) lock.exec("ROLLBACK");
+    }
+    settled = version;
   } catch {
     // Busy, or the file is gone: tried again next time.
   }
@@ -568,6 +644,14 @@ function createSchema(handle: DatabaseType): void {
       created_at INTEGER NOT NULL,
       last_used_at INTEGER,
       revoked_at INTEGER
+    );
+
+    -- One row, written only by the checkpointer thread: the write it makes to
+    -- start the write-ahead log over off the event loop (startCheckpointer).
+    -- Nothing reads it.
+    CREATE TABLE IF NOT EXISTS log_restarts (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      restarted_at INTEGER NOT NULL
     );
   `);
   addMissingColumns(handle);
