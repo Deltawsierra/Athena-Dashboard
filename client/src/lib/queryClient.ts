@@ -1,4 +1,5 @@
 import { QueryClient, QueryFunction, keepPreviousData } from "@tanstack/react-query";
+import { NOT_A_LIST, UNREADABLE_ROWS_HEADER, unreadableFromHeader, type UnreadableRows } from "@shared/unreadable-rows";
 
 // The page and the API are served from the same origin, in development and in
 // the packaged app alike (the desktop window loads the local server's own
@@ -210,8 +211,42 @@ export const getQueryFn: <T>(options: { on401: UnauthorizedBehavior }) => QueryF
     const res = await fetch(urlFromQueryKey(queryKey), { credentials: "include", ...(signal ? { signal } : {}) });
     if (res.status === 401 && on401 === "returnNull") return null as never;
     await throwIfResNotOk(res);
-    return (await res.json()) as never;
+    const body = (await res.json()) as unknown;
+    // A bare-list read that counts its unreadable rows in a header (meta.unreadableRows names its list):
+    // the rows, and the count, together.
+    const list = context.meta?.unreadableRows;
+    if (typeof list === "string") {
+      const read: RowsRead<unknown> = { rows: body as unknown[], unreadable: unreadableFromHeader(res.headers.get(UNREADABLE_ROWS_HEADER), list) };
+      return read as never;
+    }
+    return body as never;
   };
+
+/**
+ * A bare-list read's rows, and how many of them the server could not read
+ * (shared/unreadable-rows.ts; only when one could not be). A query with
+ * `meta: { unreadableRows: "<list>" }` answers this from the default query
+ * function: the body, and the count from the X-Athena-Unreadable-Rows header.
+ */
+export interface RowsRead<T> {
+  rows: T[];
+  unreadable?: UnreadableRows;
+}
+
+/**
+ * A bare-list read as RowsRead, whatever its query handed over: the RowsRead the
+ * default query function made, or the bare list itself (a query function that
+ * does not read the header), whose count is then not known and none is said.
+ * Anything else is not a list: no rows, and `list` said unread -- never none.
+ */
+export function rowsRead<T>(data: unknown, list: string): RowsRead<T> {
+  if (Array.isArray(data)) return { rows: data as T[] };
+  if (data && typeof data === "object" && Array.isArray((data as { rows?: unknown }).rows)) {
+    const held = data as RowsRead<T>;
+    return held.unreadable ? { rows: held.rows, unreadable: held.unreadable } : { rows: held.rows };
+  }
+  return { rows: [], unreadable: { [list]: NOT_A_LIST } };
+}
 
 export const queryClient = new QueryClient({
   defaultOptions: {

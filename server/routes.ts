@@ -34,6 +34,7 @@ import { ControlPlaneRefused, ControlPlaneSignInRequired, ControlPlaneUnavailabl
 import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
+import { UNREADABLE_ROWS_HEADER, unreadableHeaderValue, type UnreadableRows } from "@shared/unreadable-rows";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
@@ -5867,7 +5868,14 @@ export function registerRoutes(app: Express): void {
     // fails changes nothing.
     if (press !== null && failsafe.isConfigured()) {
       setImmediate(() => {
-        failsafe.listCommands().catch((cause) => {
+        failsafe.listCommands().then((list) => {
+          // Every row that could be read is remembered; one that could not stays not known here, and is read
+          // when its signature is relayed (a possible stop until then): never taken as no command.
+          if (list.unreadable) {
+            console.warn(`[failsafe] the kill switch's read of the failsafe commands could not read some rows ` +
+              `(${JSON.stringify(list.unreadable)}); a command not known here is read when its signature is relayed`);
+          }
+        }, (cause) => {
           console.warn(`[failsafe] the kill switch's read of the failsafe commands failed (${causeOf(cause)}); ` +
             "a command not known here is read when its signature is relayed");
         });
@@ -6276,6 +6284,17 @@ export function registerRoutes(app: Express): void {
     }
   }
 
+  /**
+   * The count of a bare-list answer's rows that could not be read, in its header
+   * (shared/unreadable-rows.ts UNREADABLE_ROWS_HEADER); nothing when every row was
+   * read. The body is unchanged, so a console page loaded before the server was
+   * updated still reads it.
+   */
+  const sendUnreadableRows = (res: Response, unreadable: UnreadableRows | undefined): void => {
+    const value = unreadable ? unreadableHeaderValue(unreadable) : null;
+    if (value !== null) res.setHeader(UNREADABLE_ROWS_HEADER, value);
+  };
+
   app.get("/api/failsafe/status", requireAdmin, asyncHandler(async (_req, res) => {
     // status() answers its own unreachability rather than throwing, so a
     // control plane that is simply not configured renders as words on the
@@ -6297,7 +6316,10 @@ export function registerRoutes(app: Express): void {
     const engineId = typeof req.query.engineId === "string" ? req.query.engineId : undefined;
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     try {
-      res.json(await failsafe.listCommands({ engineId, status }));
+      // The body stays the array it always was; a row that could not be read is counted in a header.
+      const list = await failsafe.listCommands({ engineId, status });
+      sendUnreadableRows(res, list.unreadable);
+      res.json(list.commands);
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;
       throw cause;
@@ -6568,7 +6590,10 @@ export function registerRoutes(app: Express): void {
   app.get("/api/failsafe/audit", requireAdmin, asyncHandler(async (req, res) => {
     const command = typeof req.query.command === "string" ? req.query.command : undefined;
     try {
-      res.json(await failsafe.audit({ command }));
+      // The body stays the array it always was; a row that could not be read is counted in a header.
+      const trail = await failsafe.audit({ command });
+      sendUnreadableRows(res, trail.unreadable);
+      res.json(trail.events);
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;
       throw cause;

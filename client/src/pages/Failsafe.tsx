@@ -79,7 +79,8 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, rowsRead, type RowsRead } from "@/lib/queryClient";
+import { UnreadableLists, UnreadableRows, notAListIn, unreadableIn } from "@/components/authority/parts";
 import { cn } from "@/lib/utils";
 
 /* ---- API shapes (mirror server/failsafe.ts) --------------------------- */
@@ -130,6 +131,31 @@ interface FailsafeStateView {
   awaitingSignatures: FailsafeCommand[];
   ready: FailsafeCommand[];
   recent: FailsafeCommand[];
+  /**
+   * Rows of a list the server could not read, by list (server/failsafe.ts state;
+   * shared/unreadable-rows.ts); or "not a list". Only when one could not be. Such
+   * a list is never read as none: a stop awaiting its second signature may be the
+   * row that could not be read.
+   */
+  unreadable?: Record<string, number | string>;
+}
+
+/**
+ * A count of a state list as the tile shows it: the rows read, and a "+" when
+ * some could not be -- never a bare 0 over a row nobody could read; "?" when the
+ * list was not a list at all.
+ */
+function listFigure(view: FailsafeStateView, list: "awaitingSignatures" | "ready"): string | number {
+  if (notAListIn(view, list)) return "?";
+  return unreadableIn(view, list) > 0 ? `${view[list].length}+` : view[list].length;
+}
+
+/** What the tile says under its count when rows of its list could not be read. */
+function listUnread(view: FailsafeStateView | undefined, list: "awaitingSignatures" | "ready"): string | undefined {
+  if (!view) return undefined;
+  if (notAListIn(view, list)) return "The list could not be read";
+  const count = unreadableIn(view, list);
+  return count === 0 ? undefined : `${count === 1 ? "1 row" : `${count} rows`} could not be read`;
 }
 
 interface FailsafeAuditEvent {
@@ -724,19 +750,27 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
   // that read is not shown as current. Each one's console reads it afresh.
   const lastInFlight = !state && stateQ.data ? [...stateQ.data.awaitingSignatures, ...stateQ.data.ready] : [];
 
-  const audit$ = loaded(useQuery<FailsafeAuditEvent[]>({
+  // The trail's body is a bare list; how many of its rows the server could not read rides in a header,
+  // which the default query function reads for a query that names its list (meta.unreadableRows).
+  const audit$ = loaded(useQuery<FailsafeAuditEvent[] | RowsRead<FailsafeAuditEvent>>({
     queryKey: ["/api/failsafe/audit"],
     enabled: canOperate && showActivity,
     refetchInterval: 15_000,
+    meta: { unreadableRows: "events" },
   }));
-  const audit = canOperate && showActivity && audit$.state === "ready" ? audit$.data : undefined;
+  const auditRead = canOperate && showActivity && audit$.state === "ready" ? rowsRead<FailsafeAuditEvent>(audit$.data, "events") : undefined;
+  const audit = auditRead?.rows;
+  /** Whether rows of the trail could not be read: then it is never "no activity". */
+  const auditUnread = auditRead !== undefined && unreadableIn(auditRead, "events") > 0;
   const auditFailed = canOperate && showActivity && audit$.state === "error";
 
   // The command counts and the governor state come from the engine's state
   // read. Until it has answered -- the control plane not ready, no engine
   // named, still loading, or failed -- they are unknown, not zero.
-  const stateCount = (read: (view: FailsafeStateView) => number) =>
+  const stateCount = (read: (view: FailsafeStateView) => number | string) =>
     state ? read(state) : stateFailed || !canOperate || !engineNamed ? "—" : "…";
+  /** Whether rows of the in-flight lists could not be read: then there is never "none in flight". */
+  const inFlightUnread = state !== undefined && (unreadableIn(state, "awaitingSignatures") > 0 || unreadableIn(state, "ready") > 0);
   const stateUnread = stateFailed
     ? `Could not read the engine state: ${state$.state === "error" ? state$.message : ""}`
     : statusFailed
@@ -844,11 +878,18 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
         </GlassCard>
         <StatCard
           label="Awaiting signatures"
-          value={stateCount((view) => view.awaitingSignatures.length)}
+          value={stateCount((view) => listFigure(view, "awaitingSignatures"))}
+          sublabel={listUnread(state, "awaitingSignatures")}
           icon={KeyRound}
           layout="tile"
         />
-        <StatCard label="Ready for engine" value={stateCount((view) => view.ready.length)} icon={Radio} layout="tile" />
+        <StatCard
+          label="Ready for engine"
+          value={stateCount((view) => listFigure(view, "ready"))}
+          sublabel={listUnread(state, "ready")}
+          icon={Radio}
+          layout="tile"
+        />
         <GlassCard bodyClassName="space-y-2">
           <span className="athena-label">Target engine</span>
           <Input
@@ -932,11 +973,13 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                 " The commands the last state read listed are below, so a stop still waiting for a second" +
                   " signature stays within reach; each one's current status is read when it is opened."}
             </GlassCard>
-          ) : inFlight.length === 0 && (
+          ) : inFlight.length === 0 && !inFlightUnread && (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground">
               No commands awaiting signatures or waiting on the engine.
             </GlassCard>
           )}
+          {/* Rows of the state the server could not read: said, never read as none. */}
+          {state && <UnreadableLists from={state} />}
           {inFlight.map((cmd) => (
             <GlassCard key={cmd.uuid} bodyClassName="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -1016,8 +1059,13 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                     ? "Failsafe activity is not readable until the control plane is ready."
                     : "Loading failsafe activity…"}
               </div>
-            ) : audit.length === 0 && (
+            ) : audit.length === 0 && !auditUnread && (
               <div className="py-8 text-center text-sm text-muted-foreground">No failsafe activity recorded yet.</div>
+            )}
+            {auditUnread && (
+              <div className="px-5 py-3">
+                <UnreadableRows from={auditRead} list="events" label="failsafe activity" />
+              </div>
             )}
             {(audit ?? []).slice(0, 20).map((event) => (
               <div key={event.uuid} className="flex items-center justify-between gap-3 px-5 py-3">

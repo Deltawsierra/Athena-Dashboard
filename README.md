@@ -933,15 +933,31 @@ operational risk, connectors, a finding's remediation history and its incident
 pack. Each read counts a row it cannot read under the list's name (a list inside
 a row as `outer.inner`), and the panel says "N rows could not be read: <list>"
 under its heading. In server code, no list the backend served is iterated except
-through `rowsOf` (`server/assurance.ts`); a test reads the server with the
+through `rowsOf` (`shared/unreadable-rows.ts`); a test reads the server with the
 TypeScript compiler and keeps a short, reasoned list of the exceptions
 (`tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts`).
 The bare lists (deployments, findings, unknowns, assets, providers, claims and
 retest requirements) are answered as arrays, which have nowhere to carry a count
-yet; they are on that list until they do. So are the stop lane's own reads in
-`server/failsafe.ts` (the failsafe state, its commands and audit trail): one
-null row still fails them, and they are left unchanged here, since nothing in
-this change may sit on a stop's path.
+yet; they are on that list until they do.
+
+The failsafe's own reads (`server/failsafe.ts`) are read the same way, and no
+stop waits on any of them. The state's lists (awaiting signatures, ready,
+recent) count a row they cannot read on the state, and the console never reads
+such a list as none: "Awaiting signatures" reads `0+` (or `?` for a list that is
+not a list), never a bare 0, with "N rows could not be read" under it, and "No
+commands awaiting signatures or waiting on the engine" is held back -- a stop
+awaiting its second signature may be the row that could not be read. The command
+list and the audit trail keep their array bodies, so a console page loaded
+before the server was updated still reads them, and carry the count in an
+`X-Athena-Unreadable-Rows` header (`{"commands": 2}`, `{"events": 1}`); the
+console's activity list says it and never reads "No failsafe activity recorded
+yet" over it. Every good row is shown and its command's action learnt, so the
+kill switch's read of the command list still learns a resume listed beside a
+bad row, and refuses its signature from memory while the switch is engaged. A
+command whose row could not be read is not known here: its signature is relayed
+as a possible stop, never refused as absent
+(`tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts`,
+`tests/a-bad-failsafe-row-is-said-on-the-console-never-read-as-none.test.tsx`).
 
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release

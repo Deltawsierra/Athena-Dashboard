@@ -24,6 +24,8 @@ import {
 } from "./control-plane";
 import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
+import { NOT_A_LIST, rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
+export { NOT_A_LIST, type UnreadableRows };
 import { runIdFrom } from "@shared/engine-record";
 import type { RetestCheckView } from "@shared/backend-record";
 import type {
@@ -5528,54 +5530,11 @@ export async function pushConnector(
 // the approver's account was removed) stays null; a verdict or status outside the
 // vocabulary is carried as served, and the screens read it as none of theirs.
 
-/**
- * How many rows of each list the backend served could not be read, by the list's
- * name here ("tools", "hops", ...): a row that is not a plain object. A screen
- * says "N rows could not be read" beside the list, so a row never vanishes unsaid
- * (client/src/components/authority/parts.tsx UnreadableRows). What such a row
- * held is not shown: it could not be read. Carried as `unreadable` on the object
- * that holds the list, and only when a row of it could not be read.
- */
-export type UnreadableRows = Record<string, number | typeof NOT_A_LIST>;
-
-/**
- * What `unreadable[list]` holds when the value served for the list is there
- * but is not a list at all (a string, a number, a record, true): the whole list
- * could not be read, so how many rows it held is not known. A screen says "The
- * list could not be read" (parts.tsx UnreadableRows), never that it is empty. A
- * list the answer did not carry (absent, or null) is not counted: it was not
- * served, and reads as it always did.
- */
-export const NOT_A_LIST = "not a list";
-
-/** `{ unreadable }` when a row of some list could not be read; nothing when every row was. */
-function withUnreadable(unreadable: UnreadableRows): { unreadable?: UnreadableRows } {
-  return Object.keys(unreadable).length > 0 ? { unreadable } : {};
-}
-
-/**
- * Every element of a list that is a plain object. Each element that is not one
- * is counted in `unreadable[list]`, never dropped silently. A value that is
- * served but is not a list reads as no rows, and `unreadable[list]` says the
- * whole list could not be read (NOT_A_LIST), so it never reads as empty. A list
- * not served (absent, or null) is [] and is not counted.
- */
-function rowsOf(raw: unknown, unreadable: UnreadableRows, list: string): Record<string, unknown>[] {
-  if (!Array.isArray(raw)) {
-    if (raw !== undefined && raw !== null) unreadable[list] = NOT_A_LIST;
-    return [];
-  }
-  const rows: Record<string, unknown>[] = [];
-  let unread = 0;
-  for (const one of raw) {
-    if (!!one && typeof one === "object" && !Array.isArray(one)) rows.push(one as Record<string, unknown>);
-    else unread += 1;
-  }
-  const before = unreadable[list];
-  // A list already found not to be one stays so: its count is not known.
-  if (unread > 0 && before !== NOT_A_LIST) unreadable[list] = (before ?? 0) + unread;
-  return rows;
-}
+// How many rows of each list the backend served could not be read, by the list's
+// name here ("tools", "hops", ...), carried as `unreadable` on the object that
+// holds the list, and only when a row of it could not be read: rowsOf,
+// withUnreadable, NOT_A_LIST and UnreadableRows live in shared/unreadable-rows.ts,
+// which the failsafe module's reads share (DASH-FAILSAFE-ROWS).
 
 /** A list of numbers, dropping anything that is not one. */
 function numList(raw: unknown): number[] {
