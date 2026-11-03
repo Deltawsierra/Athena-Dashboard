@@ -103,7 +103,8 @@ interface FailsafeCommand {
   expiresAt: string;
   reason: string;
   signers: string[];
-  requiredSignatures: number;
+  /** Null when the control plane did not say how many it needs: unknown, never read as fewer (server/failsafe.ts). */
+  requiredSignatures: number | null;
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
@@ -138,6 +139,41 @@ interface FailsafeStateView {
    * row that could not be read.
    */
   unreadable?: Record<string, number | string>;
+  /**
+   * Of those rows of `awaitingSignatures` and `ready`, how many may be a stop
+   * (server/failsafe.ts possibleStops): a row with no uuid whose action is a
+   * stop's or cannot be read, or a row that is not a command at all. It cannot
+   * be opened here, so the page says a stop may be awaiting a signature.
+   */
+  possibleStops?: Record<string, number>;
+}
+
+/** The lists "Commands in flight" draws, and so the only ones whose unreadable rows it says. */
+const IN_FLIGHT_LISTS = ["awaitingSignatures", "ready"] as const;
+
+/**
+ * The in-flight lists' unreadable rows, for "Commands in flight". `recent` is
+ * not among them: the page never draws it (it is the control plane's history,
+ * served empty under the service token this console reads with; the trail
+ * below is the page's history), so its count is not said under commands it
+ * does not show.
+ */
+function inFlightUnreadable(view: FailsafeStateView): { unreadable?: Record<string, number | string> } {
+  const held = view.unreadable;
+  if (!held) return {};
+  const kept = Object.fromEntries(IN_FLIGHT_LISTS.filter((list) => list in held).map((list) => [list, held[list]]));
+  return { unreadable: kept };
+}
+
+/** How many unreadable in-flight rows may be a stop (possibleStops), by list; numbers only. */
+function possibleStopsIn(view: FailsafeStateView, list: (typeof IN_FLIGHT_LISTS)[number]): number {
+  const count = view.possibleStops?.[list];
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/** A required-signature count as a reader is told it: "?" when the control plane did not say. */
+function needOf(command: FailsafeCommand): string {
+  return command.requiredSignatures === null ? "?" : String(command.requiredSignatures);
 }
 
 /**
@@ -420,7 +456,12 @@ function CommandConsole({
       toast(
         command.status === "ready"
           ? { title: "Command ready", description: "The engine will verify and apply it on its next poll." }
-          : { title: "Signature accepted", description: `${command.signers.length} of ${command.requiredSignatures} signatures.` },
+          : {
+            title: "Signature accepted",
+            description: command.requiredSignatures === null
+              ? `${command.signers.length} signed; how many it needs is not known (the control plane did not say).`
+              : `${command.signers.length} of ${command.requiredSignatures} signatures.`,
+          },
       );
     },
     onError: (error: Error) => {
@@ -503,10 +544,10 @@ function CommandConsole({
         <StatusPill tone={commandTone(command.status)}>{commandStatusLabel(command.status)}</StatusPill>
       </div>
 
-      {/* signer progress */}
-      <div className="flex items-center gap-3">
+      {/* signer progress: an unknown count is said, never drawn as the signatures already given */}
+      <div className="flex items-center gap-3" data-testid="text-signer-progress">
         <div className="flex gap-1.5">
-          {Array.from({ length: need }).map((_, i) => (
+          {Array.from({ length: need ?? signed }).map((_, i) => (
             <span
               key={i}
               className={cn(
@@ -517,7 +558,9 @@ function CommandConsole({
           ))}
         </div>
         <span className="text-sm text-muted-foreground">
-          {signed} of {need} operator {need === 1 ? "signature" : "signatures"}
+          {need === null
+            ? `${signed} signed; how many operator signatures it needs is not known (the control plane did not say)`
+            : `${signed} of ${need} operator ${need === 1 ? "signature" : "signatures"}`}
           {command.signers.length > 0 && (
             <span className="athena-mono ml-2 text-xs text-gold-dim">({command.signers.join(", ")})</span>
           )}
@@ -585,7 +628,10 @@ function CommandConsole({
                 <AthenaLabel>Step 2 — paste back what the CLI printed</AthenaLabel>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Paste the whole <span className="athena-mono">{`{"key_id": …, "sig": …}`}</span> object, or fill the
-                  fields. {need > 1 && "A second, different operator must repeat steps 1–2 with their own key."}
+                  fields.{" "}
+                  {need === null
+                    ? "How many signatures it needs is not known: a second, different operator may need to repeat steps 1–2 with their own key."
+                    : need > 1 && "A second, different operator must repeat steps 1–2 with their own key."}
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
@@ -979,7 +1025,14 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
             </GlassCard>
           )}
           {/* Rows of the state the server could not read: said, never read as none. */}
-          {state && <UnreadableLists from={state} />}
+          {state && <UnreadableLists from={inFlightUnreadable(state)} />}
+          {/* An unreadable row that may be a stop cannot be opened here: said, so its signature is sought where it can be given. */}
+          {state && IN_FLIGHT_LISTS.filter((list) => possibleStopsIn(state, list) > 0).map((list) => (
+            <p key={list} className="text-[12px] text-amber-400" data-testid="possible-stops" data-list={list} data-count={possibleStopsIn(state, list)}>
+              {possibleStopsIn(state, list) === 1 ? "1 of them" : `${possibleStopsIn(state, list)} of them`} ({list === "ready" ? "ready" : "awaiting signatures"})
+              {" "}may be a stop: it cannot be opened here, so find it on the failsafe control plane to sign it.
+            </p>
+          ))}
           {inFlight.map((cmd) => (
             <GlassCard key={cmd.uuid} bodyClassName="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -995,7 +1048,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                     <span className="athena-mono text-xs text-muted-foreground">· {cmd.engineId}</span>
                   </div>
                   <div className="athena-mono text-xs text-muted-foreground">
-                    {cmd.signers.length}/{cmd.requiredSignatures} signed · {relativeExpiry(cmd.expiresAt)}
+                    {cmd.signers.length}/{needOf(cmd)} signed · {relativeExpiry(cmd.expiresAt)}
                   </div>
                 </div>
               </div>

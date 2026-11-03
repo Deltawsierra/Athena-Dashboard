@@ -35,6 +35,7 @@ import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
 import { UNREADABLE_ROWS_HEADER, unreadableHeaderValue, type UnreadableRows } from "@shared/unreadable-rows";
+import { rowEngaged } from "@shared/kill-switch-flag";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
@@ -2057,7 +2058,8 @@ function stoppedByKillSwitch(
  */
 async function markIfEngagedElsewhere(ticket: StartTicket | null): Promise<void> {
   if (ticket === null || ticket.press !== null) return;
-  const stored = await storage.getKillSwitchState().then((one) => one?.killSwitchEnabled === true, () => false);
+  // A stored flag that is not exactly false reads as engaged (shared/kill-switch-flag.ts).
+  const stored = await storage.getKillSwitchState().then((one) => rowEngaged(one), () => false);
   if (stored && ticket.press === null) ticket.press = { seq: 0, claimed: new Set(), stops: new Map() };
 }
 
@@ -2076,7 +2078,8 @@ function killSwitchStartSentence(runId: string, stop: StopOutcome): string {
 async function killSwitchEngagedNow(): Promise<{ engaged: boolean; systemStatus: string | null }> {
   if (killSwitchMemory.engaged) return { engaged: true, systemStatus: "shutdown" };
   const state = await storage.getKillSwitchState();
-  return { engaged: state?.killSwitchEnabled === true, systemStatus: state?.systemStatus ?? null };
+  // "true", 1, null or a record stored as the flag reads as engaged, never off (shared/kill-switch-flag.ts).
+  return { engaged: rowEngaged(state), systemStatus: state?.systemStatus ?? null };
 }
 
 /**
@@ -2148,7 +2151,8 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
   }
   (async () => {
     const state = await storage.getKillSwitchState();
-    if (!state?.killSwitchEnabled && !killSwitchMemory.engaged) return void next();
+    // Only a flag that is exactly false lets a write through (shared/kill-switch-flag.ts): a null one held nothing.
+    if (!rowEngaged(state) && !killSwitchMemory.engaged) return void next();
     res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: state?.systemStatus ?? "shutdown" });
   })().catch(next);
 };
@@ -5776,7 +5780,7 @@ export function registerRoutes(app: Express): void {
     // A press this dashboard holds in memory is the switch's state whatever the row says yet (killSwitchMemory).
     res.json(killSwitchMemory.engaged
       ? { ...settings, killSwitchEnabled: true, ...(killSwitchMemory.notStored !== null ? { killSwitchNotStored: killSwitchMemory.notStored } : {}) }
-      : settings);
+      : { ...settings, killSwitchEnabled: rowEngaged(settings) });
   }));
 
   /**
@@ -5826,7 +5830,7 @@ export function registerRoutes(app: Express): void {
   const aiControlNow = (fallback: AIControlSetting | null): AIControlSetting | null => {
     const stored = aiControlLatest ?? fallback;
     if (stored === null) return null;
-    return { ...stored, killSwitchEnabled: stored.killSwitchEnabled === true || killSwitchMemory.engaged };
+    return { ...stored, killSwitchEnabled: rowEngaged(stored) || killSwitchMemory.engaged };
   };
   const SUPERSEDED = "a later change to these settings was sent while this one was being saved; the stored settings are that one's";
 
@@ -5873,7 +5877,9 @@ export function registerRoutes(app: Express): void {
           // when its signature is relayed (a possible stop until then): never taken as no command.
           if (list.unreadable) {
             console.warn(`[failsafe] the kill switch's read of the failsafe commands could not read some rows ` +
-              `(${JSON.stringify(list.unreadable)}); a command not known here is read when its signature is relayed`);
+              `(${JSON.stringify(list.unreadable)})` +
+              (list.possibleStops ? `, ${list.possibleStops.commands} of them possibly a stop` : "") +
+              "; a command not known here is read when its signature is relayed, as a possible stop");
           }
         }, (cause) => {
           console.warn(`[failsafe] the kill switch's read of the failsafe commands failed (${causeOf(cause)}); ` +
@@ -5998,7 +6004,7 @@ export function registerRoutes(app: Express): void {
     const superseded = isSuperseded ? { superseded: SUPERSEDED } : {};
     const current = isSuperseded
       ? aiControlNow((await storage.getAIControlSettings().catch(() => undefined)) ?? settings)
-      : settings === null ? null : { ...settings, killSwitchEnabled: settings.killSwitchEnabled === true || killSwitchMemory.engaged };
+      : settings === null ? null : { ...settings, killSwitchEnabled: rowEngaged(settings) || killSwitchMemory.engaged };
     /** The switch as it is now: stored, or held in memory. */
     const engagedNow = current?.killSwitchEnabled === true || killSwitchMemory.engaged;
     if (overtaken) {

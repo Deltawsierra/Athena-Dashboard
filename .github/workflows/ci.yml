@@ -157,4 +157,7 @@ jobs:
           tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts
           tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts
           tests/a-bad-failsafe-row-is-said-on-the-console-never-read-as-none.test.tsx
+          tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts
+          tests/a-missing-or-odd-failsafe-field-is-said-on-the-console-never-read-as-fewer.test.tsx
+          tests/a-stored-kill-switch-flag-that-is-not-false-reads-engaged-on-both-storage-backends.test.ts
           tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx
