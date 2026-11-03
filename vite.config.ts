@@ -6,8 +6,15 @@ import path from "path";
 // depend on where npm was invoked from.
 const rootDir = import.meta.dirname;
 
+// Every .tsx file is compiled with this app's JSX runtime: React's, which also
+// marks each character that hides or reorders text (a right-to-left override, a
+// zero-width space) wherever an element draws text, since much of that text was
+// written by the scanned target (client/src/lib/hiddenChars.ts). vitest.config.ts
+// names the same one, so the tests run what ships.
+export const JSX_IMPORT_SOURCE = "@/lib/target-text-jsx";
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react({ jsxImportSource: JSX_IMPORT_SOURCE })],
   resolve: {
     alias: {
       "@": path.resolve(rootDir, "client", "src"),

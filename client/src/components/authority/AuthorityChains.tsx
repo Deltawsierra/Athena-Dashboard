@@ -13,7 +13,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import { Waypoints } from "lucide-react";
-import { Absent, Chip, Count, Digest, Fact, NotInHand, Section, ToolName, When, served, type Tone } from "./parts";
+import { Absent, Chip, Count, Digest, Fact, NotInHand, Section, ToolName, UnreadableRows, When, served, unreadableIn, type Tone } from "./parts";
 import type { AuthorityChain, AuthorityChains, ChainHop, ChainNode, ConsequentialEffect } from "./types";
 
 const VERDICTS: Record<string, { label: string; hop: string; tone: Tone }> = {
@@ -66,6 +66,7 @@ function Node({ node }: { node: ChainNode }) {
 
 function HopRow({ hop }: { hop: ChainHop }) {
   const readings = hop.verdict === "proven" ? hop.provenBy : hop.reasons;
+  const readingsList = hop.verdict === "proven" ? "provenBy" : "reasons";
   return (
     <li
       className="space-y-1 rounded-md border border-border/50 bg-surface-1/40 p-2"
@@ -79,7 +80,7 @@ function HopRow({ hop }: { hop: ChainHop }) {
         <Node node={hop.to} />
         <VerdictChip verdict={hop.verdict} hop testId="hop-verdict" />
       </div>
-      {readings.length === 0 ? (
+      {readings.length === 0 && unreadableIn(hop, readingsList) === 0 ? (
         <p className="text-[11px]">
           <Absent>{hop.verdict === "proven" ? "nothing named as proving it" : "no reason served"}</Absent>
         </p>
@@ -93,6 +94,7 @@ function HopRow({ hop }: { hop: ChainHop }) {
           ))}
         </ul>
       )}
+      <UnreadableRows from={hop} list={readingsList} />
     </li>
   );
 }
@@ -158,7 +160,7 @@ function ChainCard({ chain }: { chain: AuthorityChain }) {
         </Fact>
       </div>
       {chain.note && <p className="text-[12px] text-muted-foreground">{chain.note}</p>}
-      {hops.length === 0 ? (
+      {hops.length === 0 && unreadableIn(chain, "hops") === 0 ? (
         <Absent>no hops served</Absent>
       ) : (
         <ol className="space-y-1.5">
@@ -167,6 +169,7 @@ function ChainCard({ chain }: { chain: AuthorityChain }) {
           ))}
         </ol>
       )}
+      <UnreadableRows from={chain} list="hops" />
     </li>
   );
 }
@@ -259,7 +262,7 @@ export function AuthorityChainsView({ data }: { data: AuthorityChains }) {
             {data.pageSize ?? "a page"} at a time.
           </p>
         )}
-        {data.chains.length === 0 ? (
+        {data.chains.length === 0 && unreadableIn(data, "chains") === 0 ? (
           <p className="text-[13px]" data-testid="no-chains">
             <Absent>No authority chain is recorded for this deployment.</Absent>
           </p>
@@ -270,12 +273,13 @@ export function AuthorityChainsView({ data }: { data: AuthorityChains }) {
             ))}
           </ul>
         )}
+        <UnreadableRows from={data} list="chains" />
       </Section>
       <Section title="Effects the approvals cover" testId="effects-section">
         <Fact label="By status">
           <Census census={data.effectCensus} labels={Object.fromEntries(Object.entries(EFFECT_STATUS).map(([k, v]) => [k, v.label]))} testId="effect-census" />
         </Fact>
-        {data.effects.length === 0 ? (
+        {data.effects.length === 0 && unreadableIn(data, "effects") === 0 ? (
           <p className="text-[13px]" data-testid="no-effects">
             <Absent>No effect is covered by an approval: no approved workflow, or none that reaches a tool.</Absent>
           </p>
@@ -286,6 +290,7 @@ export function AuthorityChainsView({ data }: { data: AuthorityChains }) {
             ))}
           </ul>
         )}
+        <UnreadableRows from={data} list="effects" />
       </Section>
       <Section title="Approval versions in force" testId="approvals-in-force-section">
         <p className="text-[12px] text-muted-foreground">

@@ -461,3 +461,29 @@ html * {
     cursor: auto !important;
   }
 }
+
+/*
+ * A character the scanned target wrote that would hide or reorder text (a
+ * bidirectional control, a zero-width character): drawn in a box naming its code
+ * point, and boxed off (an inline-block, isolated, left to right), so it reorders
+ * nothing outside the box. The character stays in the text for copy and search.
+ * See client/src/components/TargetText.tsx.
+ */
+.hidden-char {
+  display: inline-block;
+  unicode-bidi: isolate;
+  direction: ltr;
+  margin: 0 1px;
+  padding: 0 2px;
+  border: 1px dashed hsl(var(--muted-foreground));
+  border-radius: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75em;
+  line-height: 1.2;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+.hidden-char::before {
+  content: attr(data-hidden-char);
+}

@@ -32,11 +32,13 @@ import {
   NotInHand,
   Section,
   ToolName,
+  UnreadableRows,
   When,
   censusTone,
   decisionLabel,
   decisionTone,
   served,
+  unreadableIn,
 } from "./parts";
 import { HistoryPageFrame, HistoryPages, OnDemand, type PageSlot } from "./history";
 import type {
@@ -207,7 +209,7 @@ export function ApprovalVersionRow({ version, showWorkflow }: { version: Approva
           <Absent testId="version-declared-by">not recorded</Absent>
         )}
       </Fact>
-      {version.tools.length === 0 ? (
+      {version.tools.length === 0 && unreadableIn(version, "tools") === 0 ? (
         <p className="text-[12px]" data-testid="version-no-tools">
           <Absent>{withdrawn ? "A withdrawn approval binds no tools." : "This version bound no tools."}</Absent>
         </p>
@@ -218,6 +220,7 @@ export function ApprovalVersionRow({ version, showWorkflow }: { version: Approva
           ))}
         </ul>
       )}
+      <UnreadableRows from={version} list="tools" />
     </li>
   );
 }
@@ -265,13 +268,14 @@ function ApprovalHistoryPage({ deployment, workflow, slot }: { deployment: strin
       what={workflow ? "this approval's version history" : "the approval history"}
       count={(page) => page.versionCount}
       rows={(page) => page.versions.length}
+      list="versions"
     >
       {(page) => (
         <ApprovalVersionList
           versions={page.versions}
           showWorkflow={!workflow}
           empty={
-            offset !== 0
+            offset !== 0 || unreadableIn(page, "versions") > 0
               ? null
               : workflow
                 ? "No version of this approval is recorded."
@@ -319,7 +323,7 @@ function WorkflowCard({ workflow, deployment }: { workflow: ApprovedWorkflow; de
       </Fact>
       <div>
         <p className="text-[11px] uppercase tracking-wide text-muted-foreground">Tools this approval binds</p>
-        {workflow.tools.length === 0 ? (
+        {workflow.tools.length === 0 && unreadableIn(workflow, "tools") === 0 ? (
           <p className="mt-1 text-[12px]" data-testid="no-tools">
             <Absent>This approval binds no tools.</Absent>
           </p>
@@ -330,6 +334,7 @@ function WorkflowCard({ workflow, deployment }: { workflow: ApprovedWorkflow; de
             ))}
           </ul>
         )}
+        <UnreadableRows from={workflow} list="tools" />
       </div>
       {deployment && workflow.slug && (
         <OnDemand label="version history" testId="approval-version-history">
@@ -413,7 +418,7 @@ export function ApprovedWorkflowsView({
             {data.pageSize ?? "a page"} at a time.
           </p>
         )}
-        {data.approved.length === 0 ? (
+        {data.approved.length === 0 && unreadableIn(data, "approved") === 0 ? (
           <p className="text-[13px]" data-testid="no-approvals">
             <Absent>
               No approved set is recorded for this deployment. Until one is, the backend measures no workflow
@@ -427,6 +432,7 @@ export function ApprovedWorkflowsView({
             ))}
           </ul>
         )}
+        <UnreadableRows from={data} list="approved" />
         <p className="text-[12px] leading-relaxed text-muted-foreground" data-testid="approval-history-note">
           Approval history: each approval&apos;s earlier versions are read from Athena-Backend&apos;s record, under the
           approval, or every approval&apos;s together below, approvals since withdrawn included. A version names who

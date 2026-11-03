@@ -36,6 +36,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * `text` as a tooltip shows it: each bidirectional control and zero-width character written out as "[U+200B]".
+ * Listed here on its own, not read from the app.
+ */
+function writtenOut(text: string): string {
+  return text.replace(/[\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g,
+    (char) => `[U+${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`);
+}
+
 /** mythos-core `evidence.BASIS`, as the engine sends it on every finding it scores. */
 const BASIS =
   "ordinal: derived from the number of independent signals in the evidence. " +
@@ -191,7 +200,9 @@ function expectConfidence(message: string, value: string, basis: string) {
   const shown = item.querySelector("[data-testid='text-finding-confidence-value']")!;
   expect(shown.textContent).toBe(value);
   expect(onScreen(shown)).toBe(true);
-  expect(line!.getAttribute("title")).toBe(basis);
+  // The title is the basis with each character that hides or reorders text written out ("[U+200B]"): a target
+  // string cannot hide in a tooltip (client/src/lib/hiddenChars.ts). On screen and read aloud, it is as sent.
+  expect(line!.getAttribute("title")).toBe(writtenOut(basis));
 
   const sr = item.querySelector("[data-testid='text-finding-confidence-sr']");
   expect(sr, `no screen-reader basis on "${message}"`).not.toBeNull();
@@ -328,9 +339,9 @@ for (const [name, Page] of [["Athena", AthenaScan], ["Penetration testing", Pent
         // number, and it is on screen beside it.
         if (title !== null) {
           expect(sr!.className).toBe("sr-only");
-          expect(sr!.textContent).toBe(` (${title})`);
+          expect(writtenOut(sr!.textContent!)).toBe(` (${title})`);
           expect(readAloud(sr!)).toBe(true);
-          expect(item.querySelector("[data-testid='text-finding-confidence-basis']")!.textContent).toBe(title);
+          expect(writtenOut(item.querySelector("[data-testid='text-finding-confidence-basis']")!.textContent!)).toBe(title);
         } else {
           expect(sr).toBeNull();
         }

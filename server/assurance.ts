@@ -4751,6 +4751,8 @@ export interface DecisionSupport {
     /** Consequential effects no chain in force names, and approved tools whose effect class is unknown. */
     authorityChainsMissing: ConsequentialEffect[];
     effectClassesUnknown: ConsequentialEffect[];
+    /** How many rows of each list above could not be read (rowsOf); absent when every row was read. */
+    unreadable?: UnreadableRows;
   };
   note: string;
 }
@@ -4769,6 +4771,7 @@ function claimBriefs(raw: unknown): ClaimBrief[] {
 
 function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
   const claims = objOf(raw.claims);
+  const unreadable: UnreadableRows = {};
   return {
     decision: strOrNull(raw.decision),
     decisionLabel: strOrNull(raw.decision_label),
@@ -4787,11 +4790,12 @@ function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
       stale: claimBriefs(claims.stale),
       unknown: claimBriefs(claims.unknown),
       supporting: claimBriefs(claims.supporting),
-      supersededToolContracts: rowsOf(claims.superseded_tool_contracts).map(supersededToolContract),
-      authorityChainsBroken: rowsOf(claims.authority_chains_broken).map(chainBrief),
-      authorityChainsUnproven: rowsOf(claims.authority_chains_unproven).map(chainBrief),
-      authorityChainsMissing: rowsOf(claims.authority_chains_missing).map(consequentialEffect),
-      effectClassesUnknown: rowsOf(claims.effect_classes_unknown).map(consequentialEffect),
+      supersededToolContracts: rowsOf(claims.superseded_tool_contracts, unreadable, "supersededToolContracts").map(supersededToolContract),
+      authorityChainsBroken: rowsOf(claims.authority_chains_broken, unreadable, "authorityChainsBroken").map(chainBrief),
+      authorityChainsUnproven: rowsOf(claims.authority_chains_unproven, unreadable, "authorityChainsUnproven").map(chainBrief),
+      authorityChainsMissing: rowsOf(claims.authority_chains_missing, unreadable, "authorityChainsMissing").map(consequentialEffect),
+      effectClassesUnknown: rowsOf(claims.effect_classes_unknown, unreadable, "effectClassesUnknown").map(consequentialEffect),
+      ...withUnreadable(unreadable),
     },
     note: str(raw.note),
   };
@@ -5536,11 +5540,37 @@ export async function pushConnector(
 // the approver's account was removed) stays null; a verdict or status outside the
 // vocabulary is carried as served, and the screens read it as none of theirs.
 
-/** Every element of a list that is a plain object, or [] when the value is not a list. */
-function rowsOf(raw: unknown): Record<string, unknown>[] {
-  return Array.isArray(raw)
-    ? raw.filter((one): one is Record<string, unknown> => !!one && typeof one === "object" && !Array.isArray(one))
-    : [];
+/**
+ * How many rows of each list the backend served could not be read, by the list's
+ * name here ("tools", "hops", ...): a row that is not a plain object. A screen
+ * says "N rows could not be read" beside the list, so a row never vanishes unsaid
+ * (client/src/components/authority/parts.tsx UnreadableRows). What such a row
+ * held is not shown: it could not be read. Carried as `unreadable` on the object
+ * that holds the list, and only when a row of it could not be read.
+ */
+export type UnreadableRows = Record<string, number>;
+
+/** `{ unreadable }` when a row of some list could not be read; nothing when every row was. */
+function withUnreadable(unreadable: UnreadableRows): { unreadable?: UnreadableRows } {
+  return Object.keys(unreadable).length > 0 ? { unreadable } : {};
+}
+
+/**
+ * Every element of a list that is a plain object, or [] when the value is not a
+ * list. Each element that is not one is counted in `unreadable[list]`, never
+ * dropped silently.
+ */
+function rowsOf(raw: unknown, unreadable: UnreadableRows, list: string): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  let unread = 0;
+  if (Array.isArray(raw)) {
+    for (const one of raw) {
+      if (!!one && typeof one === "object" && !Array.isArray(one)) rows.push(one as Record<string, unknown>);
+      else unread += 1;
+    }
+  }
+  if (unread > 0) unreadable[list] = (unreadable[list] ?? 0) + unread;
+  return rows;
 }
 
 /** A list of numbers, dropping anything that is not one. */
@@ -5633,6 +5663,8 @@ export interface ApprovedWorkflow {
   /** When the approval was last declared: a declaration that keeps a workflow re-stamps it. */
   approvedAt: string | null;
   tools: ApprovedTool[];
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ApprovedWorkflows {
@@ -5643,6 +5675,8 @@ export interface ApprovedWorkflows {
   /** How many approvals are recorded, whether or not all were returned. */
   approvedCount: number | null;
   composition: WorkflowComposition | null;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function approvedTool(raw: Record<string, unknown>): ApprovedTool {
@@ -5657,6 +5691,7 @@ function approvedTool(raw: Record<string, unknown>): ApprovedTool {
 }
 
 function approvedWorkflow(raw: Record<string, unknown>): ApprovedWorkflow {
+  const unreadable: UnreadableRows = {};
   return {
     uuid: str(raw.uuid),
     slug: str(raw.slug),
@@ -5664,7 +5699,8 @@ function approvedWorkflow(raw: Record<string, unknown>): ApprovedWorkflow {
     description: str(raw.description),
     approvedBy: strOrNull(raw.approved_by),
     approvedAt: strOrNull(raw.approved_at),
-    tools: rowsOf(raw.tools).map(approvedTool),
+    tools: rowsOf(raw.tools, unreadable, "tools").map(approvedTool),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5679,13 +5715,15 @@ export async function approvedWorkflows(uuid: string): Promise<ApprovedWorkflows
     throw await refusedRead(response);
   }
   const raw = await readObject(response);
+  const unreadable: UnreadableRows = {};
   return {
-    approved: rowsOf(raw.approved).map(approvedWorkflow),
+    approved: rowsOf(raw.approved, unreadable, "approved").map(approvedWorkflow),
     returned: numOrNull(raw.returned),
     truncated: boolOrNull(raw.truncated),
     pageSize: numOrNull(raw.page_size),
     approvedCount: numOrNull(raw.approved_count),
     composition: workflowComposition(raw.composition),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5713,6 +5751,8 @@ export interface ChainHop {
   verdict: string;
   provenBy: ChainReading[];
   reasons: ChainReading[];
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 /** One recorded authority chain (athena-backend authority_chain_records.py `chain_payload`). */
@@ -5743,6 +5783,8 @@ export interface AuthorityChainView {
   unprovenHops: number[];
   brokenHops: number[];
   hops: ChainHop[];
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 /** One effect an approval covers (athena-backend authority_chain_records.py `effect_brief`). */
@@ -5771,6 +5813,8 @@ export interface ChainBrief {
   digest: string;
   verdict: string;
   hops: Array<{ index: number | null; relation: string; from: ChainNode; to: ChainNode; verdict: string; reasons: string[] }>;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 /** An approval or claim bound to a tool contract that has since moved (athena-backend tool_contract.py `brief`). */
@@ -5801,6 +5845,8 @@ export interface AuthorityChains {
   effects: ConsequentialEffect[];
   /** The effects by status, every status with its zeros, as served. */
   effectCensus: Record<string, number>;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function chainNode(raw: unknown): ChainNode {
@@ -5813,18 +5859,21 @@ function chainReading(raw: Record<string, unknown>): ChainReading {
 }
 
 function chainHop(raw: Record<string, unknown>): ChainHop {
+  const unreadable: UnreadableRows = {};
   return {
     index: numOrNull(raw.index),
     from: chainNode(raw.from),
     relation: str(raw.relation),
     to: chainNode(raw.to),
     verdict: str(raw.verdict),
-    provenBy: rowsOf(raw.proven_by).map(chainReading),
-    reasons: rowsOf(raw.reasons).map(chainReading),
+    provenBy: rowsOf(raw.proven_by, unreadable, "provenBy").map(chainReading),
+    reasons: rowsOf(raw.reasons, unreadable, "reasons").map(chainReading),
+    ...withUnreadable(unreadable),
   };
 }
 
 function authorityChain(raw: Record<string, unknown>): AuthorityChainView {
+  const unreadable: UnreadableRows = {};
   return {
     uuid: str(raw.uuid),
     workflow: str(raw.workflow),
@@ -5847,7 +5896,8 @@ function authorityChain(raw: Record<string, unknown>): AuthorityChainView {
     note: str(raw.note),
     unprovenHops: numList(raw.unproven_hops),
     brokenHops: numList(raw.broken_hops),
-    hops: rowsOf(raw.hops).map(chainHop),
+    hops: rowsOf(raw.hops, unreadable, "hops").map(chainHop),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5873,13 +5923,14 @@ function consequentialEffect(raw: Record<string, unknown>): ConsequentialEffect 
 }
 
 function chainBrief(raw: Record<string, unknown>): ChainBrief {
+  const unreadable: UnreadableRows = {};
   return {
     uuid: str(raw.uuid),
     workflow: str(raw.workflow),
     effect: str(raw.effect),
     digest: str(raw.digest),
     verdict: str(raw.verdict),
-    hops: rowsOf(raw.hops).map((hop) => ({
+    hops: rowsOf(raw.hops, unreadable, "hops").map((hop) => ({
       index: numOrNull(hop.index),
       relation: str(hop.relation),
       from: chainNode(hop.from),
@@ -5887,6 +5938,7 @@ function chainBrief(raw: Record<string, unknown>): ChainBrief {
       verdict: str(hop.verdict),
       reasons: strList(hop.reasons),
     })),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5914,8 +5966,9 @@ export async function authorityChains(uuid: string): Promise<AuthorityChains> {
     throw await refusedRead(response);
   }
   const raw = await readObject(response);
+  const unreadable: UnreadableRows = {};
   return {
-    chains: rowsOf(raw.chains).map(authorityChain),
+    chains: rowsOf(raw.chains, unreadable, "chains").map(authorityChain),
     returned: numOrNull(raw.returned),
     truncated: boolOrNull(raw.truncated),
     pageSize: numOrNull(raw.page_size),
@@ -5924,8 +5977,9 @@ export async function authorityChains(uuid: string): Promise<AuthorityChains> {
     superseded: numOrNull(raw.superseded),
     verdictCensus: numRecord(raw.verdict_census),
     approvalsInForce: strRecord(raw.approvals_in_force),
-    effects: rowsOf(raw.effects).map(consequentialEffect),
+    effects: rowsOf(raw.effects, unreadable, "effects").map(consequentialEffect),
     effectCensus: numRecord(raw.effect_census),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -6073,6 +6127,8 @@ export interface ApprovalVersion {
    */
   declaredBy: string | null;
   tools: ApprovalVersionTool[];
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ApprovalHistory extends HistoryPage {
@@ -6081,6 +6137,8 @@ export interface ApprovalHistory extends HistoryPage {
   versions: ApprovalVersion[];
   /** How many versions are recorded, whether or not all were returned. */
   versionCount: number | null;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function approvalVersionTool(raw: Record<string, unknown>): ApprovalVersionTool {
@@ -6097,6 +6155,7 @@ function approvalVersionTool(raw: Record<string, unknown>): ApprovalVersionTool 
 }
 
 function approvalVersion(raw: Record<string, unknown>): ApprovalVersion {
+  const unreadable: UnreadableRows = {};
   return {
     version: strOrNull(raw.version),
     workflow: strOrNull(raw.workflow),
@@ -6106,7 +6165,8 @@ function approvalVersion(raw: Record<string, unknown>): ApprovalVersion {
     inForceUntil: strOrNull(raw.in_force_until),
     recordedAt: strOrNull(raw.recorded_at),
     declaredBy: strOrNull(raw.declared_by),
-    tools: rowsOf(raw.tools).map(approvalVersionTool),
+    tools: rowsOf(raw.tools, unreadable, "tools").map(approvalVersionTool),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -6117,11 +6177,13 @@ function approvalVersion(raw: Record<string, unknown>): ApprovalVersion {
 export async function approvalHistory(uuid: string, filters: Pick<HistoryQuery, "workflow" | "offset"> = {}): Promise<ApprovalHistory> {
   const query = historySearch({ workflow: filters.workflow, offset: filters.offset });
   const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/approval-history/${query}`);
+  const unreadable: UnreadableRows = {};
   return {
     ...historyPage(raw),
     workflow: strOrNull(raw.workflow),
-    versions: rowsOf(raw.versions).map(approvalVersion),
+    versions: rowsOf(raw.versions, unreadable, "versions").map(approvalVersion),
     versionCount: numOrNull(raw.version_count),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -6147,6 +6209,8 @@ export interface ToolContractHistory extends HistoryPage {
   identifier: string | null;
   contracts: ToolContractRecord[];
   contractCount: number | null;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function toolContractRecord(raw: Record<string, unknown>): ToolContractRecord {
@@ -6174,12 +6238,14 @@ export async function toolContractHistory(
 ): Promise<ToolContractHistory> {
   const query = historySearch({ kind: filters.kind, identifier: filters.identifier, offset: filters.offset });
   const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/tool-contracts/${query}`);
+  const unreadable: UnreadableRows = {};
   return {
     ...historyPage(raw),
     kind: strOrNull(raw.kind),
     identifier: strOrNull(raw.identifier),
-    contracts: rowsOf(raw.contracts).map(toolContractRecord),
+    contracts: rowsOf(raw.contracts, unreadable, "contracts").map(toolContractRecord),
     contractCount: numOrNull(raw.contract_count),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -6213,6 +6279,8 @@ export interface ToolContractBindings extends HistoryPage {
   identifier: string | null;
   bindings: ToolContractBindingRecord[];
   bindingCount: number | null;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function toolContractBindingRecord(raw: Record<string, unknown>): ToolContractBindingRecord {
@@ -6245,12 +6313,14 @@ export async function toolContractBindings(
 ): Promise<ToolContractBindings> {
   const query = historySearch({ kind: filters.kind, identifier: filters.identifier, offset: filters.offset });
   const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/tool-contract-bindings/${query}`);
+  const unreadable: UnreadableRows = {};
   return {
     ...historyPage(raw),
     kind: strOrNull(raw.kind),
     identifier: strOrNull(raw.identifier),
-    bindings: rowsOf(raw.bindings).map(toolContractBindingRecord),
+    bindings: rowsOf(raw.bindings, unreadable, "bindings").map(toolContractBindingRecord),
     bindingCount: numOrNull(raw.binding_count),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -6271,6 +6341,8 @@ export interface DecisionTransitionRecord {
 export interface DecisionHistory extends HistoryPage {
   transitions: DecisionTransitionRecord[];
   transitionCount: number | null;
+  /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function decisionTransitionRecord(raw: Record<string, unknown>): DecisionTransitionRecord {
@@ -6292,10 +6364,12 @@ function decisionTransitionRecord(raw: Record<string, unknown>): DecisionTransit
 export async function decisionHistory(uuid: string, filters: Pick<HistoryQuery, "offset"> = {}): Promise<DecisionHistory> {
   const query = historySearch({ offset: filters.offset });
   const raw = await readHistory(`/api/assurance/deployments/${encodeURIComponent(uuid)}/decision-history/${query}`);
+  const unreadable: UnreadableRows = {};
   return {
     ...historyPage(raw),
-    transitions: rowsOf(raw.transitions).map(decisionTransitionRecord),
+    transitions: rowsOf(raw.transitions, unreadable, "transitions").map(decisionTransitionRecord),
     transitionCount: numOrNull(raw.transition_count),
+    ...withUnreadable(unreadable),
   };
 }
 

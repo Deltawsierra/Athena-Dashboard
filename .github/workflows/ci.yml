@@ -142,3 +142,11 @@ jobs:
           tests/every-in-app-download-revokes-its-blob-url-later-never-with-the-click.test.tsx
           tests/the-recovery-records-are-read-as-the-person-and-never-written.test.ts
           tests/a-recovery-record-shows-every-state-with-what-supports-it-and-never-a-clean-badge.test.tsx
+          tests/a-character-that-hides-or-reorders-text-is-drawn-marked.test.tsx
+          tests/the-build-draws-with-the-runtime-that-marks-hidden-characters.test.ts
+          tests/a-finding-s-confidence-is-read-with-the-engine-s-basis.test.tsx
+          tests/a-row-the-backend-served-that-cannot-be-read-is-counted-never-dropped.test.ts
+          tests/a-row-that-cannot-be-read-is-said-on-every-authority-screen.test.tsx
+          tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts
+          tests/the-authority-screens-show-what-the-backend-serves.test.tsx
+          tests/the-authority-histories-show-what-the-backend-recorded.test.tsx

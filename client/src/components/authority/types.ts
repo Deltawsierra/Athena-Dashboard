@@ -5,6 +5,13 @@
  * as absent, or did not serve -- never a value filled in here.
  */
 
+/**
+ * How many rows of each list the backend served this console's server could not
+ * read (a row that is not a record), by the list's name: "tools", "hops", ... Shown
+ * as "N rows could not be read" beside the list (parts.tsx UnreadableRows).
+ */
+export type UnreadableRows = Record<string, number>;
+
 export interface WorkflowComposition {
   signal: string | null;
   ruleDecision: string | null;
@@ -41,6 +48,8 @@ export interface ApprovedWorkflow {
   approvedBy: string | null;
   approvedAt: string | null;
   tools: ApprovedTool[];
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ApprovedWorkflows {
@@ -50,6 +59,8 @@ export interface ApprovedWorkflows {
   pageSize: number | null;
   approvedCount: number | null;
   composition: WorkflowComposition | null;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ChainNode {
@@ -72,6 +83,8 @@ export interface ChainHop {
   verdict: string;
   provenBy: ChainReading[];
   reasons: ChainReading[];
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface AuthorityChain {
@@ -97,6 +110,8 @@ export interface AuthorityChain {
   unprovenHops: number[];
   brokenHops: number[];
   hops: ChainHop[];
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ConsequentialEffect {
@@ -124,6 +139,8 @@ export interface AuthorityChains {
   approvalsInForce: Record<string, string>;
   effects: ConsequentialEffect[];
   effectCensus: Record<string, number>;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ChainBrief {
@@ -133,6 +150,8 @@ export interface ChainBrief {
   digest: string;
   verdict: string;
   hops: Array<{ index: number | null; relation: string; from: ChainNode; to: ChainNode; verdict: string; reasons: string[] }>;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface SupersededToolContract {
@@ -175,6 +194,8 @@ export interface DecisionSupport {
     authorityChainsUnproven: ChainBrief[];
     authorityChainsMissing: ConsequentialEffect[];
     effectClassesUnknown: ConsequentialEffect[];
+    /** Rows of a list above the server could not read, by list; absent when every row was read. */
+    unreadable?: UnreadableRows;
   };
   note: string;
 }
@@ -206,6 +227,8 @@ export interface HistoryPage {
   truncated: boolean | null;
   pageSize: number | null;
   offset: number | null;
+  /** Rows of the page's list the server could not read, by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ApprovalVersionTool {
@@ -233,12 +256,16 @@ export interface ApprovalVersion {
   /** null: Athena-Backend serves no declarer for the version (the field absent, or null). */
   declaredBy: string | null;
   tools: ApprovalVersionTool[];
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ApprovalHistory extends HistoryPage {
   workflow: string | null;
   versions: ApprovalVersion[];
   versionCount: number | null;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ToolContractRecord {
@@ -259,6 +286,8 @@ export interface ToolContractHistory extends HistoryPage {
   identifier: string | null;
   contracts: ToolContractRecord[];
   contractCount: number | null;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface ToolContractBindingRecord {
@@ -284,6 +313,8 @@ export interface ToolContractBindings extends HistoryPage {
   identifier: string | null;
   bindings: ToolContractBindingRecord[];
   bindingCount: number | null;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface DecisionTransitionRecord {
@@ -301,4 +332,6 @@ export interface DecisionTransitionRecord {
 export interface DecisionHistory extends HistoryPage {
   transitions: DecisionTransitionRecord[];
   transitionCount: number | null;
+  /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
+  unreadable?: UnreadableRows;
 }

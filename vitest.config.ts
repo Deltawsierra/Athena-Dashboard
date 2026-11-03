@@ -3,6 +3,8 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 import fs from "fs";
 
+import { JSX_IMPORT_SOURCE } from "./vite.config";
+
 // These files bound wall-clock time: how long the event loop is held, how
 // soon a stop reaches the engine, how long a connection is kept. Run beside
 // the other test files, they share the runner's cores with every other fork,
@@ -17,8 +19,9 @@ const WALL_CLOCK: string[] = JSON.parse(fs.readFileSync(path.resolve(import.meta
 
 export default defineConfig(({ mode }) => ({
   // Only the `.tsx` render suites need it; the server suites are unaffected
-  // because the plugin only transforms JSX.
-  plugins: [react()],
+  // because the plugin only transforms JSX. The app's own JSX runtime, the one
+  // the build uses (vite.config.ts JSX_IMPORT_SOURCE).
+  plugins: [react({ jsxImportSource: JSX_IMPORT_SOURCE })],
   test: {
     environment: "node",
     // `.tsx` too: the four-numbers render tests mount the assurance panels in

