@@ -41,8 +41,8 @@ afterAll(async () => {
  *     go, a commit on the loop leaves the header as it was.
  *   - Idle, the thread writes nothing -- nor do two dashboards' threads on one
  *     file write to each other.
- *   - The thread never waits on the lock: with the lock held elsewhere,
- *     closing the database ends it at once.
+ *   - The thread never waits on the lock: with the lock held elsewhere, its
+ *     turn is refused at once, counted as skipped, and writes nothing.
  *   - A Stop pressed while the thread holds the write lock for its write
  *     reaches the engine within the bound a Stop under a held lock has
  *     (tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts).
@@ -211,22 +211,44 @@ describe("the checkpointer thread writes nothing while the database is idle, and
     }
   }, 30_000);
 
-  it("with the write lock held elsewhere, the thread skips its turn: closing the database ends it at once", async () => {
+  it("with the write lock held elsewhere, the thread's turn is refused the lock at once (20 ms at most), is counted as skipped, and writes no log_restarts row", async () => {
     const { dbPath, dbm, storage, watcher } = await boot("busy");
     const lock = new Database(dbPath);
+    const probe = new Database(dbPath);
+    const restartedAt = () => (probe.prepare("SELECT restarted_at FROM log_restarts WHERE id = 1").get() as { restarted_at: number } | undefined)?.restarted_at ?? null;
+    const turns = () => Object.values(dbm.checkpointerTurns.counts).reduce((all, n) => all + n, 0);
     try {
       await someWrites(storage, "before-lock");
+      // The thread's turn for those writes, then more: its next turn has work to do.
+      await sleep(1_300);
+      await someWrites(storage, "under-lock");
       lock.pragma("busy_timeout = 0");
       lock.exec("BEGIN IMMEDIATE");
-      // At least one of the thread's turns meets the lock.
-      await sleep(1_300);
-      watcher.halt();
-      const began = Date.now();
-      await dbm.closeDatabase();
-      expect(Date.now() - began).toBeLessThan(1_000);
+      const before = restartedAt();
+      const skipped = dbm.checkpointerTurns.counts["skipped: busy"] ?? 0;
+      const seen = turns();
+      try {
+        // The thread's next turn comes within 1 s; one that waited on the lock would not end until it is let go.
+        const deadline = Date.now() + 2_500;
+        while (turns() === seen && Date.now() < deadline) await sleep(10);
+        expect(restartedAt()).toBe(before);
+      } finally {
+        lock.exec("ROLLBACK");
+      }
+      // A turn that waited ends once the lock is let go: wait for it, so that what it came to is what is asserted.
+      const deadline = Date.now() + 3_000;
+      while (turns() === seen && Date.now() < deadline) await sleep(10);
+      const last = dbm.checkpointerTurns.last;
+      expect(last).not.toBeNull();
+      // busy_timeout 0: SQLite refuses at once (microseconds). 20 ms covers a thread preempted for one
+      // Windows scheduler quantum (15.6 ms); a turn that waited on the lock took the whole hold (over 1 s).
+      expect(last!.lockMs).toBeLessThanOrEqual(20);
+      expect(last!.outcome).toBe("skipped: busy");
+      expect(dbm.checkpointerTurns.counts["skipped: busy"]).toBe(skipped + 1);
     } finally {
       if (lock.inTransaction) lock.exec("ROLLBACK");
       lock.close();
+      probe.close();
       watcher.halt();
     }
   }, 30_000);
@@ -283,6 +305,13 @@ describe("a Stop while the checkpointer thread holds the write lock", () => {
     } finally {
       writing = false;
       await writes;
+      // Close only once both threads have settled (the lock free for 2.5 s): no thread is then mid-turn.
+      const deadline = Date.now() + 15_000;
+      let freeSince = Date.now();
+      while (Date.now() - freeSince < 2_500 && Date.now() < deadline) {
+        if (lockedNow()) freeSince = Date.now();
+        await sleep(20);
+      }
       probe.close();
       watcher.halt();
       await dbm.closeDatabase();

@@ -140,6 +140,16 @@ export const CHECKPOINT_EVERY_MS = 1_000;
 export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
 
 /**
+ * What the checkpointer thread's turns came to, by outcome (CHECKPOINTER_SOURCE):
+ * `skipped: busy` (another connection held the write lock: the turn ended at
+ * once), `checkpointed part of the log`, `checkpointed`, `restarted` (the log
+ * started over by the thread's own write). An idle turn is not counted.
+ * `last` is the latest, with how long the thread's ask for the write lock took
+ * (`lockMs`): it never waits on the lock, so that is the time a refusal takes.
+ */
+export const checkpointerTurns: { counts: Record<string, number>; last: { outcome: string; lockMs: number } | null } = { counts: {}, last: null };
+
+/**
  * The checkpointer threads this copy of the module has started and that are
  * still running. `intentional` is set by closeDatabase before it ends one, so
  * that an exit it caused is not read as the thread failing.
@@ -204,6 +214,10 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
       } catch (cause) {
         loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
       }
+    } else if (typeof message === "object" && message !== null && "turn" in message) {
+      const { turn, lockMs } = message as { turn: string; lockMs: number };
+      checkpointerTurns.counts[turn] = (checkpointerTurns.counts[turn] ?? 0) + 1;
+      checkpointerTurns.last = { outcome: turn, lockMs };
     } else if (typeof message === "object" && message !== null && "failed" in message) {
       loopCheckpoints(String((message as { failed: unknown }).failed));
     }
@@ -283,6 +297,8 @@ export async function closeDatabase(): Promise<void> {
  *     by a checkpointer -- this one, or another dashboard's on the same file
  *     -- holds one frame, and two dashboards that started each other's log
  *     over would write to each other every second for ever.
+ *   - Every turn that is not idle tells the parent what it came to, and how
+ *     long its ask for the write lock took (checkpointerTurns).
  */
 const CHECKPOINTER_SOURCE = `
 const { parentPort, workerData } = require("worker_threads");
@@ -313,21 +329,35 @@ setInterval(() => {
   try {
     const version = lock.pragma("data_version", { simple: true });
     if (version === settled) return;
-    lock.exec("BEGIN IMMEDIATE");
+    const asked = performance.now();
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+    } catch (cause) {
+      if (!cause || cause.code !== "SQLITE_BUSY") throw cause;
+      parentPort.postMessage({ turn: "skipped: busy", lockMs: performance.now() - asked });
+      return;
+    }
+    const lockMs = performance.now() - asked;
+    let outcome = "checkpointed";
     try {
       if (workerData.holdForTestsMs > 0) Atomics.wait(held, 0, 0, workerData.holdForTestsMs);
       const [done] = db.pragma("wal_checkpoint(PASSIVE)");
       lock.exec("ROLLBACK");
-      if (done.busy !== 0 || done.checkpointed < done.log) return;
+      if (done.busy !== 0 || done.checkpointed < done.log) {
+        parentPort.postMessage({ turn: "checkpointed part of the log", lockMs });
+        return;
+      }
       if (done.log > 1 && restart) {
         lock.exec("BEGIN IMMEDIATE");
         restart.run(Date.now());
         lock.exec("COMMIT");
+        outcome = "restarted";
       }
     } finally {
       if (lock.inTransaction) lock.exec("ROLLBACK");
     }
     settled = version;
+    parentPort.postMessage({ turn: outcome, lockMs });
   } catch {
     // Busy, or the file is gone: tried again next time.
   }
