@@ -18,7 +18,7 @@
  * Nothing here writes: every read is a GET.
  */
 import { Fragment, useState, type ReactNode } from "react";
-import { Absent, Count, NotInHand } from "./parts";
+import { Absent, Count, NotInHand, UnreadableRows } from "./parts";
 import type { Loaded } from "@/lib/loaded";
 import type { HistoryPage } from "./types";
 
@@ -82,6 +82,7 @@ export function HistoryPageFrame<T extends HistoryPage>({
   what,
   count,
   rows,
+  list,
   children,
 }: {
   source: Loaded<T>;
@@ -93,6 +94,8 @@ export function HistoryPageFrame<T extends HistoryPage>({
   count: (page: T) => number | null;
   /** How many rows this page holds. */
   rows: (page: T) => number;
+  /** The page's list, by its name in `unreadable`: its rows that could not be read are counted under it. */
+  list: string;
   children: (page: T) => ReactNode;
 }) {
   if (source.state !== "ready") {
@@ -111,6 +114,7 @@ export function HistoryPageFrame<T extends HistoryPage>({
   return (
     <div className="space-y-2" data-history-page={slot.offset}>
       {children(page)}
+      <UnreadableRows from={page} list={list} />
       {slot.last && <HistoryFooter page={page} offset={slot.offset} count={count(page)} rows={rows(page)} onMore={slot.onMore} />}
     </div>
   );

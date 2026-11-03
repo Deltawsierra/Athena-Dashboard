@@ -43,10 +43,12 @@ import {
   NotServed,
   Section,
   ToolName,
+  UnreadableRows,
   When,
   decisionLabel,
   decisionTone,
   served,
+  unreadableIn,
 } from "./parts";
 import type { DecisionHistory, DecisionSupport, DecisionTransitionRecord } from "./types";
 
@@ -150,17 +152,45 @@ function InputRow({ input, paused }: { input: Input; paused: boolean }) {
   );
 }
 
-function Named({ title, count, children, testId }: { title: string; count: number; children: ReactNode; testId: string }) {
-  if (count === 0) return null;
+/**
+ * One kind of thing the backend names as holding the decision, with how many. `lists`
+ * names the served lists it is drawn from, so their rows that could not be read are
+ * counted under it (a kind with only such rows still shows).
+ */
+function Named({
+  title,
+  count,
+  children,
+  testId,
+  from,
+  lists = [],
+}: {
+  title: string;
+  count: number;
+  children: ReactNode;
+  testId: string;
+  from?: DecisionSupport["claims"];
+  lists?: string[];
+}) {
+  const unread = lists.reduce((sum, list) => sum + unreadableIn(from, list), 0);
+  if (count === 0 && unread === 0) return null;
   return (
     <div data-testid={testId}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
         {title} ({count})
       </p>
       <ul className="mt-1 space-y-1">{children}</ul>
+      {lists.map((list) => (
+        <UnreadableRows key={list} from={from} list={list} />
+      ))}
     </div>
   );
 }
+
+/** The served lists of what holds the decision (server/assurance.ts mapDecisionSupport), by name. */
+const HOLDING_LISTS = [
+  "supersededToolContracts", "authorityChainsBroken", "authorityChainsUnproven", "authorityChainsMissing", "effectClassesUnknown",
+];
 
 /** A decision a transition names, in words and a neutral tone: the history is a record, never a result drawn here. */
 function PastDecision({ state, none, testId }: { state: string | null; none: string; testId: string }) {
@@ -235,8 +265,9 @@ function DecisionHistoryPage({ deployment, slot }: { deployment: string; slot: P
       what="the decision history"
       count={(page) => page.transitionCount}
       rows={(page) => page.transitions.length}
+      list="transitions"
     >
-      {(page) => <DecisionTransitionList transitions={page.transitions} first={offset === 0} />}
+      {(page) => <DecisionTransitionList transitions={page.transitions} first={offset === 0 && unreadableIn(page, "transitions") === 0} />}
     </HistoryPageFrame>
   );
 }
@@ -260,6 +291,7 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
     claims.contradicted.length + claims.stale.length + claims.unknown.length +
     claims.supersededToolContracts.length + claims.authorityChainsBroken.length +
     claims.authorityChainsUnproven.length + claims.authorityChainsMissing.length + claims.effectClassesUnknown.length;
+  const unread = HOLDING_LISTS.reduce((sum, list) => sum + unreadableIn(claims, list), 0);
   return (
     <div className="space-y-4" data-screen="release-gate">
       <Section title="Release decision" icon={<Scale className="h-4 w-4 text-primary" />} testId="decision-section">
@@ -305,7 +337,7 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
       </Section>
 
       <Section title="What holds it where it is" testId="holds-section">
-        {named === 0 ? (
+        {named === 0 && unread === 0 ? (
           <Absent testId="nothing-named">The backend names no claim, chain, effect or contract here.</Absent>
         ) : (
           <div className="space-y-3">
@@ -323,7 +355,7 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
                 </li>
               ))}
             </Named>
-            <Named title="Bound to a tool contract that has since changed" count={claims.supersededToolContracts.length} testId="superseded-contracts">
+            <Named title="Bound to a tool contract that has since changed" count={claims.supersededToolContracts.length} testId="superseded-contracts" from={claims} lists={["supersededToolContracts"]}>
               {claims.supersededToolContracts.map((b, i) => (
                 <li key={`${b.toolKind}:${b.toolIdentifier}:${b.workflow ?? b.claimFingerprint ?? i}`} className="space-y-0.5 text-[12px]">
                   <div className="flex flex-wrap items-center gap-2">
@@ -345,6 +377,8 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
               title="Authority chains with a broken or unproven hop"
               count={claims.authorityChainsBroken.length + claims.authorityChainsUnproven.length}
               testId="chains-held"
+              from={claims}
+              lists={["authorityChainsBroken", "authorityChainsUnproven"]}
             >
               {[...claims.authorityChainsBroken, ...claims.authorityChainsUnproven].map((chain) => (
                 <li key={chain.uuid || chain.digest} className="space-y-0.5 text-[12px]" data-held-chain={chain.uuid}>
@@ -360,6 +394,7 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
                       <span className="font-mono text-[11px]">{hop.reasons.join(", ")}</span>
                     </p>
                   ))}
+                  <UnreadableRows from={chain} list="hops" />
                 </li>
               ))}
             </Named>
@@ -367,6 +402,8 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
               title="Effects with no chain in force, or of an unknown class"
               count={claims.authorityChainsMissing.length + claims.effectClassesUnknown.length}
               testId="effects-held"
+              from={claims}
+              lists={["authorityChainsMissing", "effectClassesUnknown"]}
             >
               {[...claims.authorityChainsMissing, ...claims.effectClassesUnknown].map((effect) => (
                 <li key={`${effect.status}:${effect.digest}`} className="space-y-0.5 text-[12px]">

@@ -207,6 +207,16 @@ written by older builds are verified once and transparently upgraded.
   file URL), is never a link; a file of the app's own is saved in the app with
   the session. The desktop app opens no window, hands no URL to the system
   browser, and grants no permission but the clipboard write its copy buttons use.
+- Text the scanned target wrote is drawn as text, never as markup: no screen
+  sets raw HTML, and a planted finding, evidence line, recovery record and scan
+  name stay inert on every screen that shows them
+  (`tests/a-hostile-finding-renders-inert-on-every-screen.test.tsx`). A character
+  that hides or reorders text (a right-to-left override, a zero-width space) is
+  drawn marked, in a box naming its code point (`U+202E`), so a name cannot read
+  reversed or hide a character. The app's JSX runtime does this wherever an
+  element draws text (`client/src/lib/hiddenChars.ts`, named in `vite.config.ts`),
+  and keeps the string as served for copy, search and export; an attribute such
+  as a tooltip keeps it verbatim.
 - `athena.db` and pasted developer logs are not tracked in git.
 - The **Failsafe console** (admin-only, `/failsafe`) can pause, stand down, or
   terminate an engine, but holds no signing key. It drafts a command and shows
@@ -895,6 +905,14 @@ coverage cap of none can mean no declared architecture to measure a gap against.
 positive result, and no input to the decision is. A verdict or state this console
 does not know is shown as served and read as none of its own.
 
+A row of a served list that this server cannot read (not a record: a null, a
+number, a string) is counted, never dropped: the screen says "N rows could not be
+read" beside the list, shows nothing of what the row held, and never reads a list
+whose rows could not be read as an empty one ("binds no tools", "no chain is
+recorded"). This holds for every list on these screens: the approved set and each
+approval's tools, the chains with their hops and readings, the effects, each list
+that holds the release decision, and each history page.
+
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release
 decision with a result for each gate is Minotaur-Backend's, which this console does
@@ -920,8 +938,10 @@ found".
 Tests: `tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts`,
 `tests/the-authority-screens-show-what-the-backend-serves.test.tsx`,
 `tests/the-authority-histories-show-what-the-backend-recorded.test.tsx`,
-`tests/the-recovery-records-are-read-as-the-person-and-never-written.test.ts` and
-`tests/a-recovery-record-shows-every-state-with-what-supports-it-and-never-a-clean-badge.test.tsx`.
+`tests/the-recovery-records-are-read-as-the-person-and-never-written.test.ts`,
+`tests/a-recovery-record-shows-every-state-with-what-supports-it-and-never-a-clean-badge.test.tsx`,
+`tests/a-row-the-backend-served-that-cannot-be-read-is-counted-never-dropped.test.ts` and
+`tests/a-row-that-cannot-be-read-is-said-on-every-authority-screen.test.tsx`.
 
 ## Retries and duplicates
 

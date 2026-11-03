@@ -78,6 +78,27 @@ export function Count({ value, testId }: { value: number | null; testId?: string
   );
 }
 
+/** How many rows of `list` the server could not read (server/assurance.ts rowsOf); 0 when it named none. */
+export function unreadableIn(from: { unreadable?: Record<string, number> } | null | undefined, list: string): number {
+  const count = from?.unreadable?.[list];
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/**
+ * Rows of a list the backend served that could not be read: counted beside the
+ * list, never dropped unsaid. What they held is not shown, since it could not be
+ * read. Nothing when every row was read.
+ */
+export function UnreadableRows({ from, list }: { from: { unreadable?: Record<string, number> } | null | undefined; list: string }) {
+  const count = unreadableIn(from, list);
+  if (count === 0) return null;
+  return (
+    <p className="text-[12px] text-amber-400" data-testid="unreadable-rows" data-list={list} data-count={count}>
+      {count === 1 ? "1 row" : `${count} rows`} could not be read
+    </p>
+  );
+}
+
 /** A labelled fact on one line. */
 export function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (

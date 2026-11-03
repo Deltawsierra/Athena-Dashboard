@@ -27,7 +27,7 @@ import { useState } from "react";
 import { FileCode2 } from "lucide-react";
 import { ContractStanding } from "./ApprovedWorkflows";
 import { HistoryPageFrame, HistoryPages, OnDemand, answeredFor, type PageSlot } from "./history";
-import { Absent, Chip, Digest, Fact, NotInHand, Section, ToolName, When, served, toolKindLabel, TOOL_KINDS } from "./parts";
+import { Absent, Chip, Digest, Fact, NotInHand, Section, ToolName, UnreadableRows, When, served, toolKindLabel, TOOL_KINDS, unreadableIn } from "./parts";
 import type {
   ApprovedTool,
   ApprovedWorkflows,
@@ -91,6 +91,12 @@ function bindingsByTool(workflows: ApprovedWorkflows | null): Map<string, Bindin
     }
   }
   return out;
+}
+
+/** Rows of the approvals (the approved set, or an approval's tools) the server could not read. */
+function approvalsUnread(workflows: ApprovedWorkflows | null): number {
+  if (workflows === null) return 0;
+  return unreadableIn(workflows, "approved") + workflows.approved.reduce((sum, workflow) => sum + unreadableIn(workflow, "tools"), 0);
 }
 
 function BindingList({ bindings }: { bindings: Binding[] }) {
@@ -351,8 +357,9 @@ function ContractRecordsPage({ deployment, tool, slot }: { deployment: string; t
       what="the contracts recorded for it"
       count={(page) => page.contractCount}
       rows={(page) => page.contracts.length}
+      list="contracts"
     >
-      {(page) => <ContractRecordList records={page.contracts} first={slot.offset === 0} />}
+      {(page) => <ContractRecordList records={page.contracts} first={slot.offset === 0 && unreadableIn(page, "contracts") === 0} />}
     </HistoryPageFrame>
   );
 }
@@ -373,8 +380,9 @@ function BindingRecordsPage({ deployment, tool, slot }: { deployment: string; to
       what="the bindings to its contracts"
       count={(page) => page.bindingCount}
       rows={(page) => page.bindings.length}
+      list="bindings"
     >
-      {(page) => <BindingRecordList bindings={page.bindings} first={slot.offset === 0} />}
+      {(page) => <BindingRecordList bindings={page.bindings} first={slot.offset === 0 && unreadableIn(page, "bindings") === 0} />}
     </HistoryPageFrame>
   );
 }
@@ -435,6 +443,9 @@ function DigestFromHistory({ deployment, tool }: { deployment: string; tool: Reg
     return <Absent testId="digest-in-force">not shown: answered for another deployment</Absent>;
   }
   const first = records.data.contracts[0];
+  if (!first && unreadableIn(records.data, "contracts") > 0) {
+    return <Absent testId="digest-in-force">not shown: the recorded contracts could not be read</Absent>;
+  }
   if (!first) return <Absent testId="digest-in-force">no contract of this registration is recorded</Absent>;
   return <Digest value={first.currentDigest} absent="none: the tool is no longer registered" testId="digest-in-force" />;
 }
@@ -444,11 +455,14 @@ function ToolCard({
   bindings,
   bindingsSource,
   deployment,
+  unread = 0,
 }: {
   asset: ToolAsset;
   bindings: Binding[];
   bindingsSource: { state: "loading" } | { state: "error"; message: string } | { state: "ready" };
   deployment?: string;
+  /** Rows of the approvals that could not be read: one of them may bind this tool. */
+  unread?: number;
 }) {
   const retired = Boolean(asset.metadata.retired);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -503,10 +517,13 @@ function ToolCard({
         )}
         {bindingsSource.state === "ready" &&
           (bindings.length === 0 ? (
-            <Absent testId="no-bindings">No approval binds this tool.</Absent>
+            <Absent testId="no-bindings">
+              {unread > 0 ? "No approval that could be read binds this tool." : "No approval binds this tool."}
+            </Absent>
           ) : (
             <BindingList bindings={bindings} />
           ))}
+        {bindingsSource.state === "ready" && <UnreadableRows from={{ unreadable: { approvals: unread } }} list="approvals" />}
       </div>
       {deployment && asset.identifier && (
         <OnDemand label="contract history" testId="tool-contract-history" open={historyOpen} onToggle={setHistoryOpen}>
@@ -557,6 +574,7 @@ export function ToolContractsView({
                 bindings={byTool.get(`${asset.kind}:${asset.identifier}`) ?? []}
                 bindingsSource={bindingsSource}
                 deployment={deployment}
+                unread={approvalsUnread(workflows)}
               />
             ))}
           </ul>

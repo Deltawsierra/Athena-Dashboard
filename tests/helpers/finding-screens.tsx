@@ -11,6 +11,10 @@
  * dashboard's own routes answer, from a seeded cache or from a stubbed fetch, and
  * every request a stubbed fetch sees is recorded in `requests`.
  *
+ * Beside the finding's own screens, the same planted strings reach the screens
+ * that show a recovery record (/authority/recovery) and a scan by its name (the
+ * Tests list's summary, the Engagements page's scans from the record).
+ *
  * The planted finding reaches each screen in the fields that screen shows:
  *
  *   - `text` -- free text the target shaped: a title, a message, a type, a
@@ -29,6 +33,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
+import { Router } from "wouter";
+import { memoryLocation } from "wouter/memory-location";
+
+import Authority from "@/pages/Authority";
+import Engagements from "@/pages/Engagements";
+import Tests from "@/pages/Tests";
 import Findings from "@/pages/Findings";
 import Risks from "@/pages/Risks";
 import Overview from "@/pages/Overview";
@@ -39,7 +49,8 @@ import { AuthorityChainsView } from "@/components/authority/AuthorityChains";
 import { ToolContractsView } from "@/components/authority/ToolContracts";
 import { ReleaseGateView } from "@/components/authority/ReleaseGate";
 import type { ApprovedWorkflows, AuthorityChains, DecisionSupport, ToolAsset, WorkflowComposition } from "@/components/authority/types";
-import { queryClient as appQueryClient } from "@/lib/queryClient";
+import { getQueryFn, queryClient as appQueryClient } from "@/lib/queryClient";
+import type { RecoveryRecords } from "@shared/recovery-record";
 import { summarizeFindings } from "../../server/findings-summary";
 
 export interface Planted {
@@ -356,4 +367,92 @@ export function renderAuthorityScreens(p: Planted) {
     render(<ToolContractsView assets={assets} workflows={approved} />),
     render(<ReleaseGateView data={decision} />),
   ];
+}
+
+/* ---- a recovery record (/authority/recovery): an incident, its steps, its coverage */
+
+export async function mountRecoveryRecords(p: Planted) {
+  const step = {
+    ref: "f-hostile-step-1", version: 1, state: p.text, reopens: null,
+    conditions: [{ condition: p.text, witness: { kind: p.text, ref: p.text } }],
+    gaps: [p.text], restrictions: [`${p.text}${p.long}`], release: "AUDIT_INCOMPLETE",
+    residualUncertainty: [{ statement: p.text, sources: [{ kind: p.text, ref: p.text }] }],
+    coverage: {
+      sources: [{ source: p.text, kind: p.text, start: NOW, end: NOW }],
+      declaredGaps: [{ kind: p.text, subject: p.text, detail: p.text, start: null, end: null }],
+      observedSources: 1, requiredSources: 2, complete: false, missing: { [p.text]: [{ start: NOW, end: NOW }] }, unknownInventory: [p.text],
+    },
+    acceptedBy: p.text, acceptedUntil: null, recordedBy: p.text, recordedAt: NOW,
+  };
+  const page: RecoveryRecords = {
+    deployment: "d1",
+    incidents: [{
+      finding: "f-hostile", title: `${p.text}${p.long}`, severity: "high",
+      current: { version: 1, state: p.text, release: "AUDIT_INCOMPLETE" }, steps: [step, { ...step, ref: "f-hostile-step-2", version: 2 }],
+    }],
+    incidentCount: 1, returned: 1, truncated: false, pageSize: 50, offset: 0,
+  };
+  vi.stubGlobal("fetch", recordingFetch((url) => {
+    if (url.endsWith("/api/assurance/status")) return { configured: true, reachable: true, authorized: true, url: null, detail: "" };
+    if (url.endsWith("/api/assurance/deployments")) return [{ uuid: "d1", name: "checkout", environment: "production", decision: null, decisionLabel: "" }];
+    if (url.includes("/api/assurance/deployments/d1/recovery-records")) return page;
+    return {};
+  }));
+  const location = memoryLocation({ path: "/authority/recovery?deployment=d1", record: true });
+  const client = new QueryClient({
+    defaultOptions: { ...appQueryClient.getDefaultOptions(), queries: { ...appQueryClient.getDefaultOptions().queries, retry: false, queryFn: getQueryFn({ on401: "throw" }) } },
+  });
+  const mounted = render(
+    <QueryClientProvider client={client}>
+      <Router hook={location.hook} searchHook={location.searchHook}>
+        <Authority params={{ screen: "recovery" }} />
+      </Router>
+    </QueryClientProvider>,
+  );
+  const card = await screen.findByTestId("incident", {}, { timeout: 10_000 });
+  // Every step, not only the current one.
+  const history = Array.from(card.querySelectorAll("button")).find((one) => /histor|step/i.test(one.textContent ?? ""));
+  if (history) await act(async () => { fireEvent.click(history); });
+  return mounted;
+}
+
+/* ---- a scan by its name: the Tests list, and the Engagements page's scans ------- */
+
+/**
+ * A scan adopted from the record is listed by a summary built from the target URL
+ * the record names (server/backend-adoption.ts), so a scan's name carries what the
+ * record was given.
+ */
+export function mountScanList(p: Planted) {
+  const test = {
+    id: "t1", clientId: "c1", siteId: null, testType: "penetration-test", status: "completed", severity: "high",
+    startedAt: NOW, completedAt: NOW, summary: `${p.text}${p.long}`, findings: null,
+    vulnerabilitiesFound: 1, criticalCount: 0, highCount: 1, mediumCount: 0, lowCount: 0, executedBy: null,
+  };
+  return mountSeeded(<Tests />, [
+    [["/api/tests"], [test]], [["/api/clients"], [CLIENT]], [["/api/sites"], []], [["/api/assurance/deployments"], []],
+    ...COMMON_SEED,
+  ]);
+}
+
+export function mountEngagements(p: Planted) {
+  const record = {
+    readAt: NOW,
+    engagements: [{
+      id: 7, name: p.text, clientName: p.text, scopeSummary: p.text, status: "running",
+      testingWindowStart: NOW, testingWindowEnd: NOW, scopeHosts: [p.text], client: null,
+    }],
+    scans: [{
+      uuid: "bs-1", targetUrl: p.url, status: "failed", verdict: null, verdictLabel: p.text, createdAt: NOW, collectedAt: NOW,
+      engineRunId: p.text, stop: { state: p.text, detail: p.text }, pdfUrl: null, errorMessage: `${p.text}${p.long}`,
+      engagement: { id: 7, name: p.text, clientName: p.text, status: p.text }, test: null,
+    }],
+    scansUnread: null,
+    deployments: [],
+    deploymentsUnread: null,
+  };
+  return mountSeeded(<Engagements />, [
+    [["/api/record/engagements"], record], [["/api/clients"], [CLIENT]], [["/api/tests"], []], [["/api/sites"], []],
+    ...COMMON_SEED,
+  ]);
 }
