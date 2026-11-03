@@ -110,6 +110,15 @@ files they used (Windows will not remove a file that is still open, so those tes
 their databases first; one that leaves a database open fails there), and the recovery
 screen's tests. The full suite and the packaged build run on Linux only.
 
+The render tests run in jsdom, whose selector engine is nwsapi. Version 2.2.27 answered
+a state pseudo-class such as `:modal` by calling `matches` on the element, which in jsdom
+is nwsapi again, so every such check recursed until the stack ran out. floating-ui asks
+it of every element it positions, so opening a Select held a test worker for 22 s on
+Linux and for over 60 s on the Windows runner, long enough for vitest to give up on the
+worker ("Timeout calling onTaskUpdate") with every test passed. The lock holds 2.2.28,
+which guards against the re-entry; `tests/a-state-pseudo-class-is-matched-without-re-entering-the-matcher.test.tsx`
+fails if it returns.
+
 ## Configuration
 
 | Variable                  | Default                        | Purpose |

@@ -70,6 +70,14 @@ jobs:
   # keeps its Blob URL until the save has read it), and the recovery screen's
   # relay and render tests. Not the whole suite and not the packaged build, which
   # stay on the Linux job above.
+  #
+  # A worker that holds its event loop for over 60 s misses vitest's reply to a
+  # task update it sent ("[vitest-worker]: Timeout calling onTaskUpdate"): the
+  # file's last results are never reported and the job fails with every test
+  # passed. jsdom's selector engine did that here (nwsapi 2.2.27 matched a state
+  # pseudo-class such as `:modal`, which floating-ui asks of every element it
+  # positions, by recursing until the stack ran out); the lock holds 2.2.28,
+  # and the state pseudo-class test below fails if the recursion comes back.
   windows:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -134,6 +142,7 @@ jobs:
           tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts
           tests/record-not-known-sends-the-stop-first-and-records-a-persons-act.test.ts
           tests/a-scan-not-known-to-the-engine-is-shown-and-counted-under-its-own-label.test.tsx
+          tests/a-state-pseudo-class-is-matched-without-re-entering-the-matcher.test.tsx
           tests/not-known-copy-lints-clean.test.ts
           tests/the-desktop-window-is-locked-and-opens-no-target-url.test.ts
           tests/a-target-url-is-text-with-a-copy-button-on-every-screen.test.tsx
