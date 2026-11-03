@@ -924,6 +924,22 @@ something that is not a list at all (a string, a number, a record) reads "The
 list could not be read", never "none"; a list not served at all (absent, or
 null) reads as it always did.
 
+The same holds on every assurance panel that draws a list the backend serves:
+capabilities, the route map, the AI-BOM, the data boundary, compliance, business
+impact, vendors, the assurance packs, effective access, the ripple effect, each
+posture domain, personal data, the data lifecycle, training reuse, logging, BOM
+drift and the declared architecture, the coverage manifest, the revalidation plan,
+operational risk, connectors, a finding's remediation history and its incident
+pack. Each read counts a row it cannot read under the list's name (a list inside
+a row as `outer.inner`), and the panel says "N rows could not be read: <list>"
+under its heading. In server code, no list the backend served is iterated except
+through `rowsOf` (`server/assurance.ts`); a test reads the server with the
+TypeScript compiler and keeps a short, reasoned list of the exceptions
+(`tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts`).
+The bare lists (deployments, findings, unknowns, assets, providers, claims and
+retest requirements) are answered as arrays, which have nowhere to carry a count
+yet; they are on that list until they do.
+
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release
 decision with a result for each gate is Minotaur-Backend's, which this console does

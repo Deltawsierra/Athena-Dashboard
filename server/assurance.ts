@@ -271,6 +271,8 @@ export interface AssuranceCapabilityMap {
   capabilities: Capability[];
   categories: CapabilityCategory[];
   summary: { total: number; highRisk: number; elevated: number; baseline: number; declared: number; shadow: number };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // System / Route Map (Phase 1.6): the layered data-flow graph, app → gateway →
@@ -358,6 +360,8 @@ export interface AssuranceRouteMap {
     layersPresent: string[];
     logsObserved: boolean;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // AI-BOM (Phase 1.7): the AI supply-chain bill of materials — an exportable
@@ -414,6 +418,8 @@ export interface AssuranceAiBom {
   };
   receipt: { algorithm: string; digest: string };
   generatedAt: string | null;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface AssuranceDeployment {
@@ -525,6 +531,8 @@ export interface AssuranceRemediation {
   stateLabel: string;
   assignee: string | null;
   events: RemediationEvent[];
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 /** One user a remediation assignment may target (Phase 2.3 assignable-users
@@ -539,6 +547,8 @@ export interface AssuranceAssignableUser {
 export interface AssuranceAssignable {
   assignable: AssuranceAssignableUser[];
   current: string | null;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 export interface AssuranceStatus {
@@ -597,6 +607,8 @@ export interface AssuranceDataBoundary {
   flows: DataBoundaryFlow[];
   shadowDestinations: DataBoundaryShadow[];
   summary: { approved: number; violations: number; unknowns: number; shadowDestinations: number };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /** The approved boundary a human declares (the PUT body). */
 export interface DataBoundaryInput {
@@ -661,6 +673,8 @@ export interface AssuranceCompliance {
     controlsWithActiveFindings: number;
     worstSeverity: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Business-impact Map (Phase 2.4) ====
@@ -706,6 +720,8 @@ export interface AssuranceBusinessImpact {
     worstSeverity: string | null;
     worstExposureBand: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Third-Party Vendor Assurance (commercial spine) ====
@@ -797,6 +813,8 @@ export interface AssuranceVendorAssurance {
     /** Most concerning band across vendors, or null when no vendors. */
     worstPostureBand: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Executive Summary (commercial spine) ====
@@ -966,6 +984,8 @@ export interface AssurancePack {
 export interface AssurancePacksCatalog {
   packs: AssurancePack[];
   summary: { packs: number };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /**
  * A regulatory regime carried as CONTEXT, never computed coverage. The note is
@@ -992,6 +1012,8 @@ export interface AssurancePackApplied {
     resolvedFindings: number;
     unmappedFindingTypes: number;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Identity Assurance & Effective Access (Phase 3.1) ====
@@ -1089,6 +1111,8 @@ export interface AssuranceEffectiveAccess {
     /** Most concerning risk across principals, or null when there are none. */
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Ripple Effect / blast radius (Phase 2.5) ====
@@ -1153,6 +1177,8 @@ export interface AssuranceRippleEffect {
     byCategory: Record<string, number>;
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Credential-gated posture (Phase 3.2 / 3.3 / 3.4) ====
@@ -1172,6 +1198,8 @@ export interface PostureDomainRef {
 }
 export interface AssurancePostureCatalog {
   domains: PostureDomainRef[];
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /** One curated check as it appears in the catalog (no result — safe to show even
  *  when the domain is inert). */
@@ -1217,6 +1245,8 @@ export interface AssurancePostureDomain {
     /** The weakest evidence behind any finding — present only when connected. */
     weakestEvidence: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Personal Context Exposure (Phase 3.5) ====
@@ -1279,6 +1309,8 @@ export interface AssurancePersonalContext {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Data Lifecycle Review (Phase 3.5) ====
@@ -1326,6 +1358,8 @@ export interface AssuranceDataLifecycle {
     controlGaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Training / Reuse Review (Phase 3.5) ====
@@ -1388,6 +1422,8 @@ export interface AssuranceTrainingReuse {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Metadata & Logging Risk (Phase 3.5) ====
@@ -1443,6 +1479,8 @@ export interface AssuranceMetadataLogging {
     gaps: number;
     worstRisk: string | null;
   };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 // ==== Mappers ====
@@ -1592,32 +1630,27 @@ function capabilitySource(raw: Record<string, unknown>): CapabilitySource {
 }
 
 function capabilityMap(raw: Record<string, unknown>): AssuranceCapabilityMap {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    capabilities: Array.isArray(raw.capabilities)
-      ? (raw.capabilities as Record<string, unknown>[]).map((c) => ({
-          key: str(c.key),
-          label: str(c.label),
-          category: str(c.category),
-          description: str(c.description),
-          risk: str(c.risk),
-          declared: bool(c.declared),
-          shadow: bool(c.shadow),
-          sources: Array.isArray(c.sources)
-            ? (c.sources as Record<string, unknown>[]).map(capabilitySource)
-            : [],
-        }))
-      : [],
-    categories: Array.isArray(raw.categories)
-      ? (raw.categories as Record<string, unknown>[]).map((c) => ({
-          category: str(c.category),
-          count: num(c.count, 0),
-          maxRisk: str(c.max_risk),
-        }))
-      : [],
+    capabilities: rowsOf(raw.capabilities, unreadable, "capabilities").map((c) => ({
+      key: str(c.key),
+      label: str(c.label),
+      category: str(c.category),
+      description: str(c.description),
+      risk: str(c.risk),
+      declared: bool(c.declared),
+      shadow: bool(c.shadow),
+      sources: rowsOf(c.sources, unreadable, "capabilities.sources").map(capabilitySource),
+    })),
+    categories: rowsOf(raw.categories, unreadable, "categories").map((c) => ({
+      category: str(c.category),
+      count: num(c.count, 0),
+      maxRisk: str(c.max_risk),
+    })),
     summary: {
       total: num(rawSummary.total, 0),
       highRisk: num(rawSummary.high_risk, 0),
@@ -1626,6 +1659,7 @@ function capabilityMap(raw: Record<string, unknown>): AssuranceCapabilityMap {
       declared: num(rawSummary.declared, 0),
       shadow: num(rawSummary.shadow, 0),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -1644,29 +1678,26 @@ function routeNode(raw: Record<string, unknown>): RouteNode {
 }
 
 function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    layers: Array.isArray(raw.layers)
-      ? (raw.layers as Record<string, unknown>[]).map((l) => ({
-          key: str(l.key),
-          label: str(l.label),
-          nodes: Array.isArray(l.nodes) ? (l.nodes as Record<string, unknown>[]).map(routeNode) : [],
-        }))
-      : [],
-    nodes: Array.isArray(raw.nodes) ? (raw.nodes as Record<string, unknown>[]).map(routeNode) : [],
-    edges: Array.isArray(raw.edges)
-      ? (raw.edges as Record<string, unknown>[]).map((e) => ({
-          source: str(e.source),
-          target: str(e.target),
-          kind: str(e.kind),
-          label: str(e.label),
-          declared: bool(e.declared),
-        }))
-      : [],
-    unresolved: unresolvedReferences(raw.unresolved),
+    layers: rowsOf(raw.layers, unreadable, "layers").map((l) => ({
+      key: str(l.key),
+      label: str(l.label),
+      nodes: rowsOf(l.nodes, unreadable, "layers.nodes").map(routeNode),
+    })),
+    nodes: rowsOf(raw.nodes, unreadable, "nodes").map(routeNode),
+    edges: rowsOf(raw.edges, unreadable, "edges").map((e) => ({
+      source: str(e.source),
+      target: str(e.target),
+      kind: str(e.kind),
+      label: str(e.label),
+      declared: bool(e.declared),
+    })),
+    unresolved: unresolvedReferences(raw.unresolved, unreadable),
     summary: {
       nodeCount: num(rawSummary.node_count, 0),
       edgeCount: num(rawSummary.edge_count, 0),
@@ -1680,6 +1711,7 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
       layersPresent: strList(rawSummary.layers_present),
       logsObserved: bool(rawSummary.logs_observed),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -1693,7 +1725,7 @@ function mapRouteMap(raw: Record<string, unknown>): AssuranceRouteMap {
  * from whatever wrote the metadata, and counting it would inflate the gap list
  * with nothing anybody can act on.
  */
-function unresolvedReferences(raw: unknown): UnresolvedReference[] | null {
+function unresolvedReferences(raw: unknown, unreadable: UnreadableRows): UnresolvedReference[] | null {
   // NULL, not []. A backend with no channel for this question and a backend
   // reporting a graph that resolved cleanly are different answers, and an empty
   // array says the second. This console ships independently of the control
@@ -1702,7 +1734,7 @@ function unresolvedReferences(raw: unknown): UnresolvedReference[] | null {
   // reference stops being invisible, which it would not if a control plane
   // that cannot answer produced a response identical to a clean one.
   if (!Array.isArray(raw)) return null;
-  return (raw as Record<string, unknown>[])
+  return rowsOf(raw, unreadable, "unresolved")
     .map((u) => {
       const reason = strOrNull(typeof u.reason === "string" ? u.reason.trim() : null);
       return {
@@ -1769,30 +1801,29 @@ function bomComponent(raw: Record<string, unknown>): BomComponent {
   };
 }
 
-function bomProvider(raw: Record<string, unknown>): BomProvider {
+function bomProvider(raw: Record<string, unknown>, unreadable: UnreadableRows): BomProvider {
   return {
     uuid: str(raw.uuid),
     name: str(raw.name),
     kind: str(raw.kind),
     kindLabel: str(raw.kind_label),
     region: str(raw.region),
-    declaredFacts: Array.isArray(raw.declared_facts)
-      ? (raw.declared_facts as Record<string, unknown>[]).map((f) => ({
-          field: str(f.field),
-          fieldLabel: str(f.field_label),
-          value: str(f.value),
-          evidenceClass: str(f.evidence_class),
-          evidenceClassLabel: str(f.evidence_class_label),
-          source: str(f.source),
-          sourceLabel: str(f.source_label),
-        }))
-      : [],
+    declaredFacts: rowsOf(raw.declared_facts, unreadable, "providers.declaredFacts").map((f) => ({
+      field: str(f.field),
+      fieldLabel: str(f.field_label),
+      value: str(f.value),
+      evidenceClass: str(f.evidence_class),
+      evidenceClassLabel: str(f.evidence_class_label),
+      source: str(f.source),
+      sourceLabel: str(f.source_label),
+    })),
     declaredFieldCount: num(raw.declared_field_count, 0),
     weakestEvidence: strOrNull(raw.weakest_evidence),
   };
 }
 
 function mapAiBom(raw: Record<string, unknown>): AssuranceAiBom {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
@@ -1809,12 +1840,8 @@ function mapAiBom(raw: Record<string, unknown>): AssuranceAiBom {
     format: str(raw.format),
     version: str(raw.version),
     deployment: { uuid: str(rawDeployment.uuid), name: str(rawDeployment.name) },
-    components: Array.isArray(raw.components)
-      ? (raw.components as Record<string, unknown>[]).map(bomComponent)
-      : [],
-    providers: Array.isArray(raw.providers)
-      ? (raw.providers as Record<string, unknown>[]).map(bomProvider)
-      : [],
+    components: rowsOf(raw.components, unreadable, "components").map(bomComponent),
+    providers: rowsOf(raw.providers, unreadable, "providers").map((one) => bomProvider(one, unreadable)),
     summary: {
       componentCount: num(rawSummary.component_count, 0),
       providerCount: num(rawSummary.provider_count, 0),
@@ -1826,6 +1853,7 @@ function mapAiBom(raw: Record<string, unknown>): AssuranceAiBom {
     },
     receipt: { algorithm: str(rawReceipt.algorithm), digest: str(rawReceipt.digest) },
     generatedAt: strOrNull(raw.generated_at),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -1866,6 +1894,7 @@ function dataBoundaryFlow(raw: Record<string, unknown>): DataBoundaryFlow {
 }
 
 function dataBoundaryAssessment(raw: Record<string, unknown>): AssuranceDataBoundary {
+  const unreadable: UnreadableRows = {};
   const rawPolicy =
     raw.policy && typeof raw.policy === "object" && !Array.isArray(raw.policy)
       ? (raw.policy as Record<string, unknown>)
@@ -1885,21 +1914,20 @@ function dataBoundaryAssessment(raw: Record<string, unknown>): AssuranceDataBoun
           updatedAt: strOrNull(rawPolicy.updated_at),
         }
       : null,
-    flows: Array.isArray(raw.flows) ? (raw.flows as Record<string, unknown>[]).map(dataBoundaryFlow) : [],
-    shadowDestinations: Array.isArray(raw.shadow_destinations)
-      ? (raw.shadow_destinations as Record<string, unknown>[]).map((s) => ({
-          assetName: str(s.asset_name),
-          kind: str(s.kind),
-          kindLabel: str(s.kind_label),
-          identifier: str(s.identifier),
-        }))
-      : [],
+    flows: rowsOf(raw.flows, unreadable, "flows").map(dataBoundaryFlow),
+    shadowDestinations: rowsOf(raw.shadow_destinations, unreadable, "shadowDestinations").map((s) => ({
+      assetName: str(s.asset_name),
+      kind: str(s.kind),
+      kindLabel: str(s.kind_label),
+      identifier: str(s.identifier),
+    })),
     summary: {
       approved: num(rawSummary.approved, 0),
       violations: num(rawSummary.violations, 0),
       unknowns: num(rawSummary.unknowns, 0),
       shadowDestinations: num(rawSummary.shadow_destinations, 0),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -1918,47 +1946,40 @@ function complianceControl(raw: Record<string, unknown>): ComplianceControl {
 }
 
 function mapCompliance(raw: Record<string, unknown>): AssuranceCompliance {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    frameworks: Array.isArray(raw.frameworks)
-      ? (raw.frameworks as Record<string, unknown>[]).map((f) => {
-          const fSummary =
-            f.summary && typeof f.summary === "object" && !Array.isArray(f.summary)
-              ? (f.summary as Record<string, unknown>)
-              : {};
-          return {
-            key: str(f.key),
-            name: str(f.name),
-            controls: Array.isArray(f.controls)
-              ? (f.controls as Record<string, unknown>[]).map(complianceControl)
-              : [],
-            summary: {
-              controlsTouched: num(fSummary.controls_touched, 0),
-              controlsWithActiveFindings: num(fSummary.controls_with_active_findings, 0),
-              worstSeverity: strOrNull(fSummary.worst_severity),
-            },
-          };
-        })
-      : [],
-    unmapped: Array.isArray(raw.unmapped)
-      ? (raw.unmapped as Record<string, unknown>[]).map((u) => ({
-          findingType: str(u.finding_type),
-          activeFindingCount: num(u.active_finding_count, 0),
-          resolvedFindingCount: num(u.resolved_finding_count, 0),
-          worstSeverity: strOrNull(u.worst_severity),
-        }))
-      : [],
-    engineReferences: Array.isArray(raw.engine_references)
-      ? (raw.engine_references as Record<string, unknown>[]).map((e) => ({
-          taxonomy: str(e.taxonomy),
-          id: str(e.id),
-          findingCount: num(e.finding_count, 0),
-          findingTypes: strList(e.finding_types),
-        }))
-      : [],
+    frameworks: rowsOf(raw.frameworks, unreadable, "frameworks").map((f) => {
+      const fSummary =
+        f.summary && typeof f.summary === "object" && !Array.isArray(f.summary)
+          ? (f.summary as Record<string, unknown>)
+          : {};
+      return {
+        key: str(f.key),
+        name: str(f.name),
+        controls: rowsOf(f.controls, unreadable, "frameworks.controls").map(complianceControl),
+        summary: {
+          controlsTouched: num(fSummary.controls_touched, 0),
+          controlsWithActiveFindings: num(fSummary.controls_with_active_findings, 0),
+          worstSeverity: strOrNull(fSummary.worst_severity),
+        },
+      };
+    }),
+    unmapped: rowsOf(raw.unmapped, unreadable, "unmapped").map((u) => ({
+      findingType: str(u.finding_type),
+      activeFindingCount: num(u.active_finding_count, 0),
+      resolvedFindingCount: num(u.resolved_finding_count, 0),
+      worstSeverity: strOrNull(u.worst_severity),
+    })),
+    engineReferences: rowsOf(raw.engine_references, unreadable, "engineReferences").map((e) => ({
+      taxonomy: str(e.taxonomy),
+      id: str(e.id),
+      findingCount: num(e.finding_count, 0),
+      findingTypes: strList(e.finding_types),
+    })),
     summary: {
       totalFindings: num(rawSummary.total_findings, 0),
       activeFindings: num(rawSummary.active_findings, 0),
@@ -1970,6 +1991,7 @@ function mapCompliance(raw: Record<string, unknown>): AssuranceCompliance {
       controlsWithActiveFindings: num(rawSummary.controls_with_active_findings, 0),
       worstSeverity: strOrNull(rawSummary.worst_severity),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -1987,22 +2009,19 @@ function businessImpactDimension(raw: Record<string, unknown>): BusinessImpactDi
 }
 
 function mapBusinessImpact(raw: Record<string, unknown>): AssuranceBusinessImpact {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    dimensions: Array.isArray(raw.dimensions)
-      ? (raw.dimensions as Record<string, unknown>[]).map(businessImpactDimension)
-      : [],
-    unmapped: Array.isArray(raw.unmapped)
-      ? (raw.unmapped as Record<string, unknown>[]).map((u) => ({
-          findingType: str(u.finding_type),
-          activeFindingCount: num(u.active_finding_count, 0),
-          resolvedFindingCount: num(u.resolved_finding_count, 0),
-          worstSeverity: strOrNull(u.worst_severity),
-        }))
-      : [],
+    dimensions: rowsOf(raw.dimensions, unreadable, "dimensions").map(businessImpactDimension),
+    unmapped: rowsOf(raw.unmapped, unreadable, "unmapped").map((u) => ({
+      findingType: str(u.finding_type),
+      activeFindingCount: num(u.active_finding_count, 0),
+      resolvedFindingCount: num(u.resolved_finding_count, 0),
+      worstSeverity: strOrNull(u.worst_severity),
+    })),
     summary: {
       totalFindings: num(rawSummary.total_findings, 0),
       activeFindings: num(rawSummary.active_findings, 0),
@@ -2015,6 +2034,7 @@ function mapBusinessImpact(raw: Record<string, unknown>): AssuranceBusinessImpac
       worstSeverity: strOrNull(rawSummary.worst_severity),
       worstExposureBand: strOrNull(rawSummary.worst_exposure_band),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2048,7 +2068,7 @@ function vendorDependentAsset(raw: Record<string, unknown>): VendorDependentAsse
   };
 }
 
-function vendor(raw: Record<string, unknown>): Vendor {
+function vendor(raw: Record<string, unknown>, unreadable: UnreadableRows): Vendor {
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
@@ -2059,12 +2079,8 @@ function vendor(raw: Record<string, unknown>): Vendor {
     kind: str(raw.kind),
     kindLabel: str(raw.kind_label),
     region: str(raw.region),
-    assertions: Array.isArray(raw.assertions)
-      ? (raw.assertions as Record<string, unknown>[]).map(vendorAssertion)
-      : [],
-    dependentAssets: Array.isArray(raw.dependent_assets)
-      ? (raw.dependent_assets as Record<string, unknown>[]).map(vendorDependentAsset)
-      : [],
+    assertions: rowsOf(raw.assertions, unreadable, "vendors.assertions").map(vendorAssertion),
+    dependentAssets: rowsOf(raw.dependent_assets, unreadable, "vendors.dependentAssets").map(vendorDependentAsset),
     gaps: strList(raw.gaps),
     // The band string is kept verbatim; a null weakest-evidence carries as null.
     weakestEvidence: strOrNull(raw.weakest_evidence),
@@ -2081,24 +2097,21 @@ function vendor(raw: Record<string, unknown>): Vendor {
 }
 
 function mapVendorAssurance(raw: Record<string, unknown>): AssuranceVendorAssurance {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    vendors: Array.isArray(raw.vendors)
-      ? (raw.vendors as Record<string, unknown>[]).map(vendor)
-      : [],
-    ungovernedDependencies: Array.isArray(raw.ungoverned_dependencies)
-      ? (raw.ungoverned_dependencies as Record<string, unknown>[]).map((u) => ({
-          assetName: str(u.asset_name),
-          kind: str(u.kind),
-          kindLabel: str(u.kind_label),
-          classification: str(u.classification),
-          classificationLabel: str(u.classification_label),
-          reason: str(u.reason),
-        }))
-      : [],
+    vendors: rowsOf(raw.vendors, unreadable, "vendors").map((one) => vendor(one, unreadable)),
+    ungovernedDependencies: rowsOf(raw.ungoverned_dependencies, unreadable, "ungovernedDependencies").map((u) => ({
+      assetName: str(u.asset_name),
+      kind: str(u.kind),
+      kindLabel: str(u.kind_label),
+      classification: str(u.classification),
+      classificationLabel: str(u.classification_label),
+      reason: str(u.reason),
+    })),
     summary: {
       vendors: num(rawSummary.vendors, 0),
       assertionsTotal: num(rawSummary.assertions_total, 0),
@@ -2111,6 +2124,7 @@ function mapVendorAssurance(raw: Record<string, unknown>): AssuranceVendorAssura
       // The worst band is null when there are no vendors — carried, not coerced.
       worstPostureBand: strOrNull(rawSummary.worst_posture_band),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2302,15 +2316,15 @@ function packView(raw: Record<string, unknown>): AssurancePack {
 }
 
 function mapAssurancePacks(raw: Record<string, unknown>): AssurancePacksCatalog {
+  const unreadable: UnreadableRows = {};
   const rawSummary =
     raw.summary && typeof raw.summary === "object" && !Array.isArray(raw.summary)
       ? (raw.summary as Record<string, unknown>)
       : {};
   return {
-    packs: Array.isArray(raw.packs)
-      ? (raw.packs as Record<string, unknown>[]).map(packView)
-      : [],
+    packs: rowsOf(raw.packs, unreadable, "packs").map(packView),
     summary: { packs: num(rawSummary.packs, 0) },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2318,7 +2332,7 @@ function mapAssurancePacks(raw: Record<string, unknown>): AssurancePacksCatalog 
  *  The same shape mapCompliance builds inline; reused for the pack view, whose
  *  frameworks are the compliance map's own slices, filtered to the pack. A
  *  touched control is carried through unchanged — an open gap, never "passed". */
-function complianceFrameworkSlice(f: Record<string, unknown>): ComplianceFramework {
+function complianceFrameworkSlice(f: Record<string, unknown>, unreadable: UnreadableRows): ComplianceFramework {
   const fSummary =
     f.summary && typeof f.summary === "object" && !Array.isArray(f.summary)
       ? (f.summary as Record<string, unknown>)
@@ -2326,9 +2340,7 @@ function complianceFrameworkSlice(f: Record<string, unknown>): ComplianceFramewo
   return {
     key: str(f.key),
     name: str(f.name),
-    controls: Array.isArray(f.controls)
-      ? (f.controls as Record<string, unknown>[]).map(complianceControl)
-      : [],
+    controls: rowsOf(f.controls, unreadable, "frameworks.controls").map(complianceControl),
     summary: {
       controlsTouched: num(fSummary.controls_touched, 0),
       controlsWithActiveFindings: num(fSummary.controls_with_active_findings, 0),
@@ -2338,6 +2350,7 @@ function complianceFrameworkSlice(f: Record<string, unknown>): ComplianceFramewo
 }
 
 function mapAssurancePack(raw: Record<string, unknown>): AssurancePackApplied {
+  const unreadable: UnreadableRows = {};
   const rawPack =
     raw.pack && typeof raw.pack === "object" && !Array.isArray(raw.pack)
       ? (raw.pack as Record<string, unknown>)
@@ -2348,17 +2361,13 @@ function mapAssurancePack(raw: Record<string, unknown>): AssurancePackApplied {
       : {};
   return {
     pack: packView(rawPack),
-    frameworks: Array.isArray(raw.frameworks)
-      ? (raw.frameworks as Record<string, unknown>[]).map(complianceFrameworkSlice)
-      : [],
+    frameworks: rowsOf(raw.frameworks, unreadable, "frameworks").map((one) => complianceFrameworkSlice(one, unreadable)),
     // Each regime carries its "not computed coverage" note VERBATIM, so a
     // consumer never renders it as scored/passing coverage.
-    regulatoryRegimes: Array.isArray(raw.regulatory_regimes)
-      ? (raw.regulatory_regimes as Record<string, unknown>[]).map((r) => ({
-          name: str(r.name),
-          note: str(r.note),
-        }))
-      : [],
+    regulatoryRegimes: rowsOf(raw.regulatory_regimes, unreadable, "regulatoryRegimes").map((r) => ({
+      name: str(r.name),
+      note: str(r.note),
+    })),
     summary: {
       frameworksEmphasized: num(rawSummary.frameworks_emphasized, 0),
       controlsTouched: num(rawSummary.controls_touched, 0),
@@ -2369,6 +2378,7 @@ function mapAssurancePack(raw: Record<string, unknown>): AssurancePackApplied {
       resolvedFindings: num(rawSummary.resolved_findings, 0),
       unmappedFindingTypes: num(rawSummary.unmapped_finding_types, 0),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2471,6 +2481,7 @@ function remediationEvent(raw: Record<string, unknown>): RemediationEvent {
 }
 
 function mapRemediation(raw: Record<string, unknown>): AssuranceRemediation {
+  const unreadable: UnreadableRows = {};
   // The Django remediation endpoints name the workflow field `remediation_state`
   // /`remediation_state_label` (see assurance/views.py `remediation`,
   // `remediation_transition`, `remediation_assign` — a finding has both a
@@ -2480,33 +2491,29 @@ function mapRemediation(raw: Record<string, unknown>): AssuranceRemediation {
   // single object) and omit the fields they did not touch — transition returns no
   // `assignee`, assign returns no state. This maps whichever fields are present,
   // so each response is surfaced honestly rather than crashing or fabricating.
-  const events = Array.isArray(raw.events)
-    ? (raw.events as Record<string, unknown>[])
-    : raw.event && typeof raw.event === "object" && !Array.isArray(raw.event)
-      ? [raw.event as Record<string, unknown>]
-      : [];
+  const events = raw.events ?? (raw.event && typeof raw.event === "object" && !Array.isArray(raw.event) ? [raw.event] : undefined);
   return {
     state: str(raw.remediation_state),
     stateLabel: str(raw.remediation_state_label),
     assignee: raw.assignee == null ? null : String(raw.assignee),
-    events: events.map(remediationEvent),
+    events: rowsOf(events, unreadable, "events").map(remediationEvent),
+    ...withUnreadable(unreadable),
   };
 }
 
 function mapAssignable(raw: Record<string, unknown>): AssuranceAssignable {
+  const unreadable: UnreadableRows = {};
   // The backend `assignable` action (assurance/views.py) returns
   // `{assignable: [{username, display}], current: <username|null>}`. Map each
   // row defensively so a malformed entry surfaces as empty strings rather than
   // crashing the picker.
-  const rows = Array.isArray(raw.assignable)
-    ? (raw.assignable as Record<string, unknown>[])
-    : [];
   return {
-    assignable: rows.map((row) => ({
+    assignable: rowsOf(raw.assignable, unreadable, "assignable").map((row) => ({
       username: str(row.username),
       display: str(row.display),
     })),
     current: strOrNull(raw.current),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2773,18 +2780,16 @@ function gapExtras(raw: Record<string, unknown>): {
   return out;
 }
 
-function accessCapability(raw: Record<string, unknown>): AccessCapability {
+function accessCapability(raw: Record<string, unknown>, unreadable: UnreadableRows): AccessCapability {
   return {
     key: str(raw.key),
     label: str(raw.label),
     category: str(raw.category),
     risk: str(raw.risk),
-    sources: Array.isArray(raw.sources)
-      ? (raw.sources as Record<string, unknown>[]).map((s) => ({
-          assetName: str(s.asset_name),
-          permission: str(s.permission),
-        }))
-      : [],
+    sources: rowsOf(raw.sources, unreadable, "principals.capabilities.sources").map((s) => ({
+      assetName: str(s.asset_name),
+      permission: str(s.permission),
+    })),
   };
 }
 
@@ -2802,7 +2807,7 @@ function accessReach(raw: Record<string, unknown>): AccessReach {
   };
 }
 
-function accessPrincipal(raw: Record<string, unknown>): AccessPrincipal {
+function accessPrincipal(raw: Record<string, unknown>, unreadable: UnreadableRows): AccessPrincipal {
   return {
     key: str(raw.key),
     name: str(raw.name),
@@ -2814,20 +2819,14 @@ function accessPrincipal(raw: Record<string, unknown>): AccessPrincipal {
     managed: bool(raw.managed),
     shadow: bool(raw.shadow),
     privilegeLevel: str(raw.privilege_level),
-    capabilities: Array.isArray(raw.capabilities)
-      ? (raw.capabilities as Record<string, unknown>[]).map(accessCapability)
-      : [],
-    effectiveReach: Array.isArray(raw.effective_reach)
-      ? (raw.effective_reach as Record<string, unknown>[]).map(accessReach)
-      : [],
-    gaps: Array.isArray(raw.gaps)
-      ? (raw.gaps as Record<string, unknown>[]).map((g) => ({
-          type: str(g.type),
-          risk: str(g.risk),
-          detail: str(g.detail),
-          ...gapExtras(g),
-        }))
-      : [],
+    capabilities: rowsOf(raw.capabilities, unreadable, "principals.capabilities").map((one) => accessCapability(one, unreadable)),
+    effectiveReach: rowsOf(raw.effective_reach, unreadable, "principals.effectiveReach").map(accessReach),
+    gaps: rowsOf(raw.gaps, unreadable, "principals.gaps").map((g) => ({
+      type: str(g.type),
+      risk: str(g.risk),
+      detail: str(g.detail),
+      ...gapExtras(g),
+    })),
     risk: str(raw.risk),
     privileged: bool(raw.privileged),
     overBroad: bool(raw.over_broad),
@@ -2836,12 +2835,11 @@ function accessPrincipal(raw: Record<string, unknown>): AccessPrincipal {
 }
 
 function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAccess {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    principals: Array.isArray(raw.principals)
-      ? (raw.principals as Record<string, unknown>[]).map(accessPrincipal)
-      : [],
-    unresolved: unresolvedReferences(raw.unresolved),
+    principals: rowsOf(raw.principals, unreadable, "principals").map((one) => accessPrincipal(one, unreadable)),
+    unresolved: unresolvedReferences(raw.unresolved, unreadable),
     summary: {
       principals: num(summary.principals, 0),
       privileged: num(summary.privileged, 0),
@@ -2852,24 +2850,23 @@ function mapEffectiveAccess(raw: Record<string, unknown>): AssuranceEffectiveAcc
       unresolvedReferences: numOrNull(summary.unresolved_references),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
-function rippleOrigin(raw: Record<string, unknown>): RippleOrigin {
+function rippleOrigin(raw: Record<string, unknown>, unreadable: UnreadableRows, findings: string): RippleOrigin {
   const out: RippleOrigin = {
     key: str(raw.key),
     origin: str(raw.origin),
     originTypes: strList(raw.origin_types),
     reasons: strList(raw.reasons),
     risk: str(raw.risk),
-    findings: Array.isArray(raw.findings)
-      ? (raw.findings as Record<string, unknown>[]).map((f) => ({
-          uuid: str(f.uuid),
-          findingType: str(f.finding_type),
-          severity: str(f.severity),
-          title: str(f.title),
-        }))
-      : [],
+    findings: rowsOf(raw.findings, unreadable, findings).map((f) => ({
+      uuid: str(f.uuid),
+      findingType: str(f.finding_type),
+      severity: str(f.severity),
+      title: str(f.title),
+    })),
     evidencedReach: bool(raw.evidenced_reach),
     consequenceCount: num(raw.consequence_count, 0),
     // The honest "no evidenced downstream reach" note, when present.
@@ -2899,14 +2896,11 @@ function rippleConsequence(raw: Record<string, unknown>): RippleConsequence {
 }
 
 function mapRippleEffect(raw: Record<string, unknown>): AssuranceRippleEffect {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    origins: Array.isArray(raw.origins)
-      ? (raw.origins as Record<string, unknown>[]).map(rippleOrigin)
-      : [],
-    consequences: Array.isArray(raw.consequences)
-      ? (raw.consequences as Record<string, unknown>[]).map(rippleConsequence)
-      : [],
+    origins: rowsOf(raw.origins, unreadable, "origins").map((one) => rippleOrigin(one, unreadable, "origins.findings")),
+    consequences: rowsOf(raw.consequences, unreadable, "consequences").map(rippleConsequence),
     summary: {
       origins: num(summary.origins, 0),
       originsWithReach: num(summary.origins_with_reach, 0),
@@ -2919,18 +2913,19 @@ function mapRippleEffect(raw: Record<string, unknown>): AssuranceRippleEffect {
       byCategory: numRecord(summary.by_category),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
 function mapPostureCatalog(raw: Record<string, unknown>): AssurancePostureCatalog {
+  const unreadable: UnreadableRows = {};
   return {
-    domains: Array.isArray(raw.domains)
-      ? (raw.domains as Record<string, unknown>[]).map((d) => ({
-          name: str(d.name),
-          label: str(d.label),
-          configured: bool(d.configured),
-        }))
-      : [],
+    domains: rowsOf(raw.domains, unreadable, "domains").map((d) => ({
+      name: str(d.name),
+      label: str(d.label),
+      configured: bool(d.configured),
+    })),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -2967,18 +2962,15 @@ function postureFinding(raw: Record<string, unknown>): PostureFinding {
  * connected.
  */
 function mapPostureDomain(raw: Record<string, unknown>): AssurancePostureDomain {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
     domain: str(raw.domain),
     domainLabel: str(raw.domain_label),
     connected: bool(raw.connected),
     detail: strOrNull(raw.detail),
-    checks: Array.isArray(raw.checks)
-      ? (raw.checks as Record<string, unknown>[]).map(postureCheckCatalog)
-      : [],
-    findings: Array.isArray(raw.findings)
-      ? (raw.findings as Record<string, unknown>[]).map(postureFinding)
-      : [],
+    checks: rowsOf(raw.checks, unreadable, "checks").map(postureCheckCatalog),
+    findings: rowsOf(raw.findings, unreadable, "findings").map(postureFinding),
     summary: {
       connected: bool(summary.connected),
       planned: num(summary.planned, 0),
@@ -2990,6 +2982,7 @@ function mapPostureDomain(raw: Record<string, unknown>): AssurancePostureDomain 
       maxRisk: str(summary.max_risk),
       weakestEvidence: strOrNull(summary.weakest_evidence),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -3014,7 +3007,7 @@ function personalGap(raw: Record<string, unknown>): PersonalGap {
   return out;
 }
 
-function personalStore(raw: Record<string, unknown>): PersonalStore {
+function personalStore(raw: Record<string, unknown>, unreadable: UnreadableRows): PersonalStore {
   return {
     assetName: str(raw.asset_name),
     kind: str(raw.kind),
@@ -3030,22 +3023,19 @@ function personalStore(raw: Record<string, unknown>): PersonalStore {
     signals: strList(raw.signals),
     evidenceClass: str(raw.evidence_class),
     evidenceClassLabel: str(raw.evidence_class_label),
-    reachableBy: Array.isArray(raw.reachable_by)
-      ? (raw.reachable_by as Record<string, unknown>[]).map(personalReader)
-      : [],
+    reachableBy: rowsOf(raw.reachable_by, unreadable, "stores.reachableBy").map(personalReader),
     readerCount: num(raw.reader_count, 0),
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(personalGap) : [],
+    gaps: rowsOf(raw.gaps, unreadable, "stores.gaps").map(personalGap),
     risk: str(raw.risk),
   };
 }
 
 function mapPersonalContext(raw: Record<string, unknown>): AssurancePersonalContext {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    stores: Array.isArray(raw.stores)
-      ? (raw.stores as Record<string, unknown>[]).map(personalStore)
-      : [],
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(personalGap) : [],
+    stores: rowsOf(raw.stores, unreadable, "stores").map((one) => personalStore(one, unreadable)),
+    gaps: rowsOf(raw.gaps, unreadable, "gaps").map(personalGap),
     summary: {
       dataBearingComponents: num(summary.data_bearing_components, 0),
       personalDataComponents: num(summary.personal_data_components, 0),
@@ -3056,6 +3046,7 @@ function mapPersonalContext(raw: Record<string, unknown>): AssurancePersonalCont
       gaps: num(summary.gaps, 0),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -3069,15 +3060,13 @@ function lifecycleComponent(raw: Record<string, unknown>): LifecycleComponent {
   };
 }
 
-function lifecycleStage(raw: Record<string, unknown>): LifecycleStage {
+function lifecycleStage(raw: Record<string, unknown>, unreadable: UnreadableRows): LifecycleStage {
   return {
     stage: str(raw.stage),
     stageLabel: str(raw.stage_label),
     controlStage: bool(raw.control_stage),
     evidenced: bool(raw.evidenced),
-    components: Array.isArray(raw.components)
-      ? (raw.components as Record<string, unknown>[]).map(lifecycleComponent)
-      : [],
+    components: rowsOf(raw.components, unreadable, "stages.components").map(lifecycleComponent),
     // Null when the stage is unevidenced — a chain is as strong as its weakest link.
     weakestEvidence: strOrNull(raw.weakest_evidence),
     weakestEvidenceLabel: strOrNull(raw.weakest_evidence_label),
@@ -3091,19 +3080,16 @@ function lifecycleStage(raw: Record<string, unknown>): LifecycleStage {
 }
 
 function mapDataLifecycle(raw: Record<string, unknown>): AssuranceDataLifecycle {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    stages: Array.isArray(raw.stages)
-      ? (raw.stages as Record<string, unknown>[]).map(lifecycleStage)
-      : [],
-    gaps: Array.isArray(raw.gaps)
-      ? (raw.gaps as Record<string, unknown>[]).map((g) => ({
-          stage: str(g.stage),
-          stageLabel: str(g.stage_label),
-          risk: str(g.risk),
-          detail: str(g.detail),
-        }))
-      : [],
+    stages: rowsOf(raw.stages, unreadable, "stages").map((one) => lifecycleStage(one, unreadable)),
+    gaps: rowsOf(raw.gaps, unreadable, "gaps").map((g) => ({
+      stage: str(g.stage),
+      stageLabel: str(g.stage_label),
+      risk: str(g.risk),
+      detail: str(g.detail),
+    })),
     summary: {
       // Both nullable. `num(..., 0)` rendered "0/0 stages evidenced", which
       // reads as a measurement -- we looked at every stage and none was
@@ -3116,6 +3102,7 @@ function mapDataLifecycle(raw: Record<string, unknown>): AssuranceDataLifecycle 
       controlGaps: num(summary.control_gaps, 0),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -3146,39 +3133,34 @@ function trainingGap(raw: Record<string, unknown>): TrainingGap {
   return out;
 }
 
-function trainingProvider(raw: Record<string, unknown>): TrainingProvider {
+function trainingProvider(raw: Record<string, unknown>, unreadable: UnreadableRows): TrainingProvider {
   return {
     providerUuid: str(raw.provider_uuid),
     providerName: str(raw.provider_name),
     kind: str(raw.kind),
     kindLabel: str(raw.kind_label),
-    dependentAssets: Array.isArray(raw.dependent_assets)
-      ? (raw.dependent_assets as Record<string, unknown>[]).map((a) => ({
-          assetName: str(a.asset_name),
-          kind: str(a.kind),
-          kindLabel: str(a.kind_label),
-          classification: str(a.classification),
-          classificationLabel: str(a.classification_label),
-          managed: bool(a.managed),
-        }))
-      : [],
-    postures: Array.isArray(raw.postures)
-      ? (raw.postures as Record<string, unknown>[]).map(reusePosture)
-      : [],
+    dependentAssets: rowsOf(raw.dependent_assets, unreadable, "providers.dependentAssets").map((a) => ({
+      assetName: str(a.asset_name),
+      kind: str(a.kind),
+      kindLabel: str(a.kind_label),
+      classification: str(a.classification),
+      classificationLabel: str(a.classification_label),
+      managed: bool(a.managed),
+    })),
+    postures: rowsOf(raw.postures, unreadable, "providers.postures").map(reusePosture),
     reusePossible: bool(raw.reuse_possible),
     reuseDeclared: bool(raw.reuse_declared),
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(trainingGap) : [],
+    gaps: rowsOf(raw.gaps, unreadable, "providers.gaps").map(trainingGap),
     risk: str(raw.risk),
   };
 }
 
 function mapTrainingReuse(raw: Record<string, unknown>): AssuranceTrainingReuse {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    providers: Array.isArray(raw.providers)
-      ? (raw.providers as Record<string, unknown>[]).map(trainingProvider)
-      : [],
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(trainingGap) : [],
+    providers: rowsOf(raw.providers, unreadable, "providers").map((one) => trainingProvider(one, unreadable)),
+    gaps: rowsOf(raw.gaps, unreadable, "gaps").map(trainingGap),
     summary: {
       providers: num(summary.providers, 0),
       reuseDeclared: num(summary.reuse_declared, 0),
@@ -3187,6 +3169,7 @@ function mapTrainingReuse(raw: Record<string, unknown>): AssuranceTrainingReuse 
       gaps: num(summary.gaps, 0),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -3196,7 +3179,7 @@ function metadataGap(raw: Record<string, unknown>): MetadataGap {
   return out;
 }
 
-function logSink(raw: Record<string, unknown>): LogSink {
+function logSink(raw: Record<string, unknown>, unreadable: UnreadableRows): LogSink {
   return {
     assetName: str(raw.asset_name),
     kind: str(raw.kind),
@@ -3209,32 +3192,29 @@ function logSink(raw: Record<string, unknown>): LogSink {
     basis: str(raw.basis),
     evidenceClass: str(raw.evidence_class),
     evidenceClassLabel: str(raw.evidence_class_label),
-    sensitiveCategories: Array.isArray(raw.sensitive_categories)
-      ? (raw.sensitive_categories as Record<string, unknown>[]).map((c) => ({
-          category: str(c.category),
-          label: str(c.label),
-          basis: str(c.basis),
-        }))
-      : [],
+    sensitiveCategories: rowsOf(raw.sensitive_categories, unreadable, "sinks.sensitiveCategories").map((c) => ({
+      category: str(c.category),
+      label: str(c.label),
+      basis: str(c.basis),
+    })),
     controlEvidenced: bool(raw.control_evidenced),
     controlDetail: strOrNull(raw.control_detail),
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(metadataGap) : [],
+    gaps: rowsOf(raw.gaps, unreadable, "sinks.gaps").map(metadataGap),
     risk: str(raw.risk),
   };
 }
 
 function mapMetadataLogging(raw: Record<string, unknown>): AssuranceMetadataLogging {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
-    sinks: Array.isArray(raw.sinks) ? (raw.sinks as Record<string, unknown>[]).map(logSink) : [],
-    sensitiveCategoriesHandled: Array.isArray(raw.sensitive_categories_handled)
-      ? (raw.sensitive_categories_handled as Record<string, unknown>[]).map((c) => ({
-          category: str(c.category),
-          basis: str(c.basis),
-          label: str(c.label),
-        }))
-      : [],
-    gaps: Array.isArray(raw.gaps) ? (raw.gaps as Record<string, unknown>[]).map(metadataGap) : [],
+    sinks: rowsOf(raw.sinks, unreadable, "sinks").map((one) => logSink(one, unreadable)),
+    sensitiveCategoriesHandled: rowsOf(raw.sensitive_categories_handled, unreadable, "sensitiveCategoriesHandled").map((c) => ({
+      category: str(c.category),
+      basis: str(c.basis),
+      label: str(c.label),
+    })),
+    gaps: rowsOf(raw.gaps, unreadable, "gaps").map(metadataGap),
     summary: {
       sinks: num(summary.sinks, 0),
       shadowSinks: num(summary.shadow_sinks, 0),
@@ -3243,6 +3223,7 @@ function mapMetadataLogging(raw: Record<string, unknown>): AssuranceMetadataLogg
       gaps: num(summary.gaps, 0),
       worstRisk: strOrNull(summary.worst_risk),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -4337,6 +4318,8 @@ export interface BomDrift {
   undeclaredProviders: string[];
   missing: BomDriftMissing[];
   note: string;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /** The counts a record-bom-drift write returns (SPINE Stage 3). */
 export interface BomDriftRecordCounts {
@@ -4348,6 +4331,7 @@ export interface BomDriftRecordCounts {
 }
 
 function mapBomDrift(raw: Record<string, unknown>): BomDrift {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
     deploymentUuid: str(raw.deployment_uuid),
@@ -4361,29 +4345,26 @@ function mapBomDrift(raw: Record<string, unknown>): BomDrift {
       undeclaredProviders: num(summary.undeclared_providers, 0),
       missing: num(summary.missing, 0),
     },
-    undeclared: Array.isArray(raw.undeclared)
-      ? (raw.undeclared as Record<string, unknown>[]).map((c) => ({
-          assetUuid: str(c.asset_uuid),
-          kind: str(c.kind),
-          kindLabel: str(c.kind_label),
-          name: str(c.name),
-          identifier: str(c.identifier),
-          providerName: strOrNull(c.provider_name),
-          severity: str(c.severity),
-        }))
-      : [],
+    undeclared: rowsOf(raw.undeclared, unreadable, "undeclared").map((c) => ({
+      assetUuid: str(c.asset_uuid),
+      kind: str(c.kind),
+      kindLabel: str(c.kind_label),
+      name: str(c.name),
+      identifier: str(c.identifier),
+      providerName: strOrNull(c.provider_name),
+      severity: str(c.severity),
+    })),
     undeclaredProviders: strList(raw.undeclared_providers),
-    missing: Array.isArray(raw.missing)
-      ? (raw.missing as Record<string, unknown>[]).map((c) => ({
-          declaredUuid: str(c.declared_uuid),
-          kind: str(c.kind),
-          kindLabel: str(c.kind_label),
-          name: str(c.name),
-          identifier: str(c.identifier),
-          providerName: strOrNull(c.provider_name),
-        }))
-      : [],
+    missing: rowsOf(raw.missing, unreadable, "missing").map((c) => ({
+      declaredUuid: str(c.declared_uuid),
+      kind: str(c.kind),
+      kindLabel: str(c.kind_label),
+      name: str(c.name),
+      identifier: str(c.identifier),
+      providerName: strOrNull(c.provider_name),
+    })),
     note: str(raw.note),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -4401,6 +4382,8 @@ export interface DeclaredComponent {
 export interface DeclaredArchitecture {
   declared: DeclaredComponent[];
   drift: BomDrift;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /** One component in the PUT body that replaces the declared set. */
 export interface DeclaredComponentInput {
@@ -4424,11 +4407,11 @@ function declaredComponent(raw: Record<string, unknown>): DeclaredComponent {
 }
 
 function mapDeclaredArchitecture(raw: Record<string, unknown>): DeclaredArchitecture {
+  const unreadable: UnreadableRows = {};
   return {
-    declared: Array.isArray(raw.declared)
-      ? (raw.declared as Record<string, unknown>[]).map(declaredComponent)
-      : [],
+    declared: rowsOf(raw.declared, unreadable, "declared").map(declaredComponent),
     drift: mapBomDrift(objOf(raw.drift)),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -4515,6 +4498,8 @@ export interface CoverageManifest {
   highRiskUnassessed: CoverageEntity[];
   unassessed: CoverageEntity[];
   summary: string;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function coverageCheck(raw: Record<string, unknown>): CoverageCheck {
@@ -4529,10 +4514,8 @@ function coverageCheck(raw: Record<string, unknown>): CoverageCheck {
   };
 }
 
-function checkList(raw: unknown): CoverageCheck[] {
-  return Array.isArray(raw)
-    ? (raw as Record<string, unknown>[]).map((r) => coverageCheck(objOf(r)))
-    : [];
+function checkList(raw: unknown, unreadable: UnreadableRows, list: string): CoverageCheck[] {
+  return rowsOf(raw, unreadable, list).map((r) => coverageCheck(r));
 }
 
 function coverageEntity(raw: Record<string, unknown>): CoverageEntity {
@@ -4549,13 +4532,11 @@ function coverageEntity(raw: Record<string, unknown>): CoverageEntity {
   };
 }
 
-function entityList(raw: unknown): CoverageEntity[] {
-  return Array.isArray(raw)
-    ? (raw as Record<string, unknown>[]).map((r) => coverageEntity(objOf(r)))
-    : [];
+function entityList(raw: unknown, unreadable: UnreadableRows, list: string): CoverageEntity[] {
+  return rowsOf(raw, unreadable, list).map((r) => coverageEntity(r));
 }
 
-function mapCoverageChecks(raw: Record<string, unknown>): CoverageChecks {
+function mapCoverageChecks(raw: Record<string, unknown>, unreadable: UnreadableRows): CoverageChecks {
   const reported = bool(raw.reported);
   return {
     reported,
@@ -4565,9 +4546,9 @@ function mapCoverageChecks(raw: Record<string, unknown>): CoverageChecks {
     complete: reported ? (typeof raw.complete === "boolean" ? raw.complete : null) : null,
     total: reported ? numOrNull(raw.total) : null,
     performed: reported ? numOrNull(raw.performed) : null,
-    notPerformed: checkList(raw.not_performed),
-    degraded: checkList(raw.degraded),
-    unmeasured: checkList(raw.unmeasured),
+    notPerformed: checkList(raw.not_performed, unreadable, "checks.notPerformed"),
+    degraded: checkList(raw.degraded, unreadable, "checks.degraded"),
+    unmeasured: checkList(raw.unmeasured, unreadable, "checks.unmeasured"),
     limitations: strListRecord(raw.limitations),
     notes: strList(raw.notes),
     reportedAt: strOrNull(raw.reported_at),
@@ -4576,6 +4557,7 @@ function mapCoverageChecks(raw: Record<string, unknown>): CoverageChecks {
 }
 
 function mapCoverageManifest(raw: Record<string, unknown>): CoverageManifest {
+  const unreadable: UnreadableRows = {};
   return {
     expected: num(raw.expected, 0),
     observed: num(raw.observed, 0),
@@ -4584,12 +4566,13 @@ function mapCoverageManifest(raw: Record<string, unknown>): CoverageManifest {
     complete: bool(raw.complete),
     criticalGap: bool(raw.critical_gap),
     hasDeclaredBaseline: bool(raw.has_declared_baseline),
-    checks: mapCoverageChecks(objOf(raw.checks)),
-    neverObserved: entityList(raw.never_observed),
-    declaredButUnassessed: entityList(raw.declared_but_unassessed),
-    highRiskUnassessed: entityList(raw.high_risk_unassessed),
-    unassessed: entityList(raw.unassessed),
+    checks: mapCoverageChecks(objOf(raw.checks), unreadable),
+    neverObserved: entityList(raw.never_observed, unreadable, "neverObserved"),
+    declaredButUnassessed: entityList(raw.declared_but_unassessed, unreadable, "declaredButUnassessed"),
+    highRiskUnassessed: entityList(raw.high_risk_unassessed, unreadable, "highRiskUnassessed"),
+    unassessed: entityList(raw.unassessed, unreadable, "unassessed"),
     summary: str(raw.summary),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -4856,9 +4839,12 @@ export interface RevalidationPlan {
   outstandingUnknowns: RevalidationUnknown[];
   stillCurrent: RevalidationCurrent[];
   note: string;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function mapRevalidationPlan(raw: Record<string, unknown>): RevalidationPlan {
+  const unreadable: UnreadableRows = {};
   const summary = objOf(raw.summary);
   return {
     deploymentUuid: str(raw.deployment_uuid),
@@ -4869,34 +4855,29 @@ function mapRevalidationPlan(raw: Record<string, unknown>): RevalidationPlan {
       outstandingUnknowns: num(summary.outstanding_unknowns, 0),
     },
     recomputeAction: str(raw.recompute_action),
-    required: Array.isArray(raw.required)
-      ? (raw.required as Record<string, unknown>[]).map((w) => ({
-          claimUuid: str(w.claim_uuid),
-          claimType: str(w.claim_type),
-          statement: str(w.statement),
-          status: str(w.status),
-          reason: str(w.reason),
-          retestRequirementUuid: strOrNull(w.retest_requirement_uuid),
-          athenaReassessments: strList(w.athena_reassessments),
-          achillesCapabilities: strList(w.achilles_capabilities),
-        }))
-      : [],
-    outstandingUnknowns: Array.isArray(raw.outstanding_unknowns)
-      ? (raw.outstanding_unknowns as Record<string, unknown>[]).map((w) => ({
-          claimUuid: str(w.claim_uuid),
-          claimType: str(w.claim_type),
-          statement: str(w.statement),
-          status: str(w.status),
-        }))
-      : [],
-    stillCurrent: Array.isArray(raw.still_current)
-      ? (raw.still_current as Record<string, unknown>[]).map((w) => ({
-          claimUuid: str(w.claim_uuid),
-          claimType: str(w.claim_type),
-          status: str(w.status),
-        }))
-      : [],
+    required: rowsOf(raw.required, unreadable, "required").map((w) => ({
+      claimUuid: str(w.claim_uuid),
+      claimType: str(w.claim_type),
+      statement: str(w.statement),
+      status: str(w.status),
+      reason: str(w.reason),
+      retestRequirementUuid: strOrNull(w.retest_requirement_uuid),
+      athenaReassessments: strList(w.athena_reassessments),
+      achillesCapabilities: strList(w.achilles_capabilities),
+    })),
+    outstandingUnknowns: rowsOf(raw.outstanding_unknowns, unreadable, "outstandingUnknowns").map((w) => ({
+      claimUuid: str(w.claim_uuid),
+      claimType: str(w.claim_type),
+      statement: str(w.statement),
+      status: str(w.status),
+    })),
+    stillCurrent: rowsOf(raw.still_current, unreadable, "stillCurrent").map((w) => ({
+      claimUuid: str(w.claim_uuid),
+      claimType: str(w.claim_type),
+      status: str(w.status),
+    })),
     note: str(raw.note),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5072,6 +5053,8 @@ export interface OperationalRisk {
     unmapped: string[];
   };
   overall: { status: string; risk: string | null; unmappedClasses: number; note: string };
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function operationalRiskSignal(raw: Record<string, unknown>): OperationalRiskSignal {
@@ -5093,7 +5076,7 @@ function operationalRiskSignal(raw: Record<string, unknown>): OperationalRiskSig
   return out;
 }
 
-function operationalRiskClass(raw: Record<string, unknown>): OperationalRiskClass {
+function operationalRiskClass(raw: Record<string, unknown>, unreadable: UnreadableRows): OperationalRiskClass {
   return {
     key: str(raw.key),
     label: str(raw.label),
@@ -5105,15 +5088,14 @@ function operationalRiskClass(raw: Record<string, unknown>): OperationalRiskClas
     risk: strOrNull(raw.risk),
     basis: strList(raw.basis),
     activeFindingCount: num(raw.active_finding_count, 0),
-    signals: Array.isArray(raw.signals)
-      ? (raw.signals as Record<string, unknown>[]).map(operationalRiskSignal)
-      : [],
+    signals: rowsOf(raw.signals, unreadable, "classes.signals").map(operationalRiskSignal),
     runtimeSignal: str(raw.runtime_signal),
     notes: strList(raw.notes),
   };
 }
 
 function mapOperationalRisk(raw: Record<string, unknown>): OperationalRisk {
+  const unreadable: UnreadableRows = {};
   const system = objOf(raw.system);
   const summary = objOf(raw.summary);
   const overall = objOf(raw.overall);
@@ -5124,9 +5106,7 @@ function mapOperationalRisk(raw: Record<string, unknown>): OperationalRisk {
       environment: str(system.environment),
       environmentLabel: str(system.environment_label),
     },
-    classes: Array.isArray(raw.classes)
-      ? (raw.classes as Record<string, unknown>[]).map(operationalRiskClass)
-      : [],
+    classes: rowsOf(raw.classes, unreadable, "classes").map((one) => operationalRiskClass(one, unreadable)),
     summary: {
       totalClasses: num(summary.total_classes, 0),
       observedClasses: num(summary.observed_classes, 0),
@@ -5143,6 +5123,7 @@ function mapOperationalRisk(raw: Record<string, unknown>): OperationalRisk {
       unmappedClasses: num(overall.unmapped_classes, 0),
       note: str(overall.note),
     },
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5245,6 +5226,8 @@ export interface IncidentPack {
   signed: boolean | null;
   // The backend's own reason this copy is unsigned, verbatim; null when none.
   unsignedReason: string | null;
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 
 function incidentPackAsset(raw: unknown): IncidentPackAsset | null {
@@ -5277,6 +5260,7 @@ function evidenceRows(raw: unknown): string[][] {
 }
 
 function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
+  const unreadable: UnreadableRows = {};
   const identity = objOf(raw.identity);
   const dep = objOf(identity.deployment);
   const find = objOf(identity.finding);
@@ -5343,12 +5327,8 @@ function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
     },
     ripple: {
       isTracedOrigin: bool(ripple.is_traced_origin),
-      origins: Array.isArray(ripple.origins)
-        ? (ripple.origins as Record<string, unknown>[]).map(rippleOrigin)
-        : [],
-      consequences: Array.isArray(ripple.consequences)
-        ? (ripple.consequences as Record<string, unknown>[]).map(rippleConsequence)
-        : [],
+      origins: rowsOf(ripple.origins, unreadable, "ripple.origins").map((one) => rippleOrigin(one, unreadable, "ripple.origins.findings")),
+      consequences: rowsOf(ripple.consequences, unreadable, "ripple.consequences").map(rippleConsequence),
       deploymentSummary: {
         origins: num(rippleSummary.origins, 0),
         originsWithReach: num(rippleSummary.origins_with_reach, 0),
@@ -5369,6 +5349,7 @@ function mapIncidentPack(raw: Record<string, unknown>): IncidentPack {
     computedAt: strOrNull(raw.computed_at),
     signed: typeof raw.signed === "boolean" ? raw.signed : null,
     unsignedReason: strOrNull(raw.unsigned_reason),
+    ...withUnreadable(unreadable),
   };
 }
 
@@ -5397,6 +5378,8 @@ export interface ConnectorRef {
 }
 export interface ConnectorsView {
   connectors: ConnectorRef[];
+  /** Rows of its lists that could not be read, by list (rowsOf; a nested list as `outer.inner`); absent when every row was read. */
+  unreadable?: UnreadableRows;
 }
 /** What an outbound push did, reported honestly. `ok` is whether the external
  *  system accepted it; an unconfigured connector is inert (`ok:false`). */
@@ -5408,13 +5391,13 @@ export interface ConnectorPushResult {
 }
 
 function mapConnectors(raw: Record<string, unknown>): ConnectorsView {
+  const unreadable: UnreadableRows = {};
   return {
-    connectors: Array.isArray(raw.connectors)
-      ? (raw.connectors as Record<string, unknown>[]).map((c) => ({
-          name: str(c.name),
-          configured: bool(c.configured),
-        }))
-      : [],
+    connectors: rowsOf(raw.connectors, unreadable, "connectors").map((c) => ({
+      name: str(c.name),
+      configured: bool(c.configured),
+    })),
+    ...withUnreadable(unreadable),
   };
 }
 

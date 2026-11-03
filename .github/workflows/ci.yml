@@ -152,4 +152,7 @@ jobs:
           tests/the-authority-histories-show-what-the-backend-recorded.test.tsx
           tests/no-read-fails-whole-on-one-bad-row-and-no-list-that-is-not-one-reads-as-none.test.ts
           tests/a-bad-row-or-a-list-that-is-not-one-is-said-never-read-as-none.test.tsx
+          tests/no-assurance-read-fails-whole-on-one-bad-row-of-any-list.test.ts
+          tests/a-bad-row-of-any-assurance-list-is-said-on-its-panel.test.tsx
+          tests/no-backend-list-is-iterated-in-server-code-except-through-rowsof.test.ts
           tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx
