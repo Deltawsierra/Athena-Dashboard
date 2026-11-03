@@ -216,7 +216,13 @@ written by older builds are verified once and transparently upgraded.
   reversed or hide a character. The app's JSX runtime does this wherever an
   element draws text (`client/src/lib/hiddenChars.ts`, named in `vite.config.ts`),
   and keeps the string as served for copy, search and export; in a tooltip, a
-  label, an alt text or a placeholder it is written out as `[U+202E]`.
+  label, an alt text or a placeholder it is written out as `[U+202E]`. Text
+  handed to a library component is guarded the same way where it is handed over:
+  each wrapper in `client/src/components/ui` registers its Radix package with
+  `drawsTargetText` (a select's items and value, a dialog's title, a toast, a
+  tooltip, a menu), and every chart passes its axis, tooltip and legend text
+  through `client/src/lib/chartText.ts`
+  (`tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx`).
 - `athena.db` and pasted developer logs are not tracked in git.
 - The **Failsafe console** (admin-only, `/failsafe`) can pause, stand down, or
   terminate an engine, but holds no signing key. It drafts a command and shows
@@ -911,7 +917,12 @@ read" beside the list, shows nothing of what the row held, and never reads a lis
 whose rows could not be read as an empty one ("binds no tools", "no chain is
 recorded"). This holds for every list on these screens: the approved set and each
 approval's tools, the chains with their hops and readings, the effects, each list
-that holds the release decision, and each history page.
+that holds the release decision (the contradicted, stale, unknown and supporting
+claims among them, on the assurance page's decision-support panel too), and each
+history page. One such row never fails the whole read. A list served as
+something that is not a list at all (a string, a number, a record) reads "The
+list could not be read", never "none"; a list not served at all (absent, or
+null) reads as it always did.
 
 Who declared each approval version is shown where Athena-Backend serves it
 (`declared_by`) and reads "not recorded" where it does not. A per-build release

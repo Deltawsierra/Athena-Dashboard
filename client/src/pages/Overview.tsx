@@ -65,6 +65,7 @@ import {
   CartesianGrid,
   Tooltip,
 } from "recharts";
+import { AXIS_TEXT, TOOLTIP_TEXT } from "@/lib/chartText";
 import type { ReactNode } from "react";
 import GlassCard from "@/components/GlassCard";
 import SampleDataNotice from "@/components/SampleDataNotice";
@@ -720,8 +721,8 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={model.trend.rows} margin={{ top: 6, right: 24, bottom: 0, left: -18 }}>
                     <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" vertical={false} />
-                    <XAxis dataKey="m" tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }} axisLine={false} tickLine={false} />
-                    <YAxis allowDecimals={false} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <XAxis dataKey="m" tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }} axisLine={false} tickLine={false} {...AXIS_TEXT} />
+                    <YAxis allowDecimals={false} tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 11 }} axisLine={false} tickLine={false} {...AXIS_TEXT} />
                     <Tooltip
                       contentStyle={{
                         background: "hsl(var(--surface-2))",
@@ -730,6 +731,7 @@ export function OverviewView({ model, sample }: { model: OverviewModel; sample: 
                         fontSize: 12,
                       }}
                       labelStyle={{ color: "hsl(var(--foreground))" }}
+                      {...TOOLTIP_TEXT}
                     />
                     {TREND_SERIES.map((s) => (
                       <Line

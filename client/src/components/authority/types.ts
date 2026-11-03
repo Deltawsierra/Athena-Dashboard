@@ -8,9 +8,14 @@
 /**
  * How many rows of each list the backend served this console's server could not
  * read (a row that is not a record), by the list's name: "tools", "hops", ... Shown
- * as "N rows could not be read" beside the list (parts.tsx UnreadableRows).
+ * as "N rows could not be read" beside the list (parts.tsx UnreadableRows). A list
+ * served as something that is not a list at all holds NOT_A_LIST instead: how
+ * many rows it held is not known, and it is shown as "The list could not be read".
  */
-export type UnreadableRows = Record<string, number>;
+export type UnreadableRows = Record<string, number | typeof NOT_A_LIST>;
+
+/** `unreadable[list]` for a list served as something that is not a list (server/assurance.ts rowsOf). */
+export const NOT_A_LIST = "not a list";
 
 export interface WorkflowComposition {
   signal: string | null;
