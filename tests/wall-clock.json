@@ -4,6 +4,7 @@
   "tests/an-api-key-stop-waits-on-no-write-and-no-start-passes-a-pressed-kill-switch.test.ts",
   "tests/a-write-flood-under-a-held-lock-delays-no-stop-and-writes-nothing-twice.test.ts",
   "tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts",
+  "tests/a-stop-goes-while-the-backend-health-read-hangs.test.ts",
   "tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts",
   "tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts",
   "tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts",
