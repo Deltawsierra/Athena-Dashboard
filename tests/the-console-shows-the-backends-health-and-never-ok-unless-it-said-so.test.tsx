@@ -31,6 +31,7 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 
 import { makeApp, signIn } from "./helpers";
 import { healthStandIn, json, type HealthStandIn } from "./helpers/health-stand-in";
+import { newServiceToken } from "./helpers/control-plane-stand-in";
 import { interpretHealth, type BackendHealthView } from "@shared/backend-health";
 import { SERVICE_TOKEN_HEADER } from "../server/failsafe-service-token";
 import AppShell from "@/components/AppShell";
@@ -176,7 +177,8 @@ beforeAll(async () => {
   process.env.ATHENA_FAILSAFE_URL = stand.url;
   delete process.env.ATHENA_FAILSAFE_USER;
   delete process.env.ATHENA_FAILSAFE_PASSWORD;
-  process.env.ATHENA_FAILSAFE_SERVICE_TOKEN = "a-service-token-that-must-never-ride-on-a-health-read"; // pragma: allowlist secret
+  // A service token built at run time: it must never ride on a health read.
+  process.env.ATHENA_FAILSAFE_SERVICE_TOKEN = newServiceToken();
   app = await makeApp();
   agent = await signIn(app);
   health = await import("../server/backend-health");

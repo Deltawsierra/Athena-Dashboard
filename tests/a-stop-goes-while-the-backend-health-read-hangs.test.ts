@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "child_process";
 import http from "http";
 import type { AddressInfo } from "net";
 import path from "path";
-import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { makeApp, TEST_ADMIN_PASSWORD } from "./helpers";
 import { healthStandIn, type HealthStandIn } from "./helpers/health-stand-in";
 
 /**
@@ -101,20 +101,14 @@ const saved = Object.fromEntries(ENV.map((key) => [key, process.env[key]]));
 beforeAll(async () => {
   engine = await spawnEngine();
   stand = await healthStandIn({ kind: "hang" });
-  process.env.ATHENA_STORAGE = "memory";
-  process.env.SESSION_SECRET = "test-secret-that-is-at-least-32-characters";
-  process.env.NODE_ENV = "test";
   process.env.ATHENA_ENGINE_URL = `http://127.0.0.1:${engine.port}`;
   process.env.ATHENA_ENGINE_KEY = "ce_op_test";
   process.env.ATHENA_FAILSAFE_URL = stand.url;
-  const { createApp } = await import("../server/app");
-  const { initializeDefaultData } = await import("../server/init-data");
-  const app = createApp();
+  // The shared boot: in-memory storage, the test session secret, the admin's test password.
+  const app = await makeApp();
   health = await import("../server/backend-health");
   // The backend's health read is held for the whole case: given up on long after the stop.
   health.backendHealthTiming.deadlineMs = 60_000;
-  await initializeDefaultData();
-  await adminHasSetPassword();
   server = http.createServer(app);
   await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
   appPort = (server.address() as AddressInfo).port;
