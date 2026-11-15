@@ -5,7 +5,7 @@ import ts from "typescript";
 
 /**
  * No list the backend served is iterated in server code except through rowsOf
- * (server/assurance.ts; DASH-ROWS).
+ * (shared/unreadable-rows.ts; DASH-ROWS, DASH-FAILSAFE-ROWS).
  *
  * A list read from Athena-Backend is `unknown` until something checks it, and
  * `(raw.x as Record<string, unknown>[]).map(...)` checks nothing: one null row
@@ -30,13 +30,11 @@ import ts from "typescript";
 
 const ROOT = path.resolve(__dirname, "..");
 
-const STOP_LANE = "on the stop lane. command() and auditEvent() throw on a null row, so one fails the read. NOT CHANGED by DASH-ROWS: the SAFETY RULE keeps that change off every stop path; it needs its own brief (DASH-ROWS report)";
 const PLANNED = "PLANNED (DASH-ROWS phase 2): a bare-list read whose answer is an array, so it has nowhere to carry a count yet; the shape is the lead's decision";
 
 /** Where a list of unread rows may be iterated other than through rowsOf, and how often. */
 const ALLOWED: Record<string, { times: number; why: string }> = {
-  // rowsOf and the helpers that read a list whole or not at all.
-  "server/assurance.ts for…of raw": { times: 1, why: "rowsOf itself, which checks each row" },
+  // The helpers that read a list whole or not at all. (rowsOf itself is in shared/unreadable-rows.ts, which reads no backend.)
   "server/assurance.ts for…of list": { times: 1, why: "wholeRowsOf, which refuses the whole read (503) on a row that is not a record" },
   "server/assurance.ts raw.map": { times: 2, why: "recoveryList: a recovery record is read whole or not at all, and a row its reader cannot read is a 503 (ControlPlaneUnavailable), never a 500; and an incident pack's evidence rows, each a list of strings: a row that is not a list reads as an empty row, cannot throw" },
   // Lists of strings or numbers, not rows: each element is checked by typeof, which cannot throw.
@@ -63,10 +61,8 @@ const ALLOWED: Record<string, { times: number; why: string }> = {
   "server/backend-scans.ts for…of rows": { times: 1, why: "the scans list: each row read with objectOf, cannot throw; one it cannot read is left out. PLANNED (DASH-ROWS phase 2): counted" },
   "server/backend-scans.ts for…of parsed": { times: 1, why: "the scans list read whole: readScanRow reads each as unknown, cannot throw; one it cannot read is left out. PLANNED (DASH-ROWS phase 2): counted" },
   "server/backend-scans.ts for…of pageOf.results": { times: 1, why: "the same, page by page" },
-  // failsafe.ts: the stop lane's own reads, which this guard reports and does not change.
+  // failsafe.ts: the state's lists, the command list and the audit trail are read through rowsOf (DASH-FAILSAFE-ROWS).
   "server/failsafe.ts raw.signers.map": { times: 1, why: "a command's signers: String(s) on each, cannot throw" },
-  "server/failsafe.ts payload[key].map": { times: 1, why: `the failsafe state's command lists (awaiting signatures, ready, recent): ${STOP_LANE}` },
-  "server/failsafe.ts payload.map": { times: 2, why: `the failsafe command list and its audit trail: ${STOP_LANE}` },
 };
 
 const ITERATORS = new Set(["map", "filter", "reduce", "reduceRight", "forEach", "some", "every", "find", "findIndex", "findLast", "findLastIndex", "flatMap"]);

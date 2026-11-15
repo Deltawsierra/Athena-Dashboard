@@ -42,6 +42,7 @@ import https from "node:https";
 import * as dnsCache from "./dns-cache";
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
 import { PersonCredentialUnavailable, PersonSignInRequired, personAccessToken, renewPersonToken } from "./person-credential";
+import { rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
 
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -768,6 +769,30 @@ export interface FailsafeStateView {
   awaitingSignatures: FailsafeCommand[];
   ready: FailsafeCommand[];
   recent: FailsafeCommand[];
+  /**
+   * Rows of `awaitingSignatures`, `ready` or `recent` the control plane served
+   * that could not be read (rowsOf), by list; or "not a list". Only when one
+   * could not be: the console then never reads that list as none -- a stop
+   * awaiting its second signature may be the row it could not read.
+   */
+  unreadable?: UnreadableRows;
+}
+
+/**
+ * The control plane's command list, every row of it that could be read; and,
+ * only when one could not, how many (`unreadable.commands`, or "not a list").
+ * A command whose row could not be read is not known here, so a signature for
+ * it is relayed as a possible stop (signatureStops): never as no command.
+ */
+export interface FailsafeCommandList {
+  commands: FailsafeCommand[];
+  unreadable?: UnreadableRows;
+}
+
+/** The audit trail, every row that could be read; and, only when one could not, how many (`unreadable.events`). */
+export interface FailsafeAuditTrail {
+  events: FailsafeAuditEvent[];
+  unreadable?: UnreadableRows;
 }
 
 export interface FailsafeStatus {
@@ -882,19 +907,26 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
     );
   }
   const payload = asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the failsafe state"));
-  const list = (key: string): FailsafeCommand[] =>
-    Array.isArray(payload[key]) ? (payload[key] as Record<string, unknown>[]).map(command).map(remember) : [];
+  // SAFETY: a row that is not a command is counted under its list, never thrown on: one null row failed the
+  // whole read (500), and took with it the stop awaiting a second operator's signature. Every good row is
+  // shown, and its action learnt (remember). A list that is not one is "not a list", never none.
+  const unreadable: UnreadableRows = {};
+  const list = (key: string, name: string): FailsafeCommand[] => rowsOf(payload[key], unreadable, name).map(command).map(remember);
+  const awaitingSignatures = list("awaiting_signatures", "awaitingSignatures");
+  const ready = list("ready", "ready");
+  const recent = list("recent", "recent");
   return {
     engineId: typeof payload.engine_id === "string" ? payload.engine_id : null,
     engineState: typeof payload.engine_state === "string" ? payload.engine_state : null,
     engineStateAvailable: payload.engine_state_available === true,
-    awaitingSignatures: list("awaiting_signatures"),
-    ready: list("ready"),
-    recent: list("recent"),
+    awaitingSignatures,
+    ready,
+    recent,
+    ...withUnreadable(unreadable),
   };
 }
 
-export async function listCommands(opts: { engineId?: string; status?: string } = {}): Promise<FailsafeCommand[]> {
+export async function listCommands(opts: { engineId?: string; status?: string } = {}): Promise<FailsafeCommandList> {
   const params = new URLSearchParams();
   if (opts.engineId) params.set("engine_id", opts.engineId);
   if (opts.status) params.set("status", opts.status);
@@ -907,7 +939,13 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
     );
   }
   const payload = await jsonWithin(response, failsafeTimeouts.bodyMs, "the list of commands");
-  return Array.isArray(payload) ? (payload as Record<string, unknown>[]).map(command).map(remember) : [];
+  // SAFETY: every good row is learnt (remember) whatever the rows beside it; a bad one is counted, never thrown
+  // on. A null row threw, so the kill switch's read learnt none of the list -- and a resume listed there went
+  // out, with the switch engaged, as a possible stop (then withdrawn). A command that could not be read stays
+  // not known here: its signature is relayed as a possible stop, never refused as absent.
+  const unreadable: UnreadableRows = {};
+  const commands = rowsOf(payload, unreadable, "commands").map(command).map(remember);
+  return { commands, ...withUnreadable(unreadable) };
 }
 
 /**
@@ -1020,7 +1058,7 @@ export async function cancelCommand(
   return { ok: true, command: remember(command(asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the withdrawal")))) };
 }
 
-export async function audit(opts: { command?: string } = {}): Promise<FailsafeAuditEvent[]> {
+export async function audit(opts: { command?: string } = {}): Promise<FailsafeAuditTrail> {
   const query = opts.command ? `?command=${encodeURIComponent(opts.command)}` : "";
   const response = await call(`/api/failsafe/audit/${query}`);
   if (!response.ok) {
@@ -1029,7 +1067,10 @@ export async function audit(opts: { command?: string } = {}): Promise<FailsafeAu
     );
   }
   const payload = await jsonWithin(response, failsafeTimeouts.bodyMs, "the audit trail");
-  return Array.isArray(payload) ? (payload as Record<string, unknown>[]).map(auditEvent) : [];
+  // A row that is not an event is counted, never dropped unsaid, and never fails the read.
+  const unreadable: UnreadableRows = {};
+  const events = rowsOf(payload, unreadable, "events").map(auditEvent);
+  return { events, ...withUnreadable(unreadable) };
 }
 
 /** Test seam: forget any cached access token, and every command action known here. */
