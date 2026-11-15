@@ -4,6 +4,7 @@ import { createApp, errorHandler } from "./app";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeDefaultData, flagLegacyDefaultPasswords } from "./init-data";
 import { startSampling } from "./health";
+import { startBackendHealthPolling } from "./backend-health";
 import { warmUp as warmFailsafe, primeNow as primeFailsafeHost } from "./failsafe";
 import { loadServiceToken } from "./failsafe-service-token";
 import * as settings from "./settings";
@@ -21,6 +22,10 @@ import { primeNow as primeEngineHost } from "./engine";
   // The control plane's service token, and the actions of the commands it
   // lists, obtained now: the first signature relay waits on neither.
   warmFailsafe();
+  // Athena-Backend's health, for the console's strip: read now and every 15 s,
+  // in the background with one total deadline, backing off on failure. On no
+  // stop's path; nothing waits on it (server/backend-health.ts).
+  startBackendHealthPolling();
 
   const server = createServer(app);
 

@@ -20,6 +20,7 @@ import { adoptBackendScans, firstDirectReads, recordEnd as endOfRecord, type Ado
 import * as failsafe from "./failsafe";
 import * as assurance from "./assurance";
 import { registerEconomicsRoutes } from "./economics";
+import { registerBackendHealthRoutes } from "./backend-health";
 import { boundedRelayRead, runBoundedRead } from "./read-deadline";
 import { SIGN_IN_REQUIRED, asThePerson, signInPerson } from "./person-credential";
 import * as idempotency from "./idempotency";
@@ -3723,8 +3724,11 @@ export function registerRoutes(app: Express): void {
     if (!before) return notFound(res, "Test");
     if (engineRecordEdited(res, before, data)) return;
     if (suppliedNotKnownStatus(res, data, before)) return;
-    const edit = { ...data, ...completionStamp(data, before) };
-    const test = await storage.updateTestWith(req.params.id, (row) => editOnto(row, edit));
+    // Stamped and written onto the row as it is when the write lands
+    // (updateTestWith): whether the edit completes the test is the row's
+    // status then, not the status `before` read -- a write made meanwhile that
+    // completed it keeps the time it has.
+    const test = await storage.updateTestWith(req.params.id, (row) => editOnto(row, { ...data, ...completionStamp(data, row) }));
     if (!test) return notFound(res, "Test");
     if (hasChanges(data)) {
       await storage.createActivityLog({ action: "updated", entityType: "test", entityId: test.id, details: null, ...actor(req) });
@@ -4722,7 +4726,7 @@ export function registerRoutes(app: Express): void {
       const now = (row.findings ?? {}) as Record<string, unknown>;
       // The record was filed meanwhile: it is the row's record of the run now
       // (the read above answers from it), and this poll writes nothing over it.
-      if (backendScanId !== null && backendSnapshotOf(now.backend) !== null) return null;
+      if (backendScanIdOf(now) !== null && backendSnapshotOf(now.backend) !== null) return null;
       // A direct read that succeeded clears the mark of a run this dashboard's
       // engine key could not read on the first try (decision 7): the run is
       // readable by this key after all, so its direct Stop is offered again.
@@ -7145,6 +7149,13 @@ export function registerRoutes(app: Express): void {
   // requireAuth; nothing totals scenarios, and nothing here is on a stop's path
   // (server/economics.ts).
   registerEconomicsRoutes(app);
+
+  // ==== ATHENA-BACKEND'S HEALTH (read-only; athena-backend #217, #226) ====
+  //
+  // The console's health strip: the backend's /api/health/ as last read, answered
+  // at once and never waited on, read in the background with one total deadline
+  // and back-off on failure. On no stop's path (server/backend-health.ts).
+  registerBackendHealthRoutes(app);
 
   // ==== REMEDIATION WORKFLOW (Phase 2.3; admin-only writes) ====
   //
