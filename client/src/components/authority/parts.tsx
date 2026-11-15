@@ -104,11 +104,12 @@ export function unreadableIn(from: HoldsUnreadable, list: string): number {
  * read. A list served as something that is not a list: "The list could not be
  * read". Nothing when every row was read.
  */
-export function UnreadableRows({ from, list }: { from: HoldsUnreadable; list: string }) {
+export function UnreadableRows({ from, list, label }: { from: HoldsUnreadable; list: string; label?: string }) {
+  const named = label === undefined ? "" : `: ${label}`;
   if (notAListIn(from, list)) {
     return (
       <p className="text-[12px] text-amber-400" data-testid="unreadable-rows" data-list={list} data-count={NOT_A_LIST}>
-        The list could not be read
+        The list could not be read{named}
       </p>
     );
   }
@@ -116,8 +117,38 @@ export function UnreadableRows({ from, list }: { from: HoldsUnreadable; list: st
   if (count === 0) return null;
   return (
     <p className="text-[12px] text-amber-400" data-testid="unreadable-rows" data-list={list} data-count={count}>
-      {count === 1 ? "1 row" : `${count} rows`} could not be read
+      {count === 1 ? "1 row" : `${count} rows`} could not be read{named}
     </p>
+  );
+}
+
+/** A list's name in `unreadable` as a reader says it: "principals.effectiveReach" is "principals › effective reach". */
+export function listLabel(list: string): string {
+  return list
+    .split(".")
+    .map((part) => part.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase())
+    .join(" › ");
+}
+
+/**
+ * Every list of a read that has rows the server could not read
+ * (server/assurance.ts rowsOf), one named line each: "2 rows could not be read:
+ * principals › gaps". The read is shown with the rows that could be read; the
+ * rest are said here, never dropped unsaid. Nothing when every row was read.
+ * Only `from.unreadable` is read, so any read can be handed in as it came.
+ */
+export function UnreadableLists({ from }: { from: unknown }) {
+  const held = from !== null && typeof from === "object" ? (from as { unreadable?: unknown }).unreadable : undefined;
+  if (held === null || typeof held !== "object" || Array.isArray(held)) return null;
+  const counted = { unreadable: held as Record<string, number | string> };
+  const lists = Object.keys(counted.unreadable).filter((list) => unreadableIn(counted, list) > 0);
+  if (lists.length === 0) return null;
+  return (
+    <div className="mb-2 space-y-0.5" data-testid="unreadable-lists">
+      {lists.map((list) => (
+        <UnreadableRows key={list} from={counted} list={list} label={listLabel(list)} />
+      ))}
+    </div>
   );
 }
 
