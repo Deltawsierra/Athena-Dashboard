@@ -296,8 +296,11 @@ describe("the Overview", () => {
   });
 });
 
-// Last in the file: once the status filter's Select has been opened, jsdom's
-// timers run late for a while (the case asserts at once, and waits on none).
+// The case asserts at once after choosing in the status filter, and waits on
+// none. Opening that Select once held the worker for over a minute on Windows:
+// nwsapi 2.2.27 recursed on the `:modal` check floating-ui makes while
+// positioning it (see
+// tests/a-state-pseudo-class-is-matched-without-re-entering-the-matcher.test.tsx).
 describe("the Tests screen", () => {
   it("labels both, notes each, keeps the Stop only where the run may still be going, and filters them by the one rule", async () => {
     vi.stubGlobal("fetch", async () => new Response("{}", { status: 503 }));
