@@ -110,6 +110,15 @@ files they used (Windows will not remove a file that is still open, so those tes
 their databases first; one that leaves a database open fails there), and the recovery
 screen's tests. The full suite and the packaged build run on Linux only.
 
+The render tests run in jsdom, whose selector engine is nwsapi. Version 2.2.27 answered
+a state pseudo-class such as `:modal` by calling `matches` on the element, which in jsdom
+is nwsapi again, so every such check recursed until the stack ran out. floating-ui asks
+it of every element it positions, so opening a Select held a test worker for 22 s on
+Linux and for over 60 s on the Windows runner, long enough for vitest to give up on the
+worker ("Timeout calling onTaskUpdate") with every test passed. The lock holds 2.2.28,
+which guards against the re-entry; `tests/a-state-pseudo-class-is-matched-without-re-entering-the-matcher.test.tsx`
+fails if it returns.
+
 ## Configuration
 
 | Variable                  | Default                        | Purpose |
@@ -450,8 +459,12 @@ its headers exactly as before.
   lands. An edit of an engine scan writes the person's notes, summary and
   test type onto the run's findings as they are then, and never writes back
   the status or counts it was checked against. Server code names the plain
-  `updateTest` only where the storage defines it
-  (`tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts`).
+  `updateTest` only where the storage defines it, and no `updateTestWith`
+  change builds the row from a row read before the call: it reads a row only
+  through the one it is handed, never closing over an earlier `getTest`, a
+  row an outer function was handed, or what was made of either (the same
+  test, with the TypeScript compiler API;
+  `tests/no-server-code-writes-a-test-row-from-a-read-taken-before.test.ts`).
 - **No break-glass** (decision 11). No direct launch path remains for a
   person-initiated scan: with the backend unreachable, refusing, or the person
   not signed in to it, a start is refused with the reason, and nothing is sent

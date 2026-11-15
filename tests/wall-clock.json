@@ -4,6 +4,7 @@
   "tests/an-api-key-stop-waits-on-no-write-and-no-start-passes-a-pressed-kill-switch.test.ts",
   "tests/a-write-flood-under-a-held-lock-delays-no-stop-and-writes-nothing-twice.test.ts",
   "tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts",
+  "tests/a-stop-goes-while-the-backend-health-read-hangs.test.ts",
   "tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts",
   "tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts",
   "tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts",
@@ -19,6 +20,7 @@
   "tests/backend-launched-scans-are-adopted-into-the-record-index.test.ts",
   "tests/the-dev-server-and-everything-it-started-end-when-the-app-quits.test.ts",
   "tests/a-scan-the-engine-does-not-know-is-never-a-dead-end.test.ts",
+  "tests/no-commit-on-the-loop-starts-the-log-over-and-a-stop-goes-while-the-checkpointer-writes.test.ts",
   "tests/a-bad-row-in-a-failsafe-read-never-throws-hides-a-command-or-holds-a-stop.test.ts",
   "tests/no-missing-or-odd-field-makes-the-failsafe-less-strict.test.ts",
   "tests/no-failsafe-command-is-lost-past-the-first-page.test.ts"
