@@ -2,6 +2,10 @@ import * as React from "react"
 import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
 
 import { cn } from "@/lib/utils"
+import { drawsTargetText } from "@/lib/hiddenChars"
+
+// Its primitives draw the text they are handed past this app's JSX runtime: guarded where it is handed over (lib/hiddenChars.ts).
+drawsTargetText(ScrollAreaPrimitive)
 
 const ScrollArea = React.forwardRef<
   React.ElementRef<typeof ScrollAreaPrimitive.Root>,

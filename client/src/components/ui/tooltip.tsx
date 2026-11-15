@@ -4,6 +4,10 @@ import * as React from "react"
 import * as TooltipPrimitive from "@radix-ui/react-tooltip"
 
 import { cn } from "@/lib/utils"
+import { drawsTargetText } from "@/lib/hiddenChars"
+
+// Its primitives draw the text they are handed past this app's JSX runtime: guarded where it is handed over (lib/hiddenChars.ts).
+drawsTargetText(TooltipPrimitive)
 
 const TooltipProvider = TooltipPrimitive.Provider
 

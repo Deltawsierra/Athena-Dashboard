@@ -5,6 +5,10 @@ import * as MenubarPrimitive from "@radix-ui/react-menubar"
 import { Check, ChevronRight, Circle } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { drawsTargetText } from "@/lib/hiddenChars"
+
+// Its primitives draw the text they are handed past this app's JSX runtime: guarded where it is handed over (lib/hiddenChars.ts).
+drawsTargetText(MenubarPrimitive)
 
 function MenubarMenu({
   ...props

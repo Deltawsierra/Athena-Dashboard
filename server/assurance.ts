@@ -4765,8 +4765,13 @@ function claimBrief(raw: Record<string, unknown>): ClaimBrief {
     statement: str(raw.statement),
   };
 }
-function claimBriefs(raw: unknown): ClaimBrief[] {
-  return Array.isArray(raw) ? (raw as Record<string, unknown>[]).map(claimBrief) : [];
+/**
+ * A list of claims as served. A row that is not a record is counted in
+ * `unreadable[list]` (rowsOf), never read: one bad row used to fail the whole
+ * decision-support read (a null row threw), and a number row drew a blank claim.
+ */
+function claimBriefs(raw: unknown, unreadable: UnreadableRows, list: string): ClaimBrief[] {
+  return rowsOf(raw, unreadable, list).map(claimBrief);
 }
 
 function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
@@ -4786,10 +4791,10 @@ function mapDecisionSupport(raw: Record<string, unknown>): DecisionSupport {
     claims: {
       hasClaims: bool(claims.has_claims),
       retestPending: bool(claims.retest_pending),
-      contradicted: claimBriefs(claims.contradicted),
-      stale: claimBriefs(claims.stale),
-      unknown: claimBriefs(claims.unknown),
-      supporting: claimBriefs(claims.supporting),
+      contradicted: claimBriefs(claims.contradicted, unreadable, "contradicted"),
+      stale: claimBriefs(claims.stale, unreadable, "stale"),
+      unknown: claimBriefs(claims.unknown, unreadable, "unknown"),
+      supporting: claimBriefs(claims.supporting, unreadable, "supporting"),
       supersededToolContracts: rowsOf(claims.superseded_tool_contracts, unreadable, "supersededToolContracts").map(supersededToolContract),
       authorityChainsBroken: rowsOf(claims.authority_chains_broken, unreadable, "authorityChainsBroken").map(chainBrief),
       authorityChainsUnproven: rowsOf(claims.authority_chains_unproven, unreadable, "authorityChainsUnproven").map(chainBrief),
@@ -5548,7 +5553,17 @@ export async function pushConnector(
  * held is not shown: it could not be read. Carried as `unreadable` on the object
  * that holds the list, and only when a row of it could not be read.
  */
-export type UnreadableRows = Record<string, number>;
+export type UnreadableRows = Record<string, number | typeof NOT_A_LIST>;
+
+/**
+ * What `unreadable[list]` holds when the value served for the list is there
+ * but is not a list at all (a string, a number, a record, true): the whole list
+ * could not be read, so how many rows it held is not known. A screen says "The
+ * list could not be read" (parts.tsx UnreadableRows), never that it is empty. A
+ * list the answer did not carry (absent, or null) is not counted: it was not
+ * served, and reads as it always did.
+ */
+export const NOT_A_LIST = "not a list";
 
 /** `{ unreadable }` when a row of some list could not be read; nothing when every row was. */
 function withUnreadable(unreadable: UnreadableRows): { unreadable?: UnreadableRows } {
@@ -5556,20 +5571,26 @@ function withUnreadable(unreadable: UnreadableRows): { unreadable?: UnreadableRo
 }
 
 /**
- * Every element of a list that is a plain object, or [] when the value is not a
- * list. Each element that is not one is counted in `unreadable[list]`, never
- * dropped silently.
+ * Every element of a list that is a plain object. Each element that is not one
+ * is counted in `unreadable[list]`, never dropped silently. A value that is
+ * served but is not a list reads as no rows, and `unreadable[list]` says the
+ * whole list could not be read (NOT_A_LIST), so it never reads as empty. A list
+ * not served (absent, or null) is [] and is not counted.
  */
 function rowsOf(raw: unknown, unreadable: UnreadableRows, list: string): Record<string, unknown>[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) unreadable[list] = NOT_A_LIST;
+    return [];
+  }
   const rows: Record<string, unknown>[] = [];
   let unread = 0;
-  if (Array.isArray(raw)) {
-    for (const one of raw) {
-      if (!!one && typeof one === "object" && !Array.isArray(one)) rows.push(one as Record<string, unknown>);
-      else unread += 1;
-    }
+  for (const one of raw) {
+    if (!!one && typeof one === "object" && !Array.isArray(one)) rows.push(one as Record<string, unknown>);
+    else unread += 1;
   }
-  if (unread > 0) unreadable[list] = (unreadable[list] ?? 0) + unread;
+  const before = unreadable[list];
+  // A list already found not to be one stays so: its count is not known.
+  if (unread > 0 && before !== NOT_A_LIST) unreadable[list] = (before ?? 0) + unread;
   return rows;
 }
 

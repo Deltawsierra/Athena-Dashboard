@@ -6,6 +6,10 @@ import { type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 import { toggleVariants } from "@/components/ui/toggle"
+import { drawsTargetText } from "@/lib/hiddenChars"
+
+// Its primitives draw the text they are handed past this app's JSX runtime: guarded where it is handed over (lib/hiddenChars.ts).
+drawsTargetText(ToggleGroupPrimitive)
 
 const ToggleGroupContext = React.createContext<
   VariantProps<typeof toggleVariants>

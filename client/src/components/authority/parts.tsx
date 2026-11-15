@@ -13,6 +13,7 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import GlassCard from "@/components/GlassCard";
 import { errorMessage, type Loaded } from "@/lib/loaded";
 import { cn } from "@/lib/utils";
+import { NOT_A_LIST } from "./types";
 
 /** How a chip reads. `positive` is reserved for a verdict the backend reached on recorded data. */
 export type Tone = "positive" | "info" | "caution" | "warning" | "critical" | "neutral";
@@ -78,8 +79,21 @@ export function Count({ value, testId }: { value: number | null; testId?: string
   );
 }
 
-/** How many rows of `list` the server could not read (server/assurance.ts rowsOf); 0 when it named none. */
-export function unreadableIn(from: { unreadable?: Record<string, number> } | null | undefined, list: string): number {
+/** What holds `unreadable` (server/assurance.ts rowsOf): a count by list, or NOT_A_LIST for a list that was not one. */
+type HoldsUnreadable = { unreadable?: Record<string, number | string> } | null | undefined;
+
+/** Whether the value served for `list` was not a list at all, so none of it could be read. */
+export function notAListIn(from: HoldsUnreadable, list: string): boolean {
+  return from?.unreadable?.[list] === NOT_A_LIST;
+}
+
+/**
+ * How many rows of `list` the server could not read (server/assurance.ts rowsOf);
+ * 0 when it named none. A list that was not a list at all counts as 1, so that no
+ * screen reads it as empty: how many rows it held is not known.
+ */
+export function unreadableIn(from: HoldsUnreadable, list: string): number {
+  if (notAListIn(from, list)) return 1;
   const count = from?.unreadable?.[list];
   return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
 }
@@ -87,9 +101,17 @@ export function unreadableIn(from: { unreadable?: Record<string, number> } | nul
 /**
  * Rows of a list the backend served that could not be read: counted beside the
  * list, never dropped unsaid. What they held is not shown, since it could not be
- * read. Nothing when every row was read.
+ * read. A list served as something that is not a list: "The list could not be
+ * read". Nothing when every row was read.
  */
-export function UnreadableRows({ from, list }: { from: { unreadable?: Record<string, number> } | null | undefined; list: string }) {
+export function UnreadableRows({ from, list }: { from: HoldsUnreadable; list: string }) {
+  if (notAListIn(from, list)) {
+    return (
+      <p className="text-[12px] text-amber-400" data-testid="unreadable-rows" data-list={list} data-count={NOT_A_LIST}>
+        The list could not be read
+      </p>
+    );
+  }
   const count = unreadableIn(from, list);
   if (count === 0) return null;
   return (

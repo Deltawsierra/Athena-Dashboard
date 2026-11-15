@@ -66,9 +66,9 @@ jobs:
   # SQLite files they used (Windows refuses to remove a file that is still open),
   # the tests of a scan whose run the engine does not know, and the desktop
   # window's lock with the target-content tests (a target URL is text; a hostile
-  # finding renders inert; an app file is saved in the app; every in-app download
-  # keeps its Blob URL until the save has read it), and the recovery screen's
-  # relay and render tests. Not the whole suite and not the packaged build, which
+  # finding renders inert; text handed to a library component is marked; an app
+  # file is saved in the app; every in-app download keeps its Blob URL until the
+  # save has read it), and the recovery screen's relay and render tests. Not the whole suite and not the packaged build, which
   # stay on the Linux job above.
   windows:
     runs-on: windows-latest
@@ -150,3 +150,6 @@ jobs:
           tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts
           tests/the-authority-screens-show-what-the-backend-serves.test.tsx
           tests/the-authority-histories-show-what-the-backend-recorded.test.tsx
+          tests/no-read-fails-whole-on-one-bad-row-and-no-list-that-is-not-one-reads-as-none.test.ts
+          tests/a-bad-row-or-a-list-that-is-not-one-is-said-never-read-as-none.test.tsx
+          tests/text-handed-to-a-library-component-is-drawn-marked.test.tsx

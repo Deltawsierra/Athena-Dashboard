@@ -78,6 +78,8 @@ import { isKeyBug, saysOutcomeUnknown, useKeyedPress } from "@/lib/keyedPress";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { ASSURANCE_SCOPE, BACKEND_RECORD } from "@/lib/sourceLabels";
+import { UnreadableRows, unreadableIn } from "@/components/authority/parts";
+import type { UnreadableRows as UnreadableCounts } from "@/components/authority/types";
 
 interface AssuranceStatus {
   configured: boolean;
@@ -6575,6 +6577,8 @@ interface DecisionSupport {
     stale: ClaimBrief[];
     unknown: ClaimBrief[];
     supporting: ClaimBrief[];
+    /** Rows of a list above the server could not read, by list (server/assurance.ts rowsOf); absent when every row was read. */
+    unreadable?: UnreadableCounts;
   };
   note: string;
 }
@@ -6585,7 +6589,7 @@ interface DecisionSupport {
  * it. A READY decision is shown to stand only while its supporting claims stay
  * current; an unassessed deployment reads "Not assessed", never ready. Self-fetching.
  */
-function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
+export function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
   const { data, isLoading, isError, error } = useQuery<DecisionSupport>({
     queryKey: [`/api/assurance/deployments/${deploymentUuid}/decision-support`],
   });
@@ -6613,9 +6617,11 @@ function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
       </section>
     );
   }
-  const bucket = (title: string, claims: ClaimBrief[], tone: string) =>
-    claims.length === 0 ? null : (
-      <div>
+  // A claim row the server could not read is counted under its list, and said
+  // beside it: a bucket whose every row could not be read is still drawn.
+  const bucket = (title: string, claims: ClaimBrief[], tone: string, list: string) =>
+    claims.length === 0 && unreadableIn(data.claims, list) === 0 ? null : (
+      <div data-testid={`decision-claims-${list}`}>
         <p className={cn("text-[10px] uppercase tracking-wide", tone)}>{title}</p>
         <ul className="mt-0.5 space-y-0.5">
           {claims.map((c) => (
@@ -6624,6 +6630,7 @@ function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
             </li>
           ))}
         </ul>
+        <UnreadableRows from={data.claims} list={list} />
       </div>
     );
   return (
@@ -6648,10 +6655,10 @@ function DecisionSupportPanel({ deploymentUuid }: { deploymentUuid: string }) {
       </div>
       <p className="mb-2 text-[12px] leading-relaxed text-muted-foreground">{data.note}</p>
       <div className="space-y-2">
-        {bucket("Contradicted (holds at needs remediation)", data.claims.contradicted, "text-sev-high")}
-        {bucket("Stale", data.claims.stale, "text-amber-400")}
-        {bucket("Unknown", data.claims.unknown, "text-amber-400")}
-        {bucket("Supporting", data.claims.supporting, "text-emerald-400")}
+        {bucket("Contradicted (holds at needs remediation)", data.claims.contradicted, "text-sev-high", "contradicted")}
+        {bucket("Stale", data.claims.stale, "text-amber-400", "stale")}
+        {bucket("Unknown", data.claims.unknown, "text-amber-400", "unknown")}
+        {bucket("Supporting", data.claims.supporting, "text-emerald-400", "supporting")}
         {!data.claims.hasClaims && (
           <p className="text-[11px] text-muted-foreground">
             No current assurance claims bear on this decision; the finding-based signal governs.

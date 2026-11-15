@@ -189,7 +189,7 @@ function Named({
 
 /** The served lists of what holds the decision (server/assurance.ts mapDecisionSupport), by name. */
 const HOLDING_LISTS = [
-  "supersededToolContracts", "authorityChainsBroken", "authorityChainsUnproven", "authorityChainsMissing", "effectClassesUnknown",
+  "contradicted", "stale", "unknown", "supersededToolContracts", "authorityChainsBroken", "authorityChainsUnproven", "authorityChainsMissing", "effectClassesUnknown",
 ];
 
 /** A decision a transition names, in words and a neutral tone: the history is a record, never a result drawn here. */
@@ -341,14 +341,20 @@ export function ReleaseGateView({ data, history }: { data: DecisionSupport; hist
           <Absent testId="nothing-named">The backend names no claim, chain, effect or contract here.</Absent>
         ) : (
           <div className="space-y-3">
-            <Named title="Contradicted claims" count={claims.contradicted.length} testId="claims-contradicted">
+            <Named title="Contradicted claims" count={claims.contradicted.length} testId="claims-contradicted" from={claims} lists={["contradicted"]}>
               {claims.contradicted.map((c) => (
                 <li key={c.uuid} className="text-[12px] text-muted-foreground">
                   <span className="text-foreground">{c.claimType}</span> — {c.statement}
                 </li>
               ))}
             </Named>
-            <Named title="Stale or unproven claims" count={claims.stale.length + claims.unknown.length} testId="claims-stale">
+            <Named
+              title="Stale or unproven claims"
+              count={claims.stale.length + claims.unknown.length}
+              testId="claims-stale"
+              from={claims}
+              lists={["stale", "unknown"]}
+            >
               {[...claims.stale, ...claims.unknown].map((c) => (
                 <li key={c.uuid} className="text-[12px] text-muted-foreground">
                   <span className="text-foreground">{c.claimType}</span> ({c.status}) — {c.statement}
