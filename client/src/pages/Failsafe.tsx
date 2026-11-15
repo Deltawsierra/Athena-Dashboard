@@ -103,7 +103,8 @@ interface FailsafeCommand {
   expiresAt: string;
   reason: string;
   signers: string[];
-  requiredSignatures: number;
+  /** Null when the control plane did not say how many it needs: unknown, never read as fewer (server/failsafe.ts). */
+  requiredSignatures: number | null;
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
@@ -122,6 +123,12 @@ interface DraftedCommand {
   command: FailsafeCommand;
   signingBytes: string;
   draft: CommandDraft;
+  /**
+   * Only when the control plane's answer to a draft named no command id
+   * (server/failsafe.ts draftCommand): why it cannot be opened here by its id.
+   * It is shown all the same, with that reason (UnopenedDraft), never hidden.
+   */
+  unopenable?: string;
 }
 
 interface FailsafeStateView {
@@ -138,6 +145,53 @@ interface FailsafeStateView {
    * row that could not be read.
    */
   unreadable?: Record<string, number | string>;
+  /**
+   * Of those rows of `awaitingSignatures` and `ready`, how many may be a stop
+   * (server/failsafe.ts possibleStops): a row with no uuid whose action is a
+   * stop's or cannot be read, or a row that is not a command at all. It cannot
+   * be opened here, so the page says a stop may be awaiting a signature.
+   */
+  possibleStops?: Record<string, number>;
+  /**
+   * Whether `awaitingSignatures` and `ready` are all there is (server/failsafe.ts
+   * morePastThePage): `true` when the control plane left commands out past its
+   * page (its row or byte limit), `null` when it did not say. Absent when it
+   * said it left none out. A list that may not be whole is never shown as whole.
+   */
+  more?: true | null;
+}
+
+/** Whether the in-flight lists may not be all there is: cut at the control plane's page, or not said (`more`). */
+function maybePartial(view: FailsafeStateView): boolean {
+  return view.more !== undefined;
+}
+
+/** The lists "Commands in flight" draws, and so the only ones whose unreadable rows it says. */
+const IN_FLIGHT_LISTS = ["awaitingSignatures", "ready"] as const;
+
+/**
+ * The in-flight lists' unreadable rows, for "Commands in flight". `recent` is
+ * not among them: the page never draws it (it is the control plane's history,
+ * served empty under the service token this console reads with; the trail
+ * below is the page's history), so its count is not said under commands it
+ * does not show.
+ */
+function inFlightUnreadable(view: FailsafeStateView): { unreadable?: Record<string, number | string> } {
+  const held = view.unreadable;
+  if (!held) return {};
+  const kept = Object.fromEntries(IN_FLIGHT_LISTS.filter((list) => list in held).map((list) => [list, held[list]]));
+  return { unreadable: kept };
+}
+
+/** How many unreadable in-flight rows may be a stop (possibleStops), by list; numbers only. */
+function possibleStopsIn(view: FailsafeStateView, list: (typeof IN_FLIGHT_LISTS)[number]): number {
+  const count = view.possibleStops?.[list];
+  return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+/** A required-signature count as a reader is told it: "?" when the control plane did not say. */
+function needOf(command: FailsafeCommand): string {
+  return command.requiredSignatures === null ? "?" : String(command.requiredSignatures);
 }
 
 /**
@@ -147,7 +201,8 @@ interface FailsafeStateView {
  */
 function listFigure(view: FailsafeStateView, list: "awaitingSignatures" | "ready"): string | number {
   if (notAListIn(view, list)) return "?";
-  return unreadableIn(view, list) > 0 ? `${view[list].length}+` : view[list].length;
+  // A list cut at the control plane's page (or not said to be whole) is at least what was read, never exactly it.
+  return unreadableIn(view, list) > 0 || maybePartial(view) ? `${view[list].length}+` : view[list].length;
 }
 
 /** What the tile says under its count when rows of its list could not be read. */
@@ -155,7 +210,10 @@ function listUnread(view: FailsafeStateView | undefined, list: "awaitingSignatur
   if (!view) return undefined;
   if (notAListIn(view, list)) return "The list could not be read";
   const count = unreadableIn(view, list);
-  return count === 0 ? undefined : `${count === 1 ? "1 row" : `${count} rows`} could not be read`;
+  if (count > 0) return `${count === 1 ? "1 row" : `${count} rows`} could not be read`;
+  if (view.more === true) return "More were left out than were listed";
+  if (view.more === null) return "Not said to be all of them";
+  return undefined;
 }
 
 interface FailsafeAuditEvent {
@@ -420,7 +478,12 @@ function CommandConsole({
       toast(
         command.status === "ready"
           ? { title: "Command ready", description: "The engine will verify and apply it on its next poll." }
-          : { title: "Signature accepted", description: `${command.signers.length} of ${command.requiredSignatures} signatures.` },
+          : {
+            title: "Signature accepted",
+            description: command.requiredSignatures === null
+              ? `${command.signers.length} signed; how many it needs is not known (the control plane did not say).`
+              : `${command.signers.length} of ${command.requiredSignatures} signatures.`,
+          },
       );
     },
     onError: (error: Error) => {
@@ -503,10 +566,10 @@ function CommandConsole({
         <StatusPill tone={commandTone(command.status)}>{commandStatusLabel(command.status)}</StatusPill>
       </div>
 
-      {/* signer progress */}
-      <div className="flex items-center gap-3">
+      {/* signer progress: an unknown count is said, never drawn as the signatures already given */}
+      <div className="flex items-center gap-3" data-testid="text-signer-progress">
         <div className="flex gap-1.5">
-          {Array.from({ length: need }).map((_, i) => (
+          {Array.from({ length: need ?? signed }).map((_, i) => (
             <span
               key={i}
               className={cn(
@@ -517,7 +580,9 @@ function CommandConsole({
           ))}
         </div>
         <span className="text-sm text-muted-foreground">
-          {signed} of {need} operator {need === 1 ? "signature" : "signatures"}
+          {need === null
+            ? `${signed} signed; how many operator signatures it needs is not known (the control plane did not say)`
+            : `${signed} of ${need} operator ${need === 1 ? "signature" : "signatures"}`}
           {command.signers.length > 0 && (
             <span className="athena-mono ml-2 text-xs text-gold-dim">({command.signers.join(", ")})</span>
           )}
@@ -585,7 +650,10 @@ function CommandConsole({
                 <AthenaLabel>Step 2 — paste back what the CLI printed</AthenaLabel>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Paste the whole <span className="athena-mono">{`{"key_id": …, "sig": …}`}</span> object, or fill the
-                  fields. {need > 1 && "A second, different operator must repeat steps 1–2 with their own key."}
+                  fields.{" "}
+                  {need === null
+                    ? "How many signatures it needs is not known: a second, different operator may need to repeat steps 1–2 with their own key."
+                    : need > 1 && "A second, different operator must repeat steps 1–2 with their own key."}
                 </p>
               </div>
               <div className="grid gap-3 sm:grid-cols-[200px_1fr]">
@@ -655,6 +723,105 @@ function CommandConsole({
   );
 }
 
+/* ---- a command drafted with no id to open it by ------------------------ */
+//
+// The control plane drafted it, but its answer named no uuid (server/failsafe.ts
+// draftCommand `unopenable`). It used to open an empty dialog: the draft to
+// sign, its signing bytes and every way to act on it were hidden. Now it is
+// shown with the reason it cannot be opened by its id, the draft to sign (the
+// fields its signers sign are all here), and how to act on it: it is found by
+// its nonce among the commands in flight -- the same command, with its id --
+// and opened from there; until then, on the failsafe control plane.
+
+/** The command in flight that a draft with no id is, found by its other identifiers: nonce, action and engine. */
+function foundByNonce(drafted: DraftedCommand, inFlight: FailsafeCommand[]): FailsafeCommand | undefined {
+  const nonce = drafted.draft.nonce || drafted.command.nonce;
+  if (!nonce) return undefined;
+  const action = drafted.draft.action || drafted.command.action;
+  const engine = drafted.draft.engine_id || drafted.command.engineId;
+  return inFlight.find((cmd) => cmd.uuid !== "" && cmd.nonce === nonce && cmd.action === action && cmd.engineId === engine);
+}
+
+function UnopenedDraft({
+  drafted,
+  inFlight,
+  onOpen,
+  onClose,
+}: {
+  drafted: DraftedCommand;
+  inFlight: FailsafeCommand[];
+  onOpen: (uuid: string) => void;
+  onClose: () => void;
+}) {
+  const found = foundByNonce(drafted, inFlight);
+  const nonce = drafted.draft.nonce || drafted.command.nonce;
+  const action = drafted.draft.action || drafted.command.action;
+  const engine = drafted.draft.engine_id || drafted.command.engineId;
+  const draftJson = JSON.stringify(drafted.draft, null, 2);
+  const why = drafted.unopenable ?? "the control plane's answer to the draft named no command id (uuid)";
+  return (
+    <div className="space-y-4" data-testid="unopened-draft">
+      <div>
+        <div className="font-serif text-xl">
+          {actionLabel(action)}{" "}
+          <span className="athena-mono text-xs text-muted-foreground">· {engine || "engine not named"}</span>
+        </div>
+        <p className="mt-1 text-sm text-amber-400" data-testid="text-unopened-why">
+          Drafted, but it cannot be opened here by its id: {why}.
+        </p>
+      </div>
+      {found ? (
+        <GlassCard bodyClassName="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm" data-testid="text-unopened-found">
+            Found among the commands in flight by its nonce <span className="athena-mono">{nonce}</span>: open it there
+            to sign it, relay its signatures, or withdraw it.
+          </p>
+          <Button type="button" className="gap-2" onClick={() => onOpen(found.uuid)} data-testid="button-open-drafted">
+            <KeyRound className="h-4 w-4" /> Open it
+          </Button>
+        </GlassCard>
+      ) : (
+        <p className="text-sm text-muted-foreground" data-testid="text-unopened-how">
+          {nonce ? (
+            <>
+              How to act on it: sign the draft below now. This console looks for it by its nonce{" "}
+              <span className="athena-mono">{nonce}</span> on every read of the commands in flight, and offers to open
+              it here when it is listed; until then, find it on the failsafe control plane by that nonce to relay its
+              signature or withdraw it.
+            </>
+          ) : (
+            <>
+              How to act on it: its answer named no nonce either, so it cannot be found here. Find it on the failsafe
+              control plane (the newest {actionLabel(action).toLowerCase()} drafted for {engine || "this engine"}) to
+              sign it, relay its signatures, or withdraw it.
+            </>
+          )}
+        </p>
+      )}
+      <div>
+        <div className="mb-1.5 flex items-center justify-between">
+          <span className="athena-label">Draft to sign</span>
+          <CopyButton text={draftJson} label="draft" />
+        </div>
+        <pre className="athena-mono max-h-56 overflow-auto rounded-lg border border-border/60 bg-surface-0/70 p-3 text-xs leading-relaxed" data-testid="text-unopened-draft-json">
+          {draftJson}
+        </pre>
+        {drafted.signingBytes && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            Signing bytes (for cross-checking):{" "}
+            <span className="athena-mono break-all text-gold-dim">{drafted.signingBytes}</span>
+          </p>
+        )}
+      </div>
+      <div className="flex justify-end">
+        <Button type="button" variant="outline" onClick={onClose} data-testid="button-close-unopened">
+          Close
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ---- the page --------------------------------------------------------- */
 
 interface FailsafeProps {
@@ -687,6 +854,8 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
 
   // The command whose console is open.
   const [openUuid, setOpenUuid] = useState<string | null>(null);
+  // A command drafted with no id to open it by: shown, never hidden (UnopenedDraft).
+  const [unopened, setUnopened] = useState<DraftedCommand | null>(null);
 
   // Every source on this console is polled, and React Query keeps the last
   // answer after a poll fails. Read raw, that answer went on rendering as the
@@ -771,6 +940,8 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
     state ? read(state) : stateFailed || !canOperate || !engineNamed ? "—" : "…";
   /** Whether rows of the in-flight lists could not be read: then there is never "none in flight". */
   const inFlightUnread = state !== undefined && (unreadableIn(state, "awaitingSignatures") > 0 || unreadableIn(state, "ready") > 0);
+  /** Whether the in-flight lists may not be all there is (the control plane cut them, or did not say): never "none in flight". */
+  const inFlightPartial = state !== undefined && maybePartial(state);
   const stateUnread = stateFailed
     ? `Could not read the engine state: ${state$.state === "error" ? state$.message : ""}`
     : statusFailed
@@ -802,6 +973,12 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
       // and no Submit: a stop just drafted could not be relayed from here.
       // Seeded, a failed first read leaves the drafted stop signable (the
       // console's stale-stop path); the read still decides what is shown.
+      if (!drafted.command.uuid) {
+        // Drafted with no id: opening it by "" showed an empty dialog, the draft hidden. Shown, and why.
+        setUnopened(drafted);
+        toast({ title: "Command drafted", description: "It cannot be opened here by its id: see why, and how to act on it." });
+        return;
+      }
       pageClient.setQueryData(failsafeCommandKey(drafted.command.uuid), drafted);
       setOpenUuid(drafted.command.uuid);
       toast({ title: "Command drafted", description: "Sign it out of band, then paste the signature back." });
@@ -973,13 +1150,31 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                 " The commands the last state read listed are below, so a stop still waiting for a second" +
                   " signature stays within reach; each one's current status is read when it is opened."}
             </GlassCard>
-          ) : inFlight.length === 0 && !inFlightUnread && (
+          ) : inFlight.length === 0 && !inFlightUnread && !inFlightPartial && (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground">
               No commands awaiting signatures or waiting on the engine.
             </GlassCard>
           )}
+          {/* A list the control plane cut at its page, or did not say is whole: said, never shown as whole. */}
+          {state && state.more !== undefined && (
+            <p className="text-[12px] text-amber-400" data-testid="text-inflight-more" data-more={String(state.more)}>
+              {state.more === true
+                ? "More commands are in flight than the control plane listed: it left some out past its page (its row or" +
+                  " byte limit), so this list is not all of them. A stop awaiting a signature may be among those left out:" +
+                  " find it on the failsafe control plane to sign it."
+                : "The control plane did not say whether this list is all the commands in flight, so it may not be. A stop" +
+                  " awaiting a signature may be missing from it: check the failsafe control plane."}
+            </p>
+          )}
           {/* Rows of the state the server could not read: said, never read as none. */}
-          {state && <UnreadableLists from={state} />}
+          {state && <UnreadableLists from={inFlightUnreadable(state)} />}
+          {/* An unreadable row that may be a stop cannot be opened here: said, so its signature is sought where it can be given. */}
+          {state && IN_FLIGHT_LISTS.filter((list) => possibleStopsIn(state, list) > 0).map((list) => (
+            <p key={list} className="text-[12px] text-amber-400" data-testid="possible-stops" data-list={list} data-count={possibleStopsIn(state, list)}>
+              {possibleStopsIn(state, list) === 1 ? "1 of them" : `${possibleStopsIn(state, list)} of them`} ({list === "ready" ? "ready" : "awaiting signatures"})
+              {" "}may be a stop: it cannot be opened here, so find it on the failsafe control plane to sign it.
+            </p>
+          ))}
           {inFlight.map((cmd) => (
             <GlassCard key={cmd.uuid} bodyClassName="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -995,7 +1190,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                     <span className="athena-mono text-xs text-muted-foreground">· {cmd.engineId}</span>
                   </div>
                   <div className="athena-mono text-xs text-muted-foreground">
-                    {cmd.signers.length}/{cmd.requiredSignatures} signed · {relativeExpiry(cmd.expiresAt)}
+                    {cmd.signers.length}/{needOf(cmd)} signed · {relativeExpiry(cmd.expiresAt)}
                   </div>
                 </div>
               </div>
@@ -1172,6 +1367,29 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
             </DialogDescription>
           </DialogHeader>
           {openUuid && <CommandConsole uuid={openUuid} onClose={() => setOpenUuid(null)} />}
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- a command drafted with no id ---- */}
+      <Dialog open={unopened !== null} onOpenChange={(open) => !open && setUnopened(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Failsafe command drafted</DialogTitle>
+            <DialogDescription>
+              The control plane drafted it, but named no id to open it by here.
+            </DialogDescription>
+          </DialogHeader>
+          {unopened && (
+            <UnopenedDraft
+              drafted={unopened}
+              inFlight={[...inFlight, ...lastInFlight]}
+              onOpen={(uuid) => {
+                setUnopened(null);
+                setOpenUuid(uuid);
+              }}
+              onClose={() => setUnopened(null)}
+            />
+          )}
         </DialogContent>
       </Dialog>
     </div>

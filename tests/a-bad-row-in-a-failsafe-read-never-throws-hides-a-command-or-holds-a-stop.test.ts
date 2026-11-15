@@ -209,12 +209,13 @@ describe("the failsafe state: a bad row is counted by its list, every good row i
     expect(res.body.awaitingSignatures).toHaveLength(1);
   });
 
-  it("a row missing its fields is a record: shown as served, never dropped, and never learnt without an action", async () => {
+  it("a row missing its fields: one with a uuid is shown as served, never learnt without an action; one with no uuid is counted and said as a possible stop, never drawn as a command nobody can open (DASH-FAILSAFE-2)", async () => {
     served.state = { engine_id: "athena-1", awaiting_signatures: [{}, { uuid: "noaction-state" }], ready: [], recent: [] };
     const res = await admin.get("/api/failsafe/state");
     expect(res.status).toBe(200);
-    expect(res.body.awaitingSignatures.map((c: { uuid: string; action: string }) => [c.uuid, c.action])).toEqual([["", ""], ["noaction-state", ""]]);
-    expect(res.body).not.toHaveProperty("unreadable");
+    expect(res.body.awaitingSignatures.map((c: { uuid: string; action: string }) => [c.uuid, c.action])).toEqual([["noaction-state", ""]]);
+    expect(res.body.unreadable).toEqual({ awaitingSignatures: 1 });
+    expect(res.body.possibleStops).toEqual({ awaitingSignatures: 1 });
     // Its action is not known here, so its signature is relayed as a possible stop (below), never refused from memory.
     expect(failsafe.knownActionOf("noaction-state")).toBeUndefined();
   });

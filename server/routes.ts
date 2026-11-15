@@ -36,6 +36,7 @@ import { IDEMPOTENCY_HEADER } from "@shared/idempotency";
 import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
 import { UNREADABLE_ROWS_HEADER, unreadableHeaderValue, type UnreadableRows } from "@shared/unreadable-rows";
+import { rowEngaged } from "@shared/kill-switch-flag";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
@@ -2058,7 +2059,8 @@ function stoppedByKillSwitch(
  */
 async function markIfEngagedElsewhere(ticket: StartTicket | null): Promise<void> {
   if (ticket === null || ticket.press !== null) return;
-  const stored = await storage.getKillSwitchState().then((one) => one?.killSwitchEnabled === true, () => false);
+  // A stored flag that is not exactly false reads as engaged (shared/kill-switch-flag.ts).
+  const stored = await storage.getKillSwitchState().then((one) => rowEngaged(one), () => false);
   if (stored && ticket.press === null) ticket.press = { seq: 0, claimed: new Set(), stops: new Map() };
 }
 
@@ -2077,7 +2079,8 @@ function killSwitchStartSentence(runId: string, stop: StopOutcome): string {
 async function killSwitchEngagedNow(): Promise<{ engaged: boolean; systemStatus: string | null }> {
   if (killSwitchMemory.engaged) return { engaged: true, systemStatus: "shutdown" };
   const state = await storage.getKillSwitchState();
-  return { engaged: state?.killSwitchEnabled === true, systemStatus: state?.systemStatus ?? null };
+  // "true", 1, null or a record stored as the flag reads as engaged, never off (shared/kill-switch-flag.ts).
+  return { engaged: rowEngaged(state), systemStatus: state?.systemStatus ?? null };
 }
 
 /**
@@ -2149,7 +2152,8 @@ export const enforceKillSwitch: RequestHandler = (req, res, next) => {
   }
   (async () => {
     const state = await storage.getKillSwitchState();
-    if (!state?.killSwitchEnabled && !killSwitchMemory.engaged) return void next();
+    // Only a flag that is exactly false lets a write through (shared/kill-switch-flag.ts): a null one held nothing.
+    if (!rowEngaged(state) && !killSwitchMemory.engaged) return void next();
     res.status(503).json({ message: KILL_SWITCH_REFUSAL, systemStatus: state?.systemStatus ?? "shutdown" });
   })().catch(next);
 };
@@ -5780,7 +5784,7 @@ export function registerRoutes(app: Express): void {
     // A press this dashboard holds in memory is the switch's state whatever the row says yet (killSwitchMemory).
     res.json(killSwitchMemory.engaged
       ? { ...settings, killSwitchEnabled: true, ...(killSwitchMemory.notStored !== null ? { killSwitchNotStored: killSwitchMemory.notStored } : {}) }
-      : settings);
+      : { ...settings, killSwitchEnabled: rowEngaged(settings) });
   }));
 
   /**
@@ -5830,7 +5834,7 @@ export function registerRoutes(app: Express): void {
   const aiControlNow = (fallback: AIControlSetting | null): AIControlSetting | null => {
     const stored = aiControlLatest ?? fallback;
     if (stored === null) return null;
-    return { ...stored, killSwitchEnabled: stored.killSwitchEnabled === true || killSwitchMemory.engaged };
+    return { ...stored, killSwitchEnabled: rowEngaged(stored) || killSwitchMemory.engaged };
   };
   const SUPERSEDED = "a later change to these settings was sent while this one was being saved; the stored settings are that one's";
 
@@ -5877,7 +5881,19 @@ export function registerRoutes(app: Express): void {
           // when its signature is relayed (a possible stop until then): never taken as no command.
           if (list.unreadable) {
             console.warn(`[failsafe] the kill switch's read of the failsafe commands could not read some rows ` +
-              `(${JSON.stringify(list.unreadable)}); a command not known here is read when its signature is relayed`);
+              `(${JSON.stringify(list.unreadable)})` +
+              (list.possibleStops ? `, ${list.possibleStops.commands} of them possibly a stop` : "") +
+              "; a command not known here is read when its signature is relayed, as a possible stop");
+          }
+          // A list the control plane cut at its page (DASH-FAILSAFE-3): what it listed is learnt, and the rest
+          // is said -- never read as all there is. It has no next page to read (no cursor), and nothing waits
+          // on one: the stops went first, and a command not learnt here is relayed as a possible stop.
+          if (list.more !== undefined) {
+            console.warn(`[failsafe] the kill switch's read of the failsafe commands learnt ${list.commands.length}, ` +
+              (list.more === true
+                ? "but the control plane left more out past its page (X-Failsafe-More: true): more commands exist than were read"
+                : "but the control plane did not say whether it left any out (no X-Failsafe-More): more commands may exist than were read") +
+              "; a command not learnt here is read when its signature is relayed, as a possible stop");
           }
         }, (cause) => {
           console.warn(`[failsafe] the kill switch's read of the failsafe commands failed (${causeOf(cause)}); ` +
@@ -6002,7 +6018,7 @@ export function registerRoutes(app: Express): void {
     const superseded = isSuperseded ? { superseded: SUPERSEDED } : {};
     const current = isSuperseded
       ? aiControlNow((await storage.getAIControlSettings().catch(() => undefined)) ?? settings)
-      : settings === null ? null : { ...settings, killSwitchEnabled: settings.killSwitchEnabled === true || killSwitchMemory.engaged };
+      : settings === null ? null : { ...settings, killSwitchEnabled: rowEngaged(settings) || killSwitchMemory.engaged };
     /** The switch as it is now: stored, or held in memory. */
     const engagedNow = current?.killSwitchEnabled === true || killSwitchMemory.engaged;
     if (overtaken) {
@@ -6323,6 +6339,9 @@ export function registerRoutes(app: Express): void {
       // The body stays the array it always was; a row that could not be read is counted in a header.
       const list = await failsafe.listCommands({ engineId, status });
       sendUnreadableRows(res, list.unreadable);
+      // Whether the control plane cut the list at its page, in its own header's words (DASH-FAILSAFE-3):
+      // "true", "false", or "unknown" when it did not say. The body stays the bare array.
+      res.setHeader(failsafe.FAILSAFE_MORE_HEADER, list.more === undefined ? "false" : list.more === true ? "true" : "unknown");
       res.json(list.commands);
     } catch (cause) {
       if (failsafeUnavailable(res, cause)) return;
@@ -6350,6 +6369,8 @@ export function registerRoutes(app: Express): void {
     // plane had drafted, and the page never received the uuid it signs.
     await recordFailsafeAct(req, "drafted", result.drafted.command.uuid, {
       failsafeAction: data.action, engineId: data.engineId, reason: data.reason,
+      // Drafted with no id (DASH-FAILSAFE-3): recorded with the nonce it can be found by, and why.
+      ...(result.drafted.unopenable !== undefined ? { nonce: result.drafted.command.nonce, unopenable: result.drafted.unopenable } : {}),
     });
     res.status(201).json(result.drafted);
   }));

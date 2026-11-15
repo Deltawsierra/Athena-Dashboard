@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { randomUUID } from "crypto";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
+import { flagFromColumn } from "@shared/kill-switch-flag";
 import { DuplicateBackendScan, DuplicateRetestCheck, type CollectWatchEnd, type IStorage, type RetestFiling, type RetestWatchEnd } from "./storage";
 import type { RetestCheckRecordView } from "@shared/backend-record";
 import { backendScanIdOf } from "@shared/engine-record";
@@ -752,21 +753,29 @@ export class SqliteStorage implements IStorage {
   }
 
   async getAIControlSettings(): Promise<AIControlSetting | undefined> {
-    return db
-      .select()
+    // The flag is read as stored, not through the boolean column (shared/kill-switch-flag.ts flagFromColumn):
+    // that read the text "true" and the integer 2 as off.
+    const { killSwitchEnabled: _flag, ...columns } = getTableColumns(schema.aiControlSettings);
+    const row = db
+      .select({ ...columns, killSwitchFlag: sql<unknown>`${schema.aiControlSettings.killSwitchEnabled}` })
       .from(schema.aiControlSettings)
       .where(eq(schema.aiControlSettings.id, AI_CONTROL_ID))
       .get();
+    if (!row) return undefined;
+    const { killSwitchFlag, ...rest } = row;
+    return { ...rest, killSwitchEnabled: flagFromColumn(killSwitchFlag) };
   }
   async getKillSwitchState(): Promise<{ killSwitchEnabled: boolean; systemStatus: string | null } | undefined> {
-    return db
+    // Anything stored but an integer 0 (false) reads as engaged, never off (shared/kill-switch-flag.ts).
+    const row = db
       .select({
-        killSwitchEnabled: schema.aiControlSettings.killSwitchEnabled,
+        killSwitchFlag: sql<unknown>`${schema.aiControlSettings.killSwitchEnabled}`,
         systemStatus: schema.aiControlSettings.systemStatus,
       })
       .from(schema.aiControlSettings)
       .where(eq(schema.aiControlSettings.id, AI_CONTROL_ID))
       .get();
+    return row ? { killSwitchEnabled: flagFromColumn(row.killSwitchFlag), systemStatus: row.systemStatus } : undefined;
   }
   async updateAIControlSettings(settings: Partial<InsertAIControlSetting>): Promise<AIControlSetting> {
     const existing = await this.getAIControlSettings();
