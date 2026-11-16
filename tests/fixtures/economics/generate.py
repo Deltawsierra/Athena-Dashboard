@@ -28,6 +28,13 @@ One backend commit, one directory:
                       retained headline. A scenario with no remediation option
                       answers the ROI route 404, recorded as it is.)
 
+  ab-at6b-2be293c/  Athena-Backend 2be293caebfd591db558b4e42259cfb8ccdb452c, the head of
+                      #237 (the ROI document's v2: every amount of money as a typed
+                      measure, ``measures``, ``side_by_side``, ``nets``, and a tail's
+                      ``reduction`` renamed ``difference_of_percentiles``). Only the
+                      ROI cases are generated from it (``-k test_roi``): the rest
+                      of what the dashboard reads is unchanged there.
+
 `residual-report` also holds `residual_report`: not a route's answer -- no route
 serves a residual run's report, by design -- but the backend's own
 `report.build_report` of the residual run, as its ROI route reads it.
@@ -113,6 +120,11 @@ SYNTHETIC = (
 OUT = Path(os.environ.get("ECON_FIXTURES_OUT", "")) if os.environ.get("ECON_FIXTURES_OUT") else None
 SHA = os.environ.get("ECON_FIXTURES_SHA", "")
 MASTER = "e7ee3ebc5a384256be1f9bf43c219639751692dd"
+#: Every backend commit a directory is generated from, and the ref it is the head of.
+BACKENDS = {
+    MASTER: "master",
+    "2be293caebfd591db558b4e42259cfb8ccdb452c": "claude/ab-the-roi-says-what-it-nets (Athena-Backend #237)",
+}
 SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "assurance" / "economics" / "snapshots" / (
     "synthetic-fx-and-cost-index-v1.json")
 CPI = "consumer prices, all items (SYNTHETIC)"
@@ -135,8 +147,8 @@ def deployment(people):
 
 
 def _backend() -> dict:
-    assert SHA == MASTER, f"generate from master {MASTER}, not {SHA!r}"
-    return {"repository": "Deltawsierra/Athena-Backend", "sha": SHA, "ref": "master"}
+    assert SHA in BACKENDS, f"generate from one of {sorted(BACKENDS)}, not {SHA!r}"
+    return {"repository": "Deltawsierra/Athena-Backend", "sha": SHA, "ref": BACKENDS[SHA]}
 
 
 def _exchange(name: str, client, path: str, *, hex_body: bool = False) -> dict:
