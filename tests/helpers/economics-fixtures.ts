@@ -3,12 +3,16 @@
  * SYNTHETIC, recorded by tests/fixtures/economics/generate.py at backend master
  * e7ee3eb (#163 and #164 merged: the v2 report with its currency bridge, the
  * receipt's signed bytes and the scenario list). A test reads its uuids, digests
- * and figures from the files, never from its own expectations.
+ * and figures from the files, never from its own expectations. AT6B holds the ROI
+ * answers of Athena-Backend #237's head 2be293c (the ROI document's v2: every
+ * figure's kind, the pairs side by side, what each figure nets, and a tail's
+ * difference of percentiles under its own name), recorded the same way.
  */
 import fs from "node:fs";
 import path from "node:path";
 
 export const MASTER = "ab-master-e7ee3eb";
+export const AT6B = "ab-at6b-2be293c";
 const ROOT = path.resolve(__dirname, "..", "fixtures", "economics");
 
 export interface Exchange {
@@ -40,7 +44,7 @@ export interface Fixture {
   cases?: Array<{ payload_hex: string; document_digest: string }>;
 }
 
-export function fixture(dir: typeof MASTER, name: string): Fixture {
+export function fixture(dir: typeof MASTER | typeof AT6B, name: string): Fixture {
   const loaded = JSON.parse(fs.readFileSync(path.join(ROOT, dir, `${name}.json`), "utf8")) as Fixture;
   if (!loaded.synthetic.startsWith("SYNTHETIC")) throw new Error(`${dir}/${name} is not marked synthetic`);
   for (const one of loaded.exchanges ?? []) {

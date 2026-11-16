@@ -1,6 +1,14 @@
 /**
  * Current against residual: the remediation option's economics as Athena-Backend's
- * ROI document serves them (mythos.economics.roi/v1, step 13, #160).
+ * ROI document serves them (mythos.economics.roi/v1, step 13, #160; and v2, #237).
+ *
+ * What each figure is (Athena-Backend #237): the kind the backend states for each
+ * figure (its `measures`, in mythos_core.measures' words), "estimate" on an
+ * estimated expense, the pairs it sets side by side with the reason they do not
+ * add, and what each figure nets (`nets`). A tail's difference of two percentiles
+ * is read from `difference_of_percentiles` (v2) or, from an older backend, from
+ * `reduction` (v1), and labelled the same either way: it is a difference of
+ * modelled percentiles, never a saving. A backend that serves no kinds is said so.
  *
  * The ONLY place a residual (counterfactual) run is shown: always beside the
  * current run it is paired with, never as the scenario's exposure. The hard
@@ -17,7 +25,7 @@
 import type { ReactNode } from "react";
 import GlassCard from "@/components/GlassCard";
 import Money from "@/components/economics/Money";
-import { Banner, NotServed, Served } from "@/components/economics/sections";
+import { Banner, Mark, NotServed, Served } from "@/components/economics/sections";
 import { LINE_LABEL, at, bannerOf, currencyOf, has, isRefused, list, obj, text, type Doc } from "@/lib/economics";
 
 function Row({ label, children, testId }: { label: string; children: ReactNode; testId?: string }) {
@@ -25,6 +33,123 @@ function Row({ label, children, testId }: { label: string; children: ReactNode; 
     <div className="grid grid-cols-[minmax(9rem,16rem)_1fr] gap-3 border-b border-border/30 py-1.5 last:border-0">
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="min-w-0 break-words" data-testid={testId}>{children}</dd>
+    </div>
+  );
+}
+
+/** The core's eight kinds of figure (mythos_core.measures), and "unknown", in words. */
+const KIND_LABEL: Record<string, string> = {
+  confirmed_loss: "confirmed loss",
+  remediation_expense: "expense",
+  revenue_deferral: "revenue deferred",
+  modeled_exposure: "modelled exposure",
+  insurance_promised: "insurance promised",
+  insurance_received: "insurance received",
+  funds_frozen: "funds frozen",
+  funds_returned: "funds returned",
+  unknown: "kind not established",
+};
+
+/** What a tail's difference is, under whichever key the backend serves it. */
+export const DIFFERENCE_LABEL = "difference of modelled percentiles, not a saving";
+
+/** What the document says each figure nets (`nets`), by its key. */
+const NETS_LABEL: Record<string, string> = {
+  expected_reduction: "Expected reduction",
+  tail_reduction: "Tail percentiles",
+  first_year_investment: "First-year investment",
+  risk_adjusted_roi: "Risk-adjusted ROI",
+  payback: "Payback",
+  period: "Period",
+  basis: "Basis",
+};
+
+type Measures = Map<string, Doc> | null;
+
+/**
+ * Each figure's measure, by where it sits ("<line>.<key>", as the document names
+ * it), or null from a backend that serves no `measures` at all.
+ */
+function measuresOf(roi: Doc): Measures {
+  if (!has(roi, "measures")) return null;
+  const found = new Map<string, Doc>();
+  for (const one of list(roi.measures)) {
+    const entry = obj(one);
+    const section = text(entry?.section);
+    const label = text(entry?.label);
+    if (entry !== null && section !== null && label !== null) found.set(`${section}.${label}`, entry);
+  }
+  return found;
+}
+
+/** A figure's kind, as the document states it; "estimate" on an estimated expense. */
+function Kind({ measures, where }: { measures: Measures; where: string }) {
+  if (measures === null) return null;
+  const entry = measures.get(where);
+  if (entry === undefined) {
+    return <span className="ml-1 text-xs text-muted-foreground" data-kind="not-served">(kind not served)</span>;
+  }
+  const kind = text(entry.kind);
+  const why = entry.measure === null ? text(entry.why) : null;
+  return (
+    <span className="ml-1 text-xs text-muted-foreground" data-kind={kind ?? "unreadable"}>
+      ({kind === null ? "kind unreadable" : KIND_LABEL[kind] ?? kind})
+      {entry.estimate === true ? <Mark kind="estimate" /> : null}
+      {why !== null ? <span className="block" data-not-a-measure="">not held as a measure: {why}</span> : null}
+    </span>
+  );
+}
+
+/** A figure's place in the document ("headline.expected_reduction"), in words. */
+function placeOf(where: unknown): string {
+  const path = text(where);
+  if (path === null) return "a figure the document does not name";
+  return path.replace(/^gross_cash\./, "gross cash: ").replace(/^headline\./, "headline: ").split("_").join(" ");
+}
+
+/** The pairs the document sets beside each other, each with the reason they do not add: never a sum. */
+function SideBySide({ roi }: { roi: Doc }) {
+  if (!has(roi, "side_by_side")) return null;
+  const pairs = list(roi.side_by_side).map(obj);
+  return (
+    <div className="mt-3 rounded-lg border border-border/40 p-3 text-sm" data-testid="roi-side-by-side">
+      <h3 className="font-semibold">Set side by side, never added</h3>
+      {pairs.length === 0 ? <p className="text-muted-foreground">The document sets no figures side by side.</p> : (
+        <ul className="mt-1 list-disc pl-5">
+          {pairs.map((pair, index) => {
+            if (pair === null) return <li key={index} data-side-by-side="unreadable">a pair the document serves that cannot be read</li>;
+            const kinds = list(pair.kinds).map((one) => text(one));
+            const reason = text(pair.do_not_add);
+            return (
+              <li key={index} data-side-by-side="">
+                {placeOf(pair.left)} ({KIND_LABEL[kinds[0] ?? ""] ?? kinds[0] ?? "kind not served"}) beside{" "}
+                {placeOf(pair.right)} ({KIND_LABEL[kinds[1] ?? ""] ?? kinds[1] ?? "kind not served"}):{" "}
+                <span data-do-not-add="">{reason !== null ? `they do not add (${reason})` : "no reason they do not add is served; nothing here adds them"}</span>
+                {text(pair.statement) ? <span className="block text-xs text-muted-foreground">{text(pair.statement)}</span> : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** What the document says each figure nets, or that this backend does not say. */
+function Nets({ roi }: { roi: Doc }) {
+  const nets = obj(roi.nets);
+  return (
+    <div className="mt-3 rounded-lg border border-border/40 p-3 text-sm" data-testid="roi-nets">
+      <h3 className="font-semibold">What each figure nets</h3>
+      {!has(roi, "nets") ? <NotServed why="this backend version does not say what each figure nets" /> : nets === null ? (
+        <NotServed why="the document's statement of what each figure nets cannot be read" />
+      ) : (
+        <dl>
+          {Object.entries(nets).map(([key, value]) => (
+            <Row key={key} label={NETS_LABEL[key] ?? key}><Served value={value} /></Row>
+          ))}
+        </dl>
+      )}
     </div>
   );
 }
@@ -81,8 +206,10 @@ function Side({ label, side }: { label: string; side: unknown }) {
 }
 
 /** One line's economics, as served: the exposures, the reduction, the ROI, the payback, the tail. */
-function EconomicsRows({ figures, code, minorUnit, line }: { figures: Doc; code: string; minorUnit: number | null; line: string }) {
+function EconomicsRows({ figures, code, minorUnit, line, measures }: { figures: Doc; code: string; minorUnit: number | null; line: string; measures: Measures }) {
   const money = (value: unknown) => <Money value={value} currency={code} minorUnit={minorUnit} />;
+  const section = line === "headline" ? "headline" : "gross_cash";
+  const kind = (key: string) => <Kind measures={measures} where={`${section}.${key}`} />;
   const ratio = (part: unknown, unit?: string) => {
     const entry = obj(part);
     if (entry === null) return <NotServed />;
@@ -97,22 +224,27 @@ function EconomicsRows({ figures, code, minorUnit, line }: { figures: Doc; code:
   const tail = (key: string) => {
     const part = obj(at(figures, "tail_reduction", key));
     if (part === null) return <NotServed />;
+    // #237 serves it as difference_of_percentiles; an older backend as reduction. The same figure either way.
+    const difference = has(part, "difference_of_percentiles") ? part.difference_of_percentiles : part.reduction;
     return (
       <span>
-        current {money(part.current)}, residual {money(part.residual)}, reduction {part.reduction === null ? <NotServed why={text(part.not_reported) ?? undefined} /> : money(part.reduction)}
+        current {money(part.current)}{kind(`tail_reduction.${key}.current`)}, residual {money(part.residual)}
+        {kind(`tail_reduction.${key}.residual`)}, <span data-tail-difference="">{DIFFERENCE_LABEL}</span>{" "}
+        {difference === null ? <NotServed why={text(part.not_reported) ?? undefined} /> : money(difference)}
+        {kind(`tail_reduction.${key}.difference_of_percentiles`)}
       </span>
     );
   };
   const id = (name: string) => (line === "headline" ? `roi-${name}` : `roi-${line}-${name}`);
   return (
     <>
-      <Row label="Current expected annual exposure">{money(figures.current_expected_annual_exposure)}</Row>
-      <Row label="Residual expected annual exposure">{money(figures.residual_expected_annual_exposure)}</Row>
-      <Row label="Expected reduction" testId={id("reduction")}>{money(figures.expected_reduction)}</Row>
+      <Row label="Current expected annual exposure">{money(figures.current_expected_annual_exposure)}{kind("current_expected_annual_exposure")}</Row>
+      <Row label="Residual expected annual exposure">{money(figures.residual_expected_annual_exposure)}{kind("residual_expected_annual_exposure")}</Row>
+      <Row label="Expected reduction" testId={id("reduction")}>{money(figures.expected_reduction)}{kind("expected_reduction")}</Row>
       <Row label="Risk-adjusted ROI" testId={id("ratio")}>{ratio(figures.risk_adjusted_roi)}</Row>
       <Row label="Payback" testId={id("payback")}>{ratio(figures.payback, text(at(figures, "payback", "unit")) ?? undefined)}</Row>
-      <Row label="Tail reduction, P90">{tail("p90")}</Row>
-      <Row label="Tail reduction, P95">{tail("p95")}</Row>
+      <Row label="Tail, P90" testId={id("tail-p90")}>{tail("p90")}</Row>
+      <Row label="Tail, P95" testId={id("tail-p95")}>{tail("p95")}</Row>
       <Row label="Tail basis"><Served value={at(figures, "tail_reduction", "basis")} /></Row>
     </>
   );
@@ -127,13 +259,20 @@ function Figures({ roi }: { roi: Doc }) {
   }
   const investment = obj(figures.first_year_investment) ?? {};
   const money = (value: unknown) => <Money value={value} currency={code} minorUnit={minorUnit} />;
+  const measures = measuresOf(roi);
   return (
     <dl data-testid="roi-figures">
       <Row label="First-year investment" testId="roi-investment">
         base {money(investment.base)} <span className="text-muted-foreground">within low</span> {money(investment.low)}{" "}
         <span className="text-muted-foreground">to high</span> {money(investment.high)}
+        <Kind measures={measures} where="headline.first_year_investment.base" />
       </Row>
-      <EconomicsRows figures={figures} code={code} minorUnit={minorUnit} line="headline" />
+      <EconomicsRows figures={figures} code={code} minorUnit={minorUnit} line="headline" measures={measures} />
+      {measures === null ? (
+        <p className="pt-1 text-xs text-muted-foreground" data-testid="roi-kinds-not-served">
+          The kind of each figure is not served by this backend version.
+        </p>
+      ) : null}
     </dl>
   );
 }
@@ -157,7 +296,7 @@ function GrossBeside({ roi }: { roi: Doc }) {
         {gross === null ? (
           <p data-served-field="figures.gross_cash">The headline line is gross cash itself: there is no second line.</p>
         ) : (
-          <dl><EconomicsRows figures={gross} code={code} minorUnit={minorUnit} line="gross" /></dl>
+          <dl><EconomicsRows figures={gross} code={code} minorUnit={minorUnit} line="gross" measures={measuresOf(roi)} /></dl>
         )}
         {text(figures.gross_cash_statement) ? <p className="text-xs text-muted-foreground">{text(figures.gross_cash_statement)}</p> : null}
       </>
@@ -284,6 +423,8 @@ export default function CurrentAgainstResidual(
         <Figures roi={roi} />
       </div>
       <GrossBeside roi={roi} />
+      <SideBySide roi={roi} />
+      <Nets roi={roi} />
       <dl className="mt-3 text-sm">
         <Row label="Utility retained"><Served value={utility.status} /> <span className="text-xs text-muted-foreground">{text(utility.reason) ?? ""}</span></Row>
         <Row label="Confidence">
