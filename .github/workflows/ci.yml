@@ -1,9 +1,25 @@
 name: CI
 
+# Each commit is tested once. A pull request's commits run on the `pull_request` event
+# (the merge of the branch into its base, which is what would be merged); a push runs
+# only on `main`, where the merge itself is tested again. `branches: ["**"]` here ran
+# the whole matrix twice for every commit pushed to a branch with an open pull request,
+# once for the push and once for the pull request, the Windows job with it. This
+# repository is public, so the cost was queue time: every run waits its turn among the
+# account's concurrent jobs. secret-scan.yml already has this shape, as Athena-Engine's
+# workflows do.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# Cancel a superseded run when a newer commit is pushed to the same branch: on a
+# pull request only the latest commit's result matters, so the in-flight matrix
+# (the Linux job and the Windows job) is dropped rather than run to
+# completion. `main` is left uncancellable so every merged commit is still tested.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build-and-test:
