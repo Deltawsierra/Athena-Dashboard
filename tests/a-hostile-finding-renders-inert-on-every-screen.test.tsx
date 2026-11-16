@@ -23,8 +23,10 @@
  * the four authority screens (approvals, chains, tool contracts, release gate) --
  * and, with the same planted strings, a recovery record (its incident, every
  * step, its coverage), that record's scope (an item's kind and reference, a
- * revision's reason, who declared or removed what), a scan by its name in the
- * Tests list, and a scan from the record on the Engagements page.
+ * revision's reason, who declared or removed what), the declaration of that scope
+ * (the names its pickers offer: an asset's, a workflow's, a piece of evidence's), a
+ * scan by its name in the Tests list, and a scan from the record on the Engagements
+ * page.
  *
  * The finding's own URL takes three forms: an outside http:// URL, a javascript:
  * URL and a data: URL.
@@ -60,7 +62,8 @@ import PentestScan from "@/pages/PentestScan";
 import { queryClient } from "@/lib/queryClient";
 import {
   ASSURANCE_FINDING, incidentPackDownload, mountAssurance, mountFindings, mountOverview, mountRetestPanel, mountRisks, mountScan,
-  mountEngagements, mountRecoveryRecords, mountRecoveryScope, mountScanList, recordingFetch, renderAuthorityScreens, requests, standInLayoutApis,
+  mountEngagements, mountRecoveryRecords, mountRecoveryScope, mountScanList, mountScopeDeclaration, recordingFetch, renderAuthorityScreens, requests,
+  standInLayoutApis,
   type Planted,
 } from "./helpers/finding-screens";
 
@@ -310,6 +313,7 @@ const SCREENS: Array<{ name: string; url: "copy" | "text" | null; mount: (plante
   { name: "the authority screens (approvals, chains, tool contracts, release gate)", url: null, mount: renderAuthorityScreens },
   { name: "a recovery record (its incident, every step, its coverage)", url: null, mount: mountRecoveryRecords },
   { name: "a recovery record's scope (its revisions, what keeps a step back, its removed items)", url: null, mount: mountRecoveryScope },
+  { name: "the declaration of a recovery record's scope (its assets, workflows and evidence, its review, its answer)", url: null, mount: mountScopeDeclaration },
   { name: "the Tests list, a scan by its name", url: null, mount: mountScanList },
   { name: "the Engagements page, a scan from the record by its target", url: "text", mount: mountEngagements },
 ];

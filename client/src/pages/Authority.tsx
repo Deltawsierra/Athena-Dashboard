@@ -18,8 +18,10 @@
  * (?deployment=<uuid>). Every read goes there as you, through this console's
  * server (server/assurance.ts), exactly as the Assurance page's do: the backend's
  * tenant scoping and role checks apply, and a person with no backend sign-in signs
- * in from the banner here. Nothing on these screens writes, starts or stops
- * anything; the live poll and every Stop are elsewhere and untouched.
+ * in from the banner here. Nothing on these screens starts or stops anything, and the
+ * one write is an administrator's declaration of an incident's next scope revision on
+ * the recovery screen (components/authority/DeclareScope.tsx), which no Stop waits on;
+ * the live poll and every Stop are elsewhere and untouched.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
@@ -183,7 +185,7 @@ export default function Authority({ params }: { params?: { screen?: string } }) 
       <PageHeader
         title={title}
         icon={<Waypoints className="h-8 w-8" />}
-        description="Approvals, the authority behind each effect, the contracts tools are approved under, the release decision, and each incident's recovery record: read-only, as Athena-Backend records them."
+        description="Approvals, the authority behind each effect, the contracts tools are approved under, the release decision, and each incident's recovery record, as Athena-Backend records them. An administrator may declare an incident's scope."
         actions={<ScreenTabs current={screen} deployment={deployment} />}
       />
       <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground" data-testid="text-authority-source">

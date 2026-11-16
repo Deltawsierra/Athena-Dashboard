@@ -14,7 +14,8 @@
  * Beside the finding's own screens, the same planted strings reach the screens
  * that show a recovery record (/authority/recovery), that record's scope (an
  * item's kind and reference, a revision's reason, who declared or removed what),
- * and a scan by its name (the Tests list's summary, the Engagements page's scans
+ * the declaration of its scope (an asset's, a workflow's and a piece of evidence's
+ * names as the pickers offer them), and a scan by its name (the Tests list's summary, the Engagements page's scans
  * from the record).
  *
  * The planted finding reaches each screen in the fields that screen shows:
@@ -479,6 +480,88 @@ export async function mountRecoveryScope(p: Planted) {
   const open = card.querySelector("[data-testid='incident-scope-revisions-toggle']");
   if (open) await act(async () => { fireEvent.click(open); });
   await waitFor(() => { if (card.querySelectorAll("[data-testid='scope-revision']").length !== 2) throw new Error("the scope's revisions are not drawn yet"); }, { timeout: 10_000 });
+  return mounted;
+}
+
+/* ---- declaring a recovery record's scope (/authority/recovery): its assets, workflows and evidence */
+
+/**
+ * An administrator's declaration form on a recovery record's incident (DASH-DECLARE), its
+ * choices shaped by the target: an asset's name, kind and identifier, a workflow's name,
+ * a piece of evidence's classification, summary and source, and an item of the current
+ * scope whose kind and reference are both the target's. The form is opened, an item and
+ * the evidence picked, a reason typed, the review drawn, and the declaration sent; the
+ * refusal it gets carries the target's text where its message and code would be.
+ */
+export async function mountScopeDeclaration(p: Planted) {
+  const ASSET = "a0a0a0a0-0000-4000-8000-0000000000b1";
+  const EVIDENCE = "e0e0e0e0-0000-4000-8000-0000000000b2";
+  const step = {
+    ref: "f-hostile-declare-step-1", version: 1, state: "repair_tested", reopens: null,
+    conditions: [{ condition: "incident_recorded", witness: { kind: "finding", ref: "f-hostile-declare" } }],
+    gaps: [], restrictions: [], release: "FAIL", residualUncertainty: [], coverage: null,
+    acceptedBy: null, acceptedUntil: null, recordedBy: "analyst-k", recordedAt: NOW,
+    scope: { revision: 1, gaps: [], added: [], removed: [], recorded: { state: "repair_tested", gaps: [], release: "FAIL" } },
+  };
+  const page: RecoveryRecords = {
+    deployment: "d1",
+    incidents: [{
+      finding: "f-hostile-declare", title: "An incident whose scope is declared from choices the target shaped", severity: "high",
+      current: { version: 1, state: "repair_tested", release: "FAIL" }, steps: [step], scope: { revision: 1, removed: [] },
+    }],
+    incidentCount: 1, returned: 1, truncated: false, pageSize: 50, offset: 0,
+  };
+  const choices = {
+    deployment: "d1", finding: "f-hostile-declare",
+    assets: [{ uuid: ASSET, name: `${p.text}${p.long}`, kind: p.text, kindLabel: p.text, identifier: p.text }],
+    assetsElsewhere: 0,
+    workflows: [{ slug: "refunds", name: p.text }],
+    workflowsWhole: true,
+    evidence: [{ uuid: EVIDENCE, classification: p.text, classificationLabel: p.text, summary: p.text, source: p.text }],
+    current: { revision: 1, items: [{ kind: p.text, ref: p.text, assetKind: p.text }, { kind: "workflow", ref: "refunds", assetKind: null }] },
+  };
+  vi.stubGlobal("fetch", recordingFetch((url, init) => {
+    if (url.endsWith("/api/assurance/status")) return { configured: true, reachable: true, authorized: true, url: null, detail: "" };
+    if (url.endsWith("/api/assurance/deployments")) return [{ uuid: "d1", name: "checkout", environment: "production", decision: null, decisionLabel: "" }];
+    if (url.endsWith("/api/auth/check")) return { authenticated: true, user: { id: "u-1", username: "admin", role: "admin" } };
+    if (url.includes("/api/assurance/deployments/d1/recovery-records")) return page;
+    if (url.includes("/api/assurance/findings/f-hostile-declare/scope-choices")) return choices;
+    if (url.includes("/api/assurance/findings/f-hostile-declare/declare-scope") && init?.method === "POST") {
+      return json({ error: p.text, code: p.text, backendStatus: 400 }, 400);
+    }
+    return {};
+  }));
+  const location = memoryLocation({ path: "/authority/recovery?deployment=d1", record: true });
+  const client = new QueryClient({
+    defaultOptions: { ...appQueryClient.getDefaultOptions(), queries: { ...appQueryClient.getDefaultOptions().queries, retry: false, queryFn: getQueryFn({ on401: "throw" }) } },
+  });
+  const mounted = render(
+    <QueryClientProvider client={client}>
+      <Router hook={location.hook} searchHook={location.searchHook}>
+        <Authority params={{ screen: "recovery" }} />
+      </Router>
+    </QueryClientProvider>,
+  );
+  const card = await screen.findByTestId("incident", {}, { timeout: 10_000 });
+  const open = await waitFor(() => {
+    const found = card.querySelector("[data-testid='incident-scope-declare-toggle']");
+    if (!found) throw new Error("the declaration's control is not drawn yet");
+    return found;
+  }, { timeout: 10_000 });
+  await act(async () => { fireEvent.click(open); });
+  const form = await waitFor(() => {
+    const found = card.querySelector("[data-testid='declare-scope-form']");
+    if (!found) throw new Error("the declaration form is not drawn yet");
+    return found as HTMLElement;
+  }, { timeout: 10_000 });
+  await act(async () => {
+    fireEvent.click(form.querySelector(`[data-item-ref='${ASSET}']`)!);
+    fireEvent.click(form.querySelector(`[data-evidence-ref='${EVIDENCE}']`)!);
+    fireEvent.change(form.querySelector("[data-testid='declare-reason']")!, { target: { value: "what the scan reached" } });
+  });
+  await act(async () => { fireEvent.click(form.querySelector("[data-testid='declare-scope-review']")!); });
+  await act(async () => { fireEvent.click(form.querySelector("[data-testid='declare-scope-send']")!); });
+  await waitFor(() => { if (!card.querySelector("[data-testid='declare-scope-said']")) throw new Error("the declaration's answer is not said yet"); }, { timeout: 10_000 });
   return mounted;
 }
 

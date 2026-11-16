@@ -37,6 +37,7 @@ import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
 import { UNREADABLE_ROWS_HEADER, unreadableHeaderValue, type UnreadableRows } from "@shared/unreadable-rows";
 import { rowEngaged } from "@shared/kill-switch-flag";
+import { DECLARABLE_KINDS, EVIDENCE_MOST, ITEMS_MOST, REASON_MOST } from "@shared/scope-declaration";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
 import type { RetestFiling } from "./storage";
@@ -7714,8 +7715,9 @@ export function registerRoutes(app: Express): void {
   // declared it. A read, as the person, behind requireAuth and under the read deadline
   // like every GET here, so it holds a connection of the browser for no longer than any
   // other read and is on no stop's path. The backend's route also takes a POST (the next
-  // revision): it is not relayed. A finding the person cannot read, and a backend
-  // without the route, are both its 404, passed on as not_found.
+  // revision): it is not relayed on this path, which stays a read; an administrator
+  // declares a revision through the route of its own below. A finding the person cannot
+  // read, and a backend without the route, are both its 404, passed on as not_found.
   app.get("/api/assurance/findings/:uuid/scope-revisions", asyncHandler(async (req, res) => {
     try {
       res.json(await assurance.findingScope(req.params.uuid));
@@ -7723,6 +7725,71 @@ export function registerRoutes(app: Express): void {
       if (assuranceUnavailable(res, cause)) return;
       throw cause;
     }
+  }));
+
+  // What an incident's next scope revision can be declared from (DASH-DECLARE): the
+  // deployment's own assets and approved workflows, the incident's own evidence and the
+  // current revision, read as the person in one answer, so the form holds one of the
+  // browser's connections. A read like every GET here: under the read deadline, on no
+  // stop's path.
+  app.get("/api/assurance/findings/:uuid/scope-choices", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.scopeChoices(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
+  // Declare the next revision of an incident's scope (SPINE SP-3; athena-backend
+  // assurance/views.py scope_revisions): admin-only here and on the backend, which
+  // decides, and recorded there as the signed-in person. The body is exactly the
+  // backend's three parts, each item of a kind it takes; a body of any other shape is
+  // refused here and nothing is sent. Never a stop, and never under a read's deadline:
+  // the backend call is bounded by its own timeout.
+  //
+  // A refusal is passed on with the backend's status and its code alone -- never its
+  // detail, so nothing a person typed comes back from here. A 401 is never passed on (it
+  // would sign the browser out of this console, away from the kill switch). Sent with
+  // no answer, or answered with neither a recording nor a refusal, the outcome is not
+  // known: 503 `outcome_unknown`, and the screen reads the scope again.
+  const declareScopeSchema = z.object({
+    items: z.array(z.object({ kind: z.enum(DECLARABLE_KINDS), ref: z.string().min(1).max(200) }).strict()).max(ITEMS_MOST),
+    reason: z.string().max(4 * REASON_MOST),
+    evidence: z.array(z.string().min(1).max(64)).max(EVIDENCE_MOST),
+  }).strict();
+
+  app.post("/api/assurance/findings/:uuid/declare-scope", requireAdmin, asyncHandler(async (req, res) => {
+    const data = declareScopeSchema.parse(req.body ?? {});
+    let result;
+    try {
+      result = await assurance.declareScope(req.params.uuid, data);
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+    if (result.ok) {
+      await storage.createActivityLog({
+        action: "scope_declared",
+        entityType: "assurance_finding",
+        entityId: req.params.uuid,
+        details: { items: data.items.length, evidence: data.evidence.length },
+        ...actor(req),
+      });
+      return void res.status(201).json({ recorded: true });
+    }
+    if (result.refused) {
+      return void res.status(result.status).json({
+        error: `Athena-Backend refused this scope revision (${result.code ?? `it answered ${result.status} and named no code`})`,
+        code: result.code,
+        backendStatus: result.status,
+      });
+    }
+    res.status(503).json({
+      error: `whether Athena-Backend recorded this scope revision is not known (${result.status === null ? "no answer came" : `it answered ${result.status}`}): read the scope again before declaring it again`,
+      code: "outcome_unknown",
+      backendStatus: result.status,
+    });
   }));
 
   // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change

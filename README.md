@@ -899,7 +899,7 @@ deployments it lists for you (`?deployment=<uuid>`):
 | Authority chains: each recorded chain, every hop with its verdict and why, unproven and broken hops named, the effects the approvals cover, the approval versions in force | `/authority/chains` | `GET /api/assurance/deployments/<uuid>/authority-chains/` |
 | Tool contracts: each tool's contract as its registration declares it (schemas, declared effect class, annotations, permissions, server) and each approval's binding to it; each registration's contract history and every binding to it, live or released | `/authority/contracts` | `GET /api/assurance/assets/?deployment=<uuid>`, the approved-workflows read, and `tool-contracts/` and `tool-contract-bindings/` (`?kind=&identifier=`) |
 | Release gate: the deployment's decision, its revision and policy, and every input the backend combines into it (findings, claims, coverage, accepted risk, workflow chains) with what holds it; how the decision changed, revision by revision | `/authority/release` | `GET /api/assurance/deployments/<uuid>/decision-support/`, and `decision-history/` |
-| Recovery records (SPINE SP-1): each incident -- a finding with a recovery record -- with its current step and every step, oldest first: the S1 state, every condition with its witness, every gap in words, every restriction, the coverage, the release word, the residual uncertainty with each source, and the owner's acceptance as recorded; one incident alone with `&finding=<uuid>`. And the incident's scope (SPINE SP-3) where the backend reports it: the revision it is at, the revision each step was taken under, what about the scope keeps a step back, every removed item with who removed it and why, and, opened on demand, every revision newest first | `/authority/recovery` | `GET /api/assurance/deployments/<uuid>/recovery-records/` (`?offset=`, 50 incidents a page), `GET /api/assurance/findings/<uuid>/recovery-record/`, and, on demand, `GET /api/assurance/findings/<uuid>/scope-revisions/` |
+| Recovery records (SPINE SP-1): each incident -- a finding with a recovery record -- with its current step and every step, oldest first: the S1 state, every condition with its witness, every gap in words, every restriction, the coverage, the release word, the residual uncertainty with each source, and the owner's acceptance as recorded; one incident alone with `&finding=<uuid>`. And the incident's scope (SPINE SP-3) where the backend reports it: the revision it is at, the revision each step was taken under, what about the scope keeps a step back, every removed item with who removed it and why, and, opened on demand, every revision newest first. For an administrator, the declaration of an incident's next scope revision | `/authority/recovery` | `GET /api/assurance/deployments/<uuid>/recovery-records/` (`?offset=`, 50 incidents a page), `GET /api/assurance/findings/<uuid>/recovery-record/`, and, on demand, `GET /api/assurance/findings/<uuid>/scope-revisions/`; to declare: `GET /api/assurance/findings/<uuid>/`, `GET /api/assurance/assets/?deployment=<uuid>`, `GET /api/assurance/deployments/<uuid>/approved-workflows/` and `POST /api/assurance/findings/<uuid>/scope-revisions/` |
 
 Every read goes through this server as the signed-in person, like the Assurance
 page's. The backend's approved-workflows and authority-chains routes also take a
@@ -1123,9 +1123,35 @@ The scope read is off the stop path. Nothing waits on it: the record is drawn wi
 it starts only when a person opens it, one incident's scope is open at a time (opening
 another closes the first and cancels its read), a closed or left view cancels it, and
 this server cuts it at the read deadline like every other read. So the scope reads of a
-screen never keep more than one of the browser's six connections. The backend's `POST`
-on the scope route (the next revision) is not relayed: declaring a scope from this
-console is not built.
+screen never keep more than one of the browser's six connections. The scope route stays a
+read here: the backend's `POST` on it is relayed only by the declaration below, on a path
+of its own.
+
+**Declaring an incident's next scope revision (DASH-DECLARE).** An administrator of this
+console declares it from the incident's card (`client/src/components/authority/DeclareScope.tsx`,
+`shared/scope-declaration.ts`); Athena-Backend decides (`_require_admin`), and its 403 is
+said in words. Anyone else is shown nothing. This console's two routes:
+`GET /api/assurance/findings/:uuid/scope-choices` reads, as the person and in one answer,
+the deployment's own assets and approved workflows, the incident's own evidence and the
+current revision; `POST /api/assurance/findings/:uuid/declare-scope` (`requireAdmin`)
+relays exactly `{items, reason, evidence}`.
+
+- **Picked, never typed:** items from the deployment's assets (by uuid) and approved
+  workflows (by slug), the two kinds the backend takes; evidence from the incident's own.
+  The form starts from the current revision's items.
+- **The reason** is one printable line of at most 500 characters, checked before posting
+  as the backend checks it (Python's `isprintable`, counted in code points).
+- **Before posting** the form says in words what the revision adds and removes against
+  the current one; one that changes nothing is not posted, and nothing is offered while a
+  list could not be read whole.
+- **A refusal** is said from its code alone, never with the backend's detail or anything
+  typed, and nothing else on the screen changes. After a 201, and after an answer that
+  leaves it unknown whether one was recorded (`outcome_unknown`), the scope and the
+  recovery record are read again: nothing is drawn from the write's answer.
+- **Off the stop path:** the choices are read only once the form is opened, one form is
+  open at a time and its read is cancelled when it is closed or left, one declaration is
+  in flight in the console at a time, and nothing is modal. The read is under the read
+  deadline; the post is bounded by the control-plane call's own timeout.
 
 Tests: `tests/the-authority-screens-read-the-backend-as-the-person-and-write-nothing.test.ts`,
 `tests/the-authority-screens-show-what-the-backend-serves.test.tsx`,
@@ -1136,6 +1162,10 @@ Tests: `tests/the-authority-screens-read-the-backend-as-the-person-and-write-not
 `tests/the-recovery-view-shows-an-incidents-scope-its-revisions-and-what-keeps-a-recovery-back.test.tsx`,
 `tests/a-stop-goes-while-a-scope-read-hangs-fails-or-answers-nonsense.test.ts`,
 `tests/a-scope-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx`,
+`tests/an-administrator-declares-an-incidents-scope-and-the-backend-decides.test.ts`,
+`tests/an-administrator-declares-an-incidents-scope-from-the-recovery-view.test.tsx`,
+`tests/a-stop-goes-while-a-scope-declaration-hangs.test.ts`,
+`tests/a-scope-declaration-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx`,
 `tests/a-row-the-backend-served-that-cannot-be-read-is-counted-never-dropped.test.ts` and
 `tests/a-row-that-cannot-be-read-is-said-on-every-authority-screen.test.tsx`.
 
