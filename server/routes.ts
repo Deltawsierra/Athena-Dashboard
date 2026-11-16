@@ -7709,6 +7709,22 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // One incident's scope, every revision (SPINE SP-3; athena-backend
+  // assurance/incident_scope.py): what each holds, added and removed, why, and who
+  // declared it. A read, as the person, behind requireAuth and under the read deadline
+  // like every GET here, so it holds a connection of the browser for no longer than any
+  // other read and is on no stop's path. The backend's route also takes a POST (the next
+  // revision): it is not relayed. A finding the person cannot read, and a backend
+  // without the route, are both its 404, passed on as not_found.
+  app.get("/api/assurance/findings/:uuid/scope-revisions", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.findingScope(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // A deployment's minimal revalidation plan (SPINE Stage 1D): what a change
   // invalidated and must re-run, and everything that stays current and need not
   // be re-run. A read, behind requireAuth like the rest of the assurance reads.

@@ -11,7 +11,12 @@
  * shown as served), every condition with its witness, every gap -- called a gap, and in
  * words -- every restriction, the coverage it rests on, the release word it yields, the
  * residual uncertainty with each source, and the owner's acceptance exactly as recorded:
- * who, until when, and that it has lapsed once its end has passed.
+ * who, until when, and that it has lapsed once its end has passed. And with the scope
+ * it was taken under (SPINE SP-3; ./IncidentScope.tsx): the incident's current scope
+ * revision, the revision each step was taken under, each thing about the scope that
+ * keeps a step back, and every item that was removed with who removed it and why. A
+ * step the scope keeps back is never drawn as standing: its state and an allowed release
+ * are marked, and the later revision and each item it added are named.
  *
  * NEVER A SINGLE "CLEAN" BADGE (H p.18). No incident and no deployment gets a summary
  * verdict: an incident's current state is one step's, beside its conditions, gaps and
@@ -38,8 +43,12 @@ import type {
   ResidualUncertainty,
 } from "@shared/recovery-record";
 import { ApiError } from "@/lib/queryClient";
+import type { IncidentScope } from "@shared/incident-scope";
 import { Absent, Chip, Count, Fact, NotInHand, Section, When, served, type Tone } from "./parts";
 import { HistoryPages, OnDemand, answeredFor, nextOffset, type PageSlot } from "./history";
+import {
+  IncidentScopeSummary, OneScopeAtATime, ScopeStandingChip, StepScopeFacts, scopeGapInWords, scopeStanding,
+} from "./IncidentScope";
 
 // ---- the words: S1's state names as served, and the release words and gaps in words ----
 
@@ -54,9 +63,17 @@ const STATE_TONES: Record<string, Tone> = {
   recovery_incomplete: "warning",
 };
 
-/** A step's S1 recovery state, by its own name. One this console does not know is shown as served, and read as none. */
-export function RecoveryStateChip({ state }: { state: string | null }) {
+/** S1's two states that say a recovery was reached. Each stands only for the scope revision its step was taken under. */
+const REACHED = new Set(["restored_with_restrictions", "recovery_accepted"]);
+
+/**
+ * A step's S1 recovery state, by its own name. One this console does not know is shown as served, and read as none.
+ * `notStanding`: the state is served beside something about the scope that keeps the step back (or beside a scope
+ * standing that is not known), so it is marked as not standing and never drawn as the plain state.
+ */
+export function RecoveryStateChip({ state, notStanding = false }: { state: string | null; notStanding?: boolean }) {
   if (state === null) return <Chip tone="neutral" testId="step-state">no state served</Chip>;
+  if (notStanding) return <Chip tone="caution" testId="step-state">{`${state}: not standing under the scope`}</Chip>;
   const tone = STATE_TONES[state];
   if (!tone) return <Chip tone="neutral" testId="step-state">{`state not recognised here: ${state}`}</Chip>;
   return (
@@ -77,6 +94,12 @@ const RELEASES: Record<string, { label: string; tone: Tone }> = {
   NOT_RUN: { label: "Release: not run", tone: "neutral" },
 };
 
+/** A release word in the words this screen uses for it: the same for a step's release and for the one its row recorded. */
+export function releaseInWords(release: string | null): string {
+  if (release === null) return "no release word served";
+  return Object.prototype.hasOwnProperty.call(RELEASES, release) ? RELEASES[release].label : `release word not recognised here: ${release}`;
+}
+
 export function ReleaseChip({ release }: { release: string | null }) {
   const known = release === null ? undefined : RELEASES[release];
   return (
@@ -92,9 +115,12 @@ export function ReleaseChip({ release }: { release: string | null }) {
  * A gap as the backend names it, in words: a coverage gap (`coverage:<kind>:<subject>`,
  * `coverage:missing:<source>`, `coverage:unknown_inventory:<source>`,
  * `coverage:no_required_source`), an effect that was not applied
- * (`effect_not_applied:receipt:<id>`), or a gap the record states in its own words.
+ * (`effect_not_applied:receipt:<id>`), a scope gap (`scope:not_declared`, `scope:unreadable`,
+ * `scope:revision:<n>:added:<kind>:<ref>`; ./IncidentScope.tsx), or a gap the record states in its own words.
  */
 export function gapInWords(gap: string): string {
+  const scope = scopeGapInWords(gap);
+  if (scope !== null) return scope;
   const [head, kind, ...rest] = gap.split(":");
   const tail = rest.join(":");
   if (head === "coverage") {
@@ -112,7 +138,7 @@ export function gapInWords(gap: string): string {
 /** A residual uncertainty's statement in words: a coverage gap, an effect nobody can say took, or the record's own words. */
 export function uncertaintyInWords(statement: string): string {
   if (statement === "effect_unknown") return "Whether the effect took is not known";
-  if (statement.startsWith("coverage:")) return gapInWords(statement);
+  if (statement.startsWith("coverage:") || statement.startsWith("scope:")) return gapInWords(statement);
   return statement;
 }
 
@@ -324,17 +350,39 @@ function Heading({ children }: { children: string }) {
   return <p className="pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{children}</p>;
 }
 
-/** One step: its state with the acceptance beside it, what supports it, and what it does not settle. */
-export function StepBody({ step, now }: { step: RecoveryStep; now: number }) {
+/**
+ * One step: its state with the acceptance beside it, what supports it, and what it does not settle.
+ * `incidentScope` is the incident's own scope block, for the revision the scope is at now.
+ *
+ * Never a look of standing on a step the scope keeps back. Athena-Backend already serves such a step with the
+ * state it was at before and an incomplete release. Should a step still be served as reached, or with an
+ * allowed release, beside a scope gap -- or beside scope gaps that were not served or could not be read whole
+ * -- it is not drawn so here: the state is marked as not standing and the release as not read as allowed.
+ */
+export function StepBody({ step, now, incidentScope }: { step: RecoveryStep; now: number; incidentScope?: IncidentScope }) {
+  const standing = scopeStanding(step);
+  const against = standing === "kept_back" || standing === "not_known";
   return (
     <div className="space-y-2" data-recovery-step={step.version ?? ""} data-step-state={step.state ?? ""}>
       <div className="flex flex-wrap items-center gap-2 text-[12px]">
         <span className="font-mono text-muted-foreground">
           {step.version === null ? "step (no version served)" : `step ${step.version}`}
         </span>
-        <RecoveryStateChip state={step.state} />
-        <ReleaseChip release={step.release} />
+        <RecoveryStateChip state={step.state} notStanding={against && step.state !== null && REACHED.has(step.state)} />
+        {against && step.release === "PASS" ? (
+          <span data-testid="step-release" data-release={step.release} data-release-standing="false">
+            <Chip tone="caution">
+              {standing === "kept_back"
+                ? "Release: not read as allowed while the scope keeps this step back"
+                : "Release: not read as allowed while what the scope says of this step is not known"}
+            </Chip>
+          </span>
+        ) : (
+          <ReleaseChip release={step.release} />
+        )}
+        <ScopeStandingChip step={step} />
       </div>
+      <StepScopeFacts step={step} incident={incidentScope} releaseInWords={releaseInWords} />
       <AcceptanceLine step={step} now={now} />
       {step.reopens && (
         <Fact label="Reopens step">
@@ -390,16 +438,17 @@ export function IncidentCard({ incident, deployment, now, alone = false }: {
         </span>
         <code className="break-all font-mono text-[11px] text-muted-foreground">{incident.finding ?? "no finding id served"}</code>
       </div>
+      <IncidentScopeSummary incident={incident} deployment={deployment} />
       <div className="space-y-2" data-testid="incident-current">
         <p className="text-[12px] text-muted-foreground">Current step</p>
-        {step ? <StepBody step={step} now={now} /> : <Absent testId="incident-no-current">{why}</Absent>}
+        {step ? <StepBody step={step} now={now} incidentScope={incident.scope} /> : <Absent testId="incident-no-current">{why}</Absent>}
       </div>
       <OnDemand label={`the ${count} recorded step${count === 1 ? "" : "s"}, oldest first`} testId="incident-steps">
         {() => (
           <ol className="space-y-3">
             {incident.steps.map((one, index) => (
               <li key={one.ref ?? index} className="rounded-md border border-border/40 p-2" data-testid="history-step">
-                <StepBody step={one} now={now} />
+                <StepBody step={one} now={now} incidentScope={incident.scope} />
               </li>
             ))}
           </ol>
@@ -554,22 +603,27 @@ export default function RecoveryRecordsScreen({ deployment, finding }: { deploym
           with its current step and every step before it, oldest first: its state, the conditions that support it and the
           witness of each, every gap and restriction, the coverage it rests on, the residual uncertainty with its sources,
           and the owner&apos;s acceptance as recorded. A state here is one step&apos;s, beside what supports it: no
-          incident and no deployment is summed up in one word.
+          incident and no deployment is summed up in one word. Each incident also shows its scope -- what is believed
+          affected -- where Athena-Backend reports it: the revision it is at, the revision each step was taken under,
+          what about the scope keeps a step back, and every item removed with who removed it and why.
         </p>
-        {finding ? (
-          <>
-            <FindingRecovery key={`${deployment}:${finding}`} deployment={deployment} finding={finding} />
-            <Link
-              href={`/authority/recovery?deployment=${encodeURIComponent(deployment)}`}
-              className="text-[12px] text-primary hover:underline"
-              data-testid="recovery-all-incidents"
-            >
-              Every incident of this deployment
-            </Link>
-          </>
-        ) : (
-          <HistoryPages key={deployment} page={(slot) => <IncidentPage deployment={deployment} slot={slot} />} />
-        )}
+        {/* One incident's scope open at a time, on this screen: its read is the only one of its kind in flight. */}
+        <OneScopeAtATime>
+          {finding ? (
+            <>
+              <FindingRecovery key={`${deployment}:${finding}`} deployment={deployment} finding={finding} />
+              <Link
+                href={`/authority/recovery?deployment=${encodeURIComponent(deployment)}`}
+                className="text-[12px] text-primary hover:underline"
+                data-testid="recovery-all-incidents"
+              >
+                Every incident of this deployment
+              </Link>
+            </>
+          ) : (
+            <HistoryPages key={deployment} page={(slot) => <IncidentPage deployment={deployment} slot={slot} />} />
+          )}
+        </OneScopeAtATime>
       </Section>
     </div>
   );
