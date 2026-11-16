@@ -140,6 +140,7 @@ jobs:
           tests/a-scope-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx
           tests/a-stop-goes-while-a-scope-declaration-hangs.test.ts
           tests/a-scope-declaration-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx
+          tests/an-observed-effect-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx
           tests/the-kill-switch-sends-stops-only-to-runs-that-may-be-running.test.ts
           tests/deleting-a-running-scan-stops-it-first.test.ts
           tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts

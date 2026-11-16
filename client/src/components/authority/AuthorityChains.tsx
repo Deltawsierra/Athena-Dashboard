@@ -10,11 +10,18 @@
  * record contradicts as a broken hop: a reader goes to the hop rather than infers
  * it. A verdict this console does not know is shown as served and read as none
  * of the three.
+ *
+ * Each chain lists the reconciliation receipts read back into its produces hop,
+ * with whether each verifies and binds and the backend's words for why not, and
+ * says when one that cannot be compared holds back the effect's proof. Beside the
+ * chains, each observed effect's record (./ObservedEffects.tsx), read on its own.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Waypoints } from "lucide-react";
+import { RECONCILIATION_CANNOT_COMPARE } from "@shared/observed-effect";
 import { Absent, Chip, Count, Digest, Fact, NotInHand, Section, ToolName, UnreadableRows, When, served, unreadableIn, type Tone } from "./parts";
 import type { AuthorityChain, AuthorityChains, ChainHop, ChainNode, ConsequentialEffect } from "./types";
+import { ObservedEffectsSection } from "./ObservedEffects";
 
 const VERDICTS: Record<string, { label: string; hop: string; tone: Tone }> = {
   proven: { label: "Proven", hop: "Proven hop", tone: "positive" },
@@ -105,6 +112,98 @@ const ROUTES: Record<string, string> = {
   unrecorded: "the route it was recorded against is not recorded",
 };
 
+/**
+ * Where a reconciliation receipt cannot be compared with another record of the chain's
+ * dispatch (two key ids, or a keyed reference beside a plain digest), it binds nothing
+ * and the produces hop reads unproven, even beside an observed effect that would prove
+ * it alone (Athena-Backend #234): said at the top of the chain, with the backend's
+ * own sentence for each such reading.
+ */
+function ProofHeldBack({ chain }: { chain: AuthorityChain }) {
+  const readings = chain.hops.flatMap((hop) => [...hop.reasons, ...hop.provenBy]).filter((reading) => reading.code === RECONCILIATION_CANNOT_COMPARE);
+  if (readings.length === 0) return null;
+  return (
+    <div className="space-y-0.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[12px] text-amber-400" data-testid="effect-proof-held-back">
+      <p>A reconciliation receipt that cannot be compared holds back the proof of this effect.</p>{" "}
+      {readings.map((reading, i) => (
+        <p key={i} data-testid="held-back-detail">
+          Athena-Backend: {reading.detail || "no sentence served"}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/** Whether a receipt verifies now, as served; not said is said. */
+function receiptVerified(verified: boolean | null): string {
+  if (verified === null) return "whether it verifies now is not said";
+  return verified ? "verifies now" : "does not verify now";
+}
+
+/** Whether a receipt binds, as served: it is read as binding only where the backend says it does. */
+function ReceiptBinds({ binds }: { binds: boolean | null }) {
+  if (binds === true) return <Chip tone="info" testId="receipt-binds">binds</Chip>;
+  if (binds === false) return <Chip tone="caution" testId="receipt-binds">binds nothing</Chip>;
+  return <Chip tone="caution" testId="receipt-binds">whether it binds is not said</Chip>;
+}
+
+/** The reconciliation receipts read back into the chain's produces hop, each with whether it binds and the backend's words for why not. */
+function Receipts({ chain }: { chain: AuthorityChain }) {
+  const receipts = chain.reconciliations;
+  if (receipts === undefined) {
+    return (
+      <Fact label="Reconciliation receipts">
+        <Absent testId="chain-receipts-not-reported">not reported by this backend</Absent>
+      </Fact>
+    );
+  }
+  return (
+    <div className="space-y-1" data-testid="chain-receipts">
+      <span className="text-[12px] text-muted-foreground">Reconciliation receipts about its dispatch</span>
+      {receipts.length === 0 && unreadableIn(chain, "reconciliations") === 0 ? (
+        <p className="text-[12px]">
+          <Absent testId="chain-no-receipts">none recorded</Absent>
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {receipts.map((receipt, i) => (
+            <li
+              key={`${receipt.receiptId ?? ""}-${i}`}
+              className="space-y-0.5 rounded-md border border-border/50 bg-surface-1/40 p-2 text-[12px]"
+              data-testid="chain-receipt"
+              data-receipt={receipt.receiptId ?? ""}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground">receipt</span>
+                {receipt.receiptId ? <code className="font-mono">{receipt.receiptId}</code> : <Absent>no id served</Absent>}
+                <span className="text-muted-foreground">attempt</span>
+                <Count value={receipt.attempt} />
+                <span className="text-muted-foreground">answer</span>
+                {receipt.answer ? <code className="font-mono">{receipt.answer}</code> : <Absent>not served</Absent>}
+                <span className="text-muted-foreground">conclusion</span>
+                {receipt.conclusion ? <code className="font-mono">{receipt.conclusion}</code> : <Absent>not served</Absent>}
+                <Chip tone={receipt.verified === true ? "neutral" : "caution"} testId="receipt-verified">{receiptVerified(receipt.verified)}</Chip>
+                <ReceiptBinds binds={receipt.binds} />
+              </div>
+              <Fact label="Read back">
+                <When iso={receipt.readAt} />{" "}
+                <span className="text-muted-foreground">from</span>{" "}
+                {receipt.provider ? <span className="text-foreground">{receipt.provider}</span> : <Absent>no provider served</Absent>}
+              </Fact>
+              {receipt.why && (
+                <p className="text-muted-foreground" data-testid="receipt-why">
+                  {receipt.why}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <UnreadableRows from={chain} list="reconciliations" label="reconciliation receipts" />
+    </div>
+  );
+}
+
 function ChainCard({ chain }: { chain: AuthorityChain }) {
   const hops = [...chain.hops].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
   return (
@@ -129,6 +228,7 @@ function ChainCard({ chain }: { chain: AuthorityChain }) {
           Broken hop{chain.brokenHops.length === 1 ? "" : "s"}: {chain.brokenHops.map((i) => `#${i}`).join(", ")}
         </p>
       )}
+      <ProofHeldBack chain={chain} />
       <div className="grid gap-1 md:grid-cols-2">
         <Fact label="Rests on">
           {chain.basisInForce === "demonstrated" ? (
@@ -158,6 +258,13 @@ function ChainCard({ chain }: { chain: AuthorityChain }) {
         <Fact label="Chain digest">
           <Digest value={chain.digest || null} />
         </Fact>
+        <Fact label="Observed effect it cites">
+          {chain.effectOutcomeId ? (
+            <code className="font-mono text-[12px] text-foreground" data-testid="chain-effect-outcome">{chain.effectOutcomeId}</code>
+          ) : (
+            <Absent testId="chain-effect-outcome">none cited</Absent>
+          )}
+        </Fact>
       </div>
       {chain.note && <p className="text-[12px] text-muted-foreground">{chain.note}</p>}
       {hops.length === 0 && unreadableIn(chain, "hops") === 0 ? (
@@ -170,6 +277,7 @@ function ChainCard({ chain }: { chain: AuthorityChain }) {
         </ol>
       )}
       <UnreadableRows from={chain} list="hops" />
+      <Receipts chain={chain} />
     </li>
   );
 }
@@ -316,6 +424,11 @@ export default function AuthorityChainsScreen({ deployment }: { deployment: stri
   const source = served(
     useQuery<AuthorityChains>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/authority-chains`] }),
   );
-  if (source.state !== "ready") return <NotInHand source={source} what="the authority chains" />;
-  return <AuthorityChainsView data={source.data} />;
+  // The observed effects are read beside the chains, never before them: neither waits on the other.
+  return (
+    <div className="space-y-4">
+      {source.state !== "ready" ? <NotInHand source={source} what="the authority chains" /> : <AuthorityChainsView data={source.data} />}
+      <ObservedEffectsSection deployment={deployment} />
+    </div>
+  );
 }

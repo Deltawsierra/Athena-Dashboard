@@ -896,15 +896,55 @@ deployments it lists for you (`?deployment=<uuid>`):
 | Screen | Route here | Read from Athena-Backend (as you) |
 |---|---|---|
 | Approved workflows: what is approved, the tools each approval binds, the contract each was approved under against the one in force, and the chains reported against the set; each approval's version history, and every version together | `/authority/workflows` | `GET /api/assurance/deployments/<uuid>/approved-workflows/`, and `approval-history/` (`?workflow=`) |
-| Authority chains: each recorded chain, every hop with its verdict and why, unproven and broken hops named, the effects the approvals cover, the approval versions in force | `/authority/chains` | `GET /api/assurance/deployments/<uuid>/authority-chains/` |
+| Authority chains: each recorded chain, every hop with its verdict and why, unproven and broken hops named, the reconciliation receipts read back into its produces hop and what holds its proof back, the effects the approvals cover, the approval versions in force; and each observed effect's record: the tool binding its permit was decided for, its execution word and what is keyed | `/authority/chains` | `GET /api/assurance/deployments/<uuid>/authority-chains/` and `chain-outcomes/` |
 | Tool contracts: each tool's contract as its registration declares it (schemas, declared effect class, annotations, permissions, server) and each approval's binding to it; each registration's contract history and every binding to it, live or released | `/authority/contracts` | `GET /api/assurance/assets/?deployment=<uuid>`, the approved-workflows read, and `tool-contracts/` and `tool-contract-bindings/` (`?kind=&identifier=`) |
 | Release gate: the deployment's decision, its revision and policy, and every input the backend combines into it (findings, claims, coverage, accepted risk, workflow chains) with what holds it; how the decision changed, revision by revision | `/authority/release` | `GET /api/assurance/deployments/<uuid>/decision-support/`, and `decision-history/` |
 | Recovery records (SPINE SP-1): each incident -- a finding with a recovery record -- with its current step and every step, oldest first: the S1 state, every condition with its witness, every gap in words, every restriction, the coverage, the release word, the residual uncertainty with each source, and the owner's acceptance as recorded; one incident alone with `&finding=<uuid>`. And the incident's scope (SPINE SP-3) where the backend reports it: the revision it is at, the revision each step was taken under, what about the scope keeps a step back, every removed item with who removed it and why, and, opened on demand, every revision newest first. For an administrator, the declaration of an incident's next scope revision | `/authority/recovery` | `GET /api/assurance/deployments/<uuid>/recovery-records/` (`?offset=`, 50 incidents a page), `GET /api/assurance/findings/<uuid>/recovery-record/`, and, on demand, `GET /api/assurance/findings/<uuid>/scope-revisions/`; to declare: `GET /api/assurance/findings/<uuid>/`, `GET /api/assurance/assets/?deployment=<uuid>`, `GET /api/assurance/deployments/<uuid>/approved-workflows/` and `POST /api/assurance/findings/<uuid>/scope-revisions/` |
 
 Every read goes through this server as the signed-in person, like the Assurance
-page's. The backend's approved-workflows and authority-chains routes also take a
-write (a PUT of the approved set, a POST of chains); neither is relayed. Nothing on
-these screens is on a stop path.
+page's. The backend's approved-workflows, authority-chains and chain-outcomes routes
+also take a write (a PUT of the approved set, a POST of chains, a POST of outcomes);
+none is relayed. Nothing on these screens is on a stop path.
+
+**An observed effect's record (version 5).** Athena-Backend #234 takes in version 5 of
+the observed-effect record and serves what a reader is shown of each one as
+`effect_reading` on its row of `chain-outcomes/`, every word Mythos-Core's. The chains
+screen draws it under "Observed effects" (`client/src/components/authority/ObservedEffects.tsx`,
+`shared/observed-effect.ts`):
+
+- **The binding:** the tool the permit was decided for, its effect, its targets and the
+  binding's bound, and each approval it rests on with that approval's population, its
+  limit per window and what was counted under it (`counted`: this dispatch's count, the
+  window's and the lifetime count after it, whether it rested on an earlier count). Where
+  the binding's bound is larger than an approval's, the backend's finding
+  (`binding_bound_over_approval`) is shown in its own words, on the record and beside the
+  approval.
+- **The execution word,** as the core says it: the state (`accepted`), its basis and the
+  core's words ("accepted, as signed"). A word the core does not have is drawn as served
+  and read as none of its words.
+- **What is keyed:** the action, the answer, the targets and the registry generation of a
+  version 5 record are keyed references only the holder of the engine's key can compute.
+  Each is labelled "keyed", with the backend's words ("keyed: not checkable here") and the
+  id of the key. **Its value is never shown, and this server does not relay it:** nothing
+  here can check one, so drawing its 64 hex would present it as a hash a person could
+  compare. A reference in a form this console does not read is not shown either.
+- **An older record** (versions 1 to 4) has no binding, no execution field and no keyed
+  reference. Each part says "not recorded" beside the core's words as served ("no tool
+  binding recorded"; "accepted, from the recorded 2xx; this version has no execution
+  field"; "plain digests: withheld from this reader"), never an empty value.
+- **A reconciliation receipt that cannot be compared** with another record of its
+  dispatch (two key ids) binds nothing, and the produces hop reads unproven
+  (`reconciliation_cannot_compare`) even beside an observed effect that would prove it.
+  The chain says the receipt holds back the effect's proof, with the backend's sentence,
+  and lists every receipt with whether it verifies, whether it binds and why not.
+- **A backend from before #234** serves no `effect_reading`: each record says its reading
+  is not reported by this backend, which is not "nothing to show". A row or a part that
+  cannot be read is counted or said, never dropped.
+
+The read is one GET with the chains screen, beside the chains' own read and never before
+it, cancelled when the screen is left and cut at the read deadline like every other read.
+No Stop and no failsafe control waits on it
+(`tests/an-observed-effect-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx`).
 
 The histories (`approval-history/`, `tool-contracts/`, `tool-contract-bindings/`,
 `decision-history/`, under `/api/assurance/deployments/<uuid>/`) are GETs only, here

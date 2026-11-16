@@ -4,6 +4,9 @@
  * DecisionSupport, AssuranceAsset). camelCase; a null is what the backend served
  * as absent, or did not serve -- never a value filled in here.
  */
+import type { ReconciliationReceipt } from "@shared/observed-effect";
+
+export type { ReconciliationReceipt };
 
 /**
  * How many rows of each list the backend served this console's server could not
@@ -115,6 +118,8 @@ export interface AuthorityChain {
   unprovenHops: number[];
   brokenHops: number[];
   hops: ChainHop[];
+  /** The reconciliation receipts read back into the chain's produces hop. Absent: this backend serves none, which is not "no receipt". */
+  reconciliations?: ReconciliationReceipt[];
   /** Rows of a list here the server could not read (server/assurance.ts rowsOf), by list; absent when every row was read. */
   unreadable?: UnreadableRows;
 }
