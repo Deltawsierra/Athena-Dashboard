@@ -159,6 +159,19 @@ interface FailsafeStateView {
    * said it left none out. A list that may not be whole is never shown as whole.
    */
   more?: true | null;
+  /**
+   * The commands the control plane passed over as too large for any page, by id
+   * (server/failsafe.ts): each shown as "a command too large to read", counted in
+   * `unreadable.tooLarge`, and in `possibleStops.tooLarge` unless it is known to
+   * be a resume or a release. Only when there was one.
+   */
+  tooLarge?: string[];
+  /**
+   * How the control plane's pages were followed, when it gave a next page: how
+   * many were read, and why the walk stopped short when it did (`more` is then
+   * true). Absent from an older control plane, which gives no next page.
+   */
+  pages?: { read: number; unfinished?: string };
 }
 
 /** Whether the in-flight lists may not be all there is: cut at the control plane's page, or not said (`more`). */
@@ -168,6 +181,17 @@ function maybePartial(view: FailsafeStateView): boolean {
 
 /** The lists "Commands in flight" draws, and so the only ones whose unreadable rows it says. */
 const IN_FLIGHT_LISTS = ["awaitingSignatures", "ready"] as const;
+/**
+ * The in-flight lists, and the commands the control plane passed over as too
+ * large for any page (`tooLarge`): which list each was in is not known, so they
+ * are counted on their own, and said under "Commands in flight".
+ */
+const IN_FLIGHT_COUNTS = [...IN_FLIGHT_LISTS, "tooLarge"] as const;
+
+/** How many commands the control plane passed over as too large for any page. */
+function tooLargeIn(view: FailsafeStateView): number {
+  return Array.isArray(view.tooLarge) ? view.tooLarge.length : 0;
+}
 
 /**
  * The in-flight lists' unreadable rows, for "Commands in flight". `recent` is
@@ -179,12 +203,12 @@ const IN_FLIGHT_LISTS = ["awaitingSignatures", "ready"] as const;
 function inFlightUnreadable(view: FailsafeStateView): { unreadable?: Record<string, number | string> } {
   const held = view.unreadable;
   if (!held) return {};
-  const kept = Object.fromEntries(IN_FLIGHT_LISTS.filter((list) => list in held).map((list) => [list, held[list]]));
+  const kept = Object.fromEntries(IN_FLIGHT_COUNTS.filter((list) => list in held).map((list) => [list, held[list]]));
   return { unreadable: kept };
 }
 
 /** How many unreadable in-flight rows may be a stop (possibleStops), by list; numbers only. */
-function possibleStopsIn(view: FailsafeStateView, list: (typeof IN_FLIGHT_LISTS)[number]): number {
+function possibleStopsIn(view: FailsafeStateView, list: (typeof IN_FLIGHT_COUNTS)[number]): number {
   const count = view.possibleStops?.[list];
   return typeof count === "number" && Number.isFinite(count) && count > 0 ? count : 0;
 }
@@ -202,7 +226,8 @@ function needOf(command: FailsafeCommand): string {
 function listFigure(view: FailsafeStateView, list: "awaitingSignatures" | "ready"): string | number {
   if (notAListIn(view, list)) return "?";
   // A list cut at the control plane's page (or not said to be whole) is at least what was read, never exactly it.
-  return unreadableIn(view, list) > 0 || maybePartial(view) ? `${view[list].length}+` : view[list].length;
+  // A command too large to read may be in either list: each is then at least what was read, never exactly it.
+  return unreadableIn(view, list) > 0 || maybePartial(view) || tooLargeIn(view) > 0 ? `${view[list].length}+` : view[list].length;
 }
 
 /** What the tile says under its count when rows of its list could not be read. */
@@ -213,6 +238,7 @@ function listUnread(view: FailsafeStateView | undefined, list: "awaitingSignatur
   if (count > 0) return `${count === 1 ? "1 row" : `${count} rows`} could not be read`;
   if (view.more === true) return "More were left out than were listed";
   if (view.more === null) return "Not said to be all of them";
+  if (tooLargeIn(view) > 0) return "A command too large to read may be among them";
   return undefined;
 }
 
@@ -939,7 +965,8 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
   const stateCount = (read: (view: FailsafeStateView) => number | string) =>
     state ? read(state) : stateFailed || !canOperate || !engineNamed ? "—" : "…";
   /** Whether rows of the in-flight lists could not be read: then there is never "none in flight". */
-  const inFlightUnread = state !== undefined && (unreadableIn(state, "awaitingSignatures") > 0 || unreadableIn(state, "ready") > 0);
+  const inFlightUnread = state !== undefined && (unreadableIn(state, "awaitingSignatures") > 0 || unreadableIn(state, "ready") > 0 ||
+    unreadableIn(state, "tooLarge") > 0 || tooLargeIn(state) > 0);
   /** Whether the in-flight lists may not be all there is (the control plane cut them, or did not say): never "none in flight". */
   const inFlightPartial = state !== undefined && maybePartial(state);
   const stateUnread = stateFailed
@@ -1166,12 +1193,27 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                   " awaiting a signature may be missing from it: check the failsafe control plane."}
             </p>
           )}
+          {/* Its pages were followed, but not to the end: how far, and why, so the cut above is never a mystery. */}
+          {state && state.pages?.unfinished !== undefined && (
+            <p className="text-[12px] text-amber-400" data-testid="text-inflight-pages" data-read={state.pages.read}>
+              Read {state.pages.read === 1 ? "1 page" : `${state.pages.read} pages`} of the control plane's list, then stopped
+              before its last: {state.pages.unfinished}.
+            </p>
+          )}
+          {/* A command the control plane passed over as too large for any page: said by its id, never dropped. */}
+          {state && (state.tooLarge ?? []).map((id, index) => (
+            <p key={`${id}-${index}`} className="text-[12px] text-amber-400" data-testid="too-large-command" data-id={id}>
+              A command too large to read: <span className="athena-mono">{id || "(the control plane gave no id)"}</span>. Open it
+              on the failsafe control plane.
+            </p>
+          ))}
           {/* Rows of the state the server could not read: said, never read as none. */}
           {state && <UnreadableLists from={inFlightUnreadable(state)} />}
           {/* An unreadable row that may be a stop cannot be opened here: said, so its signature is sought where it can be given. */}
-          {state && IN_FLIGHT_LISTS.filter((list) => possibleStopsIn(state, list) > 0).map((list) => (
+          {state && IN_FLIGHT_COUNTS.filter((list) => possibleStopsIn(state, list) > 0).map((list) => (
             <p key={list} className="text-[12px] text-amber-400" data-testid="possible-stops" data-list={list} data-count={possibleStopsIn(state, list)}>
-              {possibleStopsIn(state, list) === 1 ? "1 of them" : `${possibleStopsIn(state, list)} of them`} ({list === "ready" ? "ready" : "awaiting signatures"})
+              {possibleStopsIn(state, list) === 1 ? "1 of them" : `${possibleStopsIn(state, list)} of them`}{" "}
+              ({list === "ready" ? "ready" : list === "tooLarge" ? "too large to read" : "awaiting signatures"})
               {" "}may be a stop: it cannot be opened here, so find it on the failsafe control plane to sign it.
             </p>
           ))}

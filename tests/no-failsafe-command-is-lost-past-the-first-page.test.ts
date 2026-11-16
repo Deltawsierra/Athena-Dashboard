@@ -282,9 +282,15 @@ describe("2. stops always go: no page read delays one", () => {
       findings: { runId: "run-slow-pages", target: "https://offline.invalid/", results: [] },
     });
     try {
-      // The pages are being read, slowly, when every stop is pressed.
-      const reads = [admin.get("/api/failsafe/state"), admin.get("/api/failsafe/commands")];
-      await sleep(20);
+      // The pages are being read, slowly, when every stop is pressed. A request is sent only once it is awaited or
+      // `then`ed: `then` here, so both are on their way now -- and both have reached the control plane, and are being
+      // answered slowly, before any stop is pressed.
+      const reads = [admin.get("/api/failsafe/state"), admin.get("/api/failsafe/commands")].map((read) => read.then((answer) => answer));
+      const sent = performance.now();
+      while (arrivedAt("GET /api/failsafe/state/") === null || arrivedAt("GET /api/failsafe/commands/") === null) {
+        expect(performance.now() - sent, "both page reads reached the control plane before any stop was pressed").toBeLessThan(SLOW_MS);
+        await sleep(10);
+      }
 
       const switchPressed = performance.now();
       const pressed = admin.patch("/api/ai-control").send({ killSwitchEnabled: true });
