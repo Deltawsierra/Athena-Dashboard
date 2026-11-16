@@ -12,8 +12,10 @@
  * every request a stubbed fetch sees is recorded in `requests`.
  *
  * Beside the finding's own screens, the same planted strings reach the screens
- * that show a recovery record (/authority/recovery) and a scan by its name (the
- * Tests list's summary, the Engagements page's scans from the record).
+ * that show a recovery record (/authority/recovery), that record's scope (an
+ * item's kind and reference, a revision's reason, who declared or removed what),
+ * and a scan by its name (the Tests list's summary, the Engagements page's scans
+ * from the record).
  *
  * The planted finding reaches each screen in the fields that screen shows:
  *
@@ -51,6 +53,7 @@ import { ReleaseGateView } from "@/components/authority/ReleaseGate";
 import type { ApprovedWorkflows, AuthorityChains, DecisionSupport, ToolAsset, WorkflowComposition } from "@/components/authority/types";
 import { getQueryFn, queryClient as appQueryClient } from "@/lib/queryClient";
 import type { RecoveryRecords } from "@shared/recovery-record";
+import type { FindingScope } from "@shared/incident-scope";
 import { summarizeFindings } from "../../server/findings-summary";
 
 export interface Planted {
@@ -413,6 +416,69 @@ export async function mountRecoveryRecords(p: Planted) {
   // Every step, not only the current one.
   const history = Array.from(card.querySelectorAll("button")).find((one) => /histor|step/i.test(one.textContent ?? ""));
   if (history) await act(async () => { fireEvent.click(history); });
+  return mounted;
+}
+
+/* ---- a recovery record's scope (/authority/recovery): its revisions, what keeps a step back, removed items */
+
+export async function mountRecoveryScope(p: Planted) {
+  const item = { kind: p.text, ref: p.text };
+  const gone = { ...item, added: 2, removed: 3, removedBy: p.text, reason: `${p.text}${p.long}` };
+  const step = {
+    ref: "f-hostile-scope-step-1", version: 1, state: "repair_tested", reopens: null,
+    conditions: [{ condition: "incident_recorded", witness: { kind: "finding", ref: "f-hostile-scope" } }],
+    gaps: [`scope:revision:2:added:asset:${p.text}`], restrictions: [], release: "AUDIT_INCOMPLETE",
+    residualUncertainty: [{ statement: `scope:revision:2:added:asset:${p.text}`, sources: [{ kind: "scope", ref: p.text }] }],
+    coverage: null, acceptedBy: null, acceptedUntil: null, recordedBy: "analyst-k", recordedAt: NOW,
+    scope: {
+      revision: 1,
+      // A gap that names the item, one whose kind and reference are both the target's, and one that is no gap name at all.
+      gaps: [`scope:revision:2:added:asset:${p.text}`, `scope:revision:2:added:${p.text}:${p.text}`, `scope:${p.text}`, p.text],
+      added: [{ ...item, revision: 2, coveredBy: [{ kind: p.text, ref: p.text }, { kind: "evidence", ref: p.text }] }],
+      removed: [gone],
+      recorded: { state: p.text, gaps: [p.text], release: p.text },
+    },
+  };
+  const page: RecoveryRecords = {
+    deployment: "d1",
+    incidents: [{
+      finding: "f-hostile-scope", title: "An incident whose scope the target shaped", severity: "high",
+      current: { version: 1, state: "repair_tested", release: "AUDIT_INCOMPLETE" }, steps: [step],
+      scope: { revision: 2, removed: [gone] },
+    }],
+    incidentCount: 1, returned: 1, truncated: false, pageSize: 50, offset: 0,
+  };
+  const revision = (number: number) => ({
+    ref: p.text, revision: number, supersedes: number === 1 ? null : number - 1, current: number === 2,
+    items: [{ ...item, assetKind: p.text }, { kind: "asset", ref: p.text, assetKind: null }],
+    added: [item], removed: [item],
+    reason: `${p.text}${p.long}`, evidence: [{ uuid: p.text, classification: p.text }],
+    declaredBy: p.text, declaredAt: p.text,
+  });
+  const scope: FindingScope = { deployment: "d1", finding: "f-hostile-scope", current: 2, revisions: [revision(1), revision(2)] };
+  vi.stubGlobal("fetch", recordingFetch((url) => {
+    if (url.endsWith("/api/assurance/status")) return { configured: true, reachable: true, authorized: true, url: null, detail: "" };
+    if (url.endsWith("/api/assurance/deployments")) return [{ uuid: "d1", name: "checkout", environment: "production", decision: null, decisionLabel: "" }];
+    if (url.includes("/api/assurance/deployments/d1/recovery-records")) return page;
+    if (url.includes("/api/assurance/findings/f-hostile-scope/scope-revisions")) return scope;
+    return {};
+  }));
+  const location = memoryLocation({ path: "/authority/recovery?deployment=d1", record: true });
+  const client = new QueryClient({
+    defaultOptions: { ...appQueryClient.getDefaultOptions(), queries: { ...appQueryClient.getDefaultOptions().queries, retry: false, queryFn: getQueryFn({ on401: "throw" }) } },
+  });
+  const mounted = render(
+    <QueryClientProvider client={client}>
+      <Router hook={location.hook} searchHook={location.searchHook}>
+        <Authority params={{ screen: "recovery" }} />
+      </Router>
+    </QueryClientProvider>,
+  );
+  const card = await screen.findByTestId("incident", {}, { timeout: 10_000 });
+  // The scope's revisions, read and drawn: the current one and both in the history.
+  const open = card.querySelector("[data-testid='incident-scope-revisions-toggle']");
+  if (open) await act(async () => { fireEvent.click(open); });
+  await waitFor(() => { if (card.querySelectorAll("[data-testid='scope-revision']").length !== 2) throw new Error("the scope's revisions are not drawn yet"); }, { timeout: 10_000 });
   return mounted;
 }
 

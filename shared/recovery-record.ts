@@ -16,7 +16,12 @@
  * never a value filled in here, and never an empty list in place of one not
  * served. A record that cannot be read whole is not served in part (the server
  * answers it as unavailable instead).
+ *
+ * The incident's scope (SPINE SP-3) rides on the same reads: `scope` on an
+ * incident and on each step (shared/incident-scope.ts). It is absent when the
+ * backend served none of its fields, which is "not reported", never "no scope".
  */
+import type { IncidentScope, StepScope } from "./incident-scope";
 
 /** What a condition rests on: the kind of witness and its reference. */
 export interface RecoveryWitness {
@@ -97,6 +102,12 @@ export interface RecoveryStep {
   acceptedUntil: string | null;
   recordedBy: string | null;
   recordedAt: string | null;
+  /**
+   * The scope revision this step was taken under, what about the scope holds it
+   * back now, what its scope gained and lost, and what its row recorded. Absent:
+   * the backend served none of it for this step (not reported).
+   */
+  scope?: StepScope;
 }
 
 /** The incident's latest step, as the backend names it. */
@@ -114,6 +125,11 @@ export interface RecoveryIncident {
   /** null: the backend named no current step. */
   current: RecoveryCurrent | null;
   steps: RecoveryStep[];
+  /**
+   * The incident's current scope revision and every item a revision added and a
+   * later one removed. Absent: the backend served none of it (not reported).
+   */
+  scope?: IncidentScope;
 }
 
 /** One page of a deployment's incidents (athena-backend `deployment_records`, 50 a page). */

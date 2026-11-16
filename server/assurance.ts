@@ -24,7 +24,7 @@ import {
 } from "./control-plane";
 import { currentPersonState } from "./person-credential";
 import { IDEMPOTENCY_HEADER, REPLAYED_HEADER, keyRecordOf, refusesTheKey } from "@shared/idempotency";
-import { NOT_A_LIST, rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
+import { NOT_A_LIST, rowsOf, textsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
 export { NOT_A_LIST, type UnreadableRows };
 import { runIdFrom } from "@shared/engine-record";
 import type { RetestCheckView } from "@shared/backend-record";
@@ -32,6 +32,10 @@ import type {
   CoverageGap, CoverageInterval, CoverageSource, FindingRecoveryRecord, RecoveryCondition, RecoveryCoverage,
   RecoveryIncident, RecoveryRecords, RecoveryStep, ResidualUncertainty,
 } from "@shared/recovery-record";
+import type {
+  FindingScope, IncidentScope, ScopeAddedItem, ScopeEvidence, ScopeItem, ScopeItemRef, ScopeRecorded, ScopeRemovedItem,
+  ScopeRevision, StepScope,
+} from "@shared/incident-scope";
 import { readRetestCheck } from "./backend-scans";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
@@ -6438,8 +6442,162 @@ function residualUncertainty(raw: unknown): ResidualUncertainty {
   };
 }
 
+// ---- the incident's scope (SPINE SP-3), on the recovery reads and on a read of its own ----
+//
+// Athena-Backend keeps what an incident is believed to have affected as numbered
+// revisions (athena-backend assurance/incident_scope.py). Each recovery step names the
+// revision it was taken under, and both recovery reads carry, beside what they always
+// did: the incident's current revision and every item a revision added and a later one
+// removed (`scope_revision`, `scope_removed`); and on each step its own revision, what
+// about the scope keeps it short of its recorded state now, what its scope gained and
+// lost, and what its row recorded (`scope_revision`, `scope_gaps`, `scope_items`,
+// `recorded`). One more read serves every revision of one incident:
+//
+//   GET /api/assurance/findings/<uuid>/scope-revisions/
+//
+// GET only, as the signed-in person. That route also takes a POST (the next revision);
+// this server relays none.
+//
+// What is not known stays not known. `scope_removed`, `scope_items.added` and
+// `scope_items.removed`, and a revision's `added` and `removed`, are null where the
+// backend cannot establish them (no scope declared, a revision it cannot read): each
+// stays null here, never an empty list, which would say nothing was added or removed.
+// And a backend from before the scope was versioned serves none of these fields: the
+// `scope` block is then left out altogether, so the screen can say "not reported".
+//
+// Read with caution, row by row (shared/unreadable-rows.ts). The recovery record's own
+// lists above stay whole-or-nothing, as they were. The scope's lists do not: a row of
+// one that cannot be read is counted in the block's `unreadable` and said on the screen,
+// and can never fail the record it rides on or throw.
+
+/** The keys a step carries its scope in, and those an incident does: any one served means the backend reports the scope. */
+const STEP_SCOPE_KEYS = ["scope_revision", "scope_gaps", "scope_items", "recorded"];
+const INCIDENT_SCOPE_KEYS = ["scope_revision", "scope_removed"];
+
+/** A list of the scope's rows read by `read`: null when the backend served none, each unreadable row counted under `list`. */
+function scopeRows<T>(raw: unknown, unreadable: UnreadableRows, list: string, read: (row: Record<string, unknown>) => T): T[] | null {
+  if (raw === undefined || raw === null) return null;
+  return rowsOf(raw, unreadable, list).map(read);
+}
+
+/** A list of the scope's words: null when the backend served none, each element that is not text counted under `list`. */
+function scopeTexts(raw: unknown, unreadable: UnreadableRows, list: string): string[] | null {
+  if (raw === undefined || raw === null) return null;
+  return textsOf(raw, unreadable, list);
+}
+
+/**
+ * A value the backend serves as a record (`scope_items`, `recorded`): null when it
+ * served none; and when it served something that is not a record, null with
+ * `unreadable[name]` saying so, so it reads as unread and never as absent.
+ */
+function scopeRecord(raw: unknown, unreadable: UnreadableRows, name: string): Record<string, unknown> | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  unreadable[name] = NOT_A_LIST;
+  return null;
+}
+
+function scopeItemRef(raw: Record<string, unknown>): ScopeItemRef {
+  return { kind: strOrNull(raw.kind), ref: strOrNull(raw.ref) };
+}
+
+function scopeItem(raw: Record<string, unknown>): ScopeItem {
+  return { ...scopeItemRef(raw), assetKind: strOrNull(raw.asset_kind) };
+}
+
+function scopeRemovedItem(raw: Record<string, unknown>): ScopeRemovedItem {
+  return {
+    ...scopeItemRef(raw),
+    added: numOrNull(raw.added),
+    removed: numOrNull(raw.removed),
+    removedBy: strOrNull(raw.removed_by),
+    reason: strOrNull(raw.reason),
+  };
+}
+
+/** What a step says of its scope, or null when the backend served none of it for this step. */
+function stepScope(step: Record<string, unknown>): StepScope | null {
+  if (!STEP_SCOPE_KEYS.some((key) => key in step)) return null;
+  const unreadable: UnreadableRows = {};
+  const items = scopeRecord(step.scope_items, unreadable, "scopeItems");
+  const recorded = scopeRecord(step.recorded, unreadable, "recorded");
+  const added = (row: Record<string, unknown>): ScopeAddedItem => ({
+    ...scopeItemRef(row),
+    revision: numOrNull(row.revision),
+    coveredBy: scopeRows(row.covered_by, unreadable, "added.coveredBy", scopeItemRef),
+  });
+  const held: ScopeRecorded | null = recorded === null ? null : {
+    state: strOrNull(recorded.state),
+    gaps: scopeTexts(recorded.gaps, unreadable, "recorded.gaps"),
+    release: strOrNull(recorded.release),
+  };
+  return {
+    revision: numOrNull(step.scope_revision),
+    gaps: scopeTexts(step.scope_gaps, unreadable, "gaps"),
+    added: items === null ? null : scopeRows(items.added, unreadable, "added", added),
+    removed: items === null ? null : scopeRows(items.removed, unreadable, "removed", scopeRemovedItem),
+    recorded: held,
+    ...withUnreadable(unreadable),
+  };
+}
+
+/** What a recovery record says of its incident's scope, or null when the backend served none of it. */
+function incidentScope(incident: Record<string, unknown>): IncidentScope | null {
+  if (!INCIDENT_SCOPE_KEYS.some((key) => key in incident)) return null;
+  const unreadable: UnreadableRows = {};
+  return {
+    revision: numOrNull(incident.scope_revision),
+    removed: scopeRows(incident.scope_removed, unreadable, "removed", scopeRemovedItem),
+    ...withUnreadable(unreadable),
+  };
+}
+
+function scopeRevision(raw: Record<string, unknown>): ScopeRevision {
+  const unreadable: UnreadableRows = {};
+  return {
+    ref: strOrNull(raw.ref),
+    revision: numOrNull(raw.revision),
+    supersedes: numOrNull(raw.supersedes),
+    current: boolOrNull(raw.current),
+    items: scopeRows(raw.items, unreadable, "items", scopeItem),
+    added: scopeRows(raw.added, unreadable, "added", scopeItemRef),
+    removed: scopeRows(raw.removed, unreadable, "removed", scopeItemRef),
+    reason: strOrNull(raw.reason),
+    evidence: scopeRows(raw.evidence, unreadable, "evidence", (one): ScopeEvidence => ({
+      uuid: strOrNull(one.uuid), classification: strOrNull(one.classification),
+    })),
+    declaredBy: strOrNull(raw.declared_by),
+    declaredAt: strOrNull(raw.declared_at),
+    ...withUnreadable(unreadable),
+  };
+}
+
+/**
+ * Every revision of one incident's scope, oldest first as served, and the number of
+ * the current one. A GET only: the backend's POST on this route (the next revision) is
+ * not relayed. A row that cannot be read is counted, never thrown; an answer that is
+ * not a JSON object is unavailability (503), like every read here.
+ */
+export async function findingScope(uuid: string): Promise<FindingScope> {
+  const response = await call(`/api/assurance/findings/${encodeURIComponent(uuid)}/scope-revisions/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const raw = await readObject(response);
+  const unreadable: UnreadableRows = {};
+  return {
+    deployment: strOrNull(raw.deployment),
+    finding: strOrNull(raw.finding),
+    current: numOrNull(raw.current),
+    revisions: scopeRows(raw.revisions, unreadable, "revisions", scopeRevision),
+    ...withUnreadable(unreadable),
+  };
+}
+
 function recoveryStep(raw: unknown): RecoveryStep {
   const step = recoveryObject(raw, "steps");
+  const scope = stepScope(step);
   return {
     ref: strOrNull(step.ref),
     version: numOrNull(step.version),
@@ -6455,6 +6613,7 @@ function recoveryStep(raw: unknown): RecoveryStep {
     acceptedUntil: strOrNull(step.accepted_until),
     recordedBy: strOrNull(step.recorded_by),
     recordedAt: strOrNull(step.recorded_at),
+    ...(scope === null ? {} : { scope }),
   };
 }
 
@@ -6463,12 +6622,14 @@ function recoveryIncident(raw: unknown): RecoveryIncident {
   const current = incident.current === undefined || incident.current === null ? null : recoveryObject(incident.current, "current step");
   const steps = recoveryList(incident.steps, "steps", recoveryStep);
   if (steps === null) throw recoveryUnreadable("steps");
+  const scope = incidentScope(incident);
   return {
     finding: strOrNull(incident.finding),
     title: strOrNull(incident.title),
     severity: strOrNull(incident.severity),
     current: current === null ? null : { version: numOrNull(current.version), state: strOrNull(current.state), release: strOrNull(current.release) },
     steps,
+    ...(scope === null ? {} : { scope }),
   };
 }
 

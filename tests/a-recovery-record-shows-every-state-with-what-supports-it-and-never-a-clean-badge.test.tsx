@@ -16,6 +16,8 @@ import type {
   RecoveryRecords,
   RecoveryStep,
 } from "@shared/recovery-record";
+import { standIn } from "./helpers/bad-rows";
+import { CASES as SCOPE_CASES, DEP as SCOPE_DEP, ROUTE as SCOPE_ROUTE, servedByPath as scopeServedByPath } from "./helpers/incident-scopes";
 
 /**
  * The recovery screen (/authority/recovery; client/src/components/authority/RecoveryRecords.tsx)
@@ -32,7 +34,8 @@ import type {
  *   - an AUDIT_INCOMPLETE release reads incomplete, with each gap that keeps it so;
  *   - NEVER a "clean" or "recovered" summary, and nothing in the positive tone, for any
  *     fixture -- a fully accepted recovery included, which reads "accepted by <owner>
- *     until <date>" with its conditions beside it;
+ *     until <date>" with its conditions beside it -- and none for an incident's scope
+ *     either (SP-3), in every shape its reads take (tests/helpers/incident-scopes.ts);
  *   - an incident with a gap never reads like one without;
  *   - the owner's acceptance exactly as recorded, and lapsed once its end is past;
  *   - a deployment or finding the backend answers 404 for reads "Not found", never empty;
@@ -342,6 +345,68 @@ describe("never a single clean badge", () => {
     expect(document.querySelectorAll('[data-tone="positive"]').length).toBe(0);
     expect(texts(section).filter((text) => SUMMARY.test(text))).toEqual([]);
     expect(texts(document.body).filter((text) => lintMicrocopy(text).length > 0)).toEqual([]);
+  });
+
+  it("draws none for an incident's scope either: its revisions, what keeps a step back, the removed items and every not-known (SP-3)", async () => {
+    // What this console's real routes answer for a backend that serves the scope, in every shape its reads can
+    // take (tests/helpers/incident-scopes.ts): a declared scope, three revisions, a scope widened after an
+    // accepted recovery, an open gap, each not-known, unreadable rows, an unknown kind, and a backend with none.
+    const backend = await standIn();
+    let scoped: RecoveryRecords;
+    const scopeReads: Record<string, Answer> = {};
+    try {
+      backend.serve(scopeServedByPath());
+      const whole = await backend.user.get(SCOPE_ROUTE.page);
+      expect(whole.status, JSON.stringify(whole.body)).toBe(200);
+      scoped = whole.body;
+      for (const name of SCOPE_CASES) {
+        const read = await backend.user.get(SCOPE_ROUTE.scope(name));
+        scopeReads[SCOPE_ROUTE.scope(name)] = read.status === 200 ? read.body : { status: read.status, body: read.body };
+      }
+    } finally {
+      await backend.close();
+    }
+    serve({ ...BASE, [RECORDS(SCOPE_DEP)]: scoped, ...scopeReads });
+    mount(`/authority/recovery?deployment=${SCOPE_DEP}`);
+    await waitFor(() => expect(document.querySelectorAll('[data-testid="incident"]').length).toBe(SCOPE_CASES.length));
+    const said: string[] = [];
+    let opened = 0;
+    for (const one of scoped.incidents) {
+      const card = incidentCard(one.finding!);
+      // Every step of the incident, and its scope's revisions read and drawn (one incident's at a time).
+      fireEvent.click(within(card).getByTestId("incident-steps-toggle"));
+      const scope = within(card).queryByTestId("incident-scope-revisions-toggle");
+      if (scope) {
+        fireEvent.click(scope);
+        await waitFor(() => expect(within(card).getByTestId("incident-scope-revisions").getAttribute("data-open")).toBe("true"));
+        await waitFor(() => expect(within(card).queryByTestId("read-loading")).toBeNull());
+        opened += 1;
+      }
+      expect(texts(card).filter((text) => SUMMARY.test(text)), one.finding!).toEqual([]);
+      expect(card.querySelectorAll('[data-tone="positive"]').length, one.finding!).toBe(0);
+      expect(card.innerHTML, one.finding!).not.toMatch(/emerald|green/);
+      expect(texts(card).filter((text) => lintMicrocopy(text).length > 0), one.finding!).toEqual([]);
+      said.push(card.textContent ?? "");
+    }
+    // The scope's text was on the screen to be read: each kind of it, at least once.
+    expect(opened).toBe(SCOPE_CASES.length - 1);
+    for (const drawn of [
+      "The scope has widened since this step was taken under revision 1",
+      "Kept back by the scope",
+      "As its row recorded it, under scope revision 1: state recovery_accepted",
+      "Release: not read as allowed while the scope keeps this step back",
+      "removed by owner-d; why: ",
+      "Every revision, newest first (3)",
+      "Not known: what this incident's scope has lost cannot be established.",
+      "rows could not be read",
+      "item of an unknown kind (modem)",
+      "The scope is not reported by this backend.",
+      "Not found.",
+    ]) {
+      expect(said.some((text) => text.includes(drawn)), drawn).toBe(true);
+    }
+    expect(document.querySelectorAll('[data-tone="positive"]').length).toBe(0);
+    expect(texts(screen.getByTestId("recovery-section")).filter((text) => SUMMARY.test(text))).toEqual([]);
   });
 
   it("reads a fully accepted recovery as accepted by its owner until its end, with its conditions beside it", async () => {

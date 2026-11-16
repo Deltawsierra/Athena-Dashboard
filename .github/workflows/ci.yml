@@ -136,6 +136,8 @@ jobs:
           tests/the-kill-switch-never-blocks-another-stop.test.ts
           tests/a-stop-goes-while-the-backend-health-read-hangs.test.ts
           tests/the-console-shows-the-backends-health-and-never-ok-unless-it-said-so.test.tsx
+          tests/a-stop-goes-while-a-scope-read-hangs-fails-or-answers-nonsense.test.ts
+          tests/a-scope-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx
           tests/the-kill-switch-sends-stops-only-to-runs-that-may-be-running.test.ts
           tests/deleting-a-running-scan-stops-it-first.test.ts
           tests/every-scan-starts-through-the-backend-and-its-stop-stays-direct.test.ts

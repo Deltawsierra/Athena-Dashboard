@@ -57,6 +57,33 @@ export function rowsOf(raw: unknown, unreadable: UnreadableRows, list: string): 
 }
 
 /**
+ * Every element of a list of text that is a string, as served. rowsOf's sibling
+ * for a list whose rows are words, not records (the names of what holds a
+ * recovery back): each element that is not a string is counted in
+ * `unreadable[list]`, never dropped silently, so a list never reads as shorter
+ * than it was served. A value that is served but is not a list reads as no
+ * text, and `unreadable[list]` says the whole list could not be read
+ * (NOT_A_LIST). A list not served (absent, or null) is [] and is not counted.
+ * Never throws.
+ */
+export function textsOf(raw: unknown, unreadable: UnreadableRows, list: string): string[] {
+  if (!Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) unreadable[list] = NOT_A_LIST;
+    return [];
+  }
+  const texts: string[] = [];
+  let unread = 0;
+  for (const one of raw) {
+    if (typeof one === "string") texts.push(one);
+    else unread += 1;
+  }
+  const before = unreadable[list];
+  // A list already found not to be one stays so: its count is not known.
+  if (unread > 0 && before !== NOT_A_LIST) unreadable[list] = (before ?? 0) + unread;
+  return texts;
+}
+
+/**
  * The header a bare-list answer carries its count in (the failsafe command list
  * and audit trail: GET /api/failsafe/commands, /api/failsafe/audit). Their body
  * stays the array it always was, so a console page loaded before the server
