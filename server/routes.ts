@@ -7599,6 +7599,20 @@ export function registerRoutes(app: Express): void {
     }
   }));
 
+  // What a reader is shown of each observed effect's record (Athena-Backend #234
+  // `effect_reading`): its tool binding, its execution and what is keyed. A GET, as
+  // the person, under the read deadline like every assurance read; the backend
+  // route's POST (which appends outcomes) is never relayed. No keyed value is passed
+  // on (server/assurance.ts chainOutcomes). Nothing waits on it.
+  app.get("/api/assurance/deployments/:uuid/chain-outcomes", asyncHandler(async (req, res) => {
+    try {
+      res.json(await assurance.chainOutcomes(req.params.uuid));
+    } catch (cause) {
+      if (assuranceUnavailable(res, cause)) return;
+      throw cause;
+    }
+  }));
+
   // The histories behind those screens (athena-backend assurance/history_reads.py):
   // every version of each approval, every tool contract recorded and every binding to
   // one, every accepted change of the decision. Each is one page, newest first, read

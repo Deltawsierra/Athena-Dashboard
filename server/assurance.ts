@@ -40,6 +40,11 @@ import {
   REFUSAL_CODE, SLUG_REF, UUID_REF, type DeclareScopeBody, type ScopeAssetChoice, type ScopeChoices, type ScopeCurrent,
   type ScopeEvidenceChoice, type ScopeWorkflowChoice,
 } from "@shared/scope-declaration";
+import {
+  KEYED_REFERENCE, WITHHELD_PREFIX, type BindingApproval, type BindingFinding, type ChainOutcomeRow, type ChainOutcomes,
+  type EffectExecution, type EffectReading, type EffectReadingAsServed, type EffectReference, type KeyedUnder,
+  type ReconciliationReceipt, type ToolBinding, type WindowCount,
+} from "@shared/observed-effect";
 import { readRetestCheck } from "./backend-scans";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
@@ -5754,6 +5759,13 @@ export interface AuthorityChainView {
   unprovenHops: number[];
   brokenHops: number[];
   hops: ChainHop[];
+  /**
+   * Every reconciliation receipt recorded about the dispatch the chain's gate decision
+   * let through, oldest attempt first, with whether each binds and the backend's words
+   * for why not. Absent: this backend serves none (it is from before F1), which is not
+   * "no receipt".
+   */
+  reconciliations?: ReconciliationReceipt[];
   /** How many rows of each list here could not be read (rowsOf); absent when every row was read. */
   unreadable?: UnreadableRows;
 }
@@ -5868,7 +5880,29 @@ function authorityChain(raw: Record<string, unknown>): AuthorityChainView {
     unprovenHops: numList(raw.unproven_hops),
     brokenHops: numList(raw.broken_hops),
     hops: rowsOf(raw.hops, unreadable, "hops").map(chainHop),
+    // Read only where served: a backend from before F1 serves no receipts, and that is not none.
+    ...(raw.reconciliations === undefined || raw.reconciliations === null
+      ? {}
+      : { reconciliations: rowsOf(raw.reconciliations, unreadable, "reconciliations").map(reconciliationReceipt) }),
     ...withUnreadable(unreadable),
+  };
+}
+
+/** One receipt read back into a chain's produces hop (athena-backend assurance/effect_reconciliation.py `served`). */
+function reconciliationReceipt(raw: Record<string, unknown>): ReconciliationReceipt {
+  return {
+    receiptId: strOrNull(raw.receipt_id),
+    dispatchId: strOrNull(raw.dispatch_id),
+    attempt: numOrNull(raw.attempt),
+    gateOutcomeId: strOrNull(raw.gate_outcome_id),
+    answer: strOrNull(raw.answer),
+    conclusion: strOrNull(raw.conclusion),
+    readAt: strOrNull(raw.read_at),
+    provider: strOrNull(raw.provider),
+    // Not said is null, never false and never true: a receipt is read as binding only where the backend says so.
+    verified: boolOrNull(raw.verified),
+    binds: boolOrNull(raw.binds),
+    why: strOrNull(raw.why),
   };
 }
 
@@ -5950,6 +5984,296 @@ export async function authorityChains(uuid: string): Promise<AuthorityChains> {
     approvalsInForce: strRecord(raw.approvals_in_force),
     effects: rowsOf(raw.effects, unreadable, "effects").map(consequentialEffect),
     effectCensus: numRecord(raw.effect_census),
+    ...withUnreadable(unreadable),
+  };
+}
+
+// ==== Observed effects: what a reader is shown of each record (Athena-Backend #234) ====
+//
+// GET /api/assurance/deployments/<uuid>/chain-outcomes/ (`chain_outcomes`): the newest
+// chain outcomes, a page of them, each an observed effect's row carrying
+// `effect_reading` -- the record's version, how it refers to its action and its answer,
+// the key it is keyed under, which stage of execution it shows, the tool binding its
+// permit was decided for, and what the backend finds in that binding, every word the
+// core's (shared/observed-effect.ts). The route also takes a POST (admin-only there,
+// it appends outcomes); it is never relayed: this is a GET, as the signed-in person,
+// under the read deadline every assurance read is under. Nothing here is on a stop path.
+//
+// A KEYED VALUE IS NEVER RELAYED. A keyed reference is carried as `{form: "keyed"}`: no
+// one this console serves holds the engine's key, so its 64 hex are not a hash anyone
+// here could compare, and a screen that drew them would present them as one. A
+// reference in a form not known here is carried as `unrecognised`, its value dropped:
+// it may be a plain digest, which lets whoever reads it confirm a guess at the action.
+//
+// A part the backend did not serve stays absent; one served in a shape that cannot be
+// read is named in `unreadableFields`; a list's rows that cannot be read are counted
+// (rowsOf). A row whose reading is absent is from a backend before #234: "not
+// reported", never "none".
+
+/** What a withheld reference's `why` may be drawn as: a word of the core's (`plain-digest`, `chain-key-unkept`). */
+const WITHHELD_WHY = /^[a-z][a-z0-9-]{0,63}$/;
+
+/** A reference as served, carried as what it is and never as its value. */
+function effectReference(value: string): EffectReference {
+  if (KEYED_REFERENCE.test(value)) return { form: "keyed" };
+  if (value.startsWith(WITHHELD_PREFIX)) {
+    const why = value.slice(WITHHELD_PREFIX.length);
+    // A `why` that is not one of the core's words is not drawn: it could be a digest.
+    return { form: "withheld", why: WITHHELD_WHY.test(why) ? why : "" };
+  }
+  return { form: "unrecognised" };
+}
+
+/** `{ unreadableFields }` when a field was served in a shape that cannot be read; nothing otherwise. */
+function withUnreadableFields(bad: string[]): { unreadableFields?: string[] } {
+  return bad.length > 0 ? { unreadableFields: bad } : {};
+}
+
+/** A plain object, or null. */
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** `raw[key]` as text; null when not served (absent or null); anything else named `name` in `bad`. */
+function textIn(raw: Record<string, unknown>, key: string, name: string, bad: string[]): string | null {
+  const value = raw[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") return value;
+  bad.push(name);
+  return null;
+}
+
+/** `raw[key]` as a whole number from 0; null when not served; anything else named in `bad`. */
+function countIn(raw: Record<string, unknown>, key: string, name: string, bad: string[]): number | null {
+  const value = raw[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+  bad.push(name);
+  return null;
+}
+
+/** A count whose null is served on purpose ("names none"): undefined when not served, or when it cannot be read (named in `bad`). */
+function countOrNoneIn(raw: Record<string, unknown>, key: string, name: string, bad: string[]): number | null | undefined {
+  if (!Object.hasOwn(raw, key)) return undefined;
+  const value = raw[key];
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) return value;
+  bad.push(name);
+  return undefined;
+}
+
+/** `raw[key]` as true or false; null when not served; anything else named in `bad`. */
+function flagIn(raw: Record<string, unknown>, key: string, name: string, bad: string[]): boolean | null {
+  const value = raw[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value === "boolean") return value;
+  bad.push(name);
+  return null;
+}
+
+/** `raw[key]` as a reference; undefined when not served; a value that is not text named in `bad`. */
+function referenceIn(raw: Record<string, unknown>, key: string, name: string, bad: string[]): EffectReference | undefined {
+  const value = raw[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return effectReference(value);
+  bad.push(name);
+  return undefined;
+}
+
+function keyedUnderOf(raw: unknown, bad: string[]): KeyedUnder | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const held = recordOrNull(raw);
+  if (held === null) {
+    bad.push("keyedUnder");
+    return undefined;
+  }
+  const own: string[] = [];
+  return { chain: textIn(held, "chain", "chain", own), chainKey: textIn(held, "chain_key", "chainKey", own), ...withUnreadableFields(own) };
+}
+
+function executionOf(raw: unknown, bad: string[]): EffectExecution | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const held = recordOrNull(raw);
+  if (held === null) {
+    bad.push("execution");
+    return undefined;
+  }
+  const own: string[] = [];
+  return {
+    state: textIn(held, "state", "state", own),
+    basis: textIn(held, "basis", "basis", own),
+    words: textIn(held, "words", "words", own),
+    ...withUnreadableFields(own),
+  };
+}
+
+function windowCountOf(raw: unknown, bad: string[]): WindowCount | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const held = recordOrNull(raw);
+  if (held === null) {
+    bad.push("counted");
+    return undefined;
+  }
+  const own: string[] = [];
+  return {
+    counted: countIn(held, "counted", "counted", own),
+    rested: flagIn(held, "rested", "rested", own),
+    windowCount: countIn(held, "window_count", "windowCount", own),
+    lifetimeCount: countIn(held, "lifetime_count", "lifetimeCount", own),
+    ...withUnreadableFields(own),
+  };
+}
+
+function bindingApproval(raw: Record<string, unknown>): BindingApproval {
+  const bad: string[] = [];
+  const approval = textIn(raw, "approval", "approval", bad);
+  const effect = textIn(raw, "effect", "effect", bad);
+  const targetCount = countIn(raw, "target_count", "targetCount", bad);
+  const maxTargets = countOrNoneIn(raw, "max_targets", "maxTargets", bad);
+  const windowS = countOrNoneIn(raw, "window_s", "windowS", bad);
+  const targets = referenceIn(raw, "targets_ref", "targets", bad);
+  const counted = Object.hasOwn(raw, "counted") ? windowCountOf(raw.counted, bad) : undefined;
+  return {
+    approval,
+    effect,
+    targetCount,
+    ...(maxTargets !== undefined ? { maxTargets } : {}),
+    ...(windowS !== undefined ? { windowS } : {}),
+    ...(targets !== undefined ? { targets } : {}),
+    ...(counted !== undefined ? { counted } : {}),
+    ...withUnreadableFields(bad),
+  };
+}
+
+function toolBindingOf(raw: unknown, bad: string[]): ToolBinding | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === null) return null;
+  const held = recordOrNull(raw);
+  if (held === null) {
+    bad.push("toolBinding");
+    return undefined;
+  }
+  const own: string[] = [];
+  const unreadable: UnreadableRows = {};
+  const kind = textIn(held, "kind", "kind", own);
+  const identifier = textIn(held, "identifier", "identifier", own);
+  const generation = referenceIn(held, "generation", "generation", own);
+  const effect = textIn(held, "effect", "effect", own);
+  const targetCount = countIn(held, "target_count", "targetCount", own);
+  const maxTargets = countIn(held, "max_targets", "maxTargets", own);
+  const targets = referenceIn(held, "targets_ref", "targets", own);
+  const approvals = held.approvals === undefined || held.approvals === null
+    ? undefined
+    : rowsOf(held.approvals, unreadable, "approvals").map(bindingApproval);
+  return {
+    kind,
+    identifier,
+    ...(generation !== undefined ? { generation } : {}),
+    effect,
+    targetCount,
+    maxTargets,
+    ...(targets !== undefined ? { targets } : {}),
+    ...(approvals !== undefined ? { approvals } : {}),
+    ...withUnreadable(unreadable),
+    ...withUnreadableFields(own),
+  };
+}
+
+function bindingFinding(raw: Record<string, unknown>): BindingFinding {
+  const bad: string[] = [];
+  return {
+    code: textIn(raw, "code", "code", bad),
+    approval: textIn(raw, "approval", "approval", bad),
+    bindingMaxTargets: countIn(raw, "binding_max_targets", "bindingMaxTargets", bad),
+    approvalMaxTargets: countIn(raw, "approval_max_targets", "approvalMaxTargets", bad),
+    detail: textIn(raw, "detail", "detail", bad),
+    ...withUnreadableFields(bad),
+  };
+}
+
+/** One record's reading (athena-backend assurance/observed_effects.py `shown`). */
+function effectReading(raw: Record<string, unknown>): EffectReading {
+  const bad: string[] = [];
+  const unreadable: UnreadableRows = {};
+  const schema = textIn(raw, "schema", "schema", bad);
+  const digests = textIn(raw, "digests", "digests", bad);
+  const digestsServed = textIn(raw, "digests_served", "digestsServed", bad);
+  const actionReference = referenceIn(raw, "action_reference", "actionReference", bad);
+  const responseReference = referenceIn(raw, "response_reference", "responseReference", bad);
+  const keyedUnder = keyedUnderOf(raw.keyed_under, bad);
+  const execution = executionOf(raw.execution, bad);
+  const toolBinding = toolBindingOf(raw.tool_binding, bad);
+  const toolBindingReading = textIn(raw, "tool_binding_reading", "toolBindingReading", bad);
+  const findings = raw.findings === undefined || raw.findings === null
+    ? undefined
+    : rowsOf(raw.findings, unreadable, "findings").map(bindingFinding);
+  return {
+    schema,
+    digests,
+    digestsServed,
+    ...(actionReference !== undefined ? { actionReference } : {}),
+    ...(responseReference !== undefined ? { responseReference } : {}),
+    ...(keyedUnder !== undefined ? { keyedUnder } : {}),
+    ...(execution !== undefined ? { execution } : {}),
+    ...(toolBinding !== undefined ? { toolBinding } : {}),
+    toolBindingReading,
+    ...(findings !== undefined ? { findings } : {}),
+    ...withUnreadable(unreadable),
+    ...withUnreadableFields(bad),
+  };
+}
+
+/** A row's reading as served: not reported (no key: a backend before #234), none (null), unreadable, or read. */
+function effectReadingAsServed(row: Record<string, unknown>): EffectReadingAsServed {
+  if (!Object.hasOwn(row, "effect_reading")) return { served: "not_reported" };
+  const raw = row.effect_reading;
+  if (raw === null) return { served: "none" };
+  const held = recordOrNull(raw);
+  return held === null ? { served: "unreadable" } : { served: "reading", reading: effectReading(held) };
+}
+
+function chainOutcomeRow(raw: Record<string, unknown>): ChainOutcomeRow {
+  return {
+    uuid: str(raw.uuid),
+    outcomeId: strOrNull(raw.outcome_id),
+    workflow: str(raw.workflow),
+    status: str(raw.status),
+    statusLabel: strOrNull(raw.status_label),
+    evidenceKind: strOrNull(raw.evidence_kind),
+    evidenceKindLabel: strOrNull(raw.evidence_kind_label),
+    observerEngine: strOrNull(raw.observer_engine),
+    basisInForce: strOrNull(raw.basis_in_force),
+    signed: boolOrNull(raw.signed),
+    observedAt: strOrNull(raw.observed_at),
+    recordedAt: strOrNull(raw.recorded_at),
+    effect: effectReadingAsServed(raw),
+  };
+}
+
+/**
+ * A deployment's newest chain outcomes, each with what a reader is shown of its
+ * observed effect, and the counts served beside them. A GET only: the route's POST
+ * (which appends outcomes) is never sent. An answer that serves no list of outcomes
+ * at all is unavailable, never read as none.
+ */
+export async function chainOutcomes(uuid: string): Promise<ChainOutcomes> {
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/chain-outcomes/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const raw = await readObject(response);
+  if (raw.outcomes === undefined || raw.outcomes === null) {
+    throw new ControlPlaneUnavailable("the Athena control plane answered chain-outcomes with no list of outcomes");
+  }
+  const unreadable: UnreadableRows = {};
+  return {
+    outcomes: rowsOf(raw.outcomes, unreadable, "outcomes").map(chainOutcomeRow),
+    returned: numOrNull(raw.returned),
+    truncated: boolOrNull(raw.truncated),
+    pageSize: numOrNull(raw.page_size),
+    recordedCount: numOrNull(raw.recorded_count),
     ...withUnreadable(unreadable),
   };
 }
