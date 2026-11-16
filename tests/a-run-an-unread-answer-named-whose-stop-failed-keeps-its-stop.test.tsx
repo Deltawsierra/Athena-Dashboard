@@ -177,6 +177,17 @@ describe("a retest whose answer was not read, and whose run's stop was refused",
     const before = calls.filter((one) => one === `POST /api/scans/${RUN}/abort`).length;
     fireEvent.click(screen.getByTestId(`button-stop-retest-${twinId}`));
     await waitFor(() => expect(calls.filter((one) => one === `POST /api/scans/${RUN}/abort`).length).toBe(before + 1));
+    // The engine refused that stop. The press is not over when the engine has
+    // it: the dashboard's 502 is still on its way to the page, which says it in
+    // a toast. This waits for that answer, as the page does. Ended at the line
+    // above, the test let the page's "Not stopped" land after the toasts were
+    // cleared, in the next test's, which then saw a notice it never caused.
+    // The refusal is said as a stop that did not take, and the run keeps its Stop.
+    await waitFor(() => expect(toasts.length).toBe(2));
+    expect(String(toasts[1].title)).toBe("Not stopped");
+    expect(String(toasts[1].description)).toContain("may still be running");
+    expect(screen.getByTestId(`text-retest-phase-${twinId}`).textContent).toBe("Running");
+    expect(screen.getByTestId(`button-stop-retest-${twinId}`)).toBeTruthy();
   });
 });
 
