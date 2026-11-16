@@ -36,6 +36,10 @@ import type {
   FindingScope, IncidentScope, ScopeAddedItem, ScopeEvidence, ScopeItem, ScopeItemRef, ScopeRecorded, ScopeRemovedItem,
   ScopeRevision, StepScope,
 } from "@shared/incident-scope";
+import {
+  REFUSAL_CODE, SLUG_REF, UUID_REF, type DeclareScopeBody, type ScopeAssetChoice, type ScopeChoices, type ScopeCurrent,
+  type ScopeEvidenceChoice, type ScopeWorkflowChoice,
+} from "@shared/scope-declaration";
 import { readRetestCheck } from "./backend-scans";
 
 export { ControlPlaneUnavailable, ControlPlaneRefused, ControlPlaneSignInRequired, isConfigured };
@@ -6593,6 +6597,211 @@ export async function findingScope(uuid: string): Promise<FindingScope> {
     revisions: scopeRows(raw.revisions, unreadable, "revisions", scopeRevision),
     ...withUnreadable(unreadable),
   };
+}
+
+// ---- declaring an incident's next scope revision (SPINE SP-3; DASH-DECLARE) ----
+//
+// The write is the backend's own: POST /api/assurance/findings/<uuid>/scope-revisions/,
+// admin-only there and recorded as the signed-in person, with the body exactly
+// `{items, reason, evidence}` (athena-backend assurance/views.py scope_revisions,
+// assurance/incident_scope.py declare). What a revision is declared FROM is read first,
+// in one answer, from routes the backend already serves:
+//
+//   GET /api/assurance/findings/<uuid>/                          the incident's deployment and its own evidence
+//   GET /api/assurance/assets/?deployment=<uuid>                 the deployment's assets, every page
+//   GET /api/assurance/deployments/<uuid>/approved-workflows/    its approved workflows
+//   GET /api/assurance/findings/<uuid>/scope-revisions/          the current revision, to say what changes
+//
+// Never a stop, and nothing a stop waits on.
+
+/** A deployment's id as it may be put in a read's path: letters, digits, '-' and '_' (the backend's are uuids). */
+const PATH_ID = /^[0-9A-Za-z][0-9A-Za-z_-]*$/;
+
+function assetChoice(raw: Record<string, unknown>): { deployment: string | null; choice: ScopeAssetChoice | null } {
+  const uuid = strOrNull(raw.uuid);
+  return {
+    deployment: strOrNull(raw.deployment_uuid),
+    choice: uuid === null || !UUID_REF.test(uuid) ? null : {
+      uuid, name: strOrNull(raw.name), kind: strOrNull(raw.kind), kindLabel: strOrNull(raw.kind_label), identifier: strOrNull(raw.identifier),
+    },
+  };
+}
+
+function evidenceChoice(raw: Record<string, unknown>): ScopeEvidenceChoice | null {
+  const uuid = strOrNull(raw.uuid);
+  if (uuid === null || !UUID_REF.test(uuid)) return null;
+  return {
+    uuid, classification: strOrNull(raw.classification), classificationLabel: strOrNull(raw.classification_label),
+    summary: strOrNull(raw.summary), source: strOrNull(raw.source),
+  };
+}
+
+/** Whether two ids name the same record: case and hyphens aside, as the backend serves a uuid's canonical form. */
+function sameId(one: string, other: string): boolean {
+  const canonical = (id: string) => id.toLowerCase().replace(/-/g, "");
+  return canonical(one) === canonical(other);
+}
+
+/** Count `n` more rows of `list` that could not be read, beside whatever rowsOf counted. */
+function countUnread(unreadable: UnreadableRows, list: string, n: number): void {
+  if (n <= 0 || unreadable[list] === NOT_A_LIST) return;
+  const held = unreadable[list];
+  unreadable[list] = (typeof held === "number" ? held : 0) + n;
+}
+
+/** The revision a new one would supersede, from the scope's read: its number and items, or why they are not known. */
+function currentOf(scope: FindingScope, unreadable: UnreadableRows): ScopeCurrent {
+  const unread = scope.revisions === null ? NOT_A_LIST : scope.unreadable?.revisions;
+  if (unread !== undefined) unreadable.revisions = unread;
+  // Revisions that could not be read whole say nothing of which is current, nor that none is declared.
+  if (scope.revisions === null || unread !== undefined) return { revision: scope.current, items: null };
+  if (scope.current === null) return scope.revisions.length === 0 ? { revision: null, items: [] } : { revision: null, items: null };
+  const current = scope.revisions.find((one) => one.revision === scope.current) ?? null;
+  if (current === null) return { revision: scope.current, items: null };
+  if (current.unreadable?.items !== undefined) unreadable["current.items"] = current.unreadable.items;
+  return { revision: scope.current, items: current.items };
+}
+
+/**
+ * What an incident's next scope revision can be declared from: the deployment's own
+ * assets and approved workflows, the incident's own evidence, and the current revision.
+ * Reads only, as the signed-in person, under the read deadline of the route that serves
+ * it. A row that cannot be read is counted under its list, never offered; an asset the
+ * backend answers for another deployment is counted and never offered either.
+ */
+export async function scopeChoices(uuid: string): Promise<ScopeChoices> {
+  const response = await call(`/api/assurance/findings/${encodeURIComponent(uuid)}/`);
+  if (!response.ok) {
+    throw await refusedRead(response);
+  }
+  const finding = await readObject(response);
+  const deployment = strOrNull(finding.deployment_uuid);
+  if (deployment === null || !PATH_ID.test(deployment)) {
+    throw new ControlPlaneUnavailable(
+      "the Athena control plane answered this finding without a deployment id it issues, so what its scope can be declared from is not known",
+    );
+  }
+  const unreadable: UnreadableRows = {};
+  const evidence = rowsOf(finding.evidence, unreadable, "evidence").map(evidenceChoice);
+  countUnread(unreadable, "evidence", evidence.filter((one) => one === null).length);
+
+  const query = queryString({ deployment });
+  const [assetRows, workflows, scope] = await Promise.all([
+    pagedRows(`/api/assurance/assets/${query}`, { whole: true }),
+    approvedWorkflows(deployment),
+    findingScope(uuid),
+  ]);
+  const assets = rowsOf(assetRows, unreadable, "assets").map(assetChoice);
+  const ours = assets.filter((one) => one.deployment !== null && sameId(one.deployment, deployment));
+  countUnread(unreadable, "assets", ours.filter((one) => one.choice === null).length);
+  if (workflows.unreadable?.approved !== undefined) unreadable.workflows = workflows.unreadable.approved;
+  const slugs = workflows.approved.map((one): ScopeWorkflowChoice | null => (SLUG_REF.test(one.slug) ? { slug: one.slug, name: strOrNull(one.name) } : null));
+  countUnread(unreadable, "workflows", slugs.filter((one) => one === null).length);
+  return {
+    deployment,
+    finding: strOrNull(finding.uuid),
+    assets: ours.map((one) => one.choice).filter((one): one is ScopeAssetChoice => one !== null),
+    assetsElsewhere: assets.length - ours.length,
+    workflows: slugs.filter((one): one is ScopeWorkflowChoice => one !== null),
+    workflowsWhole: workflows.truncated === null ? null : !workflows.truncated,
+    evidence: evidence.filter((one): one is ScopeEvidenceChoice => one !== null),
+    current: currentOf(scope, unreadable),
+    ...withUnreadable(unreadable),
+  };
+}
+
+/** How long a refusal's body may take to arrive once its headers have, and how much of it is read: past either, it has no code. */
+const REFUSAL_BODY_MS = 5_000;
+const REFUSAL_BODY_BYTES = 64 * 1024;
+
+/**
+ * A refusal's code, read from its body within REFUSAL_BODY_MS and REFUSAL_BODY_BYTES: a
+ * short identifier, or null. Past either bound the body is cancelled, which abandons the
+ * backend's answer. Its detail is never kept.
+ */
+async function refusalCode(response: Response): Promise<string | null> {
+  const stream = response.body;
+  if (stream === null) return null;
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<"late">((settle) => {
+    timer = setTimeout(() => settle("late"), REFUSAL_BODY_MS);
+  });
+  try {
+    for (;;) {
+      const next = await Promise.race([reader.read(), late]);
+      if (next === "late" || (!next.done && size + next.value.byteLength > REFUSAL_BODY_BYTES)) {
+        void reader.cancel().catch(() => undefined);
+        return null;
+      }
+      if (next.done) break;
+      chunks.push(next.value);
+      size += next.value.byteLength;
+    }
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+  let payload: unknown = null;
+  try {
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return null;
+  }
+  const code = objOf(payload).code;
+  return typeof code === "string" && REFUSAL_CODE.test(code) ? code : null;
+}
+
+/**
+ * What became of a declared revision: recorded (201); refused, with the backend's
+ * status and its code (null when it named none this console reads); or sent and not
+ * known -- no answer came, or one that is neither a recording nor a refusal (a 5xx, a
+ * 2xx that is not 201), so it may have been recorded.
+ */
+export type ScopeDeclared =
+  | { ok: true }
+  | { ok: false; refused: true; status: 400 | 403 | 404 | 409; code: string | null }
+  | { ok: false; refused: false; status: number | null };
+
+/**
+ * Declare the next revision of an incident's scope: the backend's POST, as the
+ * signed-in person, with exactly `{items, reason, evidence}`. Never a stop. The answer's
+ * body is not read on a recording (the screen reads the scope again), and on a refusal
+ * only its code is: the backend's detail is never passed on. A person with no sign-in
+ * the backend takes is ControlPlaneSignInRequired, raised before anything is recorded.
+ */
+export async function declareScope(uuid: string, declared: DeclareScopeBody): Promise<ScopeDeclared> {
+  let response: Response;
+  try {
+    response = await call(`/api/assurance/findings/${encodeURIComponent(uuid)}/scope-revisions/`, {
+      method: "POST",
+      body: JSON.stringify({
+        items: declared.items.map((item) => ({ kind: item.kind, ref: item.ref })),
+        reason: declared.reason,
+        evidence: [...declared.evidence],
+      }),
+    });
+  } catch (cause) {
+    // Sent, and no answer came back: it may have been recorded.
+    if (cause instanceof ControlPlaneUnanswered) return { ok: false, refused: false, status: null };
+    throw cause;
+  }
+  if (response.status === 201) {
+    void response.body?.cancel().catch(() => undefined);
+    return { ok: true };
+  }
+  if (response.status === 400 || response.status === 403 || response.status === 404 || response.status === 409) {
+    return { ok: false, refused: true, status: response.status, code: await refusalCode(response) };
+  }
+  void response.body?.cancel().catch(() => undefined);
+  if (response.status === 401) {
+    // Not taken: the person's renewed token was refused too. Never passed on as a 401.
+    throw new ControlPlaneSignInRequired("Athena-Backend did not take your sign-in for this declaration (it answered 401): sign in to it again");
+  }
+  return { ok: false, refused: false, status: response.status };
 }
 
 function recoveryStep(raw: unknown): RecoveryStep {

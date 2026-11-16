@@ -27,8 +27,11 @@
  * Honest by construction: a field the backend did not serve says so in words, never as
  * an empty list; a deployment or finding the backend answers 404 for reads "Not found",
  * never as an empty record; and while not every incident is loaded, the footer says how
- * many are shown and how many more are recorded. Nothing here writes, accepts or offers
- * an acceptance: every read is a GET, and the backend's write is not relayed.
+ * many are shown and how many more are recorded. Nothing here accepts or offers an
+ * acceptance, and the backend's write of recovery steps is not relayed. The one write on
+ * this screen is an administrator's declaration of an incident's next scope revision,
+ * drawn on its card by ./DeclareScope.tsx (DASH-DECLARE), which holds its own post; this
+ * file sends nothing.
  */
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -49,6 +52,7 @@ import { HistoryPages, OnDemand, answeredFor, nextOffset, type PageSlot } from "
 import {
   IncidentScopeSummary, OneScopeAtATime, ScopeStandingChip, StepScopeFacts, scopeGapInWords, scopeStanding,
 } from "./IncidentScope";
+import DeclareScope, { OneDeclarationAtATime } from "./DeclareScope";
 
 // ---- the words: S1's state names as served, and the release words and gaps in words ----
 
@@ -439,6 +443,7 @@ export function IncidentCard({ incident, deployment, now, alone = false }: {
         <code className="break-all font-mono text-[11px] text-muted-foreground">{incident.finding ?? "no finding id served"}</code>
       </div>
       <IncidentScopeSummary incident={incident} deployment={deployment} />
+      <DeclareScope incident={incident} deployment={deployment} />
       <div className="space-y-2" data-testid="incident-current">
         <p className="text-[12px] text-muted-foreground">Current step</p>
         {step ? <StepBody step={step} now={now} incidentScope={incident.scope} /> : <Absent testId="incident-no-current">{why}</Absent>}
@@ -607,22 +612,25 @@ export default function RecoveryRecordsScreen({ deployment, finding }: { deploym
           affected -- where Athena-Backend reports it: the revision it is at, the revision each step was taken under,
           what about the scope keeps a step back, and every item removed with who removed it and why.
         </p>
-        {/* One incident's scope open at a time, on this screen: its read is the only one of its kind in flight. */}
+        {/* One incident's scope open at a time, on this screen: its read is the only one of its kind in flight. So is
+            one incident's declaration form, and its read. */}
         <OneScopeAtATime>
-          {finding ? (
-            <>
-              <FindingRecovery key={`${deployment}:${finding}`} deployment={deployment} finding={finding} />
-              <Link
-                href={`/authority/recovery?deployment=${encodeURIComponent(deployment)}`}
-                className="text-[12px] text-primary hover:underline"
-                data-testid="recovery-all-incidents"
-              >
-                Every incident of this deployment
-              </Link>
-            </>
-          ) : (
-            <HistoryPages key={deployment} page={(slot) => <IncidentPage deployment={deployment} slot={slot} />} />
-          )}
+          <OneDeclarationAtATime>
+            {finding ? (
+              <>
+                <FindingRecovery key={`${deployment}:${finding}`} deployment={deployment} finding={finding} />
+                <Link
+                  href={`/authority/recovery?deployment=${encodeURIComponent(deployment)}`}
+                  className="text-[12px] text-primary hover:underline"
+                  data-testid="recovery-all-incidents"
+                >
+                  Every incident of this deployment
+                </Link>
+              </>
+            ) : (
+              <HistoryPages key={deployment} page={(slot) => <IncidentPage deployment={deployment} slot={slot} />} />
+            )}
+          </OneDeclarationAtATime>
         </OneScopeAtATime>
       </Section>
     </div>

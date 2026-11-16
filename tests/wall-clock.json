@@ -6,6 +6,7 @@
   "tests/a-stop-reaches-the-engine-while-the-database-is-locked.test.ts",
   "tests/a-stop-goes-while-the-backend-health-read-hangs.test.ts",
   "tests/a-stop-goes-while-a-scope-read-hangs-fails-or-answers-nonsense.test.ts",
+  "tests/a-stop-goes-while-a-scope-declaration-hangs.test.ts",
   "tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts",
   "tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts",
   "tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts",

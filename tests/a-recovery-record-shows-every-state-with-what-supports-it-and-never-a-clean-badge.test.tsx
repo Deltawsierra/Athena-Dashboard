@@ -18,6 +18,11 @@ import type {
 } from "@shared/recovery-record";
 import { standIn } from "./helpers/bad-rows";
 import { CASES as SCOPE_CASES, DEP as SCOPE_DEP, ROUTE as SCOPE_ROUTE, servedByPath as scopeServedByPath } from "./helpers/incident-scopes";
+import {
+  BACKUP as DECLARE_BACKUP, EVIDENCE_2 as DECLARE_EVIDENCE, INCIDENT_ID as DECLARE_INCIDENT, REASON as DECLARE_REASON, RECORDED as DECLARE_RECORDED,
+  REFUSALS as DECLARE_REFUSALS, ROUTE_PATH as DECLARE_ROUTE, declareStandIn, refused as declareRefused, servedBefore as declareServedBefore,
+  type PostAnswer as DeclarePostAnswer,
+} from "./helpers/scope-declarations";
 
 /**
  * The recovery screen (/authority/recovery; client/src/components/authority/RecoveryRecords.tsx)
@@ -35,7 +40,9 @@ import { CASES as SCOPE_CASES, DEP as SCOPE_DEP, ROUTE as SCOPE_ROUTE, servedByP
  *   - NEVER a "clean" or "recovered" summary, and nothing in the positive tone, for any
  *     fixture -- a fully accepted recovery included, which reads "accepted by <owner>
  *     until <date>" with its conditions beside it -- and none for an incident's scope
- *     either (SP-3), in every shape its reads take (tests/helpers/incident-scopes.ts);
+ *     either (SP-3), in every shape its reads take (tests/helpers/incident-scopes.ts),
+ *     nor for an administrator's declaration of it: its form, its review and every
+ *     answer it can end in (DASH-DECLARE; tests/helpers/scope-declarations.ts);
  *   - an incident with a gap never reads like one without;
  *   - the owner's acceptance exactly as recorded, and lapsed once its end is past;
  *   - a deployment or finding the backend answers 404 for reads "Not found", never empty;
@@ -408,6 +415,68 @@ describe("never a single clean badge", () => {
     expect(document.querySelectorAll('[data-tone="positive"]').length).toBe(0);
     expect(texts(screen.getByTestId("recovery-section")).filter((text) => SUMMARY.test(text))).toEqual([]);
   });
+
+  it("draws none for an administrator's declaration of a scope either: its form, its review, and every answer it can end in", async () => {
+    // What this console's real routes answer over a stand-in backend (tests/helpers/scope-declarations.ts): the
+    // page, the choices, and the declaration's answer for a recording, every refusal code, an unknown code, a 403,
+    // a 404, a 500, no answer at all, and a sign-in the backend did not take.
+    const backend = await declareStandIn();
+    const PAGE = `${DECLARE_ROUTE.page}?offset=0`;
+    const reads: Record<string, Answer> = {};
+    const posts: Array<[string, Answer]> = [];
+    try {
+      for (const path of [PAGE, DECLARE_ROUTE.choices]) {
+        const read = await backend.admin.get(path);
+        expect(read.status, path).toBe(200);
+        reads[path] = read.body;
+      }
+      const answers: Array<[string, DeclarePostAnswer]> = [
+        ["recorded", DECLARE_RECORDED], ...DECLARE_REFUSALS.map(([code, status]) => [code, declareRefused(code, status)] as [string, DeclarePostAnswer]),
+        ["unknown code", declareRefused("scope_frozen", 409)], ["403", { status: 403, body: { detail: "no" } }], ["404", { status: 404, body: { detail: "no" } }],
+        ["500", { status: 500, raw: "Server Error (500)" }], ["no answer", { drop: true }], ["401", { status: 401, body: { detail: "no" } }],
+      ];
+      for (const [name, answer] of answers) {
+        backend.serve(declareServedBefore());
+        backend.answerPost(answer);
+        const res = await backend.admin.post(DECLARE_ROUTE.declare).send({ items: [{ kind: "asset", ref: DECLARE_BACKUP }], reason: DECLARE_REASON, evidence: [DECLARE_EVIDENCE] });
+        posts.push([name, { status: res.status, body: res.body }]);
+      }
+    } finally {
+      await backend.close();
+    }
+    const ADMIN = { authenticated: true, user: { id: "u-1", username: "admin", role: "admin" } };
+    let drawn = 0;
+    for (const [name, answer] of posts) {
+      serve({ ...BASE, "/api/auth/check": ADMIN, ...reads, [DECLARE_ROUTE.declare]: answer });
+      mount(`/authority/recovery?deployment=${SCOPE_DEP}`);
+      await waitFor(() => expect(incidentCard(DECLARE_INCIDENT)).toBeTruthy());
+      const card = incidentCard(DECLARE_INCIDENT);
+      await waitFor(() => expect(within(card).getByTestId("incident-scope-declare-toggle")).toBeTruthy());
+      fireEvent.click(within(card).getByTestId("incident-scope-declare-toggle"));
+      const form = await waitFor(() => within(card).getByTestId("declare-scope-form"));
+      // Every state of the form on the way: what blocks it, the picks, the review, and the answer.
+      const check = (when: string) => {
+        expect(texts(card).filter((text) => SUMMARY.test(text)), `${name}: ${when}`).toEqual([]);
+        expect(texts(card).filter((text) => lintMicrocopy(text).length > 0), `${name}: ${when}`).toEqual([]);
+        expect(card.querySelectorAll('[data-tone="positive"]').length, `${name}: ${when}`).toBe(0);
+        expect(card.innerHTML, `${name}: ${when}`).not.toMatch(/emerald|green/);
+      };
+      check("opened, blocked");
+      fireEvent.click(within(form).getAllByTestId("declare-item").find((one) => one.getAttribute("data-item-ref") === DECLARE_BACKUP)!);
+      fireEvent.click(within(form).getAllByTestId("declare-evidence-item").find((one) => one.getAttribute("data-evidence-ref") === DECLARE_EVIDENCE)!);
+      fireEvent.change(within(form).getByTestId("declare-reason"), { target: { value: "one\u2028two" } });
+      check("a reason refused");
+      fireEvent.change(within(form).getByTestId("declare-reason"), { target: { value: DECLARE_REASON } });
+      fireEvent.click(within(form).getByTestId("declare-scope-review"));
+      check("reviewed");
+      fireEvent.click(within(form).getByTestId("declare-scope-send"));
+      await waitFor(() => expect(within(card).getByTestId("declare-scope-said")).toBeTruthy());
+      check("answered");
+      drawn += 1;
+      cleanup();
+    }
+    expect(drawn).toBe(posts.length);
+  }, 120_000);
 
   it("reads a fully accepted recovery as accepted by its owner until its end, with its conditions beside it", async () => {
     await mountAll();
