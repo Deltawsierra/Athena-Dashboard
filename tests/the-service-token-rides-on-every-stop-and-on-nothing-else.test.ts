@@ -9,6 +9,7 @@ import path from "node:path";
 import { makeApp, signIn } from "./helpers";
 import { controlPlaneStandIn, newServiceToken, type ControlPlaneStandIn, type Seen } from "./helpers/control-plane-stand-in";
 import { TEST_ADMIN_PASSWORD } from "./test-admin";
+import { sweepClientReads, urlsOf } from "./helpers/client-reads";
 
 /**
  * The failsafe service token (#337): on every stop this server relays to the
@@ -41,6 +42,14 @@ import { TEST_ADMIN_PASSWORD } from "./test-admin";
  *     every request that is not a stop goes as the signed-in person (the
  *     stand-in names the account each request was made as), with or without
  *     the service token.
+ *   - The route walk sends each route in one form; the client reads them in
+ *     many (a later page's cursor, a history's filter and offset, a useQueries
+ *     entry, an infinite query's page). So every read the client makes, in
+ *     every form (tests/helpers/client-reads.ts), is made by the app's query
+ *     function, which sends the person's session and nothing else, and every
+ *     URL those reads become is sent through this server: what reached the
+ *     control plane went as the signed-in person, never with the service
+ *     token, but for the stop lane's own reads (STOP_LANE_READS).
  */
 
 const ROOT = path.resolve(__dirname, "..");
@@ -439,4 +448,81 @@ describe("the service account's token -- the stop credential -- is renewed by it
       failsafe._resetForTests();
     }
   }, 30_000);
+});
+
+/**
+ * The client's reads the backend judges stops, by the path the client asks this
+ * server for, and why each is one. Any other read the control plane judges a
+ * stop fails.
+ */
+const STOP_LANE_READS = new Map<string, string>([
+  // server/failsafe.ts: a stop, "the stop lane's reads" among them, goes as the service account and the token.
+  ["/api/failsafe/status", "the failsafe console's reachability check reads failsafe:state, the stop lane's read, before it reads the commands a second operator signs"],
+  ["/api/failsafe/state", "failsafe:state, where a second operator finds the stop awaiting their signature: the stop lane's read, so no stop waits on a person's sign-in"],
+  ["/api/failsafe/commands/x1", "failsafe:command-detail, the bytes a stop's signers sign: the stop lane's read"],
+]);
+
+/**
+ * The fetches the client sends itself, outside React Query, by file, and why
+ * each is one. Each sends the person's session (credentials "include") and no
+ * credential header; a fetch in any other file fails until it is listed here.
+ */
+const OWN_FETCHES = new Map<string, string>([
+  ["client/src/lib/queryClient.ts", "the app's query function, which every keyed read goes through, and apiFetch, which every press goes through"],
+  ["client/src/components/BackendHealthStrip.tsx", "the backend health strip's polled read of /api/backend-health, under its own deadline and backoff"],
+  ["client/src/components/economics/ReceiptDownload.tsx", "a receipt's bytes, read on a press and checked against their digest before they are saved; nothing caches them"],
+  ["client/src/lib/appFile.ts", "a file from this app's origin, saved on a press; nothing caches it"],
+  ["client/src/utils/auth.ts", "the session itself: its check, its sign-in, a password change and its sign-out"],
+]);
+
+describe("every read the client makes, in every form, goes as the signed-in person and never with the service token", () => {
+  it("each read, in whatever form, is made by the app's query function, which sends the person's session; every fetch the client sends itself sends it too", () => {
+    const { reads, fetches } = sweepClientReads();
+    expect(reads.length).toBeGreaterThan(90);
+    expect(new Set(reads.map((one) => one.form))).toContain("useQueries");
+    expect(reads.filter((one) => one.ownQueryFn).map((one) => `${one.where} (${one.form})`), "reads with their own query function").toEqual([]);
+    expect(fetches.filter((one) => one.credentials !== "include" || one.credentialHeader).map((one) => `${one.where}: credentials ${one.credentials}`),
+      "fetches that do not send the person's session alone").toEqual([]);
+    expect(fetches.filter((one) => !OWN_FETCHES.has(one.file)).map((one) => one.where), "fetches no entry lists").toEqual([]);
+    expect([...OWN_FETCHES.keys()].filter((file) => !fetches.some((one) => one.file === file)), "entries no fetch needs").toEqual([]);
+  });
+
+  it("every URL the client's reads become, sent through this server: what reached the control plane went as the signed-in person, without the service token, but for the stop lane's own reads", async () => {
+    plane = await controlPlaneStandIn({ serviceToken: TOKEN });
+    const p = plane;
+    const { admin } = await boot(p, TOKEN);
+    captureLogs();
+    const { found } = sweepClientReads();
+    const urls = await urlsOf(found);
+    const pathOf = (url: string) => url.split("?")[0];
+    const wrong: string[] = [];
+    const stopReads = new Set<string>();
+    const sent = new Set<string>();
+    let relayed = 0;
+    for (const { where, form, url } of urls) {
+      if (sent.has(url)) continue;
+      sent.add(url);
+      const from = p.seen.length;
+      const res = await admin.get(url).timeout({ response: 20_000, deadline: 30_000 });
+      expect(res.status, `${where}: GET ${url}`).not.toBe(401);
+      const operator = p.seen.slice(from).filter((one) => !one.path.startsWith("/api/token/"));
+      relayed += operator.length;
+      for (const one of operator) {
+        const said = `${where} (${form}): GET ${url} sent ${one.method} ${one.path}${one.query} as ${one.account ?? "nobody"} (${one.by ?? "unauthenticated"})`;
+        if (one.stop) {
+          stopReads.add(pathOf(url));
+          if (!STOP_LANE_READS.has(pathOf(url))) wrong.push(`${said}: a read the control plane judges a stop`);
+          if (one.serviceToken !== TOKEN) wrong.push(`${said}: a stop without the service token`);
+        } else if (one.serviceToken !== undefined || one.by !== "bearer" || one.account !== "admin") {
+          wrong.push(`${said}${one.serviceToken !== undefined ? ", with the service token" : ""}: not as the signed-in person alone`);
+        }
+      }
+    }
+    expect(wrong).toEqual([]);
+    // The walk reached the control plane, and through the forms the route walk sends no request in: a useQueries entry's later page.
+    expect(relayed).toBeGreaterThan(30);
+    expect(p.seen.some((one) => /\/chain-outcomes\/$/.test(one.path) && one.query.includes("before=x1"))).toBe(true);
+    // Every stop-lane entry is a read the client makes: the list permits nothing no read needs.
+    expect([...STOP_LANE_READS.keys()].filter((one) => !stopReads.has(one))).toEqual([]);
+  }, 120_000);
 });
