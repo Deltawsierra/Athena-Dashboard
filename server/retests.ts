@@ -309,37 +309,51 @@ export class RetestWatcher {
 
   /**
    * Note that the engine accepted a stop for this run: in memory at once, on
-   * the record in the background. Only ever called after the stop was sent,
-   * and never awaited by it.
+   * the record once `after` has settled (noteLater). Only ever called after
+   * the stop was sent, and never awaited by it.
    */
-  stopAccepted(engineRunId: string): Promise<string | null> {
+  stopAccepted(engineRunId: string, after?: Promise<unknown>): Promise<string | null> {
     const at = new Date();
     const row = this.known.get(engineRunId);
     if (row) row.stopAcceptedAt = at;
     // What writing the note came to: null when it is on the record (or there
     // is no running watch to note it on), else why not -- the kill switch
     // counts it in its writeFailures.
-    return this.storage.updateRunningRetestWatch(engineRunId, { stopAcceptedAt: at }).then(
-      () => null,
-      (cause) => `the note that the engine accepted the stop of retest run ${engineRunId} could not be written: ${causeOf(cause)}`,
-    );
+    return this.noteLater(engineRunId, { stopAcceptedAt: at }, after,
+      (cause) => `the note that the engine accepted the stop of retest run ${engineRunId} could not be written: ${causeOf(cause)}`);
   }
 
   /**
    * Note that a stop was sent for this run and the engine answered it 2xx,
    * but the rest of its answer was not read: "stop sent, answer unread" --
-   * never an accepted stop. In memory at once, on the record in the
-   * background. What writing the note came to: null when it is on the record
-   * (or there is no running watch to note it on), else why not.
+   * never an accepted stop. In memory at once, on the record once `after` has
+   * settled (noteLater). What writing the note came to: null when it is on
+   * the record (or there is no running watch to note it on), else why not.
    */
-  stopSentUnread(engineRunId: string): Promise<string | null> {
+  stopSentUnread(engineRunId: string, after?: Promise<unknown>): Promise<string | null> {
     const at = new Date();
     const row = this.known.get(engineRunId);
     if (row) row.stopUnreadAt = at;
-    return this.storage.updateRunningRetestWatch(engineRunId, { stopUnreadAt: at }).then(
-      () => null,
-      (cause) => `the note that a stop was sent to retest run ${engineRunId}, its answer unread, could not be written: ${causeOf(cause)}`,
-    );
+    return this.noteLater(engineRunId, { stopUnreadAt: at }, after,
+      (cause) => `the note that a stop was sent to retest run ${engineRunId}, its answer unread, could not be written: ${causeOf(cause)}`);
+  }
+
+  /**
+   * Write a stop's note onto the watch's row once `after` has settled (a
+   * Stop's answer gone out: routes.ts answerGone), and never in the caller's
+   * turn of the loop. better-sqlite3 runs each statement on the loop for as
+   * long as the disk takes: written before a retest's Stop answered, the note
+   * held that answer for as long as a slow or stalled disk held the write
+   * (3 s held, 3 s late). The note is in memory already.
+   */
+  private noteLater(
+    engineRunId: string, note: { stopAcceptedAt: Date } | { stopUnreadAt: Date }, after: Promise<unknown> | undefined,
+    failed: (cause: unknown) => string,
+  ): Promise<string | null> {
+    const ready = after ?? new Promise<void>((turn) => setImmediate(turn));
+    return ready.then(() => undefined, () => undefined)
+      .then(() => this.storage.updateRunningRetestWatch(engineRunId, note))
+      .then(() => null, failed);
   }
 
   /** Stop reading, as a dashboard that shut down does. Its watches stay on the record for the next to resume. */
