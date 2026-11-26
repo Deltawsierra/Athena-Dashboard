@@ -105,6 +105,16 @@ describe.each(BACKENDS)("a test row changed from the row as it lands, on the $na
     expect(change).not.toHaveBeenCalled();
   });
 
+  // As on the event loop, where the read, the change and the write were one step made when it was called: a call
+  // made after it -- in the same turn, before it is answered -- sees what it wrote (server/store-client.ts, the line).
+  it("a read made right after the change was called, before it is answered, reads the row it wrote", async () => {
+    const { id } = await aRow();
+    const writing = storage.updateTestWith(id, (row) => ({ findings: { ...findingsOf(row), backendMirror: { mirrored: true } } }));
+    const read = storage.getTest(id);
+    await writing;
+    expect(findingsOf(await read)).toEqual({ runId: "run-1", backendMirror: { mirrored: true } });
+  });
+
   it("leaves the row a Stop finds from memory (peekTest) as written", async () => {
     const { id } = await aRow();
     await storage.updateTestWith(id, (row) => ({ status: "aborted", findings: { ...findingsOf(row), backendMirror: { mirrored: true } } }));
@@ -158,7 +168,8 @@ describe("a test row changed from the row as it lands, with another dashboard on
     const { id } = await aRow();
     const other = new Database(dbPath);
     try {
-      other.pragma("busy_timeout = 0");
+      // The checkpointer thread takes the write lock for a moment once a second: this connection waits that out.
+      other.pragma("busy_timeout = 5000");
       const seen: unknown[] = [];
       const written = await storage.updateTestWith(id, (row) => {
         seen.push(row.findings);
@@ -182,7 +193,7 @@ describe("a test row changed from the row as it lands, with another dashboard on
     const { id } = await aRow();
     const other = new Database(dbPath);
     try {
-      other.pragma("busy_timeout = 0");
+      other.pragma("busy_timeout = 5000");
       let tries = 0;
       await expect(storage.updateTestWith(id, (row) => {
         tries += 1;
