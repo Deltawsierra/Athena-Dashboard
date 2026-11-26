@@ -762,10 +762,13 @@ function namedByUnreadAnswer(stop: StopOutcome): StopOutcome {
   return stop.unknownRun === true ? { stopped: false, unknownRun: true, namedOnly: true, detail: UNKNOWN_NAMED_RUN } : stop;
 }
 
-/** Send one run the abort its own Stop sends. Reads and writes nothing here. */
-async function sendAbort(runId: string): Promise<StopOutcome> {
+/**
+ * Send one run the abort its own Stop sends. Reads and writes nothing here.
+ * `written`: called once the stop's request has been written (engine.abortRun).
+ */
+async function sendAbort(runId: string, written?: () => void): Promise<StopOutcome> {
   try {
-    return outcomeOf(await engine.abortRun(runId));
+    return outcomeOf(await engine.abortRun(runId, written));
   } catch (cause) {
     return { stopped: false, detail: causeOf(cause) };
   }
@@ -1248,21 +1251,44 @@ function runningScansOf(rows: Test[]): Array<{ test: Test; runId: string }> {
  *   - the retests' stops go first, by the ids held in memory;
  *   - the recorded scans' stops go next, from the tests this process holds in
  *     memory (storage.peekAllTests);
- *   - the engine's list, and the tests on the database, are read alongside:
- *     each run on the engine's list that nothing above covered is sent its
- *     stop as soon as the list is in; and each scan the database records as
- *     running that nothing above covered -- another dashboard's among them --
- *     is sent its stop as soon as the database is read, whatever the engine's
- *     list is doing (an engine whose worker threads are all busy may not
- *     answer that list for 20 s).
- * No stop waits on a read another list needs. The records of the stops -- a
- * log line each, and the watches' notes -- are written once every stop has
- * been answered, so no write, however slow or failed, delays another run's
- * stop. A write that failed is counted in `writeFailures` and said.
+ *   - the engine's list is asked for alongside, and each run on it that
+ *     nothing above covered is sent its stop as soon as the list is in;
+ *   - the tests on the database are read once every stop above has left this
+ *     process (stopsLeft: its request written), never in the turn that sent
+ *     them -- a statement in that turn holds them all for as long as a
+ *     stalled disk holds it -- and each scan the database records as running
+ *     that nothing above covered, another dashboard's among them, is sent its
+ *     stop as soon as the database is read, whatever the engine's list is
+ *     doing (an engine whose worker threads are all busy may not answer that
+ *     list for 20 s).
+ * No stop waits on a read another list needs, and none on this dashboard's
+ * store. `storeMayWrite` settles once the database's read is in and every
+ * stop sent by then has left: the flag's write waits for it. Neither the read
+ * nor the flag waits for the stops to leave past STOPS_LEAVE_WAIT_MS after
+ * the press (a stop whose connection never opens leaves only at its call
+ * deadline); a stop not left by then can be held by them on a stalled disk. The records of
+ * the stops -- a log line each, and the watches' notes -- are written once
+ * every stop has been answered, so no write, however slow or failed, delays
+ * another run's stop. A write that failed is counted in `writeFailures` and
+ * said.
+ *
+ * Whom it stops is as before: the same lists, each run claimed once. Only
+ * when the database is read has moved, from the press's own turn to the
+ * moment its stops have left -- a few milliseconds.
  */
-async function stopEverythingRunning(
+function stopEverythingRunning(
   req: Request, watcher: retests.RetestWatcher, press: KillPress,
-): Promise<{ stops: RecordedStops; engineRuns: EngineSweep; writeFailures: string[] }> {
+): {
+  swept: Promise<{ stops: RecordedStops; engineRuns: EngineSweep; writeFailures: string[] }>;
+  storeMayWrite: Promise<void>;
+} {
+  // This press's own store work waits for its stops to leave, but for at most STOPS_LEAVE_WAIT_MS from now.
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  const leaveWaitOver = new Promise<void>((over) => {
+    leaveTimer = setTimeout(over, STOPS_LEAVE_WAIT_MS);
+    leaveTimer.unref?.();
+  });
+  const stopsLeftOrWaitOver = () => Promise.race([stopsLeft(press), leaveWaitOver]);
   const who = actor(req);
   const records: Array<() => Promise<string | null>> = [];
   /**
@@ -1328,9 +1354,10 @@ async function stopEverythingRunning(
   const peeked = storage.peekAllTests();
   const memoryStops = Promise.all(runningScansOf(peeked ?? []).filter((one) => claim(one.runId)).map(stopScan));
 
-  // The engine's list and the database's tests, read alongside.
+  // The engine's list, asked for alongside; the database's tests once every stop above has left (stopsLeft),
+  // or STOPS_LEAVE_WAIT_MS after the press.
   const engineRead = settle(engine.activeRuns());
-  const rowsRead = settle(storage.getAllTests());
+  const rowsRead = stopsLeftOrWaitOver().then(() => settle(new Promise<Test[]>((read) => read(storage.getAllTests()))));
 
   // Each run the engine lists that no stop named yet, as soon as the list is in.
   let unnamed = 0;
@@ -1356,86 +1383,94 @@ async function stopEverythingRunning(
   // and never only once it failed. Each is claimed against the stops already
   // sent, so a run the memory list or the engine's list reached first is not
   // sent a second stop, and the engine's sweep skips what this sent.
-  const rowStops: Promise<ScanStop[]> = rowsRead.then((rows) =>
-    rows.ok ? Promise.all(runningScansOf(rows.value).filter((one) => claim(one.runId)).map(stopScan)) : []);
+  const rowStopsSent: Promise<{ answered: Promise<ScanStop[]> }> = rowsRead.then((rows) => ({
+    answered: rows.ok ? Promise.all(runningScansOf(rows.value).filter((one) => claim(one.runId)).map(stopScan)) : Promise.resolve([]),
+  }));
+  const rowStops: Promise<ScanStop[]> = rowStopsSent.then((sent) => sent.answered);
+  // The flag's write: once the database's scans were sent their stops, and every stop sent by then has left --
+  // or STOPS_LEAVE_WAIT_MS after the press.
+  const storeMayWrite = rowStopsSent.then(stopsLeftOrWaitOver, stopsLeftOrWaitOver).then(() => clearTimeout(leaveTimer));
 
-  // Every stop has been sent; wait for their answers.
-  const [retestsAnswered, memoryDone, sweepDone, rowsDone] = await Promise.all([retestStops, memoryStops, sweepStops, rowStops]);
-  const listed = await engineRead;
-  // A handle's run the engine does not know, once its list was read and every
-  // run on it sent a stop: the run that start began, under whatever id, was
-  // on that list and is reported with it -- the handle ends, said as that.
-  // With the list unread, or listing a live run with no id no stop could
-  // name, it keeps its Stop and its slot (UNKNOWN_NAMED_RUN).
-  if (listed.ok && unnamed === 0) {
-    const swept: StopOutcome = { stopped: false, unknownRun: true, detail: UNKNOWN_NAMED_RUN_SWEPT };
-    for (const runId of Array.from(unsettled)) noteHandleStop(runId, swept, KILL_SWITCH_SWEPT);
-    for (const runId of Array.from(unknownNamed.keys())) unknownNamed.set(runId, swept);
-  }
-  const retestsDone = retestsAnswered.map((one) => {
-    const settled = unknownNamed.get(one.runId);
-    return settled ? { runId: one.runId, target: one.target, testId: one.testId, ...settled } : one;
-  });
-  // Whether the scans stopped make a complete list: the database's read is
-  // needed for that only when this process never held the tests, or the
-  // engine's list could not be read (then the database is the only place
-  // another dashboard's scan is recorded).
-  const needRows = peeked === null || !listed.ok;
-  const read = await rowsRead;
-  const rows: Settled<Test[]> = needRows ? read : { ok: true, value: read.ok ? read.value : (peeked ?? []) };
-  const tests = rows.ok ? rows.value : (peeked ?? []);
-  const recordedBy = new Map<string, Test>();
-  for (const test of tests) {
-    const runId = stopIdOf(test);
-    if (runId !== null) recordedBy.set(runId, test);
-  }
-  // A run the engine's list reached first that a test records as running is
-  // that test's scan, and is said as one.
-  const scans: ScanStop[] = [...memoryDone, ...rowsDone];
-  const others: EngineRunStop[] = [];
-  for (const run of sweepDone) {
-    const test = recordedBy.get(run.runId);
-    if (test && unfinishedStopIdOf(test) === run.runId) {
-      scans.push({ ...run, testId: test.id });
-      records.push(() => writeStopRecord(who, { runId: run.runId, target: run.target, testId: test.id }, "kill_switch", run));
-    } else {
-      others.push({ ...run, testId: test?.id ?? null });
-      records.push(() => writeStopRecord(who, { runId: run.runId, target: run.target, testId: test?.id ?? null }, "kill_switch", run));
+  const answered = (async () => {
+    // Every stop has been sent; wait for their answers.
+    const [retestsAnswered, memoryDone, sweepDone, rowsDone] = await Promise.all([retestStops, memoryStops, sweepStops, rowStops]);
+    const listed = await engineRead;
+    // A handle's run the engine does not know, once its list was read and every
+    // run on it sent a stop: the run that start began, under whatever id, was
+    // on that list and is reported with it -- the handle ends, said as that.
+    // With the list unread, or listing a live run with no id no stop could
+    // name, it keeps its Stop and its slot (UNKNOWN_NAMED_RUN).
+    if (listed.ok && unnamed === 0) {
+      const swept: StopOutcome = { stopped: false, unknownRun: true, detail: UNKNOWN_NAMED_RUN_SWEPT };
+      for (const runId of Array.from(unsettled)) noteHandleStop(runId, swept, KILL_SWITCH_SWEPT);
+      for (const runId of Array.from(unknownNamed.keys())) unknownNamed.set(runId, swept);
     }
-  }
-
-  // Then write.
-  const writeFailures = (await Promise.all(records.map((write) => write()))).filter((one): one is string => one !== null);
-
-  const resumed = watcher.resumeState();
-  const engineRuns: EngineSweep = listed.ok
-    ? {
-      listed: true,
-      runs: [...others, ...retestsDone.map((one) => ({ ...one, target: listedAt.get(one.runId) ?? null }))],
-      ...(unnamed > 0 ? { unnamed } : {}),
+    const retestsDone = retestsAnswered.map((one) => {
+      const settled = unknownNamed.get(one.runId);
+      return settled ? { runId: one.runId, target: one.target, testId: one.testId, ...settled } : one;
+    });
+    // Whether the scans stopped make a complete list: the database's read is
+    // needed for that only when this process never held the tests, or the
+    // engine's list could not be read (then the database is the only place
+    // another dashboard's scan is recorded).
+    const needRows = peeked === null || !listed.ok;
+    const read = await rowsRead;
+    const rows: Settled<Test[]> = needRows ? read : { ok: true, value: read.ok ? read.value : (peeked ?? []) };
+    const tests = rows.ok ? rows.value : (peeked ?? []);
+    const recordedBy = new Map<string, Test>();
+    for (const test of tests) {
+      const runId = stopIdOf(test);
+      if (runId !== null) recordedBy.set(runId, test);
     }
-    : {
-      listed: false,
-      detail: listed.detail,
-      ...(retestsDone.length > 0 ? { retests: retestsDone } : {}),
-      ...(!resumed.loaded
-        ? {
-          retestsUnlisted: "the retests on record could not be read either" +
-            (resumed.lastError ? ` (${resumed.lastError})` : " (the read is still in progress)") +
-            ", so no list of the retests could be made: a retest this dashboard has not read may still be running",
-        }
-        : {}),
-    };
-  const stops: RecordedStops = rows.ok
-    ? { listed: true, scans }
-    : {
-      listed: false,
-      detail: peeked !== null
-        ? `the scans recorded on the database could not be read (${rows.detail}); the ${scans.length} this dashboard held as running were sent a stop`
-        : rows.detail,
-      ...(scans.length > 0 ? { scans } : {}),
-    };
-  return { stops, engineRuns, writeFailures };
+    // A run the engine's list reached first that a test records as running is
+    // that test's scan, and is said as one.
+    const scans: ScanStop[] = [...memoryDone, ...rowsDone];
+    const others: EngineRunStop[] = [];
+    for (const run of sweepDone) {
+      const test = recordedBy.get(run.runId);
+      if (test && unfinishedStopIdOf(test) === run.runId) {
+        scans.push({ ...run, testId: test.id });
+        records.push(() => writeStopRecord(who, { runId: run.runId, target: run.target, testId: test.id }, "kill_switch", run));
+      } else {
+        others.push({ ...run, testId: test?.id ?? null });
+        records.push(() => writeStopRecord(who, { runId: run.runId, target: run.target, testId: test?.id ?? null }, "kill_switch", run));
+      }
+    }
+
+    // Then write.
+    const writeFailures = (await Promise.all(records.map((write) => write()))).filter((one): one is string => one !== null);
+
+    const resumed = watcher.resumeState();
+    const engineRuns: EngineSweep = listed.ok
+      ? {
+        listed: true,
+        runs: [...others, ...retestsDone.map((one) => ({ ...one, target: listedAt.get(one.runId) ?? null }))],
+        ...(unnamed > 0 ? { unnamed } : {}),
+      }
+      : {
+        listed: false,
+        detail: listed.detail,
+        ...(retestsDone.length > 0 ? { retests: retestsDone } : {}),
+        ...(!resumed.loaded
+          ? {
+            retestsUnlisted: "the retests on record could not be read either" +
+              (resumed.lastError ? ` (${resumed.lastError})` : " (the read is still in progress)") +
+              ", so no list of the retests could be made: a retest this dashboard has not read may still be running",
+          }
+          : {}),
+      };
+    const stops: RecordedStops = rows.ok
+      ? { listed: true, scans }
+      : {
+        listed: false,
+        detail: peeked !== null
+          ? `the scans recorded on the database could not be read (${rows.detail}); the ${scans.length} this dashboard held as running were sent a stop`
+          : rows.detail,
+        ...(scans.length > 0 ? { scans } : {}),
+      };
+    return { stops, engineRuns, writeFailures };
+  })();
+  return { swept: answered, storeMayWrite };
 }
 
 /**
@@ -1965,7 +2000,54 @@ interface KillPress {
   seq: number;
   claimed: Set<string>;
   stops: Map<string, Promise<StopOutcome>>;
+  /**
+   * The stops sent for this press whose request is not yet written whole to
+   * its connection: each settles once it is (its `finish`), or once the stop
+   * is answered or has failed, whichever is first (stopsLeft).
+   */
+  leaving: Set<Promise<void>>;
 }
+
+/** A press with nothing sent yet. */
+function aPress(seq: number): KillPress {
+  return { seq, claimed: new Set(), stops: new Map(), leaving: new Set() };
+}
+
+/**
+ * Settles once every stop this press has sent so far has left this process:
+ * its request written whole (engine.abortRun's `written`), or the stop
+ * answered or failed. A stop sent while this waits is waited for too.
+ *
+ * SAFETY: Node opens a request's connection, and writes its bytes, only once
+ * the turn of the event loop that made the request is over -- and
+ * better-sqlite3 runs each statement on the loop, for as long as the disk
+ * takes. A statement started in the turn that sent the kill switch's stops
+ * held every one of them in this process: with the disk stalling as it was
+ * pressed, they reached the engine after 3 s. The kill switch's own store
+ * work -- its read of the tests table, and the write of its flag -- waits for
+ * this, so a stalled disk delays none of the stops already sent; but for at
+ * most STOPS_LEAVE_WAIT_MS after the press.
+ */
+async function stopsLeft(press: KillPress): Promise<void> {
+  while (press.leaving.size > 0) await Promise.all(Array.from(press.leaving));
+}
+
+/**
+ * The longest the kill switch's own store work -- its read of the tests table,
+ * and the write of its flag -- waits after the press for its stops to leave
+ * (stopsLeft): it starts once every stop sent so far has left, or this long
+ * after the press, whichever is first. A stop whose connection never opens
+ * (an engine host that drops connections) leaves only at its call deadline
+ * (engineTimeouts.callMs, 20 s), and held the database's read -- with it the
+ * stops of the scans only the database records, another dashboard's -- and
+ * the flag that must survive a restart, for all of that.
+ *
+ * What is left: a stop that has not left by then -- one still connecting
+ * after 1 s, or one sent after it (a database-only scan's, once the read is
+ * in) -- can be held by a statement of this store work for as long as a
+ * stalled disk holds that statement.
+ */
+const STOPS_LEAVE_WAIT_MS = 1_000;
 
 /**
  * The switch as this dashboard pressed it. `engaged` is set when an engage is
@@ -2017,7 +2099,7 @@ function trackStart(kind: StartTicket["kind"]): RequestHandler {
  * press), and every start in flight is marked.
  */
 function pressKillSwitch(seq: number, flagWrittenLaterThan: (seq: number) => boolean): KillPress {
-  const press: KillPress = { seq, claimed: new Set(), stops: new Map() };
+  const press = aPress(seq);
   if (!flagWrittenLaterThan(seq)) {
     killSwitchMemory.engaged = true;
     killSwitchMemory.seq = Math.max(killSwitchMemory.seq, seq);
@@ -2040,12 +2122,22 @@ function killSwitchFlagNotStored(seq: number, why: string): void {
   if (killSwitchMemory.engaged && seq === killSwitchMemory.seq) killSwitchMemory.notStored = why;
 }
 
-/** Send a run its stop for a press: one per run per press, shared with whichever list named it first. */
+/**
+ * Send a run its stop for a press: one per run per press, shared with whichever
+ * list named it first. Until its request is written, it is one of the press's
+ * stops still leaving (KillPress.leaving, stopsLeft).
+ */
 function stopForPress(press: KillPress, runId: string): Promise<StopOutcome> {
   let sent = press.stops.get(runId);
   if (!sent) {
     press.claimed.add(runId);
-    sent = sendAbort(runId);
+    let left!: () => void;
+    const leaving = new Promise<void>((resolve) => { left = resolve; });
+    press.leaving.add(leaving);
+    void leaving.then(() => { press.leaving.delete(leaving); });
+    sent = sendAbort(runId, left);
+    // sendAbort never rejects: a stop answered, or failed before it was written, has left all the same.
+    void sent.then(left, left);
     press.stops.set(runId, sent);
   }
   return sent;
@@ -2081,7 +2173,7 @@ async function markIfEngagedElsewhere(ticket: StartTicket | null): Promise<void>
   if (ticket === null || ticket.press !== null) return;
   // A stored flag that is not exactly false reads as engaged (shared/kill-switch-flag.ts).
   const stored = await storage.getKillSwitchState().then((one) => rowEngaged(one), () => false);
-  if (stored && ticket.press === null) ticket.press = { seq: 0, claimed: new Set(), stops: new Map() };
+  if (stored && ticket.press === null) ticket.press = aPress(0);
 }
 
 const KILL_SWITCH_START_NOTE = "started while the kill switch was being pressed: stopped as soon as the engine answered the start";
@@ -5885,8 +5977,12 @@ export function registerRoutes(app: Express): void {
     const press = data.killSwitchEnabled === true ? pressKillSwitch(seq, flagWrittenLaterThan) : null;
     // The stops first (stopEverythingRunning): each goes to the engine before
     // anything is written, and they go together. Then the flag, so every other
-    // dashboard refuses writes too. Sent again each time the switch is sent
-    // on, so an operator can retry the scans that could not be reached.
+    // dashboard refuses writes too -- once every stop has left this process
+    // (sweep.storeMayWrite), or STOPS_LEAVE_WAIT_MS after the press: a write
+    // started in the turn that sent them held them all for as long as a
+    // stalled disk held it. Sent again each time the
+    // switch is sent on, so an operator can retry the scans that could not be
+    // reached.
     //
     // A flag that could not be stored holds back no stop: on a full disk, or
     // a read-only or locked database, the stops have gone already, and the
@@ -5947,6 +6043,7 @@ export function registerRoutes(app: Express): void {
     /** A later-sequenced request stored one of these fields first: this one writes nothing, and says so. */
     let overtaken = false;
     try {
+      if (sweep !== null) await sweep.storeMayWrite;
       settings = await writeAIControl(seq, { ...now, lastModifiedBy: req.session.userId ?? null });
       if (settings === null) overtaken = true;
     } catch (cause) {
@@ -5959,7 +6056,7 @@ export function registerRoutes(app: Express): void {
     if (sweep !== null) {
       // Neither list failing is a 500: what the page must say is which list
       // could not be read -- not that nothing ran.
-      ({ stops, engineRuns, writeFailures } = await sweep);
+      ({ stops, engineRuns, writeFailures } = await sweep.swept);
       // Decision 6: each stopped hybrid scan's record at the backend, once THIS
       // answer has gone out, whichever way it goes -- never before it, never
       // awaited by it.

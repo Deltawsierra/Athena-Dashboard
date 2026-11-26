@@ -649,8 +649,12 @@ type CallInit = { method?: string; body?: string; headers?: Record<string, strin
  * redirect): 307 and 308 with the same method and body; 301 and 302 as a GET
  * when the request was a POST, and 303 always as a GET (HEAD stays HEAD),
  * without a body; to http or https only, and at most MAX_REDIRECTS times.
+ *
+ * `written`, when given, is called once a request of this call has been
+ * written whole to its connection (the request's `finish`): from then on its
+ * bytes are out of this process, whatever its event loop does next.
  */
-function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs): Promise<EngineAnswer> {
+function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.callMs, written?: () => void): Promise<EngineAnswer> {
   const base = baseUrl();
   if (!base) {
     return Promise.reject(new EngineNotConfigured(notConfiguredRefusal()));
@@ -672,12 +676,12 @@ function call(path: string, init?: CallInit, timeoutMs: number = engineTimeouts.
     for (let hops = 0; ; hops += 1) {
       let answer: EngineAnswer;
       try {
-        answer = await send(url, method, payload, deadline, true, init?.headers);
+        answer = await send(url, method, payload, deadline, true, init?.headers, written);
       } catch (cause) {
         if (cause instanceof StaleConnection && resendable(method, url.pathname)) {
           // Reset on a kept connection before any answer: sent once more, on a new one.
           try {
-            answer = await send(url, method, payload, deadline, false, init?.headers);
+            answer = await send(url, method, payload, deadline, false, init?.headers, written);
           } catch (again) {
             throw failure(again, base, timedOut);
           }
@@ -738,7 +742,7 @@ const TIMED_OUT = Symbol("timed out");
  */
 function send(
   url: URL, method: string, payload: string | undefined, deadline: number, mayReuse: boolean,
-  extra: Record<string, string> = {},
+  extra: Record<string, string> = {}, written?: () => void,
 ): Promise<EngineAnswer> {
   const secure = url.protocol === "https:";
   return new Promise<EngineAnswer>((resolve, reject) => {
@@ -771,6 +775,7 @@ function send(
       else if (mayReuse && req.reusedSocket && typeof cause.code === "string" && STALE_CONNECTION.has(cause.code)) reject(new StaleConnection(cause));
       else reject(cause);
     });
+    if (written) req.once("finish", written);
     if (payload !== undefined) req.write(payload);
     req.end();
   });
@@ -1651,11 +1656,15 @@ export interface AbortOutcome {
 /** What both engines answer a stop to a run id they have no record of (api/server.py: HTTPException(404, "No such scan run")). */
 export const NO_SUCH_RUN = "No such scan run";
 
-/** Ask a running scan to stop. */
-export async function abortRun(runId: string): Promise<AbortOutcome> {
+/**
+ * Ask a running scan to stop. `written`, when given, is called once the stop's
+ * request has been written whole to its connection (call): the kill switch
+ * starts no store work of its own before then.
+ */
+export async function abortRun(runId: string, written?: () => void): Promise<AbortOutcome> {
   const response = await call(`/api/scans/${encodeURIComponent(runId)}/abort`, {
     method: "POST",
-  });
+  }, engineTimeouts.callMs, written);
   if (!response.ok) {
     // A 404 is read -- as a 2xx is, for at most engineTimeouts.abortBodyMs
     // and a few bytes -- for the engine's own "No such scan run". Every other

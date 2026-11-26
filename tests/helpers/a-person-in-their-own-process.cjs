@@ -2,17 +2,22 @@
 // is held cannot hold it too: it sends what it is told, and times by its own
 // clock (Date.now()) when it sent it and when the whole answer had come.
 //
-// One JSON command a line on stdin: {id, method, url, cookie}. One JSON line
-// on stdout for each answer: {id, sentAt, answeredAt, status, body}; or
-// {id, sentAt, error} when none came. {ready: true} once it listens.
+// One JSON command a line on stdin: {id, method, url, cookie, body?}, `body`
+// sent as JSON when given (the kill switch's {killSwitchEnabled: true}), else
+// nothing. One JSON line on stdout for each answer: {id, sentAt, answeredAt,
+// status, body}; or {id, sentAt, error} when none came. {ready: true} once it
+// listens.
 const http = require("http");
 
-function press({ id, method, url, cookie }) {
+function press({ id, method, url, cookie, body: sent }) {
   const target = new URL(url);
+  const payload = sent === undefined ? "" : JSON.stringify(sent);
+  const headers = { cookie, "content-length": String(Buffer.byteLength(payload)) };
+  if (sent !== undefined) headers["content-type"] = "application/json";
   const sentAt = Date.now();
   const req = http.request({
     hostname: target.hostname, port: target.port, path: target.pathname + target.search, method,
-    headers: { cookie, "content-length": "0" }, agent: false,
+    headers, agent: false,
   }, (res) => {
     let raw = "";
     res.setEncoding("utf8");
@@ -29,7 +34,7 @@ function press({ id, method, url, cookie }) {
     });
   });
   req.on("error", (cause) => process.stdout.write(JSON.stringify({ id, sentAt, error: cause.message }) + "\n"));
-  req.end();
+  req.end(payload);
 }
 
 let buffer = "";
