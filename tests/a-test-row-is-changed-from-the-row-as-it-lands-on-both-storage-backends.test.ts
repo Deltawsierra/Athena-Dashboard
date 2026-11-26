@@ -150,6 +150,51 @@ describe("a test row changed from the row as it lands, with another dashboard on
       other.close();
     }
   });
+
+  // The change runs on the event loop and the store's thread writes it only if the row is still the one the change
+  // was worked out from (server/store-client.ts updateTestWith: compare and swap). A write that skipped the compare
+  // would write the change over another dashboard's, made between the read and the write.
+  it("another connection changes the row between the read and the write: the change is worked out again, from the row that connection wrote, and both stand", async () => {
+    const { id } = await aRow();
+    const other = new Database(dbPath);
+    try {
+      other.pragma("busy_timeout = 0");
+      const seen: unknown[] = [];
+      const written = await storage.updateTestWith(id, (row) => {
+        seen.push(row.findings);
+        // Between this read and its write, another dashboard writes the row's record.
+        if (seen.length === 1) {
+          other.prepare("UPDATE tests SET findings = ? WHERE id = ?").run(JSON.stringify({ runId: "run-1", backend: { status: "stopped" } }), id);
+        }
+        return { findings: { ...findingsOf(row), backendMirror: { mirrored: true } } };
+      });
+      expect(seen).toEqual([{ runId: "run-1" }, { runId: "run-1", backend: { status: "stopped" } }]);
+      expect(findingsOf(written)).toEqual({ runId: "run-1", backend: { status: "stopped" }, backendMirror: { mirrored: true } });
+      expect(findingsOf(await storage.getTest(id))).toEqual({ runId: "run-1", backend: { status: "stopped" }, backendMirror: { mirrored: true } });
+      expect(findingsOf(storage.peekTest(id))).toEqual({ runId: "run-1", backend: { status: "stopped" }, backendMirror: { mirrored: true } });
+    } finally {
+      other.close();
+    }
+  });
+
+  it("another connection changes the row every time it is read: after a bounded number of tries nothing is written, and the write is refused", async () => {
+    const { STORE_CHANGE_TRIES } = await import("../server/store-client");
+    const { id } = await aRow();
+    const other = new Database(dbPath);
+    try {
+      other.pragma("busy_timeout = 0");
+      let tries = 0;
+      await expect(storage.updateTestWith(id, (row) => {
+        tries += 1;
+        other.prepare("UPDATE tests SET findings = ? WHERE id = ?").run(JSON.stringify({ runId: "run-1", elsewhere: tries }), id);
+        return { findings: { ...findingsOf(row), backendMirror: { mirrored: true } } };
+      })).rejects.toThrow(/changed by another writer/);
+      expect(tries).toBe(STORE_CHANGE_TRIES);
+      expect(findingsOf(await storage.getTest(id))).toEqual({ runId: "run-1", elsewhere: STORE_CHANGE_TRIES });
+    } finally {
+      other.close();
+    }
+  });
 });
 
 describe("a full disk refuses every write of a test row", () => {

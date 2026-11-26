@@ -149,6 +149,27 @@ export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = 
  */
 export const checkpointerTurns: { counts: Record<string, number>; last: { outcome: string; lockMs: number } | null } = { counts: {}, last: null };
 
+/** Told whenever `checkpointer` or `checkpointerTurns` changes: the store's worker thread says so to the event loop (store-worker.ts). */
+const checkpointerWatchers = new Set<() => void>();
+
+/** Be told of every change of the checkpointer's state and turns; the answer stops it. */
+export function watchCheckpointer(changed: () => void): () => void {
+  checkpointerWatchers.add(changed);
+  return () => {
+    checkpointerWatchers.delete(changed);
+  };
+}
+
+function checkpointerChanged(): void {
+  for (const changed of Array.from(checkpointerWatchers)) {
+    try {
+      changed();
+    } catch {
+      // A watcher's failure is its own.
+    }
+  }
+}
+
 /**
  * The checkpointer threads this copy of the module has started and that are
  * still running. `intentional` is set by closeDatabase before it ends one, so
@@ -188,6 +209,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
     }
     console.error(`[db] the checkpointer thread is not running (${why}); every commit is synced to disk on the event loop ` +
       "(synchronous FULL), and SQLite checkpoints there, as before");
+    checkpointerChanged();
   };
   let worker: Worker;
   try {
@@ -211,6 +233,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
         handle.pragma("wal_autocheckpoint = 0");
         checkpointer.state = "on";
         console.log(`[db] the checkpointer thread is running: the write-ahead log is synced and checkpointed off the event loop every ${CHECKPOINT_EVERY_MS} ms (commits synchronous NORMAL)`);
+        checkpointerChanged();
       } catch (cause) {
         loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
       }
@@ -218,6 +241,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
       const { turn, lockMs } = message as { turn: string; lockMs: number };
       checkpointerTurns.counts[turn] = (checkpointerTurns.counts[turn] ?? 0) + 1;
       checkpointerTurns.last = { outcome: turn, lockMs };
+      checkpointerChanged();
     } else if (typeof message === "object" && message !== null && "failed" in message) {
       loopCheckpoints(String((message as { failed: unknown }).failed));
     }
@@ -232,11 +256,28 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
 }
 
 /**
- * Release the database file: end this copy's checkpointer thread(s), close the
- * connection, and forget it, so the next query opens the database afresh (and
- * starts a new thread). The state is reset to `off`, so the new thread can
- * report `on` again. An exit caused here is not a failure: nothing falls back
- * to FULL syncs and nothing is logged. Never throws.
+ * The store worker threads (store-client.ts) started by the modules loaded
+ * with this copy of the module, each with how to end it: a thread holds the
+ * database's connection and its checkpointer thread's (store-worker.ts).
+ */
+const storeThreads = new Set<() => Promise<void>>();
+
+/** Note a store worker thread for closeDatabase to end; the answer forgets it again (once it has ended). */
+export function noteStoreThread(end: () => Promise<void>): () => void {
+  storeThreads.add(end);
+  return () => {
+    storeThreads.delete(end);
+  };
+}
+
+/**
+ * Release the database file: end the store's worker thread(s) (each closes
+ * its connection and its checkpointer thread first), end this copy's own
+ * checkpointer thread(s), close the connection, and forget it, so the next
+ * query opens the database afresh (and starts a new thread). The state is
+ * reset to `off`, so the new thread can report `on` again. An exit caused
+ * here is not a failure: nothing falls back to FULL syncs and nothing is
+ * logged. Never throws.
  *
  * For tests, which remove their database file afterwards: Windows will not
  * remove or rename a file while a handle on it is open, and each thread holds
@@ -246,6 +287,10 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
 export async function closeDatabase(): Promise<void> {
   try {
     const ending: Array<Promise<unknown>> = [];
+    for (const end of Array.from(storeThreads)) {
+      storeThreads.delete(end);
+      ending.push(end().catch(() => undefined));
+    }
     for (const [worker, thread] of Array.from(checkpointerThreads.entries())) {
       thread.intentional = true;
       checkpointerThreads.delete(worker);

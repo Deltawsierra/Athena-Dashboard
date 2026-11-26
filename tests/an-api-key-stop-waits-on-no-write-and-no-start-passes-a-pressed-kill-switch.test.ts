@@ -8,6 +8,7 @@ import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
 import { hybridBackendStandIn, type HybridBackendStandIn } from "./helpers/hybrid-backend-stand-in";
 import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
+import { onTheStoresConnection, storeInATestWorker } from "./helpers/store-in-a-test-worker";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 let hybrid: HybridBackendStandIn | null = null;
@@ -241,14 +242,17 @@ describe("no start passes a pressed kill switch", () => {
 
 describe("while the checkpointer runs, commits do not sync the log and checkpoints are made off the event loop", () => {
   it("a commit does not sync the log (NORMAL), SQLite checkpoints nothing on the loop, and the checkpointer thread moves the log into the database", async () => {
+    // The store's connection is its worker thread's: its settings are read there (a test's worker, its __sql).
+    const putBack = storeInATestWorker();
     const { storage, dbPath, watcher } = await boot("ckpt-run");
+    putBack();
     try {
       const dbm = await import("../server/db-sqlite");
       const deadline = Date.now() + 3_000;
       while (dbm.checkpointer.state === "off" && Date.now() < deadline) await sleep(20);
       expect(dbm.checkpointer.state).toBe("on");
-      expect(dbm.sqlite.pragma("synchronous", { simple: true })).toBe(1); // NORMAL
-      expect(dbm.sqlite.pragma("wal_autocheckpoint", { simple: true })).toBe(0);
+      expect(await onTheStoresConnection(storage, "pragma", "synchronous")).toBe(1); // NORMAL
+      expect(await onTheStoresConnection(storage, "pragma", "wal_autocheckpoint")).toBe(0);
       for (let i = 0; i < 500; i += 1) {
         await storage.createActivityLog({ action: "ckpt", entityType: "test", entityId: String(i), details: null });
       }

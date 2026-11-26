@@ -8,13 +8,11 @@ async function buildElectronServer() {
 
     try {
         // Build the server as **CommonJS**, not ESM
-        await build({
-            entryPoints: ['server/index-electron.ts'],
+        const options = {
             bundle: true,
             platform: 'node',
             target: 'node20',
             format: 'cjs',                           // <-- CHANGED
-            outfile: 'dist/server-electron.cjs',     // <-- CHANGED
             external: [
                 'better-sqlite3',  // native module
                 'sqlite3',         // native module (if used)
@@ -32,9 +30,15 @@ async function buildElectronServer() {
             },
             minify: false,
             sourcemap: false,
-        });
-
+        };
+        await build({ ...options, entryPoints: ['server/index-electron.ts'], outfile: 'dist/server-electron.cjs' });
         console.log('✓ Server bundled successfully to dist/server-electron.cjs');
+
+        // The store's worker thread (server/store-client.ts): better-sqlite3 and
+        // every statement run there, off the event loop. The server starts it
+        // from this file, beside its own (server/store-worker-file.ts).
+        await build({ ...options, entryPoints: ['server/store-worker-main.ts'], outfile: 'dist/store-worker.cjs' });
+        console.log('✓ The store\'s worker bundled successfully to dist/store-worker.cjs');
 
         // better-sqlite3 is deliberately NOT copied into dist/node_modules.
         //
@@ -49,6 +53,7 @@ async function buildElectronServer() {
         console.log('\n✅ Electron server build complete!');
         console.log('Files created:');
         console.log(' - dist/server-electron.cjs (bundled server)');
+        console.log(' - dist/store-worker.cjs (the store\'s worker thread)');
         console.log(' - better-sqlite3 is resolved from node_modules, rebuilt by electron-builder');
     } catch (error) {
         console.error('Build failed:', error);

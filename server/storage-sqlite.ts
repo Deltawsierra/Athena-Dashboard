@@ -3,6 +3,7 @@ import * as schema from "@shared/schema";
 import { and, desc, eq, getTableColumns, gte, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { randomUUID } from "crypto";
+import { isDeepStrictEqual } from "util";
 import { DEFAULT_ACTIVE_SYSTEMS } from "@shared/ai-systems";
 import { ratingOf } from "@shared/latest-scans";
 import { flagFromColumn } from "@shared/kill-switch-flag";
@@ -11,6 +12,9 @@ import type { RetestCheckRecordView } from "@shared/backend-record";
 import { backendScanIdOf } from "@shared/engine-record";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
+import { readsOnly, STORE_PAGE_ROWS } from "./store-protocol";
+import { StoreClient } from "./store-client";
+import { storeWorkerFile } from "./store-worker-file";
 import type {
   User, InsertUser,
   Client, InsertClient,
@@ -29,10 +33,6 @@ import type {
   ApiKey,
 } from "@shared/schema";
 
-/**
- * SQLite backend. All methods are synchronous under the hood (better-sqlite3)
- * but exposed as async to satisfy IStorage.
- */
 /** The settings table holds one row, and this is its id. */
 const AI_CONTROL_ID = "singleton";
 const CONNECTION_ID = "singleton";
@@ -56,31 +56,49 @@ function countFindings(test: Test): number {
     + (test.mediumCount ?? 0) + (test.lowCount ?? 0);
 }
 
-export class SqliteStorage implements IStorage {
-  /**
-   * A read made after this call's own write committed -- the row read back to
-   * return it. A busy database is waited out here, off the event loop, and
-   * never by running the whole call again: withBusyRetry re-runs a call only
-   * when it failed busy before anything it does was committed, and a call
-   * whose write is in cannot fail busy after it any more (one that still
-   * cannot read back says so with an error that is not a busy one, which is
-   * not retried). Re-running it wrote a second row for one call.
-   */
-  private async readBack<T>(read: () => T | Promise<T>): Promise<T> {
-    const deadline = Date.now() + BUSY_RETRY_FOR_MS;
-    for (;;) {
-      try {
-        return await read();
-      } catch (cause) {
-        if (!isBusy(cause)) throw cause;
-        if (Date.now() >= deadline) {
-          throw new Error(`written, but it could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+/**
+ * A read made after a call's own write committed -- the row read back to
+ * return it. A busy database is waited out here, off the event loop, and
+ * never by running the whole call again: withBusyRetry re-runs a call only
+ * when it failed busy before anything it does was committed, and a call
+ * whose write is in cannot fail busy after it any more (one that still
+ * cannot read back says so with an error that is not a busy one, which is
+ * not retried). Re-running it wrote a second row for one call.
+ */
+async function readBack<T>(read: () => T | Promise<T>): Promise<T> {
+  const deadline = Date.now() + BUSY_RETRY_FOR_MS;
+  for (;;) {
+    try {
+      return await read();
+    } catch (cause) {
+      if (!isBusy(cause)) throw cause;
+      if (Date.now() >= deadline) {
+        throw new Error(`written, but it could not be read back: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
+      await new Promise((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
     }
   }
+}
 
+/**
+ * What the store's worker thread answers (server/store-worker.ts): every
+ * call of the storage contract but the two the event loop answers from
+ * memory (peekTest, peekAllTests) and the one whose change is a function
+ * (updateTestWith), which cannot cross between threads. The client on the
+ * loop (server/store-client.ts) answers those three itself -- updateTestWith
+ * by compare and swap, with updateTestIfUnchanged below -- and the tests it
+ * holds in memory are filled from every test an answer carries.
+ */
+type StoreCalls = Omit<IStorage, "peekTest" | "peekAllTests" | "updateTestWith">;
+
+/**
+ * The SQLite backend. It runs on the store's own worker thread (server/store-worker.ts), never on the
+ * event loop: better-sqlite3 runs each statement synchronously, for as long as the disk takes to answer it, and a
+ * statement on the loop held every request -- a Stop included -- for as long as a slow or stalled disk held it
+ * (2908-2934 ms behind a statement held 3 s; DASH-STORE-OFF-THE-LOOP). The server calls it through its client
+ * (server/store-client.ts), by message.
+ */
+export class SqliteStorage implements StoreCalls {
   // Users
   async getUser(id: string): Promise<User | undefined> {
     return db.select().from(schema.users).where(eq(schema.users.id, id)).get();
@@ -102,7 +120,7 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.users).values(row).run();
-    return (await this.readBack(() => this.getUser(row.id)))!;
+    return (await readBack(() => this.getUser(row.id)))!;
   }
   async updateUser(id: string, user: Partial<InsertUser>): Promise<User | undefined> {
     const updates = { ...user };
@@ -110,7 +128,7 @@ export class SqliteStorage implements IStorage {
     if (definedKeys(updates).length > 0) {
       db.update(schema.users).set(updates).where(eq(schema.users.id, id)).run();
     }
-    return this.readBack(() => this.getUser(id));
+    return readBack(() => this.getUser(id));
   }
   async deleteUser(id: string): Promise<boolean> {
     return db.delete(schema.users).where(eq(schema.users.id, id)).run().changes > 0;
@@ -173,29 +191,33 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.clients).values(row).run();
-    return (await this.readBack(() => this.getClient(row.id)))!;
+    return (await readBack(() => this.getClient(row.id)))!;
   }
   async updateClient(id: string, client: Partial<InsertClient>): Promise<Client | undefined> {
     if (definedKeys(client).length > 0) {
       db.update(schema.clients).set(client).where(eq(schema.clients.id, id)).run();
     }
-    return this.readBack(() => this.getClient(id));
+    return readBack(() => this.getClient(id));
   }
   async deleteClient(id: string): Promise<boolean> {
     // There are no foreign keys, so the children are removed here. Without
     // this, deleting a client orphaned its tests, sites and documents, which
     // then referenced an id that no longer existed.
-    const { removed, testIds } = db.transaction(() => {
+    return (await this.deleteClientWithItsTests(id)).removed;
+  }
+  /**
+   * The delete, and which tests went with it: the client on the event loop
+   * forgets those alone (store-client.ts), and every other test stays in
+   * memory, so a Stop still finds its run without a read.
+   */
+  async deleteClientWithItsTests(id: string): Promise<{ removed: boolean; testIds: string[] }> {
+    return db.transaction(() => {
       const gone = db.select({ id: schema.tests.id }).from(schema.tests).where(eq(schema.tests.clientId, id)).all();
       db.delete(schema.tests).where(eq(schema.tests.clientId, id)).run();
       db.delete(schema.sites).where(eq(schema.sites.clientId, id)).run();
       db.delete(schema.documents).where(eq(schema.documents.clientId, id)).run();
       return { removed: db.delete(schema.clients).where(eq(schema.clients.id, id)).run().changes > 0, testIds: gone.map((one) => one.id) };
     });
-    // Only the tests that went are forgotten; every other test stays in
-    // memory, so a Stop still finds its run without a read.
-    this.forgetSomeTests((test) => test.clientId === id || testIds.includes(test.id));
-    return removed;
   }
 
   // Sites
@@ -218,102 +240,68 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.sites).values(row).run();
-    return (await this.readBack(() => this.getSite(row.id)))!;
+    return (await readBack(() => this.getSite(row.id)))!;
   }
   async updateSite(id: string, site: Partial<InsertSite>): Promise<Site | undefined> {
     if (definedKeys(site).length > 0) {
       db.update(schema.sites).set(site).where(eq(schema.sites.id, id)).run();
     }
-    return this.readBack(() => this.getSite(id));
+    return readBack(() => this.getSite(id));
   }
   async deleteSite(id: string): Promise<boolean> {
     return db.delete(schema.sites).where(eq(schema.sites.id, id)).run().changes > 0;
   }
 
-  // Tests
-  //
-  // Every test this process has read or written is kept in memory as well
-  // (peekTest / peekAllTests), so a Stop can find the run it names without
-  // asking the database first: a database that is locked, slow or failing
-  // must never stand between a Stop and the engine.
-  private testCache = new Map<string, Test>();
-  private testsListed = false;
-  private remember<T extends Test | undefined>(test: T): T {
-    if (test) this.testCache.set(test.id, { ...test });
-    return test;
-  }
-  peekTest(id: string): Test | undefined {
-    const test = this.testCache.get(id);
-    return test ? { ...test } : undefined;
-  }
-  peekAllTests(): Test[] | null {
-    return this.testsListed ? Array.from(this.testCache.values()).map((one) => ({ ...one })) : null;
-  }
-  /**
-   * Forget the tests a delete removed -- those alone -- and read the list
-   * again in the background, so what this process holds matches the record
-   * without anything waiting on it: a Stop answers from what is held (never
-   * from a refill), and a refill that fails leaves the list as it was.
-   */
-  private forgetSomeTests(gone: (test: Test) => boolean): void {
-    for (const [id, test] of Array.from(this.testCache.entries())) {
-      if (gone(test)) this.testCache.delete(id);
-    }
-    if (this.testsListed) {
-      setImmediate(() => void storage.getAllTests().catch(() => undefined));
-    }
-  }
+  // Tests. The tests this process has read or written are kept in memory on
+  // the event loop, by the client (store-client.ts peekTest / peekAllTests),
+  // so a Stop finds the run it names without asking the store first.
   async getTest(id: string): Promise<Test | undefined> {
-    return this.remember(db.select().from(schema.tests).where(eq(schema.tests.id, id)).get());
+    return db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
   }
   /**
-   * How many rows one page of the full table scan below reads before the
-   * event loop is given back.
+   * One page of the tests table, after the row `afterRowid` (0 for the
+   * first), in rowid order, at most STORE_PAGE_ROWS rows; `lastRowid` is where
+   * the next page starts, null on an empty page. The client reads the whole
+   * table a page a message (store-client.ts getAllTests): 60,000 rows in one
+   * message held the event loop 169-180 ms to read, and an unbounded
+   * `SELECT * FROM tests` on the loop held it 623 ms; a Stop waits behind one
+   * page at most.
    *
-   * One unbounded `SELECT * FROM tests` (better-sqlite3 runs it synchronously)
-   * held the loop for 623 ms at 60,000 rows with realistic column sizes here --
-   * and every Stop that arrived while it ran queued behind it, however far
-   * past this suite's 50 ms bound that pushed it. A page this size reads in
-   * single-digit milliseconds, so a Stop waiting behind at most one page is
-   * answered on schedule.
+   * Paged by rowid, not OFFSET: OFFSET counts live rows from the start on
+   * every page, so a row deleted behind the cursor would shift every page
+   * after it and could skip or repeat a row. A page's own last rowid names
+   * exactly where the next one starts, whatever else is written meanwhile.
    */
-  private static readonly TESTS_PAGE_SIZE = 1000;
+  async getTestsPage(afterRowid: number): Promise<{ rows: Test[]; lastRowid: number | null }> {
+    const page = db
+      .select({ ...getTableColumns(schema.tests), __rowid: sql<number>`tests."rowid"` })
+      .from(schema.tests)
+      .where(sql`tests."rowid" > ${afterRowid}`)
+      .orderBy(sql`tests."rowid"`)
+      .limit(STORE_PAGE_ROWS)
+      .all();
+    const rows = page.map(({ __rowid: _rowid, ...row }) => row as Test);
+    return { rows, lastRowid: page.length === 0 ? null : page[page.length - 1].__rowid };
+  }
   async getAllTests(): Promise<Test[]> {
     const rows: Test[] = [];
-    // Paged by rowid, not OFFSET: OFFSET counts live rows from the start on
-    // every page, so a row deleted behind the cursor would shift every page
-    // after it and could skip or repeat a row. A page's own last rowid names
-    // exactly where the next one starts, whatever else is written meanwhile.
-    let lastRowid = 0;
+    let after = 0;
     for (;;) {
-      const page = db
-        .select({ ...getTableColumns(schema.tests), __rowid: sql<number>`tests."rowid"` })
-        .from(schema.tests)
-        .where(sql`tests."rowid" > ${lastRowid}`)
-        .orderBy(sql`tests."rowid"`)
-        .limit(SqliteStorage.TESTS_PAGE_SIZE)
-        .all();
-      if (page.length === 0) break;
-      for (const { __rowid, ...row } of page) rows.push(row as Test);
-      lastRowid = page[page.length - 1].__rowid;
-      if (page.length < SqliteStorage.TESTS_PAGE_SIZE) break;
+      const page = await this.getTestsPage(after);
+      rows.push(...page.rows);
+      if (page.lastRowid === null || page.rows.length < STORE_PAGE_ROWS) break;
+      after = page.lastRowid;
       // A start caught mid-scan by a fresh row past the cursor is not missed:
       // trackStart marks it directly (routes.ts), off this read entirely.
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    this.testCache = new Map(rows.map((row) => [row.id, { ...row }]));
-    this.testsListed = true;
     return rows;
   }
   async getTestsByClient(clientId: string): Promise<Test[]> {
-    const rows = db.select().from(schema.tests).where(eq(schema.tests.clientId, clientId)).all();
-    rows.forEach((row) => this.remember(row));
-    return rows;
+    return db.select().from(schema.tests).where(eq(schema.tests.clientId, clientId)).all();
   }
   async getTestsBySite(siteId: string): Promise<Test[]> {
-    const rows = db.select().from(schema.tests).where(eq(schema.tests.siteId, siteId)).all();
-    rows.forEach((row) => this.remember(row));
-    return rows;
+    return db.select().from(schema.tests).where(eq(schema.tests.siteId, siteId)).all();
   }
   // Findings
   async getFinding(id: string): Promise<Finding | undefined> {
@@ -514,7 +502,7 @@ export class SqliteStorage implements IStorage {
     if (Object.keys(fields).length > 0) {
       db.update(schema.findings).set(fields).where(eq(schema.findings.id, id)).run();
     }
-    return this.readBack(() => this.getFinding(id));
+    return readBack(() => this.getFinding(id));
   }
 
   async createTest(test: NewTest): Promise<Test> {
@@ -546,35 +534,36 @@ export class SqliteStorage implements IStorage {
       }
       throw cause;
     }
-    return (await this.readBack(() => this.getTest(row.id)))!;
+    return (await readBack(() => this.getTest(row.id)))!;
   }
   async updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined> {
     if (definedKeys(test).length > 0) {
       db.update(schema.tests).set(test).where(eq(schema.tests.id, id)).run();
     }
-    return this.readBack(() => this.getTest(id));
+    return readBack(() => this.getTest(id));
   }
-  async updateTestWith(id: string, change: (test: Test) => Partial<InsertTest> | null): Promise<Test | undefined> {
-    // One IMMEDIATE transaction: the row is read, changed and read back under
-    // the write lock, so a write another writer -- or another dashboard on
-    // this file -- made a moment ago is in the row `change` is handed, never
-    // lost to a read taken before it. A busy database refuses it at BEGIN,
-    // before anything is written, and withBusyRetry tries it again off the
-    // loop; no statement here waits on the lock.
-    const run = sqlite.transaction((): Test | undefined => {
+  /**
+   * The write of updateTestWith (store-client.ts), by compare and swap: `updates` is written only if the row is still
+   * `seen`, the row the change was worked out from -- compared and written in one IMMEDIATE transaction, under the
+   * write lock, so a write another writer, or another dashboard on this file, made since `seen` was read is never
+   * written over. Answers whether it was written, and the row as it now stands: the row written, or the one another
+   * writer left, from which the client works the change out again (undefined when there is no such test). A busy
+   * database refuses it at BEGIN, before anything is written, and withBusyRetry tries it again; no statement here
+   * waits on the lock.
+   */
+  async updateTestIfUnchanged(
+    id: string, seen: Test, updates: Partial<InsertTest>,
+  ): Promise<{ written: boolean; row: Test | undefined }> {
+    const run = sqlite.transaction((): { written: boolean; row: Test | undefined } => {
       const row = db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
-      if (!row) return undefined;
-      const updates = change({ ...row });
-      if (updates === null || definedKeys(updates).length === 0) return row;
-      db.update(schema.tests).set(updates).where(eq(schema.tests.id, id)).run();
-      return db.select().from(schema.tests).where(eq(schema.tests.id, id)).get();
+      if (!row || !isDeepStrictEqual(row, seen)) return { written: false, row };
+      if (definedKeys(updates).length > 0) db.update(schema.tests).set(updates).where(eq(schema.tests.id, id)).run();
+      return { written: true, row: db.select().from(schema.tests).where(eq(schema.tests.id, id)).get() };
     });
-    return this.remember(run.immediate());
+    return run.immediate();
   }
   async deleteTest(id: string): Promise<boolean> {
-    const removed = db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
-    this.testCache.delete(id);
-    return removed;
+    return db.delete(schema.tests).where(eq(schema.tests.id, id)).run().changes > 0;
   }
 
   // Documents
@@ -600,14 +589,14 @@ export class SqliteStorage implements IStorage {
       updatedAt: now,
     };
     db.insert(schema.documents).values(row).run();
-    return (await this.readBack(() => this.getDocument(row.id)))!;
+    return (await readBack(() => this.getDocument(row.id)))!;
   }
   async updateDocument(id: string, document: Partial<InsertDocument>): Promise<Document | undefined> {
     db.update(schema.documents)
       .set({ ...document, updatedAt: new Date() })
       .where(eq(schema.documents.id, id))
       .run();
-    return this.readBack(() => this.getDocument(id));
+    return readBack(() => this.getDocument(id));
   }
   async deleteDocument(id: string): Promise<boolean> {
     return db.delete(schema.documents).where(eq(schema.documents.id, id)).run().changes > 0;
@@ -636,8 +625,6 @@ export class SqliteStorage implements IStorage {
       db.delete(schema.sites).where(eq(schema.sites.isSample, true)).run();
       db.delete(schema.clients).where(eq(schema.clients.isSample, true)).run();
     });
-    // The sample tests alone are forgotten (forgetSomeTests).
-    this.forgetSomeTests((test) => test.isSample === true);
     return removed;
   }
 
@@ -664,7 +651,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.activityLogs).values(row).run();
-    return (await this.readBack(() => db.select().from(schema.activityLogs).where(eq(schema.activityLogs.id, row.id)).get()))!;
+    return (await readBack(() => db.select().from(schema.activityLogs).where(eq(schema.activityLogs.id, row.id)).get()))!;
   }
 
   // AI health
@@ -700,7 +687,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.aiHealthMetrics).values(row).run();
-    return (await this.readBack(() => db.select().from(schema.aiHealthMetrics).where(eq(schema.aiHealthMetrics.id, row.id)).get()))!;
+    return (await readBack(() => db.select().from(schema.aiHealthMetrics).where(eq(schema.aiHealthMetrics.id, row.id)).get()))!;
   }
   async getLatestBenchmarkReading(): Promise<BenchmarkReading | null> {
     const held = db
@@ -743,13 +730,13 @@ export class SqliteStorage implements IStorage {
         ...settings,
         id: CONNECTION_ID, updatedAt: now, updatedBy,
       } as any).run();
-      return (await this.readBack(() => this.getConnectionSettings()))!;
+      return (await readBack(() => this.getConnectionSettings()))!;
     }
     db.update(schema.connectionSettings)
       .set({ ...settings, updatedAt: now, updatedBy } as any)
       .where(eq(schema.connectionSettings.id, existing.id))
       .run();
-    return (await this.readBack(() => this.getConnectionSettings()))!;
+    return (await readBack(() => this.getConnectionSettings()))!;
   }
 
   async getAIControlSettings(): Promise<AIControlSetting | undefined> {
@@ -797,13 +784,13 @@ export class SqliteStorage implements IStorage {
         target: schema.aiControlSettings.id,
         set: { ...settings, lastModifiedAt: now },
       }).run();
-      return (await this.readBack(() => this.getAIControlSettings()))!;
+      return (await readBack(() => this.getAIControlSettings()))!;
     }
     db.update(schema.aiControlSettings)
       .set({ ...settings, lastModifiedAt: now })
       .where(eq(schema.aiControlSettings.id, existing.id))
       .run();
-    return (await this.readBack(() => this.getAIControlSettings()))!;
+    return (await readBack(() => this.getAIControlSettings()))!;
   }
 
   // Chat
@@ -829,7 +816,7 @@ export class SqliteStorage implements IStorage {
       timestamp: new Date(),
     };
     db.insert(schema.aiChatMessages).values(row).run();
-    return (await this.readBack(() => this.getChatMessage(row.id)))!;
+    return (await readBack(() => this.getChatMessage(row.id)))!;
   }
   async deleteChatMessage(id: string): Promise<boolean> {
     return db.delete(schema.aiChatMessages).where(eq(schema.aiChatMessages.id, id)).run().changes > 0;
@@ -853,13 +840,13 @@ export class SqliteStorage implements IStorage {
       createdAt: new Date(),
     };
     db.insert(schema.classifiers).values(row).run();
-    return (await this.readBack(() => this.getClassifier(row.id)))!;
+    return (await readBack(() => this.getClassifier(row.id)))!;
   }
   async updateClassifier(id: string, classifier: Partial<InsertClassifier>): Promise<Classifier | undefined> {
     if (definedKeys(classifier).length > 0) {
       db.update(schema.classifiers).set(classifier).where(eq(schema.classifiers.id, id)).run();
     }
-    return this.readBack(() => this.getClassifier(id));
+    return readBack(() => this.getClassifier(id));
   }
   async deleteClassifier(id: string): Promise<boolean> {
     return db.delete(schema.classifiers).where(eq(schema.classifiers.id, id)).run().changes > 0;
@@ -885,7 +872,7 @@ export class SqliteStorage implements IStorage {
       revokedAt: null,
     };
     db.insert(schema.apiKeys).values(row).run();
-    return { key: (await this.readBack(() => this.getApiKey(row.id)))!, secret };
+    return { key: (await readBack(() => this.getApiKey(row.id)))!, secret };
   }
   async findActiveApiKeyByHash(keyHash: string): Promise<ApiKey | undefined> {
     return db
@@ -903,12 +890,9 @@ export class SqliteStorage implements IStorage {
     if (existing.revokedAt == null) {
       db.update(schema.apiKeys).set({ revokedAt: new Date() }).where(eq(schema.apiKeys.id, id)).run();
     }
-    return this.readBack(() => this.getApiKey(id));
+    return readBack(() => this.getApiKey(id));
   }
 }
-
-/** Methods that answer from memory, synchronously, and are never retried. */
-const IN_MEMORY = new Set<PropertyKey>(["peekTest", "peekAllTests"]);
 
 /** How long, in all, a statement is retried while another connection holds the lock it needs. */
 const BUSY_RETRY_FOR_MS = 5_000;
@@ -916,11 +900,6 @@ const BUSY_RETRY_FOR_MS = 5_000;
 function isBusy(cause: unknown): boolean {
   const code = (cause as { code?: unknown } | null)?.code;
   return typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"));
-}
-
-/** Calls that only read: under WAL a read never waits for the write lock, so one never queues behind the writes that do. */
-function readsOnly(property: PropertyKey): boolean {
-  return typeof property === "string" && /^(get|find|count|filed)[A-Z]/.test(property);
 }
 
 /** A call waiting in the BusyLine for its turn. */
@@ -1134,7 +1113,7 @@ export class BusyLine {
  * A call is tried again from the start only when it failed busy before
  * anything it does was committed: every call writes one statement, or one
  * transaction rolled back whole, and any read it makes after its write is
- * waited out inside the call (SqliteStorage.readBack), never by running it
+ * waited out inside the call (readBack), never by running it
  * again -- so no write is ever made twice.
  */
 export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RETRY_FOR_MS, line = new BusyLine()): T {
@@ -1142,7 +1121,6 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
     get(object, property, receiver) {
       const value = Reflect.get(object, property, receiver);
       if (typeof value !== "function" || property === "constructor") return value;
-      if (IN_MEMORY.has(property)) return value.bind(object);
       return async (...args: unknown[]) => {
         const deadline = Date.now() + retryForMs;
         const seat = line.seat();
@@ -1182,4 +1160,31 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
   });
 }
 
-export const storage: IStorage = withBusyRetry(new SqliteStorage());
+/**
+ * Every call the store's worker thread answers: SqliteStorage's own methods,
+ * by name. The worker takes no other (store-worker.ts), and the client on the
+ * event loop forwards each one it does not answer itself (SqliteStoreClient).
+ */
+export const STORE_CALLS: readonly string[] = Object.freeze(
+  Object.getOwnPropertyNames(SqliteStorage.prototype).filter((name) => name !== "constructor"),
+);
+
+/**
+ * The store as the server calls it: a client of the worker thread that runs
+ * SqliteStorage under withBusyRetry (server/store-client.ts), each call a
+ * message. Its methods are on its prototype, one per call the worker answers.
+ */
+export class SqliteStoreClient extends StoreClient {}
+for (const name of STORE_CALLS) {
+  if (name in StoreClient.prototype) continue;
+  Object.defineProperty(SqliteStoreClient.prototype, name, {
+    value: function (this: StoreClient, ...args: unknown[]) {
+      return this.ask(name, args);
+    },
+    writable: true,
+    configurable: true,
+  });
+}
+
+/** The worker thread runs the file storeWorkerFile() names: the bundle's own, or the source's (store-worker-file.ts). */
+export const storage: IStorage = new SqliteStoreClient(storeWorkerFile());
