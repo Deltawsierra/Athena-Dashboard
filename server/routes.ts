@@ -1263,7 +1263,10 @@ function runningScansOf(rows: Test[]): Array<{ test: Test; runId: string }> {
  *     list for 20 s).
  * No stop waits on a read another list needs, and none on this dashboard's
  * store. `storeMayWrite` settles once the database's read is in and every
- * stop sent by then has left: the flag's write waits for it. The records of
+ * stop sent by then has left: the flag's write waits for it. Neither the read
+ * nor the flag waits for the stops to leave past STOPS_LEAVE_WAIT_MS after
+ * the press (a stop whose connection never opens leaves only at its call
+ * deadline); a stop not left by then can be held by them on a stalled disk. The records of
  * the stops -- a log line each, and the watches' notes -- are written once
  * every stop has been answered, so no write, however slow or failed, delays
  * another run's stop. A write that failed is counted in `writeFailures` and
@@ -1279,6 +1282,13 @@ function stopEverythingRunning(
   swept: Promise<{ stops: RecordedStops; engineRuns: EngineSweep; writeFailures: string[] }>;
   storeMayWrite: Promise<void>;
 } {
+  // This press's own store work waits for its stops to leave, but for at most STOPS_LEAVE_WAIT_MS from now.
+  let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+  const leaveWaitOver = new Promise<void>((over) => {
+    leaveTimer = setTimeout(over, STOPS_LEAVE_WAIT_MS);
+    leaveTimer.unref?.();
+  });
+  const stopsLeftOrWaitOver = () => Promise.race([stopsLeft(press), leaveWaitOver]);
   const who = actor(req);
   const records: Array<() => Promise<string | null>> = [];
   /**
@@ -1344,9 +1354,10 @@ function stopEverythingRunning(
   const peeked = storage.peekAllTests();
   const memoryStops = Promise.all(runningScansOf(peeked ?? []).filter((one) => claim(one.runId)).map(stopScan));
 
-  // The engine's list, asked for alongside; the database's tests once every stop above has left (stopsLeft).
+  // The engine's list, asked for alongside; the database's tests once every stop above has left (stopsLeft),
+  // or STOPS_LEAVE_WAIT_MS after the press.
   const engineRead = settle(engine.activeRuns());
-  const rowsRead = stopsLeft(press).then(() => settle(new Promise<Test[]>((read) => read(storage.getAllTests()))));
+  const rowsRead = stopsLeftOrWaitOver().then(() => settle(new Promise<Test[]>((read) => read(storage.getAllTests()))));
 
   // Each run the engine lists that no stop named yet, as soon as the list is in.
   let unnamed = 0;
@@ -1376,8 +1387,9 @@ function stopEverythingRunning(
     answered: rows.ok ? Promise.all(runningScansOf(rows.value).filter((one) => claim(one.runId)).map(stopScan)) : Promise.resolve([]),
   }));
   const rowStops: Promise<ScanStop[]> = rowStopsSent.then((sent) => sent.answered);
-  // The flag's write: once the database's scans were sent their stops, and every stop sent by then has left.
-  const storeMayWrite = rowStopsSent.then(() => stopsLeft(press), () => stopsLeft(press));
+  // The flag's write: once the database's scans were sent their stops, and every stop sent by then has left --
+  // or STOPS_LEAVE_WAIT_MS after the press.
+  const storeMayWrite = rowStopsSent.then(stopsLeftOrWaitOver, stopsLeftOrWaitOver).then(() => clearTimeout(leaveTimer));
 
   const answered = (async () => {
     // Every stop has been sent; wait for their answers.
@@ -2013,11 +2025,29 @@ function aPress(seq: number): KillPress {
  * held every one of them in this process: with the disk stalling as it was
  * pressed, they reached the engine after 3 s. The kill switch's own store
  * work -- its read of the tests table, and the write of its flag -- waits for
- * this, so a stalled disk delays none of the stops already sent.
+ * this, so a stalled disk delays none of the stops already sent; but for at
+ * most STOPS_LEAVE_WAIT_MS after the press.
  */
 async function stopsLeft(press: KillPress): Promise<void> {
   while (press.leaving.size > 0) await Promise.all(Array.from(press.leaving));
 }
+
+/**
+ * The longest the kill switch's own store work -- its read of the tests table,
+ * and the write of its flag -- waits after the press for its stops to leave
+ * (stopsLeft): it starts once every stop sent so far has left, or this long
+ * after the press, whichever is first. A stop whose connection never opens
+ * (an engine host that drops connections) leaves only at its call deadline
+ * (engineTimeouts.callMs, 20 s), and held the database's read -- with it the
+ * stops of the scans only the database records, another dashboard's -- and
+ * the flag that must survive a restart, for all of that.
+ *
+ * What is left: a stop that has not left by then -- one still connecting
+ * after 1 s, or one sent after it (a database-only scan's, once the read is
+ * in) -- can be held by a statement of this store work for as long as a
+ * stalled disk holds that statement.
+ */
+const STOPS_LEAVE_WAIT_MS = 1_000;
 
 /**
  * The switch as this dashboard pressed it. `engaged` is set when an engage is
@@ -5948,8 +5978,9 @@ export function registerRoutes(app: Express): void {
     // The stops first (stopEverythingRunning): each goes to the engine before
     // anything is written, and they go together. Then the flag, so every other
     // dashboard refuses writes too -- once every stop has left this process
-    // (sweep.storeMayWrite): a write started in the turn that sent them held
-    // them all for as long as a stalled disk held it. Sent again each time the
+    // (sweep.storeMayWrite), or STOPS_LEAVE_WAIT_MS after the press: a write
+    // started in the turn that sent them held them all for as long as a
+    // stalled disk held it. Sent again each time the
     // switch is sent on, so an operator can retry the scans that could not be
     // reached.
     //

@@ -4,7 +4,8 @@ import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import type { Server, IncomingMessage } from "http";
+import http, { type Server, type IncomingMessage } from "http";
+import { Duplex } from "stream";
 import type { AddressInfo } from "net";
 import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
@@ -110,7 +111,7 @@ async function knob(name: string, body: unknown) {
  * connection after this one last read the table. And a scan that has ended,
  * which nothing stops.
  */
-async function aDashboard(runId: string) {
+async function aDashboard(runId: string, alsoRunning: string[] = []) {
   process.env.ATHENA_STORAGE = "sqlite";
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "athena-ks-first-"));
   madeDirs.push(dir);
@@ -139,6 +140,7 @@ async function aDashboard(runId: string) {
   const ended = await scan("completed", `scan-of-${runId}`);
   const inMemory = await scan("running", `ks-mem-${runId}`);
   const notKnown = await scan(NOT_KNOWN_STATUS, `ks-notknown-${runId}`);
+  for (const run of alsoRunning) await scan("running", run);
   // As the console's poll of /api/tests has done: the tests are in memory.
   await storage.getAllTests();
   const elsewhere = `elsewhere-${runId}`;
@@ -166,7 +168,8 @@ async function aDashboard(runId: string) {
     ended: `scan-of-${runId}`, listed: `ks-listed-${runId}`,
   };
   const tests = { ended: ended.id, inMemory: inMemory.id, notKnown: notKnown.id, elsewhere };
-  return { server, base, cookie, storage, watcher, runs, tests };
+  const engineModule = await import("../server/engine");
+  return { server, base, cookie, storage, watcher, runs, tests, engineModule };
 }
 type Dashboard = Awaited<ReturnType<typeof aDashboard>>;
 
@@ -326,6 +329,92 @@ describe("the kill switch's stops leave before its own store work", () => {
       } finally {
         await knob("__abortDelay", { ms: 0 });
         await knob("__active", { active: [] });
+        await close(dash);
+      }
+    }, 60_000);
+  }
+});
+
+/**
+ * The kill switch's own store work waits for its stops to leave for at most
+ * STOPS_LEAVE_WAIT_MS after the press (server/routes.ts): a stop whose
+ * connection never opens -- here, its request is given a socket that never
+ * takes its bytes, as a connect no answer ever comes to -- held the database's
+ * read and the flag's write until its call deadline (engineTimeouts.callMs; 5 s
+ * here, 20 s in the app), and the database-only scans' stops with them.
+ */
+const STOPS_LEAVE_WAIT_MS = 1_000;
+
+/** Every request this process sends to `path` from now on goes out on a socket that never takes a byte. Returns the undo. */
+function aConnectionThatNeverOpens(path: string): () => void {
+  const request = http.request;
+  const patched = function (this: unknown, ...args: unknown[]) {
+    const [url, options] = args as [unknown, Record<string, unknown> | undefined];
+    const target = url instanceof URL ? url.pathname : typeof url === "string" ? new URL(url).pathname : null;
+    if (target === path && options && typeof options === "object") {
+      const never = new Duplex({ read() { /* nothing ever arrives */ }, write() { /* the bytes never leave */ } });
+      // No agent: only then does the request take its socket from createConnection (node:http ClientRequest).
+      args[1] = { ...options, agent: undefined, createConnection: () => never };
+    }
+    return (request as (...a: unknown[]) => http.ClientRequest).apply(this, args);
+  };
+  (http as { request: unknown }).request = patched;
+  return () => { (http as { request: unknown }).request = request; };
+}
+
+describe("a stop whose connection never opens holds the kill switch's own store work at most 1 s", () => {
+  for (const held of [false, true]) {
+    it(held
+      ? "the store held 3 s from the press: its read of the tests table starts within 1 s of the press, and every other stop still reaches the engine within 250 ms"
+      : "its read of the tests table and the write of its flag both start within 1 s of the press, and the scan only the database records is sent its stop", async () => {
+      const stuck = held ? "ks-stuck-held" : "ks-stuck";
+      const dash = await aDashboard(held ? "ks-cap-held" : "ks-cap", [stuck]);
+      const { runs, engineModule } = dash;
+      const callMs = engineModule.engineTimeouts.callMs;
+      engineModule.engineTimeouts.callMs = 5_000;
+      const undo = aConnectionThatNeverOpens(`/api/scans/${stuck}/abort`);
+      // When the kill switch's read and its flag's write start: on the store's own class, under its busy-retry
+      // wrapper, as the app calls them -- before any statement of theirs is held.
+      const own = Object.getPrototypeOf(dash.storage) as {
+        getAllTests: () => Promise<unknown>; updateAIControlSettings: (fields: Record<string, unknown>) => Promise<unknown>;
+      };
+      const read = own.getAllTests;
+      const write = own.updateAIControlSettings;
+      let readAt: number | null = null;
+      let flagAt: number | null = null;
+      vi.spyOn(own, "getAllTests").mockImplementation(function (this: unknown) {
+        readAt ??= Date.now();
+        return read.call(this);
+      });
+      vi.spyOn(own, "updateAIControlSettings").mockImplementation(function (this: unknown, fields: Record<string, unknown>) {
+        if (fields.killSwitchEnabled === true) flagAt ??= Date.now();
+        return write.call(this, fields);
+      });
+      try {
+        await knob("__active", { active: [] });
+        const { answer, reach, sentTo } = await press(dash, held ? "arrival" : null, [runs.retest, runs.inMemory, runs.notKnown, runs.elsewhere]);
+        console.log(`[kill switch, a stop that never leaves${held ? ", store held" : ""}] the tests read started after ` +
+          `${readAt === null ? "never" : readAt - answer.sentAt} ms, the flag's write after ${flagAt === null ? "never" : flagAt - answer.sentAt} ms`);
+        expect(answer.error).toBeUndefined();
+        expect(sentTo, "the stop whose connection never opens never reached the engine").not.toContain(stuck);
+        expect(readAt, "the tests table was read").not.toBeNull();
+        expect(readAt! - answer.sentAt, "the tests read started").toBeLessThan(STOPS_LEAVE_WAIT_MS + REACH_MS);
+        for (const runId of [runs.retest, runs.inMemory, runs.notKnown]) {
+          expect(reach.get(runId), `the stop of ${runId} reached the engine`).toBeDefined();
+          expect(reach.get(runId)!, `the stop of ${runId}`).toBeLessThan(REACH_MS);
+        }
+        expect(reach.get(runs.elsewhere), "the database's scan was sent its stop").toBeDefined();
+        if (!held) {
+          expect(flagAt, "the flag was written").not.toBeNull();
+          expect(flagAt! - answer.sentAt, "the flag's write started").toBeLessThan(STOPS_LEAVE_WAIT_MS + REACH_MS);
+          expect(reach.get(runs.elsewhere)!, "the database's scan's stop").toBeLessThan(STOPS_LEAVE_WAIT_MS + REACH_MS);
+        }
+        // The stop that never left is said as not taken, never as stopped.
+        const scans = answer.body.stops.scans as Array<{ runId: string; stopped: boolean }>;
+        expect(scans.find((one) => one.runId === stuck)).toMatchObject({ stopped: false });
+      } finally {
+        undo();
+        engineModule.engineTimeouts.callMs = callMs;
         await close(dash);
       }
     }, 60_000);
