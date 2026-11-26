@@ -6459,6 +6459,22 @@ export function registerRoutes(app: Express): void {
   }
 
   /**
+   * What a withdrawn start's answer said of the stops it had lifted, as words
+   * for the withdrawal's own sentence; "" when the control plane said nothing
+   * of it (a start never made ready, or a control plane that does not say).
+   * Null -- they could not be put back in force -- is never said as none.
+   */
+  function backInForceSaid(command: failsafe.FailsafeCommand): string {
+    const back = command.backInForce;
+    if (back === undefined) return "";
+    const count = back === null ? "the stops it had lifted could NOT be put back in force"
+      : back === "unreadable" ? "how many stops are back in force could not be read"
+        : `${back} ${back === 1 ? "stop is" : "stops are"} back in force`;
+    const note = (command.backInForceNote ?? "").replace(/\.\s*$/, "");
+    return `; ${count}${note ? `. ${note}` : ""}`;
+  }
+
+  /**
    * A signature relayed as a possible stop whose command turned out to be a
    * resume or a release. When the relay would have been refused had that been
    * known (wouldRefuseRecovery), the command is withdrawn at once -- by this
@@ -6481,7 +6497,9 @@ export function registerRoutes(app: Express): void {
       try {
         const result = await failsafe.cancelCommand(uuid);
         withdrawn = result.ok;
-        detail = result.ok ? `the control plane took the withdrawal; the command is ${result.command.status}`
+        // The start had been made ready by the signature just relayed: whether the stops it lifted are back in
+        // force is said with the withdrawal, in the control plane's own words (only when it said so, #242).
+        detail = result.ok ? `the control plane took the withdrawal; the command is ${result.command.status}${backInForceSaid(result.command)}`
           : `the control plane refused the withdrawal (${result.status}): ${result.detail}`;
         if (!result.ok) break;
       } catch (cause) {
@@ -6550,7 +6568,11 @@ export function registerRoutes(app: Express): void {
         : `it had to be withdrawn, and the withdrawal did not take: ${withdrawal.detail}. Withdraw it from the failsafe console now.`);
     if (failed !== null) {
       if (failed instanceof failsafe.FailsafeUnavailable) {
-        return void res.status(503).json({ error: withdrawnSentence ? `${failed.message}. ${withdrawnSentence}` : failed.message, ...withdrawnNote });
+        // The control plane's own answer and sentence, beside the error as it always was: a start it held back
+        // (503 "Held, not done ... Sign it again") is shown in its words. Nothing here relays it again.
+        const said = failed instanceof failsafe.FailsafeAnswered && failed.said !== undefined
+          ? { controlPlaneStatus: failed.status, controlPlaneSaid: failed.said } : {};
+        return void res.status(503).json({ error: withdrawnSentence ? `${failed.message}. ${withdrawnSentence}` : failed.message, ...withdrawnNote, ...said });
       }
       throw failed;
     }
@@ -6615,7 +6637,12 @@ export function registerRoutes(app: Express): void {
       throw cause;
     }
     if (!result.ok) {
-      return void res.status(result.status).json({ error: result.detail });
+      // The refusal as it always was; and the control plane's own sentence beside it, when it keeps stops in
+      // force (a cancel never ends one: its 409 says what does).
+      return void res.status(result.status).json({
+        error: result.detail,
+        ...(result.said !== undefined ? { controlPlaneStatus: result.status, controlPlaneSaid: result.said } : {}),
+      });
     }
     await recordFailsafeAct(req, "canceled", req.params.uuid, { status: result.command.status });
     res.json(result.command);

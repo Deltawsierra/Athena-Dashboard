@@ -79,7 +79,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, rowsRead, type RowsRead } from "@/lib/queryClient";
+import { ApiError, apiRequest, rowsRead, type RowsRead } from "@/lib/queryClient";
 import { UnreadableLists, UnreadableRows, notAListIn, unreadableIn } from "@/components/authority/parts";
 import { cn } from "@/lib/utils";
 
@@ -108,6 +108,40 @@ interface FailsafeCommand {
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
+  /*
+   * The keys below are there only when the control plane said them: one that
+   * keeps a stop in force until a signed start lifts it (server/failsafe.ts
+   * inForceOf, backInForceOf, auditMissedOf). A command without them is drawn
+   * exactly as it always was.
+   */
+  /** `true`: a stop in force. `null`: said, but not readably -- it may be in force, and is never read as not. */
+  inForce?: true | null;
+  /** Since when it is in force; null when not said. */
+  readyAt?: string | null;
+  /** The start that alone lifts it; null: the control plane said nothing does. Absent: it did not say. */
+  liftedOnlyBy?: string | null;
+  /** The control plane's own sentence about a stop in force: drawn as text, never as markup. */
+  inForceNote?: string;
+  /** When a start lifted this stop, and which (null: the row does not name it). */
+  liftedAt?: string;
+  liftedBy?: string | null;
+  /** On a write's answer: how many of its audit rows the control plane could not write (null: not readably said). */
+  auditMissed?: number | null;
+  /** On the cancel of a start that had been made ready: how many stops are back in force; null: they could NOT be put back. */
+  backInForce?: number | null | "unreadable";
+  backInForceStops?: string[];
+  /** The control plane's own sentence about that cancel, shown in full. */
+  backInForceNote?: string;
+}
+
+/** A command row the control plane itself could not read, by what it could still read of it (server/failsafe.ts). */
+interface UnreadableCommand {
+  uuid: string | null;
+  engineId: string | null;
+  action: string | null;
+  status: string | null;
+  why: string | null;
+  list: string;
 }
 
 interface CommandDraft {
@@ -172,6 +206,12 @@ interface FailsafeStateView {
    * true). Absent from an older control plane, which gives no next page.
    */
   pages?: { read: number; unfinished?: string };
+  /** The rows the control plane itself could not read: listed as unreadable with their why, never as commands. */
+  unreadableCommands?: UnreadableCommand[];
+  /** How many command rows the control plane could not read on this read (its header); null: not readably said. Only when not 0. */
+  planeUnreadable?: number | null;
+  /** How many audit rows of stops the control plane could not write (its header on this read); null: not readably said. Only when not 0. */
+  auditMissed?: number | null;
 }
 
 /** Whether the in-flight lists may not be all there is: cut at the control plane's page, or not said (`more`). */
@@ -323,6 +363,119 @@ function isStop(action: string): boolean {
   return spec !== undefined && spec.weight !== "recover";
 }
 
+/** Whether an action puts an engine back to work: resume, release. */
+function isStart(action: string): boolean {
+  return ACTION_BY_KEY[action]?.weight === "recover";
+}
+
+/* ---- a stop in force, in the control plane's own words ----------------- */
+//
+// Everything here is read from what the control plane said and drawn as text:
+// React escapes every string, and none is ever set as markup. None of it is a
+// control, and none of it is read by one: a stop is drafted and signed exactly
+// as it was, whatever any of this says or fails to say.
+
+/** A time as it is shown: the control plane's own, and this machine's reading of it beside it when it is one. */
+function whenSaid(iso: string | null | undefined): string {
+  if (!iso) return "not said by the control plane";
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? iso : `${iso} (${at.toLocaleString()})`;
+}
+
+/** What alone lifts a stop in force: the control plane's `lifted_only_by`. Null is "nothing"; not said is said. */
+function liftedOnlyBy(command: FailsafeCommand): string {
+  if (command.liftedOnlyBy === undefined) return "not said by the control plane";
+  return command.liftedOnlyBy === null ? "nothing" : `a ${actionLabel(command.liftedOnlyBy).toLowerCase()} drafted and signed after it`;
+}
+
+/** What ends a stop in force, where a cancel would have been offered. */
+function whatEndsIt(command: FailsafeCommand): string {
+  if (command.liftedOnlyBy === undefined) return "The control plane did not say what ends it.";
+  return command.liftedOnlyBy === null
+    ? "Nothing ends it."
+    : `Only a ${actionLabel(command.liftedOnlyBy).toLowerCase()} drafted and signed after it ends it.`;
+}
+
+/**
+ * The pill of a command: "In force" for a stop in force; "Lifted" for a stop a
+ * start lifted, which the control plane no longer answers to its engine even
+ * while it is still listed as ready; its status otherwise, as it always was.
+ */
+function pillLabel(command: FailsafeCommand): string {
+  if (command.inForce === true) return "In force";
+  if (command.inForce === null) return "May be in force";
+  return command.liftedAt !== undefined ? "Lifted" : commandStatusLabel(command.status);
+}
+
+/** The pill's colour: as it always was, unless the control plane said the command is in force or lifted. */
+function pillTone(command: FailsafeCommand): StatusTone {
+  if (command.inForce !== undefined) return "review";
+  return command.liftedAt !== undefined ? "neutral" : commandTone(command.status);
+}
+
+/**
+ * A stop in force says so, first and plainly: since when, what alone lifts it,
+ * and the control plane's own note. A stop a start lifted says which start,
+ * and when. Nothing for any other command.
+ */
+function InForce({ command, testid }: { command: FailsafeCommand; testid: string }) {
+  if (command.inForce === undefined) {
+    if (command.liftedAt === undefined) return null;
+    return (
+      <div className="basis-full text-sm" data-testid={testid} data-lifted="true">
+        <span className="font-medium">Lifted: no longer in force.</span>{" "}
+        <span data-testid="text-lifted-by">
+          Lifted by{" "}
+          {command.liftedBy ? <>the start <span className="athena-mono">{command.liftedBy}</span></> : "a start this row does not name"}{" "}
+          at {whenSaid(command.liftedAt)}.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="basis-full space-y-1 rounded-lg border border-sev-high/40 bg-sev-high/5 p-3 text-sm" data-testid={testid} data-in-force={String(command.inForce)}>
+      <div className="font-semibold text-sev-high" data-testid="text-in-force">
+        {command.inForce === true ? "In force" : "May be in force"}
+      </div>
+      {command.inForce === null && (
+        <p>The control plane said whether this command is in force, but not readably: it is not read as not in force.</p>
+      )}
+      <p data-testid="text-in-force-since">Since: {whenSaid(command.readyAt)}</p>
+      <p data-testid="text-lifted-only-by">Lifted only by: {liftedOnlyBy(command)}</p>
+      {command.inForceNote && <p className="text-muted-foreground" data-testid="text-in-force-note">{command.inForceNote}</p>}
+    </div>
+  );
+}
+
+/** How many stops are back in force after a start was canceled. Null -- they could not be put back -- is never "none". */
+function backInForceSaid(command: FailsafeCommand): string {
+  const back = command.backInForce;
+  if (back === null) return "The stops it had lifted could not be put back in force.";
+  if (back === undefined || back === "unreadable") return "How many stops are back in force could not be read from the control plane's answer.";
+  return `${back} ${back === 1 ? "stop is" : "stops are"} back in force.`;
+}
+
+/** What a write's toast adds when the control plane could not write audit rows of it: the command itself stands. */
+function auditMissedSaid(command: { auditMissed?: number | null }): string {
+  if (command.auditMissed === undefined) return "";
+  return command.auditMissed === null
+    ? " Audit rows of it are missing on the control plane (it did not say readably how many): the command itself stands."
+    : ` ${command.auditMissed === 1 ? "1 audit row" : `${command.auditMissed} audit rows`} of it could not be written on the control plane: the command itself stands.`;
+}
+
+/** Why a start will never be delivered, when the trail's `superseded` event says so. */
+function supersededReason(event: FailsafeAuditEvent): string | undefined {
+  const reason = event.event === "superseded" ? event.detail?.reason : undefined;
+  return typeof reason === "string" && reason !== "" ? reason : undefined;
+}
+
+/** The control plane's own sentence on a refusal, when the server passed it on (server/routes.ts `controlPlaneSaid`). */
+function controlPlaneSaid(error: unknown): { status: number; said: string } | null {
+  if (!(error instanceof ApiError) || typeof error.body?.controlPlaneSaid !== "string") return null;
+  const status = typeof error.body.controlPlaneStatus === "number" ? error.body.controlPlaneStatus : error.status;
+  return { status, said: error.body.controlPlaneSaid };
+}
+
 /** How soon a failed status read is retried: seconds, not the next 30s poll. */
 const STATUS_RETRY_MS = 3_000;
 
@@ -449,6 +602,11 @@ function CommandConsole({
   const client = useQueryClient();
   const [keyId, setKeyId] = useState("");
   const [signature, setSignature] = useState("");
+  // What the control plane said of the last cancel or signature here, kept on the dialog until it is closed:
+  // a start canceled after it was made ready, a cancel it refused, a start it held back. Words only.
+  const [canceled, setCanceled] = useState<FailsafeCommand | null>(null);
+  const [refused, setRefused] = useState<{ status: number; said: string } | null>(null);
+  const [held, setHeld] = useState<{ status: number; said: string } | null>(null);
 
   const commandQ = useQuery<DraftedCommand>({
     queryKey: failsafeCommandKey(uuid),
@@ -498,39 +656,96 @@ function CommandConsole({
     onSuccess: (command) => {
       setSignature("");
       setKeyId("");
+      setHeld(null);
       client.invalidateQueries({ queryKey: failsafeCommandKey(uuid) });
       client.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
       client.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       toast(
         command.status === "ready"
-          ? { title: "Command ready", description: "The engine will verify and apply it on its next poll." }
+          ? { title: "Command ready", description: `The engine will verify and apply it on its next poll.${auditMissedSaid(command)}` }
           : {
             title: "Signature accepted",
-            description: command.requiredSignatures === null
+            description: (command.requiredSignatures === null
               ? `${command.signers.length} signed; how many it needs is not known (the control plane did not say).`
-              : `${command.signers.length} of ${command.requiredSignatures} signatures.`,
+              : `${command.signers.length} of ${command.requiredSignatures} signatures.`) + auditMissedSaid(command),
           },
       );
     },
     onError: (error: Error) => {
       toast({ title: "The signature was not accepted", description: error.message, variant: "destructive" });
+      // A start the control plane held back (503): its own sentence stays on the dialog, with what to do. It is
+      // not sent again from here: this mutation never retries, and nothing below submits for the operator.
+      const said = controlPlaneSaid(error);
+      const action = commandQ.data?.command.action ?? "";
+      setHeld(said !== null && said.status === 503 && isStart(action) ? said : null);
     },
   });
 
   const cancel = useMutation({
     mutationFn: async () => {
-      await apiRequest("POST", `/api/failsafe/commands/${uuid}/cancel`, {});
+      const response = await apiRequest("POST", `/api/failsafe/commands/${uuid}/cancel`, {});
+      // The canceled command, as the control plane answered it; null when the answer was not one.
+      return (await response.json().catch(() => null)) as FailsafeCommand | null;
     },
-    onSuccess: () => {
+    onSuccess: (answer) => {
       client.invalidateQueries({ queryKey: ["/api/failsafe/state"] });
       client.invalidateQueries({ queryKey: ["/api/failsafe/audit"] });
       toast({ title: "Command canceled" });
+      setRefused(null);
+      // A start that had been made ready: what became of the stops it had lifted stays on the dialog, in full,
+      // until the operator closes it. Anything else closes as it always did.
+      if (answer && typeof answer === "object" && (answer.backInForce !== undefined || answer.backInForceNote !== undefined)) {
+        setCanceled(answer);
+        return;
+      }
       onClose();
     },
     onError: (error: Error) => {
-      toast({ title: "Could not cancel", description: error.message, variant: "destructive" });
+      // The control plane's own refusal (409: a cancel never ends a stop in force) is said as it said it, in the
+      // toast and on the dialog, where it stays; and the command is read again, so what it is now -- in force,
+      // or lifted -- is what is shown. From a control plane that does not say one, the toast is as it always was.
+      const said = controlPlaneSaid(error);
+      toast({ title: "Could not cancel", description: said?.said ?? error.message, variant: "destructive" });
+      setRefused(said);
+      if (said !== null) client.invalidateQueries({ queryKey: failsafeCommandKey(uuid) });
     },
   });
+
+  const notices = (canceled || refused || held) ? (
+    <div className="space-y-3">
+      {canceled && (
+        <GlassCard ruling bodyClassName="space-y-1.5" data-testid="notice-start-canceled">
+          <div className="font-medium">{actionLabel(canceled.action)} canceled</div>
+          <p className="text-sm" data-testid="text-back-in-force" data-back={String(canceled.backInForce)}>
+            {backInForceSaid(canceled)}
+          </p>
+          {(canceled.backInForceStops ?? []).length > 0 && (
+            <p className="athena-mono break-all text-xs text-muted-foreground" data-testid="text-back-in-force-stops">
+              {(canceled.backInForceStops ?? []).join(", ")}
+            </p>
+          )}
+          {canceled.backInForceNote && (
+            <p className="text-sm text-foreground/90" data-testid="text-back-in-force-note">{canceled.backInForceNote}</p>
+          )}
+        </GlassCard>
+      )}
+      {refused && (
+        <GlassCard ruling bodyClassName="space-y-1.5" data-testid="notice-cancel-refused">
+          <div className="font-medium">The control plane refused this cancel ({refused.status}). Nothing was canceled. It said:</div>
+          <p className="text-sm text-foreground/90" data-testid="text-cancel-refused">{refused.said}</p>
+        </GlassCard>
+      )}
+      {held && (
+        <GlassCard ruling bodyClassName="space-y-1.5" data-testid="notice-start-held">
+          <div className="font-medium">The control plane did not make this command ready ({held.status}). It said:</div>
+          <p className="text-sm text-foreground/90" data-testid="text-start-held">{held.said}</p>
+          <p className="text-sm text-muted-foreground" data-testid="text-start-sign-again">
+            This console has not sent the signature again, and will not. To go on, sign it again and submit it.
+          </p>
+        </GlassCard>
+      )}
+    </div>
+  ) : null;
 
   const unread = command$.state === "error" ? (
     <div className="space-y-4 py-2 text-center text-sm text-muted-foreground" data-testid="text-command-unread">
@@ -554,10 +769,15 @@ function CommandConsole({
     </div>
   ) : null;
 
-  if (command$.state === "error" && !relayStale) return unread;
+  if (command$.state === "error" && !relayStale) return notices ? <div className="space-y-4">{notices}{unread}</div> : unread;
   const shown = data ?? (relayStale ? stale : undefined);
   if (!shown) {
-    return (
+    return notices ? (
+      <div className="space-y-4">
+        {notices}
+        <div className="py-10 text-center text-sm text-muted-foreground">Loading the command…</div>
+      </div>
+    ) : (
       <div className="py-10 text-center text-sm text-muted-foreground">Loading the command…</div>
     );
   }
@@ -572,9 +792,12 @@ function CommandConsole({
 
   return (
     <div className="space-y-5">
+      {notices}
       {unread}
       {data && (
       <>
+      {/* A stop in force says so first; a stop a start lifted says which, and when. */}
+      <InForce command={command} testid={`in-force-${command.uuid}`} />
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           {spec && (
@@ -585,11 +808,11 @@ function CommandConsole({
           <div>
             <div className="font-serif text-xl">{actionLabel(command.action)}</div>
             <div className="athena-mono text-xs text-muted-foreground">
-              {command.engineId} · {relativeExpiry(command.expiresAt)}
+              {command.engineId} · {command.inForce === undefined ? relativeExpiry(command.expiresAt) : "in force whatever its window"}
             </div>
           </div>
         </div>
-        <StatusPill tone={commandTone(command.status)}>{commandStatusLabel(command.status)}</StatusPill>
+        <StatusPill tone={pillTone(command)}>{pillLabel(command)}</StatusPill>
       </div>
 
       {/* signer progress: an unknown count is said, never drawn as the signatures already given */}
@@ -615,7 +838,8 @@ function CommandConsole({
         </span>
       </div>
 
-      {command.status === "ready" && (
+      {/* Not for a stop in force (said above, first) nor one a start lifted: the engine is no longer answered it. */}
+      {command.status === "ready" && command.inForce === undefined && command.liftedAt === undefined && (
         <GlassCard ruling bodyClassName="flex items-start gap-3">
           <Radio className="mt-0.5 h-5 w-5 shrink-0 text-gold" />
           <p className="text-sm text-foreground/90">
@@ -713,7 +937,12 @@ function CommandConsole({
 
       <Divider className="my-1" />
       <div className="flex flex-wrap justify-between gap-3">
-        {open && data ? (
+        {data && command.inForce === true ? (
+          // A cancel of a stop in force can only be refused: in its place, what ends it.
+          <p className="max-w-sm text-sm text-muted-foreground" data-testid="text-no-cancel-in-force">
+            A cancel never ends a stop in force, so none is offered here. {whatEndsIt(command)}
+          </p>
+        ) : open && data ? (
           <Button
             type="button"
             variant="ghost"
@@ -1008,7 +1237,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
       }
       pageClient.setQueryData(failsafeCommandKey(drafted.command.uuid), drafted);
       setOpenUuid(drafted.command.uuid);
-      toast({ title: "Command drafted", description: "Sign it out of band, then paste the signature back." });
+      toast({ title: "Command drafted", description: `Sign it out of band, then paste the signature back.${auditMissedSaid(drafted.command)}` });
     },
     onError: (error: Error) => {
       toast({ title: "Could not draft the command", description: error.message, variant: "destructive" });
@@ -1177,7 +1406,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                 " The commands the last state read listed are below, so a stop still waiting for a second" +
                   " signature stays within reach; each one's current status is read when it is opened."}
             </GlassCard>
-          ) : inFlight.length === 0 && !inFlightUnread && !inFlightPartial && (
+          ) : inFlight.length === 0 && !inFlightUnread && !inFlightPartial && state.planeUnreadable === undefined && (
             <GlassCard bodyClassName="py-8 text-center text-sm text-muted-foreground">
               No commands awaiting signatures or waiting on the engine.
             </GlassCard>
@@ -1217,6 +1446,57 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
               {" "}may be a stop: it cannot be opened here, so find it on the failsafe control plane to sign it.
             </p>
           ))}
+          {/* The control plane could not read rows on this read: a banner on the read that said so. */}
+          {state && state.planeUnreadable !== undefined && (
+            // The count rides on the wrapper: GlassCard forwards only its data-testid.
+            <div data-testid="banner-plane-unreadable" data-count={String(state.planeUnreadable)}>
+            <GlassCard className="border-sev-high/40" bodyClassName="flex items-start gap-3">
+              <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-sev-high" />
+              <p className="text-sm">
+                {state.planeUnreadable === null
+                  ? "The control plane said it could not read command rows on this read, but not readably how many."
+                  : `The control plane could not read ${state.planeUnreadable === 1 ? "1 command row" : `${state.planeUnreadable} command rows`} on this read.`}{" "}
+                A row it cannot read is not served to its engine, and may be a stop. Each one it named is listed below as
+                unreadable. A new stop can be drafted above whatever this says.
+              </p>
+            </GlassCard>
+            </div>
+          )}
+          {/* Audit rows of stops the control plane could not write: said; the stops themselves stand. */}
+          {state && state.auditMissed !== undefined && (
+            <div data-testid="banner-audit-missed" data-count={String(state.auditMissed)}>
+            <GlassCard className="border-sev-high/40" bodyClassName="flex items-start gap-3">
+              <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-sev-high" />
+              <p className="text-sm">
+                {state.auditMissed === null
+                  ? "Audit rows of failsafe stops are missing on the control plane: it said so, but not readably how many."
+                  : `${state.auditMissed === 1 ? "1 audit row" : `${state.auditMissed} audit rows`} of failsafe stops ${state.auditMissed === 1 ? "is" : "are"} missing on the control plane: it could not write ${state.auditMissed === 1 ? "it" : "them"}.`}{" "}
+                The stops themselves stand. The count is the control plane's since its process last started; its error log
+                names each missing row.
+              </p>
+            </GlassCard>
+            </div>
+          )}
+          {/* A row the control plane itself could not read: listed as unreadable with its why, never as a command. */}
+          {state && (state.unreadableCommands ?? []).filter((row) => row.list !== "recent").map((row, index) => (
+            <div key={`${row.uuid ?? "no-id"}-${index}`} data-testid="unreadable-command" data-uuid={row.uuid ?? ""} data-list={row.list}>
+            <GlassCard className="border-amber-400/40" bodyClassName="space-y-1">
+              <div className="font-medium text-amber-400">
+                Unreadable command: {row.action ? actionLabel(row.action) : "action not readable"}{" "}
+                <span className="athena-mono text-xs text-muted-foreground">· {row.engineId ?? "engine not readable"}</span>
+              </div>
+              <div className="athena-mono text-xs text-muted-foreground">
+                id {row.uuid ?? "not readable"} · {row.status ? `stored status ${row.status}` : "status not readable"} ·
+                listed under {row.list === "ready" ? "ready" : "awaiting signatures"}
+              </div>
+              <p className="text-sm" data-testid="text-unreadable-why">{row.why ?? "The control plane gave no reason."}</p>
+              <p className="text-xs text-muted-foreground">
+                It cannot be opened or signed here.
+                {!(row.action !== null && isStart(row.action)) && " It may be a stop: a new stop can be drafted above whatever this says."}
+              </p>
+            </GlassCard>
+            </div>
+          ))}
           {inFlight.map((cmd) => (
             <GlassCard key={cmd.uuid} bodyClassName="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
@@ -1228,16 +1508,21 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                 </span>
                 <div>
                   <div className="font-medium">
+                    {cmd.inForce !== undefined && (
+                      <span className="mr-2 font-semibold text-sev-high" data-testid={`text-row-in-force-${cmd.uuid}`}>
+                        {cmd.inForce === true ? "In force" : "May be in force"}
+                      </span>
+                    )}
                     {actionLabel(cmd.action)}{" "}
                     <span className="athena-mono text-xs text-muted-foreground">· {cmd.engineId}</span>
                   </div>
                   <div className="athena-mono text-xs text-muted-foreground">
-                    {cmd.signers.length}/{needOf(cmd)} signed · {relativeExpiry(cmd.expiresAt)}
+                    {cmd.signers.length}/{needOf(cmd)} signed · {cmd.inForce === undefined ? relativeExpiry(cmd.expiresAt) : "in force whatever its window"}
                   </div>
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <StatusPill tone={commandTone(cmd.status)}>{commandStatusLabel(cmd.status)}</StatusPill>
+                <StatusPill tone={pillTone(cmd)}>{pillLabel(cmd)}</StatusPill>
                 <Button
                   type="button"
                   variant="outline"
@@ -1248,6 +1533,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                   {cmd.status === "awaiting_signatures" ? "Sign / relay" : "View"}
                 </Button>
               </div>
+              <InForce command={cmd} testid={`row-in-force-${cmd.uuid}`} />
             </GlassCard>
           ))}
           {lastInFlight.map((cmd) => (
@@ -1262,7 +1548,7 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                   <span className="athena-mono text-xs text-muted-foreground">· {cmd.engineId}</span>
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  Last read as {commandStatusLabel(cmd.status).toLowerCase()}. Not a current reading.
+                  Last read as {pillLabel(cmd).toLowerCase()}. Not a current reading.
                 </div>
               </div>
               <Button
@@ -1309,6 +1595,13 @@ export function FailsafeConsole({ showActivity = true }: FailsafeProps) {
                 <div className="min-w-0">
                   <span className="font-medium">{event.event.replace(/_/g, " ")}</span>
                   {event.actor && <span className="ml-2 text-sm text-muted-foreground">by {event.actor}</span>}
+                  {/* A start the engine's poll will never deliver: why, in the control plane's own words. */}
+                  {supersededReason(event) !== undefined && (
+                    <p className="text-xs text-muted-foreground" data-testid="text-superseded-reason" data-command={event.commandUuid ?? ""}>
+                      {event.commandUuid && <>Command <span className="athena-mono">{event.commandUuid}</span>: </>}
+                      {supersededReason(event)}
+                    </p>
+                  )}
                 </div>
                 <span className="athena-mono shrink-0 text-xs text-muted-foreground">
                   {new Date(event.timestamp).toLocaleString()}

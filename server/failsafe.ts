@@ -156,6 +156,19 @@ const MAX_ERROR_BODY = 500;
 export class FailsafeUnavailable extends Error {}
 
 /**
+ * The control plane answered, and not with success: the sentence is the one
+ * this client always raised (FailsafeUnavailable's), unchanged. `said` is the
+ * control plane's own `detail`, only from one that serves stops in force
+ * (refusalOf): a start it held back (503 "Held, not done ... Sign it again")
+ * is then shown in its own words.
+ */
+export class FailsafeAnswered extends FailsafeUnavailable {
+  constructor(message: string, readonly status: number, readonly said?: string) {
+    super(message);
+  }
+}
+
+/**
  * A call that goes as the signed-in person (not a stop), who has no credential
  * the control plane takes. Raised before anything is sent; never on a stop.
  */
@@ -546,6 +559,148 @@ async function body(response: ControlPlaneResponse): Promise<string> {
   return withoutServiceToken((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "").slice(0, MAX_ERROR_BODY);
 }
 
+// ==== What a control plane that keeps a stop in force says (athena-backend #242) ====
+//
+// Reads and words only: nothing here is sent, and nothing a stop does waits on
+// it. Every key and header below is read when it is there, and a control plane
+// that sends none of them is read exactly as it always was.
+
+/** How many command rows a stop-lane read came across that the control plane could not read ("0" when none). */
+export const FAILSAFE_UNREADABLE_HEADER = "X-Failsafe-Unreadable";
+/** How many audit rows of stops the control plane could not write: on a stop's answer, and on the state read. */
+export const FAILSAFE_AUDIT_MISSED_HEADER = "X-Failsafe-Audit-Missed";
+/** On the answer to the cancel of a start that had been made ready: how many stops are back in force, or "unknown". */
+export const FAILSAFE_BACK_IN_FORCE_HEADER = "X-Failsafe-Back-In-Force";
+
+/**
+ * Whether this control plane has shown that it keeps stops in force: a read of
+ * its carried X-Failsafe-Unreadable, which every state and list page of such a
+ * control plane does ("0" when none). Until then its refusals are passed on
+ * exactly as they always were, and no more (refusalOf).
+ *
+ * SAFETY: set only by the reads (status, state, listCommands, and their later
+ * pages), which no stop waits on; read only by refusalOf, once a refusal is in
+ * hand. Nothing that drafts, signs or withdraws a stop reads or writes it
+ * before or while it is sent, and nothing waits on it: a boolean, no lock.
+ */
+let stopsInForceServed = false;
+
+/** A read's answer in hand: whether its control plane keeps stops in force (stopsInForceServed). No wait. */
+function heardFrom(response: ControlPlaneResponse): void {
+  if (!stopsInForceServed && response.header(FAILSAFE_UNREADABLE_HEADER) !== undefined) stopsInForceServed = true;
+}
+
+/** The most of the control plane's own sentence that is passed on. */
+const MAX_SAID = 4_000;
+
+/**
+ * A refusal's body as it was always quoted (`raw`: body()), and -- only from a
+ * control plane that keeps stops in force -- its own sentence (`said`, the
+ * `detail` of its JSON), so a cancel it refused (409) and a start it held back
+ * (503) are shown in its words, never as a generic error.
+ */
+async function refusalOf(response: ControlPlaneResponse): Promise<{ raw: string; said?: string }> {
+  const text = withoutServiceToken((await textWithin(response, failsafeTimeouts.bodyMs)) ?? "");
+  const raw = text.slice(0, MAX_ERROR_BODY);
+  if (!stopsInForceServed) return { raw };
+  try {
+    const detail = asRecord(JSON.parse(text)).detail;
+    if (typeof detail === "string" && detail !== "") return { raw, said: detail.slice(0, MAX_SAID) };
+  } catch {
+    // Not JSON: quoted as it came, as before.
+  }
+  return { raw };
+}
+
+/**
+ * A count a header carried: undefined when it was not sent; a whole number of
+ * at least 0; null when it was sent but is not one -- unknown, never read as 0.
+ * Sent twice, the larger is kept.
+ */
+function countHeader(value: string | undefined): number | null | undefined {
+  if (value === undefined) return undefined;
+  let most = 0;
+  for (const one of value.split(",").map((part) => part.trim())) {
+    if (!/^\d{1,9}$/.test(one)) return null;
+    most = Math.max(most, Number(one));
+  }
+  return most;
+}
+
+/** Two pages' counts as one: unknown when either is; `sum` for rows each page counts, the larger otherwise. */
+function countsTogether(a: number | null | undefined, b: number | null | undefined, sum: boolean): number | null | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  if (a === null || b === null) return null;
+  return sum ? a + b : Math.max(a, b);
+}
+
+/** Whether a count is said at all: one that is unknown, or more than 0. Never a 0, and never one not sent. */
+function worthSaying(count: number | null | undefined): count is number | null {
+  return count === null || (typeof count === "number" && count > 0);
+}
+
+/** `auditMissed` as an answer carries it: only when the control plane said audit rows are missing, or said it unreadably. */
+function auditMissedOf(header: string | undefined): { auditMissed?: number | null } {
+  const missed = countHeader(header);
+  return worthSaying(missed) ? { auditMissed: missed } : {};
+}
+
+/**
+ * What the control plane says of a stop in force, and of one a start lifted
+ * (athena-backend failsafe/views.py `_console_row`), each only when it is said:
+ *
+ *   - `in_force: true`: in force. `in_force` there but neither true nor false
+ *     (a string, a number, null): `inForce: null` -- it may be in force and
+ *     could not be read, never read as not in force.
+ *   - `ready_at`: since when; null when it is not a time that was said.
+ *   - `lifted_only_by`: the start that alone lifts it; null when the control
+ *     plane said null (nothing lifts a terminate); absent when it did not say.
+ *   - `in_force_note`: its own sentence, passed on as it is.
+ *   - `lifted_at` / `lifted_by`: of a stop a start lifted. Never beside
+ *     `in_force`: a row saying both is in force.
+ */
+function inForceOf(raw: Record<string, unknown>): Partial<FailsafeCommand> {
+  if ("in_force" in raw && raw.in_force !== false) {
+    return {
+      inForce: raw.in_force === true ? true : null,
+      readyAt: typeof raw.ready_at === "string" && raw.ready_at !== "" ? raw.ready_at : null,
+      ...(typeof raw.lifted_only_by === "string" && raw.lifted_only_by !== "" ? { liftedOnlyBy: raw.lifted_only_by }
+        : "lifted_only_by" in raw && raw.lifted_only_by === null ? { liftedOnlyBy: null } : {}),
+      ...(typeof raw.in_force_note === "string" && raw.in_force_note !== "" ? { inForceNote: raw.in_force_note } : {}),
+    };
+  }
+  if (typeof raw.lifted_at === "string" && raw.lifted_at !== "") {
+    return { liftedAt: raw.lifted_at, liftedBy: typeof raw.lifted_by === "string" && raw.lifted_by !== "" ? raw.lifted_by : null };
+  }
+  return {};
+}
+
+/**
+ * What the answer to the cancel of a start that had been made ready says of
+ * the stops that start had lifted (`back_in_force`, `back_in_force_note`, and
+ * the X-Failsafe-Back-In-Force header), only when it says any of it:
+ *
+ *   - a number: how many are back in force (`backInForceStops`: which);
+ *   - null: they could NOT be put back in force -- never read as none;
+ *   - "unreadable": it was said, but not readably, or the body and the header
+ *     disagree: how many are back in force is not known.
+ */
+function backInForceOf(payload: Record<string, unknown>, header: string | undefined): Partial<FailsafeCommand> {
+  const note = typeof payload.back_in_force_note === "string" && payload.back_in_force_note !== ""
+    ? { backInForceNote: payload.back_in_force_note } : {};
+  const inBody = "back_in_force" in payload;
+  if (!inBody && header === undefined) return "backInForceNote" in note ? { backInForce: "unreadable", ...note } : {};
+  const listed = payload.back_in_force;
+  const stops = Array.isArray(listed) && listed.every((one) => typeof one === "string") ? (listed as string[]) : null;
+  const fromBody: number | null | "unreadable" | undefined = !inBody ? undefined : stops !== null ? stops.length : listed === null ? null : "unreadable";
+  const counted = countHeader(header);
+  const fromHeader: number | null | "unreadable" | undefined = header === undefined ? undefined
+    : header.trim().toLowerCase() === "unknown" ? null : counted === null || counted === undefined ? "unreadable" : counted;
+  const backInForce = fromBody === undefined ? fromHeader! : fromHeader === undefined || fromHeader === fromBody ? fromBody : "unreadable";
+  return { backInForce, ...(typeof backInForce === "number" && stops !== null ? { backInForceStops: stops } : {}), ...note };
+}
+
 /**
  * Call an operator route, authenticated by the cached service token.
  *
@@ -742,6 +897,49 @@ export interface FailsafeCommand {
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
+  /**
+   * The keys below are there only when the control plane said them (one that
+   * keeps a stop in force, athena-backend #242; inForceOf, backInForceOf,
+   * auditMissedOf). A command from a control plane that says none of them is
+   * exactly the twelve fields above.
+   */
+  /** `true`: a stop in force. `null`: `in_force` was said but could not be read -- it may be in force. */
+  inForce?: true | null;
+  /** Since when it is in force (made ready); null when not said. Only beside `inForce`. */
+  readyAt?: string | null;
+  /** The start that alone lifts it; null when the control plane said nothing does (a terminate). Absent when not said. */
+  liftedOnlyBy?: string | null;
+  /** The control plane's own sentence about a stop in force. */
+  inForceNote?: string;
+  /** When a start lifted this stop; and that start's id (null when the row does not name it). */
+  liftedAt?: string;
+  liftedBy?: string | null;
+  /** On the answer to a draft, a signature or a cancel: how many of its audit rows the control plane could not write (null: said unreadably). */
+  auditMissed?: number | null;
+  /** On the answer to the cancel of a start that had been made ready: how many stops are back in force; null: they could NOT be put back; "unreadable": not known. */
+  backInForce?: number | null | "unreadable";
+  /** Which stops are back in force, when the control plane named them. */
+  backInForceStops?: string[];
+  /** The control plane's own sentence about that cancel, in full. */
+  backInForceNote?: string;
+}
+
+/**
+ * A command row the control plane itself could not read (athena-backend #242
+ * `_named`: `unreadable: true`), with what it could still read of it. It is
+ * listed as unreadable with its `why` -- never dropped, and never drawn as an
+ * ordinary command -- and counted with its list's unreadable rows, and as a
+ * possible stop unless its action is a resume's or a release's.
+ */
+export interface UnreadableCommand {
+  uuid: string | null;
+  engineId: string | null;
+  action: string | null;
+  status: string | null;
+  /** The control plane's own reason; null when it gave none. */
+  why: string | null;
+  /** The list it was in, by its name here ("awaitingSignatures", "ready", "recent", "commands"). */
+  list: string;
 }
 
 /** The exact fields an operator feeds to `mythos-failsafe sign --draft`. These
@@ -831,6 +1029,20 @@ export interface FailsafeStateView {
    * that could not be followed), why. Such a walk leaves `more` true.
    */
   pages?: PagesRead;
+  /** The rows the control plane itself could not read, each by what it could still read of it. Only when there was one. */
+  unreadableCommands?: UnreadableCommand[];
+  /**
+   * X-Failsafe-Unreadable on this read: how many command rows the control
+   * plane could not read (over the pages read). Only when it is more than 0,
+   * or null: sent, but not a count -- unknown, never read as none.
+   */
+  planeUnreadable?: number | null;
+  /**
+   * X-Failsafe-Audit-Missed on this read: how many audit rows of stops the
+   * control plane could not write (its process's count). Only when it is more
+   * than 0, or null: sent, but not a count.
+   */
+  auditMissed?: number | null;
 }
 
 /** How a read followed the control plane's pages (followPages). */
@@ -858,6 +1070,8 @@ export interface FailsafeCommandList {
   tooLarge?: string[];
   /** How the pages were followed (as FailsafeStateView.pages). */
   pages?: PagesRead;
+  /** The rows the control plane itself could not read (as FailsafeStateView.unreadableCommands): never among `commands`. */
+  unreadableCommands?: UnreadableCommand[];
 }
 
 /** The header the control plane's two stop-lane reads carry: "true" when a read left a command out (athena-backend failsafe/views.py MORE_HEADER). */
@@ -984,6 +1198,9 @@ class Gathered {
   readonly unreadable: UnreadableRows = {};
   readonly possibleStops: Record<string, number> = {};
   readonly tooLarge: string[] = [];
+  /** The rows the control plane itself could not read, each once (by its uuid when it has one). */
+  readonly named: UnreadableCommand[] = [];
+  readonly namedSeen = new Set<string>();
 
   /**
    * A page's rows of `list`, every one learnt (remember) and counted as
@@ -993,7 +1210,7 @@ class Gathered {
    */
   rows(raw: unknown, list: string, into: FailsafeCommand[], dedupe: boolean, stops = true): void {
     const pageStops: Record<string, number> = {};
-    for (const one of commandRows(raw, this.unreadable, list, stops ? pageStops : undefined)) {
+    for (const one of commandRows(raw, this.unreadable, list, stops ? pageStops : undefined, { named: this.named, namedSeen: this.namedSeen, dedupe })) {
       if (dedupe && this.seen.has(one.uuid)) continue;
       this.seen.add(one.uuid);
       into.push(one);
@@ -1018,11 +1235,12 @@ class Gathered {
     }
   }
 
-  fields(): { unreadable?: UnreadableRows; possibleStops?: Record<string, number>; tooLarge?: string[] } {
+  fields(): { unreadable?: UnreadableRows; possibleStops?: Record<string, number>; tooLarge?: string[]; unreadableCommands?: UnreadableCommand[] } {
     return {
       ...withUnreadable(this.unreadable),
       ...(Object.keys(this.possibleStops).length > 0 ? { possibleStops: this.possibleStops } : {}),
       ...(this.tooLarge.length > 0 ? { tooLarge: this.tooLarge } : {}),
+      ...(this.named.length > 0 ? { unreadableCommands: this.named } : {}),
     };
   }
 }
@@ -1120,6 +1338,8 @@ function command(raw: Record<string, unknown>): FailsafeCommand {
     status: String(raw.status ?? "unknown"),
     createdAt: typeof raw.created_at === "string" ? raw.created_at : null,
     updatedAt: typeof raw.updated_at === "string" ? raw.updated_at : null,
+    // A stop in force, or one a start lifted, says so: only when the control plane did.
+    ...inForceOf(raw),
   };
 }
 
@@ -1166,6 +1386,7 @@ export async function status(): Promise<FailsafeStatus> {
     // so it presents the service token: the console reads the commands a second
     // operator signs only after this answers authorized.
     const response = await call("/api/failsafe/state/", { stop: true });
+    heardFrom(response);
     if (response.status === 401 || response.status === 403) {
       return {
         configured: true,
@@ -1214,12 +1435,37 @@ function unreadCount(unreadable: UnreadableRows, list: string): number {
  * stop is counted there too: one whose action is not a start (a stop's, or
  * none that can be read), and one that is not a command at all.
  */
-function commandRows(raw: unknown, unreadable: UnreadableRows, list: string, stops?: Record<string, number>): FailsafeCommand[] {
+function commandRows(
+  raw: unknown, unreadable: UnreadableRows, list: string, stops?: Record<string, number>,
+  named?: { named: UnreadableCommand[]; namedSeen: Set<string>; dedupe: boolean },
+): FailsafeCommand[] {
   const before = unreadCount(unreadable, list);
   let possibleStops = 0;
   let noUuid = 0;
   const commands: FailsafeCommand[] = [];
   for (const row of rowsOf(raw, unreadable, list)) {
+    if ("unreadable" in row && row.unreadable !== false) {
+      // A row the control plane itself could not read (#242): listed as unreadable with its why, counted with
+      // the list's unreadable rows, and never drawn as a command. What this server remembers of it is exactly
+      // what it remembered before (its action by its uuid, when both were read), so no relay is decided anew.
+      const uuid = typeof row.uuid === "string" && row.uuid !== "" ? row.uuid : null;
+      if (uuid !== null) remember(command(row));
+      // Listed again on a later page (the control plane relists awaiting stops): one row, counted once. The first
+      // page is kept exactly as it came, as its readable rows are.
+      if (uuid !== null && named?.dedupe === true && named.namedSeen.has(uuid)) continue;
+      if (uuid !== null) named?.namedSeen.add(uuid);
+      named?.named.push({
+        uuid,
+        engineId: typeof row.engine_id === "string" && row.engine_id !== "" ? row.engine_id : null,
+        action: typeof row.action === "string" && row.action !== "" ? row.action : null,
+        status: typeof row.status === "string" && row.status !== "" ? row.status : null,
+        why: typeof row.why === "string" && row.why !== "" ? row.why : null,
+        list,
+      });
+      noUuid += 1;
+      if (!(typeof row.action === "string" && START_ACTIONS.has(row.action))) possibleStops += 1;
+      continue;
+    }
     if (typeof row.uuid === "string" && row.uuid !== "") {
       commands.push(remember(command(row)));
       continue;
@@ -1229,6 +1475,7 @@ function commandRows(raw: unknown, unreadable: UnreadableRows, list: string, sto
   }
   // A row that is not a command at all (counted by rowsOf): its action cannot be read, so it may be a stop.
   possibleStops += unreadCount(unreadable, list) - before;
+  // `noUuid`: the rows counted here -- one with no uuid, and one the control plane said it could not read.
   if (noUuid > 0 && unreadable[list] !== NOT_A_LIST) unreadable[list] = unreadCount(unreadable, list) + noUuid;
   if (stops && possibleStops > 0) stops[list] = possibleStops;
   return commands;
@@ -1240,6 +1487,7 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   const query = engineId ? `?engine_id=${encodeURIComponent(engineId)}` : "";
   // The stop lane's read (failsafe:state): where a second operator finds the stop awaiting their signature.
   const response = await call(`/api/failsafe/state/${query}`, { stop: true });
+  heardFrom(response);
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
@@ -1260,6 +1508,9 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   // The history: the newest commands, in flight or not (empty under the service token). Counted, not stops.
   got.rows(payload.recent, "recent", recent, false, false);
   got.passedOver(response.header(FAILSAFE_TOO_LARGE_HEADER));
+  // What this read's headers say (#242): rows the control plane could not read, and audit rows it could not write.
+  let planeUnreadable = countHeader(response.header(FAILSAFE_UNREADABLE_HEADER));
+  let auditMissed = countHeader(response.header(FAILSAFE_AUDIT_MISSED_HEADER));
   // A list the control plane cut at its page is followed to its end when it gives the next page, and said to
   // be cut when it cannot be: never shown as whole (DASH-FAILSAFE-3, DASH-FAILSAFE-PAGES). A later page holds
   // the commands in flight only (its `recent` is empty), each learnt as the first page's are.
@@ -1267,9 +1518,12 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
   const walk = await followPages("/api/failsafe/state/", params, "a page of the failsafe state", first,
     nextPageOf(response.header(FAILSAFE_NEXT_HEADER), payload.next), (raw, page) => {
       const later = asRecord(raw);
+      heardFrom(page);
       got.rows(later.awaiting_signatures, "awaitingSignatures", awaitingSignatures, true);
       got.rows(later.ready, "ready", ready, true);
       got.passedOver(page.header(FAILSAFE_TOO_LARGE_HEADER));
+      planeUnreadable = countsTogether(planeUnreadable, countHeader(page.header(FAILSAFE_UNREADABLE_HEADER)), true);
+      auditMissed = countsTogether(auditMissed, countHeader(page.header(FAILSAFE_AUDIT_MISSED_HEADER)), false);
       return {
         more: morePastThePage(later.more, page.header(FAILSAFE_MORE_HEADER)),
         next: nextPageOf(page.header(FAILSAFE_NEXT_HEADER), later.next),
@@ -1285,6 +1539,8 @@ export async function state(engineId?: string): Promise<FailsafeStateView> {
     ...got.fields(),
     ...moreField(walk.more),
     ...(walk.pages ? { pages: walk.pages } : {}),
+    ...(worthSaying(planeUnreadable) ? { planeUnreadable } : {}),
+    ...(worthSaying(auditMissed) ? { auditMissed } : {}),
   };
 }
 
@@ -1295,6 +1551,7 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   const query = params.toString() ? `?${params.toString()}` : "";
   // The stop lane's read (failsafe:commands, GET).
   const response = await call(`/api/failsafe/commands/${query}`, { stop: true });
+  heardFrom(response);
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
@@ -1315,6 +1572,7 @@ export async function listCommands(opts: { engineId?: string; status?: string } 
   const first = morePastThePage(undefined, response.header(FAILSAFE_MORE_HEADER));
   const walk = await followPages("/api/failsafe/commands/", params, "a page of the list of commands", first,
     nextPageOf(response.header(FAILSAFE_NEXT_HEADER), undefined), (raw, page) => {
+      heardFrom(page);
       got.rows(raw, "commands", commands, true);
       got.passedOver(page.header(FAILSAFE_TOO_LARGE_HEADER));
       return {
@@ -1361,7 +1619,8 @@ export async function draftCommand(input: {
   return {
     ok: true,
     drafted: {
-      command: drafted,
+      // Audit rows of this draft the control plane could not write are said (the header of the answer in hand).
+      command: { ...drafted, ...auditMissedOf(response.header(FAILSAFE_AUDIT_MISSED_HEADER)) },
       signingBytes: typeof payload.signing_bytes === "string" ? payload.signing_bytes : "",
       draft: draftFrom(payload),
       // Drafted, but with no id to open it by: said, never hidden (DASH-FAILSAFE-3). Nothing here reads the
@@ -1412,9 +1671,10 @@ export async function submitSignature(
     return { ok: false, status: response.status, detail: await body(response) };
   }
   if (!response.ok) {
-    throw new FailsafeUnavailable(
-      `the control plane answered ${response.status}: ${await body(response)}`,
-    );
+    // The same sentence as ever; and, from a control plane that keeps stops in force, its own words beside it
+    // (a start held back, 503: "Held, not done ... Sign it again"). Nothing here sends the signature again.
+    const refused = await refusalOf(response);
+    throw new FailsafeAnswered(`the control plane answered ${response.status}: ${refused.raw}`, response.status, refused.said);
   }
   // The signature has been taken by now (2xx): its answer is waited for no longer than a stop's.
   let payload: Record<string, unknown>;
@@ -1426,25 +1686,37 @@ export async function submitSignature(
       "the signature; read the command again to see where it stands",
     );
   }
-  return { ok: true, command: remember(command(payload)) };
+  return { ok: true, command: { ...remember(command(payload)), ...auditMissedOf(response.header(FAILSAFE_AUDIT_MISSED_HEADER)) } };
 }
 
 export async function cancelCommand(
   uuid: string,
-): Promise<{ ok: true; command: FailsafeCommand } | { ok: false; status: number; detail: string }> {
+): Promise<{ ok: true; command: FailsafeCommand } | { ok: false; status: number; detail: string; said?: string }> {
   const response = await call(`/api/failsafe/commands/${encodeURIComponent(uuid)}/cancel/`, {
     method: "POST",
     stop: withdrawalStops(uuid),
   });
   if (response.status === 403 || response.status === 409) {
-    return { ok: false, status: response.status, detail: await body(response) };
+    // `detail` is the body as it was always quoted. `said`: the control plane's own sentence, from one that keeps
+    // stops in force -- a cancel never ends a stop in force, and its 409 says what does.
+    const refused = await refusalOf(response);
+    return { ok: false, status: response.status, detail: refused.raw, ...(refused.said !== undefined ? { said: refused.said } : {}) };
   }
   if (!response.ok) {
     throw new FailsafeUnavailable(
       `the control plane answered ${response.status}: ${await body(response)}`,
     );
   }
-  return { ok: true, command: remember(command(asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the withdrawal")))) };
+  const payload = asRecord(await jsonWithin(response, failsafeTimeouts.bodyMs, "the withdrawal"));
+  return {
+    ok: true,
+    command: {
+      ...remember(command(payload)),
+      // The cancel of a start that had been made ready: the stops it had lifted, back in force or not (#242).
+      ...backInForceOf(payload, response.header(FAILSAFE_BACK_IN_FORCE_HEADER)),
+      ...auditMissedOf(response.header(FAILSAFE_AUDIT_MISSED_HEADER)),
+    },
+  };
 }
 
 export async function audit(opts: { command?: string } = {}): Promise<FailsafeAuditTrail> {
@@ -1471,4 +1743,5 @@ export function _resetForTests(): void {
   if (refreshTimer !== null) clearTimeout(refreshTimer);
   refreshTimer = null;
   knownActions.clear();
+  stopsInForceServed = false;
 }
