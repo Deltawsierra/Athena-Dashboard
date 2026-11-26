@@ -41,7 +41,7 @@ import {
   type ScopeEvidenceChoice, type ScopeWorkflowChoice,
 } from "@shared/scope-declaration";
 import {
-  KEYED_REFERENCE, WITHHELD_PREFIX, type BindingApproval, type BindingFinding, type ChainOutcomeRow, type ChainOutcomes,
+  KEYED_REFERENCE, MAX_CURSOR_CHARS, RECORDED_AS_OBSERVED_EFFECT, WITHHELD_PREFIX, type BindingApproval, type BindingFinding, type ChainOutcomeRow, type ChainOutcomes,
   type EffectExecution, type EffectReading, type EffectReadingAsServed, type EffectReference, type KeyedUnder,
   type ReconciliationReceipt, type ToolBinding, type WindowCount,
 } from "@shared/observed-effect";
@@ -6253,28 +6253,87 @@ function chainOutcomeRow(raw: Record<string, unknown>): ChainOutcomeRow {
 }
 
 /**
- * A deployment's newest chain outcomes, each with what a reader is shown of its
- * observed effect, and the counts served beside them. A GET only: the route's POST
- * (which appends outcomes) is never sent. An answer that serves no list of outcomes
- * at all is unavailable, never read as none.
+ * A page of outcomes Athena-Backend refused as asked: a 400 with a `code`
+ * (assurance/outcome_pages.py: `bad_cursor`, `unknown_recorded_as`,
+ * `unknown_parameter`). Passed on as the 400 it is, with the backend's code and its
+ * words, never read as an outage and never as an empty page. It is asked once: nothing
+ * here asks again.
  */
-export async function chainOutcomes(uuid: string): Promise<ChainOutcomes> {
-  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/chain-outcomes/`);
+export class OutcomePageRefused extends ControlPlaneUnavailable {
+  readonly status = 400;
+  constructor(message: string, readonly code: string | null, readonly said: string | null) {
+    super(message);
+  }
+}
+
+/** A refusal's code as the backend words them: one short lower-case word. Anything else is not passed on as a code. */
+const OUTCOME_REFUSAL_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+/** How much of a refusal's sentence is passed on. */
+const MAX_REFUSAL_CHARS = 600;
+
+async function refusedOutcomePage(response: Response): Promise<ControlPlaneUnavailable> {
+  if (response.status !== 400) return refusedRead(response);
+  const answer = recordOrNull(await response.json().catch(() => null));
+  const code = answer !== null && typeof answer.code === "string" && OUTCOME_REFUSAL_CODE.test(answer.code) ? answer.code : null;
+  const said = answer !== null && typeof answer.error === "string" && answer.error !== "" ? answer.error.slice(0, MAX_REFUSAL_CHARS) : null;
+  return new OutcomePageRefused(`the Athena control plane answered 400${said === null ? "" : `: ${said}`}`, code, said);
+}
+
+/** Whether `value` could be a cursor of the outcome read: text, not empty, no longer than the backend reads. */
+export function outcomeCursor(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && value.length <= MAX_CURSOR_CHARS;
+}
+
+/**
+ * One page of a deployment's observed effects, each row with what a reader is shown
+ * of it, and the counts served beside it (Athena-Backend #241). A GET only: the
+ * route's POST (which appends outcomes) is never sent.
+ *
+ * WHAT IS SENT: `recorded_as=observed_effect` on every page, and `before=<cursor>`
+ * for a page after the first. Nothing else: the backend refuses any other parameter.
+ * ONE REQUEST per call. A further page is read only when this is called again with
+ * the `next` of the page before; nothing here follows `next` by itself.
+ *
+ * A backend from before #241 reads neither parameter and answers its newest outcomes
+ * of every kind, with no `next` and no `matching_count`: both stay absent. Such an
+ * answer to a read that sent `before` is not the page asked for, and is unavailable,
+ * never drawn as that page. An answer with no list of outcomes at all is unavailable,
+ * never read as none.
+ */
+export async function chainOutcomes(uuid: string, before?: string): Promise<ChainOutcomes> {
+  const asked = new URLSearchParams({ recorded_as: RECORDED_AS_OBSERVED_EFFECT });
+  if (before !== undefined) asked.set("before", before);
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/chain-outcomes/?${asked.toString()}`);
   if (!response.ok) {
-    throw await refusedRead(response);
+    throw await refusedOutcomePage(response);
   }
   const raw = await readObject(response);
   if (raw.outcomes === undefined || raw.outcomes === null) {
     throw new ControlPlaneUnavailable("the Athena control plane answered chain-outcomes with no list of outcomes");
   }
+  if (before !== undefined && !Object.hasOwn(raw, "next")) {
+    throw new ControlPlaneUnavailable(
+      "the Athena control plane answered a page of chain-outcomes without saying whether another follows: it did not read the cursor, so its rows are not the page asked for",
+    );
+  }
   const unreadable: UnreadableRows = {};
+  const bad: string[] = [];
+  const matchingCount = countIn(raw, "matching_count", "matchingCount", bad);
+  let next: string | null | undefined;
+  if (Object.hasOwn(raw, "next")) {
+    if (raw.next === null || outcomeCursor(raw.next)) next = raw.next;
+    else bad.push("next");
+  }
   return {
     outcomes: rowsOf(raw.outcomes, unreadable, "outcomes").map(chainOutcomeRow),
     returned: numOrNull(raw.returned),
     truncated: boolOrNull(raw.truncated),
     pageSize: numOrNull(raw.page_size),
     recordedCount: numOrNull(raw.recorded_count),
+    ...(matchingCount !== null ? { matchingCount } : {}),
+    ...(next !== undefined ? { next } : {}),
     ...withUnreadable(unreadable),
+    ...withUnreadableFields(bad),
   };
 }
 

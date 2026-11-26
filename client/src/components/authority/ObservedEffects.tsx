@@ -28,21 +28,37 @@
  * Every string here came from the backend's record and is drawn as text by the app's own
  * runtime, which marks any character that hides or reorders text (lib/hiddenChars.ts).
  *
- * OFF THE STOP PATH. Nothing here writes. The read is one GET with the screen, beside the
- * chains' own read and never before it: the chains are drawn without it. A left screen
- * cancels it (lib/queryClient.ts), and this console's server cuts it at the read deadline
- * (server/read-deadline.ts). Every Stop and the failsafe console are elsewhere and read
- * none of this.
+ * EVERY OBSERVED EFFECT CAN BE READ, A PAGE AT A TIME (Athena-Backend #241). The first
+ * page is read with the screen; this console's server asks the backend only for the rows
+ * recorded as observed effects. "Show more" reads the page after the last one in hand,
+ * with the cursor that page gave: ONE PAGE PER PRESS, never the rest by itself. The
+ * section says how many are shown of how many the backend counts, and that is all only
+ * when the backend says no page follows. A row recorded as an observed effect whose
+ * reading the backend serves as null is drawn as that, never dropped and never as an
+ * effect in force. A cursor the backend refuses: the list changed, and the first page is
+ * offered again. A page that could not be read keeps the rows in hand and offers that
+ * page again, once per press; it is never read as the last. A backend that does not page
+ * (it serves no `next`): what it gave, as before, and that more may exist.
+ *
+ * OFF THE STOP PATH. Nothing here writes. Each read is one GET through the app's cache:
+ * the first with the screen, beside the chains' own read and never before it (the chains
+ * are drawn without it), a later one on a press of this section's own button. A left
+ * screen cancels them (lib/queryClient.ts), and this console's server cuts each at the
+ * read deadline (server/read-deadline.ts). The buttons here are this section's alone:
+ * they share no state, no queue and no lock with any Stop. Every Stop and the failsafe
+ * console are elsewhere and read none of this.
  */
-import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, type ReactNode } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Eye } from "lucide-react";
 import {
+  BAD_CURSOR,
   BINDING_BOUND_OVER_APPROVAL,
   EXECUTION_STATES,
   WITHHELD_PLAIN_DIGEST,
   effectVersionOf,
   isObservedEffect,
+  servesPages,
   type BindingApproval,
   type BindingFinding,
   type ChainOutcomeRow,
@@ -434,13 +450,21 @@ function ReadingAsServed({ row }: { row: ChainOutcomeRow }) {
   }
 }
 
-export function ObservedEffectCard({ row }: { row: ChainOutcomeRow }) {
+/**
+ * One row. `recorded`: it was read under the filter, so it was RECORDED AS an observed
+ * effect whatever it reads as now. Such a row that is not an observed effect in force
+ * (the backend names another kind of evidence for it and serves no reading: its
+ * signature no longer checks) is drawn as that, in the backend's own word for it.
+ */
+export function ObservedEffectCard({ row, recorded = false }: { row: ChainOutcomeRow; recorded?: boolean }) {
+  const inForce = isObservedEffect(row);
   return (
     <li
       className="space-y-2 rounded-lg border border-border/60 bg-surface-1/30 p-3"
       data-testid="observed-effect"
       data-outcome={row.outcomeId ?? ""}
       data-effect-served={row.effect.served}
+      data-in-force={inForce ? "true" : "false"}
     >
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-[13px] font-semibold text-foreground">
@@ -451,13 +475,16 @@ export function ObservedEffectCard({ row }: { row: ChainOutcomeRow }) {
         <Chip tone={STATUS_TONE[row.status] ?? "neutral"} testId="effect-status">
           {row.statusLabel ?? (row.status || "no status served")}
         </Chip>
+        {recorded && !inForce && (
+          <Chip tone="caution" testId="effect-not-in-force">recorded as an observed effect: not one in force</Chip>
+        )}
       </div>
       <div className="grid gap-1 md:grid-cols-2">
         <Fact label="Signed by">
           {row.observerEngine ? <span className="text-foreground">{row.observerEngine}</span> : <Absent>not said</Absent>}
         </Fact>
-        <Fact label="Kind of evidence">
-          {row.evidenceKindLabel ?? row.evidenceKind ?? <Absent>not said</Absent>}
+        <Fact label={recorded && !inForce ? "Kind of evidence the backend reads it as" : "Kind of evidence"}>
+          <span data-testid="effect-kind">{row.evidenceKindLabel ?? row.evidenceKind ?? <Absent>not said</Absent>}</span>
         </Fact>
         <Fact label="Effect observed at">
           <When iso={row.observedAt} />
@@ -466,7 +493,15 @@ export function ObservedEffectCard({ row }: { row: ChainOutcomeRow }) {
           <When iso={row.recordedAt} />
         </Fact>
       </div>
-      <ReadingAsServed row={row} />
+      {recorded && !inForce && row.effect.served === "none" ? (
+        <p className="text-[12px] text-amber-400" data-testid="effect-recorded-reading-null">
+          This row was recorded as an observed effect. Athena-Backend serves its reading as null and reads its evidence as{" "}
+          {row.evidenceKindLabel ?? row.evidenceKind ?? "a kind it does not name"}: the signature it was recorded under does
+          not check now. It is shown as recorded, and is not an observed effect in force.
+        </p>
+      ) : (
+        <ReadingAsServed row={row} />
+      )}
     </li>
   );
 }
@@ -488,14 +523,48 @@ function EffectsSection({ children }: { children: ReactNode }) {
     <Section title="Observed effects" icon={<Eye className="h-4 w-4 text-primary" />} testId="observed-effects-section">
       <p className="text-[12px] text-muted-foreground">
         What Athena-Backend shows of each observed effect&apos;s signed record: the tool binding its permit was decided for,
-        which stage of execution it shows, and what is keyed. Read from the deployment&apos;s newest chain outcomes.
+        which stage of execution it shows, and what is keyed. Read from the deployment&apos;s chain outcomes, a page at a time.
       </p>
       {children}
     </Section>
   );
 }
 
-export function ObservedEffectsView({ data }: { data: ChainOutcomes }) {
+/** What became of the page after those in hand. */
+export type NextPage =
+  | { state: "none" }
+  | { state: "reading" }
+  /** It could not be read (the network, this server, the backend): never the last page. */
+  | { state: "failed"; message: string }
+  /** The backend refused it as asked (a 400): its code and its words, as served. */
+  | { state: "refused"; code: string | null; error: string | null }
+  /** A page in hand was read again and no longer leads to the pages read after it. */
+  | { state: "changed" };
+
+/** What a press in this section asks for. Each is this section's own, and reads one page. */
+export interface WalkActions {
+  /** Read the page after the last one in hand, with the cursor that page gave. */
+  more?: (next: string) => void;
+  /** Read once more the page that could not be read. */
+  again?: () => void;
+  /** Read again from the first page. */
+  fromFirst?: () => void;
+}
+
+const BUTTON = "rounded-md bg-primary/15 px-3 py-1 text-[12px] font-medium text-primary hover:bg-primary/25";
+
+/** A refusal's code and words, as served: text, never markup. */
+function Refusal({ code, error }: { code: string | null; error: string | null }) {
+  return (
+    <span data-testid="effects-refusal">
+      <code className="font-mono" data-testid="effects-refusal-code">{code ?? "no code served"}</code>:{" "}
+      <span data-testid="effects-refusal-error">{error ?? "no reason served"}</span>
+    </span>
+  );
+}
+
+/** A backend that does not page: the newest outcomes it gave, of every kind, as this section always drew them. */
+function NotPagedView({ data }: { data: ChainOutcomes }) {
   const effects = data.outcomes.filter(isObservedEffect);
   const reported = data.outcomes.filter((row) => row.effect.served !== "not_reported").length;
   // Rows that say neither what kind of evidence they are nor carry a reading: any could be an observed effect.
@@ -514,6 +583,10 @@ export function ObservedEffectsView({ data }: { data: ChainOutcomes }) {
           <Count value={effects.length} testId="effects-count" />
         </Fact>
       </div>
+      <NotServed testId="effects-not-paged">
+        This backend does not page its chain outcomes: what is shown is what it gave, its newest outcomes of every kind, and
+        it did not say how many observed effects there are. More observed effects may exist than are shown.
+      </NotServed>
       {data.truncated === true && (
         <p className="text-[12px] text-amber-400" data-testid="effects-truncated">
           Showing the observed effects among the newest {data.returned ?? "few"} of {data.recordedCount ?? "more"} chain outcomes:
@@ -552,15 +625,205 @@ export function ObservedEffectsView({ data }: { data: ChainOutcomes }) {
   );
 }
 
-/** The observed effects of a deployment, read once with the screen and drawn beside the chains. Nothing waits on it. */
-export function ObservedEffectsSection({ deployment }: { deployment: string }) {
-  const source = served(
-    useQuery<unknown>({ queryKey: [`/api/assurance/deployments/${encodeURIComponent(deployment)}/chain-outcomes`] }),
+/**
+ * The pages in hand, oldest read first, and what became of the page after them. A
+ * backend that pages serves only rows recorded as observed effects: every one is drawn.
+ * The counts are the backend's, from the page read last; none is worked out here but
+ * the number of rows on the screen.
+ */
+export function ObservedEffectsView({
+  data, later = [], after = { state: "none" }, actions = {},
+}: {
+  /** The first page. */
+  data: ChainOutcomes;
+  /** The pages read after it, in order. */
+  later?: ChainOutcomes[];
+  after?: NextPage;
+  actions?: WalkActions;
+}) {
+  if (!servesPages(data)) return <NotPagedView data={data} />;
+  const pages = [data, ...later];
+  const last = pages[pages.length - 1];
+  const rows = pages.flatMap((page) => page.outcomes);
+  const unread = pages.reduce((sum, page) => sum + unreadableIn(page, "outcomes"), 0);
+  const notInForce = rows.filter((row) => !isObservedEffect(row)).length;
+  const matching = last.matchingCount;
+  const nextUnreadable = last.next === undefined;
+  const isLast = last.next === null && after.state === "none";
+  return (
+    <EffectsSection>
+      <p className="text-[13px] text-foreground" data-testid="effects-showing" data-shown={rows.length} data-matching={matching ?? ""}>
+        {matching === undefined
+          ? `Showing ${rows.length} observed ${rows.length === 1 ? "effect" : "effects"}. This backend did not say how many there are.`
+          : `Showing ${rows.length} of ${matching} observed ${matching === 1 ? "effect" : "effects"}.`}
+      </p>
+      <div className="grid gap-1 md:grid-cols-2">
+        <Fact label="Chain outcomes recorded in all, of every kind">
+          <Count value={last.recordedCount} testId="effects-recorded" />
+        </Fact>
+        <Fact label="Pages read">
+          <Count value={pages.length} testId="effects-pages" />
+        </Fact>
+      </div>
+      {notInForce > 0 && (
+        <p className="text-[12px] text-amber-400" data-testid="effects-not-in-force">
+          Of those shown, {notInForce} {notInForce === 1 ? "is" : "are"} recorded as an observed effect and not read as one in
+          force: each says so.
+        </p>
+      )}
+      {rows.length === 0 && unread === 0 ? (
+        <p className="text-[13px]" data-testid="no-observed-effects">
+          <Absent>
+            {isLast
+              ? "No observed effect is recorded for this deployment."
+              : "No observed effect is on the pages read."}
+          </Absent>
+        </p>
+      ) : (
+        <ul className="space-y-3">
+          {pages.map((page, at) => page.outcomes.map((row, i) => (
+            <ObservedEffectCard key={`${at}-${row.uuid}-${i}`} row={row} recorded />
+          )))}
+        </ul>
+      )}
+      {pages.map((page, at) => (
+        <UnreadableRows key={at} from={page} list="outcomes" label={`chain outcomes, page ${at + 1}`} />
+      ))}
+      <div className="space-y-2" data-testid="effects-walk" data-after={after.state}>
+        {after.state === "reading" && (
+          <p className="text-[12px] text-muted-foreground" data-testid="effects-next-reading">Reading the next page…</p>
+        )}
+        {after.state === "failed" && (
+          <>
+            <p className="text-[12px] text-amber-400" data-testid="effects-next-not-read">
+              The next page could not be read: {after.message}. The observed effects above are those read before it; more are
+              recorded than are shown.
+            </p>
+            {actions.again && (
+              <button type="button" className={BUTTON} data-testid="effects-read-again" onClick={actions.again}>
+                Read that page again
+              </button>
+            )}
+          </>
+        )}
+        {after.state === "refused" && (
+          <>
+            {after.code === BAD_CURSOR ? (
+              <p className="text-[12px] text-amber-400" data-testid="effects-list-changed">
+                The list changed while it was being read: the backend no longer takes this page&apos;s place in it (
+                <Refusal code={after.code} error={after.error} />). The observed effects above are those read before; the next
+                page was not read.
+              </p>
+            ) : (
+              <p className="text-[12px] text-amber-400" data-testid="effects-next-refused">
+                The backend refused the next page as asked (<Refusal code={after.code} error={after.error} />). It is not asked
+                again by itself. The observed effects above are those read before it; more may be recorded than are shown.
+              </p>
+            )}
+            {actions.fromFirst && (
+              <button type="button" className={BUTTON} data-testid="effects-from-first" onClick={actions.fromFirst}>
+                Read again from the first page
+              </button>
+            )}
+          </>
+        )}
+        {after.state === "changed" && (
+          <>
+            <p className="text-[12px] text-amber-400" data-testid="effects-list-changed">
+              The list changed while it was being read: a page shown above was read again and no longer leads to the pages
+              read after it, which are not shown.
+            </p>
+            {actions.fromFirst && (
+              <button type="button" className={BUTTON} data-testid="effects-from-first" onClick={actions.fromFirst}>
+                Read again from the first page
+              </button>
+            )}
+          </>
+        )}
+        {after.state === "none" && typeof last.next === "string" && (
+          <>
+            <p className="text-[12px] text-muted-foreground" data-testid="effects-more-follow">
+              More follow: the backend serves at most {last.pageSize ?? "a page"} at a time. Each press reads one more page.
+            </p>
+            {actions.more && (
+              <button type="button" className={BUTTON} data-testid="effects-show-more" onClick={() => actions.more?.(last.next as string)}>
+                Show more
+              </button>
+            )}
+          </>
+        )}
+        {after.state === "none" && nextUnreadable && (
+          <p className="text-[12px] text-amber-400" data-testid="effects-next-unreadable">
+            The backend&apos;s word on whether another page follows could not be read: more observed effects may exist than are
+            shown, and this is not read as the last page.
+          </p>
+        )}
+        {isLast && (
+          <p className="text-[12px] text-muted-foreground" data-testid="effects-that-is-all">
+            That is all: the backend says no page follows this one.
+            {matching !== undefined && matching !== rows.length + unread &&
+              ` It counts ${matching} now and ${rows.length + unread} ${rows.length + unread === 1 ? "row was" : "rows were"} read: the list changed while it was read.`}
+          </p>
+        )}
+        {isLast && matching !== undefined && matching !== rows.length + unread && actions.fromFirst && (
+          <button type="button" className={BUTTON} data-testid="effects-from-first" onClick={actions.fromFirst}>
+            Read again from the first page
+          </button>
+        )}
+      </div>
+    </EffectsSection>
   );
+}
+
+/** The refusal a read's error carries, when this console's server answered it 400: its code and its words, each only as text. */
+function refusalOf(error: unknown): { code: string | null; error: string | null } | null {
+  const held = error !== null && typeof error === "object" ? (error as { status?: unknown; body?: unknown }) : null;
+  if (held === null || held.status !== 400) return null;
+  const body = held.body !== null && typeof held.body === "object" ? (held.body as { code?: unknown; error?: unknown }) : {};
+  return { code: typeof body.code === "string" ? body.code : null, error: typeof body.error === "string" ? body.error : null };
+}
+
+/** One page asked for by a press: the cursor it was asked with, and which reading of it this is. */
+interface AskedPage { before: string; attempt: number }
+/** The walk of one deployment: which reading of the first page it starts from, and the pages asked for after it. */
+interface Walk { deployment: string; round: number; asked: AskedPage[] }
+
+/**
+ * The observed effects of a deployment. The first page is read once with the screen
+ * and drawn beside the chains; nothing waits on it. A later page is read only when its
+ * button is pressed: the list of pages asked for grows by one per press and by nothing
+ * else, and no read here is made again by itself.
+ */
+export function ObservedEffectsSection({ deployment }: { deployment: string }) {
+  const path = `/api/assurance/deployments/${encodeURIComponent(deployment)}/chain-outcomes`;
+  const [held, setWalk] = useState<Walk>({ deployment, round: 0, asked: [] });
+  // Another deployment's walk is not this one's: it starts from its own first page.
+  const walk: Walk = held.deployment === deployment ? held : { deployment, round: 0, asked: [] };
+  // The trailing number makes a reading asked for again a read of its own in the cache; it is no part of the address.
+  const first = useQuery<unknown>({ queryKey: walk.round === 0 ? [path] : [path, {}, walk.round], retry: false });
+  const read = useQueries({
+    queries: walk.asked.map((page) => ({
+      // `before` is the whole query string. What follows it names which reading this is, and is no part of the address.
+      queryKey: walk.round === 0 && page.attempt === 0
+        ? [path, { before: page.before }]
+        : [path, { before: page.before }, `${walk.round}.${page.attempt}`],
+      retry: false,
+      refetchOnReconnect: false,
+    })),
+  });
+  const source = served(first);
   if (source.state !== "ready") {
+    const refusal = first.isError ? refusalOf(first.error) : null;
     return (
       <EffectsSection>
-        <NotInHand source={source} what="the observed effects" />
+        {refusal === null ? (
+          <NotInHand source={source} what="the observed effects" />
+        ) : (
+          <p className="text-[13px] text-amber-400" data-testid="effects-first-refused">
+            The backend refused the read of the observed effects as asked (<Refusal code={refusal.code} error={refusal.error} />).
+            It is not asked again by itself, and none of it is read as no effect.
+          </p>
+        )}
       </EffectsSection>
     );
   }
@@ -573,5 +836,42 @@ export function ObservedEffectsSection({ deployment }: { deployment: string }) {
       </EffectsSection>
     );
   }
-  return <ObservedEffectsView data={source.data} />;
+  // The pages in hand are those read in order from the first; the first one not in hand is what `after` says.
+  const later: ChainOutcomes[] = [];
+  let after: NextPage = { state: "none" };
+  for (let at = 0; at < read.length; at += 1) {
+    const page = read[at];
+    // A page follows from the one before it only by the cursor that page gave.
+    if (walk.asked[at].before !== (at === 0 ? source.data.next : later[at - 1].next)) {
+      after = { state: "changed" };
+      break;
+    }
+    if (page.isError) {
+      const refusal = refusalOf(page.error);
+      after = refusal === null
+        ? { state: "failed", message: page.error instanceof Error ? page.error.message : "the read did not answer" }
+        : { state: "refused", ...refusal };
+      break;
+    }
+    if (page.data === undefined || page.isPlaceholderData) {
+      after = { state: "reading" };
+      break;
+    }
+    if (!isChainOutcomes(page.data)) {
+      after = { state: "failed", message: "the answer for the page could not be read" };
+      break;
+    }
+    later.push(page.data);
+  }
+  const actions: WalkActions = {
+    // One press, one page: a cursor already asked with adds nothing.
+    more: (next) => setWalk(walk.asked.some((page) => page.before === next) ? walk : { ...walk, asked: [...walk.asked, { before: next, attempt: 0 }] }),
+    // The page that could not be read, once more: the pages before it stay in hand.
+    again: () => setWalk({
+      ...walk,
+      asked: walk.asked.map((page, at) => (at === later.length ? { ...page, attempt: page.attempt + 1 } : page)),
+    }),
+    fromFirst: () => setWalk({ deployment, round: walk.round + 1, asked: [] }),
+  };
+  return <ObservedEffectsView data={source.data} later={later} after={after} actions={actions} />;
 }

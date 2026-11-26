@@ -37,6 +37,7 @@ import { ratingOf } from "@shared/latest-scans";
 import { coverageOf } from "@shared/scan-coverage";
 import { UNREADABLE_ROWS_HEADER, unreadableHeaderValue, type UnreadableRows } from "@shared/unreadable-rows";
 import { rowEngaged } from "@shared/kill-switch-flag";
+import { BAD_CURSOR } from "@shared/observed-effect";
 import { DECLARABLE_KINDS, EVIDENCE_MOST, ITEMS_MOST, REASON_MOST } from "@shared/scope-declaration";
 import { deploymentSummary } from "./summary";
 import * as lifecycle from "./findings";
@@ -7604,10 +7605,38 @@ export function registerRoutes(app: Express): void {
   // the person, under the read deadline like every assurance read; the backend
   // route's POST (which appends outcomes) is never relayed. No keyed value is passed
   // on (server/assurance.ts chainOutcomes). Nothing waits on it.
+  //
+  // ONE PAGE per request (Athena-Backend #241): the first with no parameter, a later
+  // one with `?before=<the next of the page before>`. This server adds the filter
+  // (`recorded_as=observed_effect`) itself, on every page, and sends the backend
+  // nothing else. `before` is checked here first -- given once, not empty, no longer
+  // than a cursor is -- and any other parameter is refused here, as the backend
+  // refuses it: `?offset=100` is never answered with the first page again. A page the
+  // backend refuses is its 400, passed on with its code and its words, and asked once.
   app.get("/api/assurance/deployments/:uuid/chain-outcomes", asyncHandler(async (req, res) => {
+    const others = Object.keys(req.query).filter((name) => name !== "before").length;
+    if (others > 0) {
+      res.status(400).json({
+        error: `this read takes \`before\` and nothing else: ${others} other parameter${others === 1 ? " was" : "s were"} sent`,
+        code: "unknown_parameter",
+      });
+      return;
+    }
+    const before = req.query.before;
+    if (before !== undefined && !assurance.outcomeCursor(before)) {
+      res.status(400).json({
+        error: "`before` is not a cursor this read issued: it is the `next` of an earlier page, given once. Read the first page again without it.",
+        code: BAD_CURSOR,
+      });
+      return;
+    }
     try {
-      res.json(await assurance.chainOutcomes(req.params.uuid));
+      res.json(await assurance.chainOutcomes(req.params.uuid, before));
     } catch (cause) {
+      if (cause instanceof assurance.OutcomePageRefused) {
+        res.status(400).json({ error: cause.said ?? cause.message, code: cause.code ?? "backend_refused" });
+        return;
+      }
       if (assuranceUnavailable(res, cause)) return;
       throw cause;
     }
