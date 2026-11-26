@@ -6303,7 +6303,9 @@ export function outcomeCursor(value: unknown): value is string {
 export async function chainOutcomes(uuid: string, before?: string): Promise<ChainOutcomes> {
   const asked = new URLSearchParams({ recorded_as: RECORDED_AS_OBSERVED_EFFECT });
   if (before !== undefined) asked.set("before", before);
-  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/chain-outcomes/?${asked.toString()}`);
+  const query = `?${asked.toString()}`;
+  // A read, not a stop: no `stop` is passed, so it goes as the signed-in person and never presents the failsafe service token.
+  const response = await call(`/api/assurance/deployments/${encodeURIComponent(uuid)}/chain-outcomes/${query}`);
   if (!response.ok) {
     throw await refusedOutcomePage(response);
   }

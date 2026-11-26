@@ -3,6 +3,7 @@ import type { Server } from "http";
 import type { AddressInfo } from "net";
 
 import { makeApp, signIn, signInToBackend } from "../helpers";
+import { newServiceToken } from "./control-plane-stand-in";
 import { hostileText, older, outcomeRow, v5 } from "./observed-effects";
 
 /**
@@ -22,7 +23,9 @@ import { hostileText, older, outcomeRow, v5 } from "./observed-effects";
  *     `matching_count`.
  *
  * Every request is kept as it arrived (`requests`), so a test can say exactly what was
- * sent. `script` makes the next request for one page answer something else, once.
+ * sent, and with which credentials: this console holds a failsafe service token
+ * (`serviceToken`), which only a stop may carry. `script` makes the next request for one
+ * page answer something else, once.
  */
 
 export const DEP_PAGES = "dep-pages";
@@ -78,13 +81,23 @@ const RECORD: Record<string, { rows: Recorded[]; size: number; older?: boolean; 
   [DEP_PAGES_NONE]: { size: 2, rows: [other(gate("gate-only"))] },
 };
 
-export interface BackendRequest { dep: string; search: string; params: Array<[string, string]> }
+export interface BackendRequest {
+  dep: string;
+  search: string;
+  params: Array<[string, string]>;
+  /** The X-Failsafe-Service-Token header as it arrived; undefined when none was sent. */
+  serviceToken: string | undefined;
+  /** The Authorization header as it arrived. */
+  authorization: string | undefined;
+}
 export interface Scripted { status: number; body: unknown }
 
 export const HOSTILE_REFUSAL = hostileText("refusal");
 
 export async function pagingBackend(): Promise<{
   user: Awaited<ReturnType<typeof signIn>>;
+  /** The failsafe service token this console was started with (invented here): a stop's, never a read's. */
+  serviceToken: string;
   /** Every chain-outcomes request the backend was sent, in order. */
   requests: BackendRequest[];
   requestsFor(dep: string): BackendRequest[];
@@ -95,6 +108,7 @@ export async function pagingBackend(): Promise<{
   close(): Promise<void>;
 }> {
   const requests: BackendRequest[] = [];
+  const serviceToken = newServiceToken();
   const scripted = new Map<string, Scripted[]>();
   const cursors = new Map<string, { dep: string; filter: string; index: number }>();
   // Shaped like a signed cursor: url-safe text, a colon, a signature. It holds no row id.
@@ -124,7 +138,11 @@ export async function pagingBackend(): Promise<{
       if (req.method !== "GET" || named === null || !(named[1] in RECORD)) return json(404, { detail: "Not found." });
       const dep = named[1];
       const params = Array.from(url.searchParams.entries());
-      requests.push({ dep, search: url.search, params });
+      const header = (name: string) => {
+        const value = req.headers[name];
+        return Array.isArray(value) ? value.join(", ") : value;
+      };
+      requests.push({ dep, search: url.search, params, serviceToken: header("x-failsafe-service-token"), authorization: header("authorization") });
       const record = RECORD[dep];
       const queued = scripted.get(`${dep}|${url.searchParams.get("before") ?? ""}`);
       if (queued && queued.length > 0) {
@@ -171,11 +189,13 @@ export async function pagingBackend(): Promise<{
   process.env.ATHENA_FAILSAFE_URL = `http://127.0.0.1:${port}`;
   process.env.ATHENA_FAILSAFE_USER = "svc-operator";
   process.env.ATHENA_FAILSAFE_PASSWORD = "svc-secret"; // pragma: allowlist secret
+  process.env.ATHENA_FAILSAFE_SERVICE_TOKEN = serviceToken;
   const app: Express = await makeApp();
   const user = await signIn(app);
   await signInToBackend(user);
   return {
     user,
+    serviceToken,
     requests,
     requestsFor: (dep) => requests.filter((one) => one.dep === dep),
     cursorAfter: (dep, rows) => cursorFor(dep, "observed_effect", rows),
@@ -187,6 +207,7 @@ export async function pagingBackend(): Promise<{
       delete process.env.ATHENA_FAILSAFE_URL;
       delete process.env.ATHENA_FAILSAFE_USER;
       delete process.env.ATHENA_FAILSAFE_PASSWORD;
+      delete process.env.ATHENA_FAILSAFE_SERVICE_TOKEN;
       await new Promise<void>((r) => server.close(() => r()));
     },
   };

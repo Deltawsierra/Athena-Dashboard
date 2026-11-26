@@ -22,7 +22,8 @@ import {
  *
  *   1. The backend is asked `?recorded_as=observed_effect`, and `&before=<next>` for a
  *      later page: the filter on EVERY page, and no other parameter. One page is read
- *      per press; the rest are never read by themselves.
+ *      per press; the rest are never read by themselves. Every page is a read, sent as
+ *      the signed-in person, never with the failsafe service token a stop carries.
  *   2. The section says how many are shown of how many the backend counts, and how many
  *      outcomes are recorded in all; never a count the backend did not give. Only when
  *      the backend says no page follows does it say that is all.
@@ -128,6 +129,22 @@ describe("1. the section reads with the filter and walks the cursor, one page pe
       expect(request.params.filter(([name]) => name === "recorded_as")).toEqual([FILTER]);
       expect(request.params.map(([name]) => name).filter((name) => name !== "recorded_as" && name !== "before")).toEqual([]);
     }
+  });
+
+  it("every page is a read, sent as the signed-in person: none carries the failsafe service token this console holds for its stops", async () => {
+    await firstPage(DEP_PAGES);
+    press("effects-show-more");
+    await waitFor(() => expect(shown()).toHaveLength(4));
+    press("effects-show-more");
+    await waitFor(() => expect(shown()).toHaveLength(5));
+    const pages = backend.requestsFor(DEP_PAGES);
+    // The first page and the two after it, each with its cursor.
+    expect(pages.map((one) => one.params.some(([name]) => name === "before"))).toEqual([false, true, true]);
+    expect(backend.serviceToken.length).toBeGreaterThanOrEqual(32);
+    expect(pages.map((one) => one.serviceToken)).toEqual([undefined, undefined, undefined]);
+    // As the person this console signed in to the backend, never as the service account.
+    expect(pages.map((one) => one.authorization)).toEqual(["Bearer access-for-admin", "Bearer access-for-admin", "Bearer access-for-admin"]);
+    expect(pages.filter((one) => `${one.authorization ?? ""} ${one.search}`.includes(backend.serviceToken))).toEqual([]);
   });
 
   it("a press while a page is being read reads nothing more, and a left screen cancels the read", async () => {

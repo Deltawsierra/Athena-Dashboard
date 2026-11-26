@@ -799,14 +799,13 @@ export function ObservedEffectsSection({ deployment }: { deployment: string }) {
   const [held, setWalk] = useState<Walk>({ deployment, round: 0, asked: [] });
   // Another deployment's walk is not this one's: it starts from its own first page.
   const walk: Walk = held.deployment === deployment ? held : { deployment, round: 0, asked: [] };
-  // The trailing number makes a reading asked for again a read of its own in the cache; it is no part of the address.
-  const first = useQuery<unknown>({ queryKey: walk.round === 0 ? [path] : [path, {}, walk.round], retry: false });
+  // Each key is the path, then the query string as an object (the first page's is empty), then which reading this is.
+  // That trailing part makes a reading asked for again a read of its own in the cache; it is no part of the address.
+  const first = useQuery<unknown>({ queryKey: [path, {}, walk.round], retry: false });
   const read = useQueries({
     queries: walk.asked.map((page) => ({
-      // `before` is the whole query string. What follows it names which reading this is, and is no part of the address.
-      queryKey: walk.round === 0 && page.attempt === 0
-        ? [path, { before: page.before }]
-        : [path, { before: page.before }, `${walk.round}.${page.attempt}`],
+      // `before` is the whole query string.
+      queryKey: [path, { before: page.before }, `${walk.round}.${page.attempt}`],
       retry: false,
       refetchOnReconnect: false,
     })),
