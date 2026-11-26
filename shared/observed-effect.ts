@@ -208,14 +208,47 @@ export interface ChainOutcomeRow {
   effect: EffectReadingAsServed;
 }
 
-/** The newest chain outcomes of a deployment, a page of them, with the counts served beside it. */
+/**
+ * The filter this console reads a deployment's observed effects with (Athena-Backend
+ * #241, `?recorded_as=`): the rows RECORDED AS observed effects. Each row still says
+ * for itself what it is in force: one whose signature no longer checks is among them,
+ * with `effect_reading` null.
+ */
+export const RECORDED_AS_OBSERVED_EFFECT = "observed_effect";
+/** The longest cursor Athena-Backend reads (assurance/outcome_pages.py MAX_CURSOR_CHARS). */
+export const MAX_CURSOR_CHARS = 512;
+/** The backend's code for a cursor it does not take: the walk starts again from the first page. */
+export const BAD_CURSOR = "bad_cursor";
+
+/**
+ * One page of a deployment's chain outcomes, with the counts served beside it.
+ *
+ * A backend that pages (Athena-Backend #241) serves `next` and `matching_count`, and
+ * the rows are those the filter matched. One that does not serves neither: the rows
+ * are its newest outcomes of every kind, and both stay absent here, never filled in.
+ */
 export interface ChainOutcomes {
   outcomes: ChainOutcomeRow[];
   returned: number | null;
   truncated: boolean | null;
   pageSize: number | null;
+  /** Every outcome of the deployment, whatever the filter and whichever the page. */
   recordedCount: number | null;
+  /** What the filter matched, on every page. Absent: not served, or not a count (then named in `unreadableFields`). */
+  matchingCount?: number;
+  /**
+   * The cursor for the page after this one; null: the backend says this is the last.
+   * Absent: not served (a backend that does not page), or served as something that is
+   * not a cursor (then named in `unreadableFields`): never read as the last page.
+   */
+  next?: string | null;
   unreadable?: UnreadableRows;
+  unreadableFields?: string[];
+}
+
+/** Whether an answer came from a backend that pages: it served `next`, readable or not. */
+export function servesPages(page: ChainOutcomes): boolean {
+  return page.next !== undefined || (page.unreadableFields ?? []).includes("next");
 }
 
 /** Whether a row is an observed effect: by its evidence kind, or by a reading served on it. */

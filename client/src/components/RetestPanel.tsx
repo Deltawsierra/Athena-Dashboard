@@ -336,7 +336,7 @@ function RetestStatusPanel({ twinId, initial, onVerdict, onStopAnswered }: {
     },
     onError: (error: Error) => toast({
       title: "Not stopped",
-      description: `${error.message} Press Stop again, or use the kill switch on the AI Control page.`,
+      description: notStoppedNotice(error.message),
       variant: "destructive",
     }),
   });
@@ -424,6 +424,16 @@ function RetestStatusPanel({ twinId, initial, onVerdict, onStopAnswered }: {
       )}
     </div>
   );
+}
+
+/**
+ * What the notice of a Stop that was not taken says: why, as its own sentence, then
+ * what to do. The reason is the server's and may not end in a full stop ("...the retest
+ * may still be running"); one is added, so the two sentences never run together.
+ */
+export function notStoppedNotice(reason: string): string {
+  const said = reason.trim();
+  return `${/[.?!]$/.test(said) ? said : `${said}.`} Press Stop again, or use the kill switch on the AI Control page.`;
 }
 
 export default function RetestPanel({ testId }: { testId: string }) {
