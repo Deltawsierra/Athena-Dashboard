@@ -775,6 +775,24 @@ async function sendAbort(runId: string): Promise<StopOutcome> {
 type Who = ReturnType<typeof actor>;
 
 /**
+ * Settles once a Stop's answer has gone out whole, its last byte included (or
+ * its connection closed). The session middleware (express-session) sends all
+ * but the last byte of an answer at once and the last byte a turn of the loop
+ * later, once its store has noted the session; and better-sqlite3 runs each
+ * statement on the loop for as long as the disk takes. So a record written
+ * right after res.json held that last byte, and the answer with it, for as
+ * long as a slow or stalled disk held the write: with the store held for 3 s,
+ * a retest's Stop was answered after 3 s. A Stop's records wait for this.
+ */
+function answerGone(res: Response): Promise<void> {
+  if (res.writableFinished || res.destroyed) return Promise.resolve();
+  return new Promise<void>((gone) => {
+    res.once("finish", () => gone());
+    res.once("close", () => gone());
+  });
+}
+
+/**
  * Write what a stop came to. Only ever run after the stop was sent -- for the
  * kill switch, after every stop was -- and never awaited by one. A write that
  * failed does not unsend the stop or hide its outcome; it is counted and said.
@@ -4417,8 +4435,10 @@ export function registerRoutes(app: Express): void {
       ? { stopped: false, alreadyFinished: true, runId, state: outcome.state, detail: ALREADY_FINISHED }
       : { stopped: true, runId, ...(outcome.answerUnread ? { answerUnread: true, detail: ANSWER_UNREAD } : {}) });
 
-    // After the stop and its answer, and best-effort: a log write that failed
-    // (a full disk, a locked database) neither unsends the stop nor delays it.
+    // After the stop and its answer -- the whole of it (answerGone) -- and
+    // best-effort: a log write that failed (a full disk, a locked database)
+    // neither unsends the stop nor delays it, and a slow one holds no answer.
+    await answerGone(res);
     const failed = await writeStopRecord(who, { runId, target: null, testId: test.id }, "stop", stopOutcome);
     if (failed) console.error(logLine(`[abort] ${failed}`));
     // Decision 6: the stop's record at the backend -- after the engine's answer
@@ -5454,11 +5474,12 @@ export function registerRoutes(app: Express): void {
     // a watch of the same id or not (namedByUnreadAnswer).
     noteHandleStop(runId, namedByUnreadAnswer(stopOutcome));
     // Noted in memory at once (a watch's own read after this knows it), on
-    // the record in the background: an accepted stop only when the engine
-    // took it and said so; a 2xx whose answer was not read as just that --
-    // "stop sent, answer unread" -- never as accepted.
+    // the record once the answer has gone out whole (answerGone): an accepted
+    // stop only when the engine took it and said so; a 2xx whose answer was
+    // not read as just that -- "stop sent, answer unread" -- never as accepted.
+    const gone = answerGone(res);
     if (outcome.accepted) {
-      const noted = outcome.answerUnread ? watcher.stopSentUnread(runId) : watcher.stopAccepted(runId);
+      const noted = outcome.answerUnread ? watcher.stopSentUnread(runId, gone) : watcher.stopAccepted(runId, gone);
       void noted.then((failed) => { if (failed) console.error(logLine(`[retest] ${failed}`)); });
     }
     res.json(outcome.alreadyFinished
@@ -5468,7 +5489,9 @@ export function registerRoutes(app: Express): void {
         : outcome.unknownRun
         ? { stopped: false, unknownRun: true, runId, detail: UNKNOWN_RUN }
         : { stopped: true, runId, ...(outcome.answerUnread ? { answerUnread: true, detail: ANSWER_UNREAD } : {}) });
-    // After the stop and its answer: a write that failed unsends nothing.
+    // After the stop and its answer, the whole of it: a write that failed
+    // unsends nothing, and a slow one holds no answer.
+    await gone;
     const note = unverified && me?.role !== "admin"
       ? `sent before watches loaded, id not verified as a retest: sent by ${who.userId ?? "an unnamed session"} before ` +
         "this dashboard had read the retests on record, so neither whether this run id is a retest's nor whether they " +

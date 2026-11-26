@@ -7,10 +7,11 @@
 // A scan start (POST /api/scan) is answered as a run still going, under a
 // fresh run id.
 //
-// Two knobs: POST /__hang {hang} leaves /api/scans/active unanswered (no
+// Three knobs: POST /__hang {hang} leaves /api/scans/active unanswered (no
 // headers) -- an engine whose worker threads are all busy, as round 1
 // measured (28 s); POST /__abortDelay {ms} answers each stop after ms (a run
-// whose id starts "victim" is answered at once).
+// whose id starts "victim" is answered at once); POST /__abortBodyHang {hang}
+// answers each stop 200 and the first bytes of its body, and never the rest.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -26,6 +27,7 @@ let started = 0;
 let active = { active: [] };
 let hangActive = false;
 let abortDelayMs = 0;
+let abortBodyHang = false;
 const server = http.createServer((req, res) => {
   let raw = "";
   req.on("data", (chunk) => { raw += chunk; });
@@ -46,6 +48,11 @@ const server = http.createServer((req, res) => {
       res.end("{}");
       return;
     }
+    if (url === "/__abortBodyHang") {
+      abortBodyHang = JSON.parse(raw).hang === true;
+      res.end("{}");
+      return;
+    }
     process.stdout.write(JSON.stringify({ line: `${req.method} ${url}`, at: Date.now() }) + "\n");
     if (url === "/api/scans/active" && hangActive) return; // never answered
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -58,6 +65,7 @@ const server = http.createServer((req, res) => {
       }));
     }
     const abort = /^\/api\/scans\/([^/]+)\/abort$/.exec(url);
+    if (abort && abortBodyHang) return void res.write("{\"run_id\": "); // the rest never comes
     if (abort) {
       const send = () => res.end(JSON.stringify({ ...abortAnswer, run_id: decodeURIComponent(abort[1]) }));
       if (abortDelayMs > 0 && !abort[1].startsWith("victim")) return void setTimeout(send, abortDelayMs);
