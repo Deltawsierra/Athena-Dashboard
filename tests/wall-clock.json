@@ -10,6 +10,7 @@
   "tests/a-stop-goes-first-and-a-retest-verdict-is-never-lost.test.ts",
   "tests/a-retest-files-only-a-verdict-and-its-stop-waits-on-nothing.test.ts",
   "tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts",
+  "tests/a-stop-is-answered-at-once-while-a-stalled-disk-holds-the-store.test.ts",
   "tests/a-stale-account-gains-only-stops-and-an-unread-stop-is-never-accepted.test.ts",
   "tests/a-stop-follows-the-account-and-no-failed-read-or-stalled-answer-holds-it.test.ts",
   "tests/findings-summary-holds-at-estate-scale.test.ts",
