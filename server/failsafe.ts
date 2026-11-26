@@ -42,7 +42,7 @@ import https from "node:https";
 import * as dnsCache from "./dns-cache";
 import { SERVICE_TOKEN_HEADER, serviceToken, withoutServiceToken } from "./failsafe-service-token";
 import { PersonCredentialUnavailable, PersonSignInRequired, personAccessToken, renewPersonToken } from "./person-credential";
-import { NOT_A_LIST, rowsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
+import { NOT_A_LIST, rowsOf, textsOf, withUnreadable, type UnreadableRows } from "@shared/unreadable-rows";
 
 const FAILSAFE_URL_ENV = "ATHENA_FAILSAFE_URL";
 const FAILSAFE_USER_ENV = "ATHENA_FAILSAFE_USER";
@@ -692,7 +692,11 @@ function backInForceOf(payload: Record<string, unknown>, header: string | undefi
   const inBody = "back_in_force" in payload;
   if (!inBody && header === undefined) return "backInForceNote" in note ? { backInForce: "unreadable", ...note } : {};
   const listed = payload.back_in_force;
-  const stops = Array.isArray(listed) && listed.every((one) => typeof one === "string") ? (listed as string[]) : null;
+  // The stops' uuids, read through textsOf (rowsOf's sibling for a list of text): an element that is not one is
+  // counted, never dropped, and then how many are back in force is not known.
+  const unread: UnreadableRows = {};
+  const uuids = textsOf(listed, unread, "backInForce");
+  const stops = Array.isArray(listed) && unread.backInForce === undefined ? uuids : null;
   const fromBody: number | null | "unreadable" | undefined = !inBody ? undefined : stops !== null ? stops.length : listed === null ? null : "unreadable";
   const counted = countHeader(header);
   const fromHeader: number | null | "unreadable" | undefined = header === undefined ? undefined

@@ -238,6 +238,13 @@ describe("3. the cancel of a start that had been made ready says what became of 
     expect((await cancelResume(ok({ ...cmd("resume-ready", "resume", "canceled"), back_in_force: [] }, { "X-Failsafe-Back-In-Force": "0" }))).body.backInForce).toBe(0);
     expect((await cancelResume(ok({ ...cmd("resume-ready", "resume", "canceled"), back_in_force: null }, { "X-Failsafe-Back-In-Force": "2" }))).body.backInForce).toBe("unreadable");
     expect((await cancelResume(ok({ ...cmd("resume-ready", "resume", "canceled"), back_in_force: "two" }))).body.backInForce).toBe("unreadable");
+    // A list with an element that is not a stop's id: never read as the shorter list -- how many is not known,
+    // with no header, and with a header that would agree with the shorter list.
+    for (const headers of [{}, { "X-Failsafe-Back-In-Force": "1" }]) {
+      const mixed = (await cancelResume(ok({ ...cmd("resume-ready", "resume", "canceled"), back_in_force: ["pause-1", 7] }, headers))).body;
+      expect(mixed.backInForce, JSON.stringify(headers)).toBe("unreadable");
+      expect(mixed).not.toHaveProperty("backInForceStops");
+    }
     expect((await cancelResume(ok(cmd("resume-ready", "resume", "canceled"), { "X-Failsafe-Back-In-Force": "unknown" }))).body.backInForce).toBeNull();
   });
 });
