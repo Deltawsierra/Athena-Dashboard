@@ -947,10 +947,38 @@ screen draws it under "Observed effects" (`client/src/components/authority/Obser
   is not reported by this backend, which is not "nothing to show". A row or a part that
   cannot be read is counted or said, never dropped.
 
-The read is one GET with the chains screen, beside the chains' own read and never before
-it, cancelled when the screen is left and cut at the read deadline like every other read.
-No Stop and no failsafe control waits on it
-(`tests/an-observed-effect-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx`).
+**Every observed effect can be read, a page at a time.** Athena-Backend #241 pages
+`chain-outcomes/` with a cursor (`next`, read back with `?before=`) and filters it
+(`?recorded_as=observed_effect`: the rows recorded as observed effects). This server asks
+for exactly that: the filter on every page, `before` for a page after the first, and no
+other parameter (the backend refuses any other with a 400, and so does this server on its
+own route, `GET /api/assurance/deployments/<uuid>/chain-outcomes[?before=<next>]`).
+
+- **One page per press.** The first page is read with the screen. "Show more" reads the
+  page after the last one in hand; nothing reads the rest by itself.
+- **It says how many:** "Showing N of M observed effects" from the backend's
+  `matching_count`, and how many outcomes are recorded in all from `recorded_count`. A
+  count the backend did not give is not said. "That is all" is said only on the page
+  whose `next` is null.
+- **A row recorded as an observed effect whose reading is null** (its signature no longer
+  checks; the backend reads it as another kind of evidence) is drawn as that, with the
+  backend's word for the kind, never dropped and never as an effect in force.
+- **A cursor the backend refuses** (`400 bad_cursor`): the section says the list changed
+  and offers the first page again. Any other 400 is shown with its `code` and its words.
+  Neither is asked again by itself.
+- **A page that could not be read** keeps the rows already shown, says the next page
+  could not be read, and is read once more per press. It is never read as the last page.
+- **A backend from before #241** serves no `next` and no `matching_count`, and ignores
+  the filter: the section shows the observed effects among what it gave, as before, and
+  says this backend does not page, so more may exist than are shown. It is never sent
+  `before`.
+
+Each read is one GET: the first with the chains screen, beside the chains' own read and
+never before it, a later one on a press of the section's own button. Each is cancelled
+when the screen is left and cut at the read deadline like every other read. The section's
+buttons share no state with any stop control. No Stop and no failsafe control waits on it
+(`tests/an-observed-effect-read-never-holds-the-stop-control-or-the-failsafe-panel.test.tsx`,
+`tests/every-observed-effect-can-be-read-a-page-at-a-time.test.tsx`).
 
 The histories (`approval-history/`, `tool-contracts/`, `tool-contract-bindings/`,
 `decision-history/`, under `/api/assurance/deployments/<uuid>/`) are GETs only, here
