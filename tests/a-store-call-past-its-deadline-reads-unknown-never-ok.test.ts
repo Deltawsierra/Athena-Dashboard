@@ -58,16 +58,17 @@ describe("a store held 12 s by the disk", () => {
       const read = await answerOf(around, settings, HELD_MS + 10_000);
       console.log(`[past its deadline] the settings were answered ${read.status} after ${read.answeredAt! - read.sentAt} ms: ${JSON.stringify(read.body).slice(0, 160)}`);
       expect(read.answeredAt! - read.sentAt).toBeLessThan(READ_MS + SLACK_MS);
-      // Not read: never the switch off.
-      if (read.status === 200) expect(read.body.killSwitchEnabled).toBe(true);
-      else expect(read.status).toBeGreaterThanOrEqual(500);
+      // Not read: never the switch off, and said so in a plain sentence.
+      expect(read.status).toBe(503);
+      expect(read.body).toEqual({ message: "the store did not answer in time; nothing was read" });
       expect(read.body?.killSwitchEnabled).not.toBe(false);
 
       const started = await answerOf(around, start, HELD_MS + 10_000);
       console.log(`[past its deadline] the start was answered ${started.status} after ${started.answeredAt! - started.sentAt} ms`);
       expect(started.answeredAt! - started.sentAt).toBeLessThan(READ_MS + SLACK_MS);
       expect(started.status).not.toBe(201);
-      expect(started.status).toBeGreaterThanOrEqual(400);
+      expect(started.status).toBe(503);
+      expect(started.body).toEqual({ message: "the store did not answer in time; nothing was read" });
 
       const write = await written;
       console.log(`[past its deadline] the write was refused after ${write.at - heldFrom} ms: ${write.ok ? "(answered)" : String((write.cause as Error).message)}`);

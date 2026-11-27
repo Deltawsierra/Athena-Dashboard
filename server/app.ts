@@ -10,6 +10,7 @@ import * as settings from "./settings";
 import * as health from "./health";
 import * as engine from "./engine";
 import { forgetPerson } from "./person-credential";
+import { STORE_NOT_ANSWERED } from "./store-protocol";
 
 const SESSION_COOKIE = "athena.sid";
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -171,6 +172,15 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   // an internal error string reached a client.
   if (err && typeof err === "object" && "type" in err && (err as { type?: string }).type === "entity.parse.failed") {
     res.status(400).json({ message: "Malformed JSON body" });
+    return;
+  }
+
+  // A store call the store did not answer (store-client.ts): in time, or at all. Said as it is, in a plain sentence --
+  // "the store did not answer in time; nothing was read" -- never as a fault of the server.
+  if (err && typeof err === "object" && (err as { code?: unknown }).code === STORE_NOT_ANSWERED) {
+    console.error(`[store] ${(err as Error).message}`);
+    const said = (err as { said?: unknown }).said;
+    res.status(503).json({ message: typeof said === "string" ? said : "the store did not answer in time; nothing was read" });
     return;
   }
 
