@@ -46,7 +46,8 @@ describe("the server's event loop never loads the SQLite driver", () => {
       PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, TEMP: process.env.TEMP, TMP: process.env.TMP, HOME: data, USERPROFILE: data,
       NODE_ENV: "production", PORT: port, HOST: "127.0.0.1",
       ATHENA_DB_PATH: path.join(data, "athena.db"),
-      SESSION_SECRET: "a-session-secret-for-this-boot-that-is-long-enough",
+      // The session secret every test runs with (tests/setup.ts).
+      SESSION_SECRET: process.env.SESSION_SECRET,
       ATHENA_INITIAL_ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
     };
     const booted = spawnSync(process.execPath, [path.join(__dirname, "helpers", "boot-the-bundle-and-say-what-its-loop-loaded.cjs"),
