@@ -3,34 +3,36 @@ const { build } = require('esbuild');
 const path = require('path');
 const fs = require('fs');
 
+// Build the server as **CommonJS**, not ESM. Exported: a test builds the same bundles to boot them
+// (tests/the-event-loop-never-loads-the-sqlite-driver.test.ts).
+const options = {
+    bundle: true,
+    platform: 'node',
+    target: 'node20',
+    format: 'cjs',                           // <-- CHANGED
+    external: [
+        'better-sqlite3',  // native module
+        'sqlite3',         // native module (if used)
+        'electron',        // Electron itself
+    ],
+    loader: {
+        '.ts': 'ts',
+        '.tsx': 'tsx',
+        '.js': 'js',
+        '.jsx': 'jsx',
+    },
+    define: {
+        'process.env.NODE_ENV': '"production"',
+        'process.env.USE_SQLITE': '"true"',
+    },
+    minify: false,
+    sourcemap: false,
+};
+
 async function buildElectronServer() {
     console.log('Building Electron server bundle...');
 
     try {
-        // Build the server as **CommonJS**, not ESM
-        const options = {
-            bundle: true,
-            platform: 'node',
-            target: 'node20',
-            format: 'cjs',                           // <-- CHANGED
-            external: [
-                'better-sqlite3',  // native module
-                'sqlite3',         // native module (if used)
-                'electron',        // Electron itself
-            ],
-            loader: {
-                '.ts': 'ts',
-                '.tsx': 'tsx',
-                '.js': 'js',
-                '.jsx': 'jsx',
-            },
-            define: {
-                'process.env.NODE_ENV': '"production"',
-                'process.env.USE_SQLITE': '"true"',
-            },
-            minify: false,
-            sourcemap: false,
-        };
         await build({ ...options, entryPoints: ['server/index-electron.ts'], outfile: 'dist/server-electron.cjs' });
         console.log('✓ Server bundled successfully to dist/server-electron.cjs');
 
@@ -61,4 +63,6 @@ async function buildElectronServer() {
     }
 }
 
-buildElectronServer();
+if (require.main === module) buildElectronServer();
+
+module.exports = { options };

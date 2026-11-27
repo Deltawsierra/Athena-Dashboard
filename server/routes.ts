@@ -1,7 +1,7 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { storage } from "./storage-unified";
-import { openReport } from "./db-sqlite";
+import { openReport } from "./db-report";
 import { patiently } from "./store-protocol";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {

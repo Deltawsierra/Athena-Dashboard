@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { storage } from "./storage-unified";
-import { resolveDbPath } from "./db-sqlite";
+import { resolveDbPath } from "./db-report";
 import {
   verifyPassword, newPasswordRefusal, LEGACY_DEFAULT_PASSWORDS, LEGACY_DEFAULT_USERNAMES, MIN_PASSWORD_LENGTH,
 } from "./password";

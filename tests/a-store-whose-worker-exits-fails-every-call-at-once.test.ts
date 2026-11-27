@@ -79,10 +79,11 @@ describe("the store's worker thread ends with calls in flight", () => {
       expect(String((outcomes.killSwitch as { cause: Error }).cause.message)).toMatch(/not known/);
       // Asked while the thread was held and then ended: not read, never the switch off.
       expect(settingsAnswer.body?.killSwitchEnabled).not.toBe(false);
-      expect(settingsAnswer.status).toBeGreaterThanOrEqual(500);
+      expect(settingsAnswer.status).toBe(503);
+      expect(settingsAnswer.body).toEqual({ message: "the store did not answer; nothing was read" });
       expect(settingsAnswer.answeredAt! - exited).toBeLessThan(REFUSED_WITHIN_MS + 400);
       // A start made meanwhile: refused, and never sent.
-      expect(startAnswer.status).toBeGreaterThanOrEqual(500);
+      expect(startAnswer.status).toBe(503);
       expect(around.engineCalls.slice(callsBefore).some((one) => one.line === "POST /api/scan")).toBe(false);
 
       // The next call: a new thread, on the same file.
