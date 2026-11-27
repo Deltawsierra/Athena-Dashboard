@@ -32,5 +32,6 @@
   "tests/a-stop-that-arrives-behind-a-held-statement-reaches-the-engine-at-once.test.ts",
   "tests/a-timer-fires-and-an-account-read-is-bounded-while-the-disk-holds-a-statement.test.ts",
   "tests/a-store-call-past-its-deadline-reads-unknown-never-ok.test.ts",
-  "tests/a-store-whose-worker-exits-fails-every-call-at-once.test.ts"
+  "tests/a-store-whose-worker-exits-fails-every-call-at-once.test.ts",
+  "tests/an-api-key-stop-goes-from-memory-while-the-disk-holds-the-store.test.ts"
 ]

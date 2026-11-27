@@ -9,6 +9,7 @@ import {
   refreshAccount, ACCOUNT_REFRESH_MS,
   requirePasswordChanged, refusePasswordChangeRequired, PASSWORD_CHANGE_REQUIRED, endOtherSessions, passwordStamp,
   asTheSessionHoldsIt,
+  learnApiKeys, noteApiKey, noteApiKeyRevoked,
 } from "./auth";
 import { verifyPassword, isLegacyDefaultPassword, newPasswordRefusal } from "./password";
 import * as assistant from "./assistant";
@@ -3201,6 +3202,9 @@ export function registerRoutes(app: Express): void {
   // The tests, read once in the background so a Stop finds its run in memory
   // (storage.peekTest) without asking the database. Holds up nothing.
   setImmediate(() => void storage.getAllTests().catch(() => undefined));
+  // And every live API key, with the account behind it, so a Stop presented with one goes from memory
+  // (auth.ts apiKeyStopHolder) without asking the database. Holds up nothing.
+  setImmediate(() => void learnApiKeys().catch(() => undefined));
   /** The retests being asked of the engine right now, by test and twin. */
   const retestsInFlight = new Set<string>();
   /**
@@ -5509,7 +5513,7 @@ export function registerRoutes(app: Express): void {
     // Authorised from memory, never from a read: an admin, or the owner of the
     // retest -- who pressed Retest, or who ran the test it was run from. The
     // session's role is the account's now (auth.ts sessionUser).
-    const signedIn = sessionUser(req) ?? (req.currentUser ? { id: req.currentUser.id, role: req.currentUser.role } : null);
+    const signedIn = sessionUser(req) ?? req.apiKeyHolder ?? (req.currentUser ? { id: req.currentUser.id, role: req.currentUser.role } : null);
     let me = signedIn;
     const watched = watcher.peek(runId);
     // A run a retest's unread answer named, whose own stop did not take
@@ -5857,6 +5861,8 @@ export function registerRoutes(app: Express): void {
   app.post("/api/api-keys", requireAdmin, asyncHandler(async (req, res) => {
     const { name } = createApiKeySchema.parse(req.body);
     const { key, secret } = await storage.createApiKey({ name, createdBy: req.session.userId ?? null });
+    // Known here at once: its stops go from memory (auth.ts apiKeyStopHolder).
+    noteApiKey(key);
     // The name and prefix are recorded; the secret is not — an audit log that
     // held the key would be a second place the credential lives.
     await storage.createActivityLog({
@@ -5890,6 +5896,8 @@ export function registerRoutes(app: Express): void {
         if (account.role !== "admin") return void res.status(403).json({ message: "Admin role required" });
       }
     }
+    // Forgotten here before the write: from now on its stops are authorised from the record, which the write revokes.
+    noteApiKeyRevoked(req.params.id);
     const revoked = await storage.revokeApiKey(req.params.id);
     if (!revoked) return notFound(res, "API key");
     await storage.createActivityLog({

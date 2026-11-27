@@ -1070,7 +1070,9 @@ describe("every kill-switch answer states the switch as it is when it is given",
   it("an engage whose flag a later disengage stored first is overtaken: its stops go all the same (409 'Every stop was sent all the same'), it writes nothing, and its log says so", async () => {
     const made = await admin.post("/api/api-keys").send({ name: "r5 automation" });
     expect(made.status).toBe(201);
-    const secret = made.body.secret as string;
+    // The engage presents a key this process does not hold in memory (made on the record, not through this
+    // dashboard's route: another dashboard's, not read here yet): authorised from the record, so it can be late.
+    const { secret } = await storage.createApiKey({ name: "r5 automation, on the record", createdBy: adminId });
     const t = await runningTest(`r5-overtaken-${Date.now()}`);
     const runId = (t.findings as { runId: string }).runId;
     const real = storage.findActiveApiKeyByHash.bind(storage);
