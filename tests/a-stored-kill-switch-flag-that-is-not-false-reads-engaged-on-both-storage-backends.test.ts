@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { IStorage } from "../server/storage";
 import { flagEngaged, flagFromColumn, rowEngaged } from "../shared/kill-switch-flag";
+import { onTheStoresConnection, storeInATestWorker } from "./helpers/store-in-a-test-worker";
 
 /**
  * SAFETY (DASH-FAILSAFE-2): a stored kill-switch flag that is not exactly
@@ -45,20 +46,21 @@ describe("a stored flag value: only exactly false is off", () => {
 describe("the SQLite backend reads the flag as stored", () => {
   it("\"true\", 2, -1 and \"false\" stored in the column each read as engaged, in the kill switch's read and the settings' read; 0 and 1 read as written", async () => {
     process.env.ATHENA_DB_PATH = ":memory:";
+    // The store runs on its own thread, on its own connection: the value is stored there (a test's worker, its __sql).
+    storeInATestWorker();
     const storage: IStorage = (await import("../server/storage-sqlite")).storage;
-    const { sqlite } = await import("../server/db-sqlite");
     await storage.updateAIControlSettings({ killSwitchEnabled: false });
-    const store = (raw: unknown) => sqlite.prepare("UPDATE ai_control_settings SET kill_switch_enabled = ?").run(raw);
+    const store = (raw: unknown) => onTheStoresConnection(storage, "run", "UPDATE ai_control_settings SET kill_switch_enabled = ?", raw);
 
     for (const raw of ["true", 2, -1, "false"]) {
-      store(raw);
+      await store(raw);
       expect((await storage.getKillSwitchState())?.killSwitchEnabled, `stored ${JSON.stringify(raw)}`).toBe(true);
       expect((await storage.getAIControlSettings())?.killSwitchEnabled, `stored ${JSON.stringify(raw)}`).toBe(true);
     }
-    store(0);
+    await store(0);
     expect((await storage.getKillSwitchState())?.killSwitchEnabled).toBe(false);
     expect((await storage.getAIControlSettings())?.killSwitchEnabled).toBe(false);
-    store(1);
+    await store(1);
     expect((await storage.getKillSwitchState())?.killSwitchEnabled).toBe(true);
     // The rest of the settings row reads as it did.
     const settings = await storage.getAIControlSettings();

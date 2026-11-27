@@ -6,6 +6,7 @@ import path from "path";
 import request from "supertest";
 import Database from "better-sqlite3";
 import { TEST_ADMIN_PASSWORD, adminHasSetPassword } from "./test-admin";
+import { prelude, storeInATestWorker } from "./helpers/store-in-a-test-worker";
 import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
@@ -171,31 +172,26 @@ describe("a busy database never makes a write twice", () => {
     process.env.ATHENA_DB_PATH = path.join(tempDir(path.join(os.tmpdir(), "athena-r3-dbl-")), "athena.db");
     vi.resetModules();
     await noteDatabase();
-    const { storage } = await import("../server/storage-sqlite");
-    await storage.getAllActivityLogs();
-    const proto = (Database as unknown as { prototype: { prepare: (sql: string) => unknown } }).prototype;
-    const realPrepare = proto.prepare;
-    let armed = false; let inserts = 0; let throws = 0;
-    proto.prepare = function (this: unknown, sql: string) {
-      const text = String(sql).toLowerCase();
-      if (text.startsWith('insert into "activity_logs"')) { inserts += 1; if (inserts === 1) armed = true; }
-      else if (armed && text.startsWith("select") && text.includes('"activity_logs"')) {
-        armed = false; throws += 1;
-        const busy = new Error("database is locked") as Error & { code: string };
-        busy.code = "SQLITE_BUSY";
-        throw busy;
-      }
-      return realPrepare.call(this, sql);
-    };
+    // The store's statements run on its own thread: the read-back's busy refusal is made there, and counted
+    // (tests/helpers/store-worker-preludes/read-back-busy-once.mjs: [inserts, throws]).
+    const counted = new Int32Array(new SharedArrayBuffer(8));
+    const putBack = storeInATestWorker({ preludes: [prelude("read-back-busy-once.mjs")], workerData: { readBackBusyOnce: counted.buffer } });
+    let inserts = 0; let throws = 0;
     try {
-      const row = await storage.createActivityLog({ action: "x1", entityType: "test", entityId: "once", details: null });
-      expect(row.action).toBe("x1");
+      const { storage } = await import("../server/storage-sqlite");
+      await storage.getAllActivityLogs();
+      try {
+        const row = await storage.createActivityLog({ action: "x1", entityType: "test", entityId: "once", details: null });
+        expect(row.action).toBe("x1");
+      } finally {
+        [inserts, throws] = [Atomics.load(counted, 0), Atomics.load(counted, 1)];
+      }
+      expect(throws).toBe(1);
+      expect(inserts).toBe(1);
+      expect((await storage.getAllActivityLogs()).filter((one) => one.action === "x1")).toHaveLength(1);
     } finally {
-      proto.prepare = realPrepare;
+      putBack();
     }
-    expect(throws).toBe(1);
-    expect(inserts).toBe(1);
-    expect((await storage.getAllActivityLogs()).filter((one) => one.action === "x1")).toHaveLength(1);
   });
 });
 

@@ -79,14 +79,16 @@ export interface IStorage {
   updateTest(id: string, test: Partial<InsertTest>): Promise<Test | undefined>;
   /**
    * Change a test from the row as it is when the change lands: `change` is
-   * handed the row read in the same step as the write (one IMMEDIATE
-   * transaction on SQLite; one synchronous step in memory) and answers what to
-   * write, or null to write nothing. So a writer that sets its own part of
+   * handed the row as it is when its answer is written (on SQLite by compare
+   * and swap: written in one IMMEDIATE transaction only if the row is still the
+   * one `change` was handed, else `change` is run again from the row as it then
+   * stands, a bounded number of times -- store-client.ts; one synchronous step
+   * in memory) and answers what to write, or null to write nothing. So a writer that sets its own part of
    * `findings` never writes back another writer's part as it was before that
    * one's write landed: the row's findings have more than one writer (the
    * live poll, a Stop's mirror, the collect watch), and each read the row
    * before an await. `change` must be synchronous and may be run again (a
-   * busy database is tried again from the start). Answers the row as it now
+   * row another writer changed first is worked out again). Answers the row as it now
    * stands -- unchanged when `change` answered null -- or undefined when there
    * is no such test.
    */

@@ -8,31 +8,12 @@ import os from "os";
 import { Worker } from "worker_threads";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
+import {
+  checkpointer, checkpointerChanged, checkpointerTurns, endStoreThreads, noteStoreThread, openReport, resolveDbPath, watchCheckpointer,
+} from "./db-report";
 
-/**
- * Database location, in priority order:
- *   1. ATHENA_DB_PATH         explicit file path, or ":memory:" for tests
- *   2. ATHENA_USER_DATA       directory supplied by the Electron main process
- *   3. ~/.athena-ai/athena.db when running inside Electron without (2)
- *   4. ./athena.db            project root for local development
- */
-export function resolveDbPath(): string {
-  if (process.env.ATHENA_DB_PATH) return process.env.ATHENA_DB_PATH;
-
-  const userData = process.env.ATHENA_USER_DATA;
-  if (userData) {
-    fs.mkdirSync(userData, { recursive: true });
-    return path.join(userData, "athena.db");
-  }
-
-  if (process.versions?.electron) {
-    const dir = path.join(os.homedir(), ".athena-ai");
-    fs.mkdirSync(dir, { recursive: true });
-    return path.join(dir, "athena.db");
-  }
-
-  return path.resolve(process.cwd(), "athena.db");
-}
+// What the event loop reads of the database without loading its driver (db-report.ts), and what this module keeps of it.
+export { checkpointer, checkpointerTurns, noteStoreThread, openReport, resolveDbPath, watchCheckpointer };
 
 /**
  * The connection is opened on first use, not on import.
@@ -51,18 +32,6 @@ type Connection = { sqlite: DatabaseType; db: ReturnType<typeof drizzle> };
  * turn of the loop: 200 writes started together held it 2.2 s.
  */
 export const BUSY_TIMEOUT_MS = 0;
-
-/**
- * What opening the database found and could not do, said rather than thrown:
- * a database that cannot open takes every Stop down with it.
- */
-export const openReport: {
-  duplicateEngineRunIds: string[];
-  /** Backend scan uuids more than one test row names, which kept idx_tests_backend_scan from being created (createBackendScanIndex). */
-  duplicateBackendScanIds: string[];
-  /** Why idx_tests_backend_scan could not be created, when it could not for another reason (a findings cell that is not JSON); null when it was. */
-  backendScanIndexNotCreated: string | null;
-} = { duplicateEngineRunIds: [], duplicateBackendScanIds: [], backendScanIndexNotCreated: null };
 
 let connection: Connection | null = null;
 
@@ -130,26 +99,6 @@ function connect(): Connection {
 export const CHECKPOINT_EVERY_MS = 1_000;
 
 /**
- * What the checkpointer is doing: `off` until its thread reports it is
- * running (SQLite checkpoints on the loop meanwhile, as by default), `on`
- * once it runs, and `failed` (with why) if it could not start or stopped --
- * then every commit is synced when it is made again (FULL), and SQLite's own
- * checkpoints on the loop are switched back on: no commit waits on the
- * thread for its sync, and the log never grows without bound.
- */
-export const checkpointer: { state: "off" | "on" | "failed"; detail: string } = { state: "off", detail: "" };
-
-/**
- * What the checkpointer thread's turns came to, by outcome (CHECKPOINTER_SOURCE):
- * `skipped: busy` (another connection held the write lock: the turn ended at
- * once), `checkpointed part of the log`, `checkpointed`, `restarted` (the log
- * started over by the thread's own write). An idle turn is not counted.
- * `last` is the latest, with how long the thread's ask for the write lock took
- * (`lockMs`): it never waits on the lock, so that is the time a refusal takes.
- */
-export const checkpointerTurns: { counts: Record<string, number>; last: { outcome: string; lockMs: number } | null } = { counts: {}, last: null };
-
-/**
  * The checkpointer threads this copy of the module has started and that are
  * still running. `intentional` is set by closeDatabase before it ends one, so
  * that an exit it caused is not read as the thread failing.
@@ -188,6 +137,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
     }
     console.error(`[db] the checkpointer thread is not running (${why}); every commit is synced to disk on the event loop ` +
       "(synchronous FULL), and SQLite checkpoints there, as before");
+    checkpointerChanged();
   };
   let worker: Worker;
   try {
@@ -211,6 +161,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
         handle.pragma("wal_autocheckpoint = 0");
         checkpointer.state = "on";
         console.log(`[db] the checkpointer thread is running: the write-ahead log is synced and checkpointed off the event loop every ${CHECKPOINT_EVERY_MS} ms (commits synchronous NORMAL)`);
+        checkpointerChanged();
       } catch (cause) {
         loopCheckpoints(cause instanceof Error ? cause.message : String(cause));
       }
@@ -218,6 +169,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
       const { turn, lockMs } = message as { turn: string; lockMs: number };
       checkpointerTurns.counts[turn] = (checkpointerTurns.counts[turn] ?? 0) + 1;
       checkpointerTurns.last = { outcome: turn, lockMs };
+      checkpointerChanged();
     } else if (typeof message === "object" && message !== null && "failed" in message) {
       loopCheckpoints(String((message as { failed: unknown }).failed));
     }
@@ -232,11 +184,13 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
 }
 
 /**
- * Release the database file: end this copy's checkpointer thread(s), close the
- * connection, and forget it, so the next query opens the database afresh (and
- * starts a new thread). The state is reset to `off`, so the new thread can
- * report `on` again. An exit caused here is not a failure: nothing falls back
- * to FULL syncs and nothing is logged. Never throws.
+ * Release the database file: end the store's worker thread(s) (each closes
+ * its connection and its checkpointer thread first), end this copy's own
+ * checkpointer thread(s), close the connection, and forget it, so the next
+ * query opens the database afresh (and starts a new thread). The state is
+ * reset to `off`, so the new thread can report `on` again. An exit caused
+ * here is not a failure: nothing falls back to FULL syncs and nothing is
+ * logged. Never throws.
  *
  * For tests, which remove their database file afterwards: Windows will not
  * remove or rename a file while a handle on it is open, and each thread holds
@@ -245,7 +199,7 @@ export function startCheckpointer(handle: DatabaseType, dbPath: string, modulePa
  */
 export async function closeDatabase(): Promise<void> {
   try {
-    const ending: Array<Promise<unknown>> = [];
+    const ending: Array<Promise<unknown>> = [endStoreThreads()];
     for (const [worker, thread] of Array.from(checkpointerThreads.entries())) {
       thread.intentional = true;
       checkpointerThreads.delete(worker);

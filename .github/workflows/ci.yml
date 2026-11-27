@@ -135,6 +135,11 @@ jobs:
           tests/a-retest-verdict-survives-a-restart-and-is-filed-once.test.ts
           tests/a-stop-is-answered-at-once-while-a-stalled-disk-holds-the-store.test.ts
           tests/the-kill-switch-s-stops-leave-before-its-own-store-work.test.ts
+          tests/a-stop-that-arrives-behind-a-held-statement-reaches-the-engine-at-once.test.ts
+          tests/a-timer-fires-and-an-account-read-is-bounded-while-the-disk-holds-a-statement.test.ts
+          tests/a-store-call-past-its-deadline-reads-unknown-never-ok.test.ts
+          tests/a-store-whose-worker-exits-fails-every-call-at-once.test.ts
+          tests/a-sign-in-flood-holds-none-of-the-store-s-later-calls.test.ts
           tests/the-kill-switch-never-blocks-another-stop.test.ts
           tests/a-stop-goes-while-the-backend-health-read-hangs.test.ts
           tests/the-console-shows-the-backends-health-and-never-ok-unless-it-said-so.test.tsx

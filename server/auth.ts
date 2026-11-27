@@ -4,6 +4,7 @@ import "express-session";
 import { storage } from "./storage-unified";
 import type { User } from "@shared/schema";
 import { hashApiKey, API_KEY_PREFIX } from "./api-keys";
+import { patiently } from "./store-protocol";
 
 declare module "express-session" {
   interface SessionData {
@@ -121,10 +122,14 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
   const presented = presentedApiKey(req);
   if (!presented) return undefined;
 
-  const record = await storage.findActiveApiKeyByHash(hashApiKey(presented));
+  // A stop's reads are waited out however long the store takes (patiently):
+  // refused for their time, they would drop the stop.
+  const stop = isStopFromTheRequest(req);
+  const read = <T>(one: Promise<T>): Promise<T> => (stop ? patiently(one) : one);
+  const record = await read(storage.findActiveApiKeyByHash(hashApiKey(presented)));
   if (!record || !record.createdBy) return undefined;
 
-  const user = await storage.getUser(record.createdBy);
+  const user = await read(storage.getUser(record.createdBy));
   if (user) noteAccount(user);
   if (!user || !user.isActive) return undefined;
 

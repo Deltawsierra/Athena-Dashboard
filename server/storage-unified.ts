@@ -1,6 +1,6 @@
 import type { IStorage } from "./storage";
 import { storage as memStorage } from "./storage";
-import { storage as sqliteStorage } from "./storage-sqlite";
+import { storage as sqliteStorage } from "./storage-sqlite-client";
 
 /**
  * Backend selection.

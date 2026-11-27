@@ -1,7 +1,8 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { z } from "zod";
 import { storage } from "./storage-unified";
-import { openReport } from "./db-sqlite";
+import { openReport } from "./db-report";
+import { patiently } from "./store-protocol";
 import { loadFindingsSummary, SummaryReadError } from "./findings-summary";
 import {
   requireAuth, requireAdmin, requireAdminUnlessStop, type StopKind, asyncHandler, actor, sessionUser, accountNow, noteAccount, noteAccountDeleted, reviseLiveSessions,
@@ -927,7 +928,7 @@ async function mirrorStopToBackend(
 function mirrorStopsToBackend(who: Who, stops: ScanStop[], via: "kill_switch" | "delete", rows: Array<{ id: string; findings: unknown }> = []): void {
   for (const stop of stops) {
     void (async () => {
-      const test = rows.find((one) => one.id === stop.testId) ?? storage.peekTest(stop.testId) ?? (await storage.getTest(stop.testId));
+      const test = rows.find((one) => one.id === stop.testId) ?? storage.peekTest(stop.testId) ?? (await patiently(storage.getTest(stop.testId)));
       if (test) await mirrorStopToBackend(who, test, stop, via);
     })().catch((cause) => console.error(logLine(`[abort] the stop mirror for test ${stop.testId} could not be sent: ${causeOf(cause)}`)));
   }
@@ -1355,9 +1356,10 @@ function stopEverythingRunning(
   const memoryStops = Promise.all(runningScansOf(peeked ?? []).filter((one) => claim(one.runId)).map(stopScan));
 
   // The engine's list, asked for alongside; the database's tests once every stop above has left (stopsLeft),
-  // or STOPS_LEAVE_WAIT_MS after the press.
+  // or STOPS_LEAVE_WAIT_MS after the press -- waited out however long the store takes (patiently): a read refused
+  // for its time would leave a scan only the database records without its stop.
   const engineRead = settle(engine.activeRuns());
-  const rowsRead = stopsLeftOrWaitOver().then(() => settle(new Promise<Test[]>((read) => read(storage.getAllTests()))));
+  const rowsRead = stopsLeftOrWaitOver().then(() => settle(new Promise<Test[]>((read) => read(patiently(storage.getAllTests())))));
 
   // Each run the engine lists that no stop named yet, as soon as the list is in.
   let unnamed = 0;
@@ -4474,8 +4476,10 @@ export function registerRoutes(app: Express): void {
     // The test from memory when this process has seen it -- it wrote every
     // scan it started, and reads every test list -- so the stop goes to the
     // engine without asking the database first. Only a test this process has
-    // never seen is read, and that read is all that comes before its stop.
-    const test = storage.peekTest(req.params.testId) ?? (await storage.getTest(req.params.testId));
+    // never seen is read, and that read is all that comes before its stop:
+    // waited out however long the store takes (patiently), never refused for
+    // its time, which would drop the stop.
+    const test = storage.peekTest(req.params.testId) ?? (await patiently(storage.getTest(req.params.testId)));
     if (!test) return notFound(res, "Test");
     const who = actor(req);
 

@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import request from "supertest";
 import { adminHasSetPassword } from "./test-admin";
+import { BroadcastChannel } from "node:worker_threads";
 import { noteDatabase, releaseAndRemove } from "./helpers/databases-in-use";
+import { prelude, storeInATestWorker } from "./helpers/store-in-a-test-worker";
 
 /** The temporary directories this file made, each removed when the file is done -- passed or failed. Only these. */
 const madeDirs: string[] = [];
@@ -51,6 +53,30 @@ function holdTheNextRehash(): Promise<void> {
   return new Promise<void>((resolve) => { hold.entered = resolve; });
 }
 
+/**
+ * The same hold where the SQLite store runs the rehash: its own worker thread
+ * (tests/helpers/store-worker-preludes/hold-the-next-rehash.mjs). vi.mock
+ * reaches this thread's modules only, and the memory backend's.
+ */
+const storeRehash = (() => {
+  const armed = new Int32Array(new SharedArrayBuffer(4));
+  const name = `athena-rehash-${process.pid}-${Date.now()}`;
+  const channel = new BroadcastChannel(name);
+  channel.unref();
+  let entered: () => void = () => {};
+  channel.onmessage = (event) => {
+    if ((event as MessageEvent).data?.entered) entered();
+  };
+  return {
+    workerData: { rehash: { channel: name, password: OLD, armed: armed.buffer } },
+    holdTheNext: () => new Promise<void>((resolve) => {
+      entered = resolve;
+      Atomics.store(armed, 0, 1);
+    }),
+    release: () => channel.postMessage({ release: true }),
+  };
+})();
+
 const legacy = (pw: string) => crypto.createHash("sha256").update(pw).digest("hex");
 
 describe("a sign-in on an old hash never writes over a changed password", () => {
@@ -60,6 +86,7 @@ describe("a sign-in on an old hash never writes over a changed password", () => 
     const dbFile = path.join(dir, "athena.db");
     process.env.ATHENA_STORAGE = "sqlite";
     process.env.ATHENA_DB_PATH = dbFile;
+    storeInATestWorker({ preludes: [prelude("hold-the-next-rehash.mjs")], workerData: storeRehash.workerData });
     await noteDatabase();
     const { createApp } = await import("../server/app");
     const { initializeDefaultData } = await import("../server/init-data");
@@ -75,7 +102,7 @@ describe("a sign-in on an old hash never writes over a changed password", () => 
     // An account from an early release: its hash is the legacy sha256.
     db.update(schema.users).set({ password: legacy(OLD) }).where(eq(schema.users.id, ops.id)).run();
 
-    const rehashing = holdTheNextRehash();
+    const rehashing = storeRehash.holdTheNext();
     const inFlight = request.agent(app);
     const signingIn = inFlight.post("/api/auth/login").send({ username: "ops", password: OLD }).then((r) => r);
     await rehashing;
@@ -84,7 +111,7 @@ describe("a sign-in on an old hash never writes over a changed password", () => 
     expect((await owner.post("/api/auth/login").send({ username: "ops", password: OLD })).status).toBe(200);
     expect((await owner.post("/api/auth/change-password").send({ currentPassword: OLD, newPassword: NEW })).status).toBe(200);
 
-    hold.release();
+    storeRehash.release();
     expect((await signingIn).status).toBe(401);
 
     expect((await inFlight.get("/api/users")).status).toBe(401);
