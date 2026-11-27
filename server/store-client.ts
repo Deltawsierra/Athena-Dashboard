@@ -3,7 +3,7 @@ import { getTableColumns } from "drizzle-orm";
 import * as schema from "@shared/schema";
 import type { InsertTest, SampleDataCounts, Test } from "@shared/schema";
 import type { IStorage } from "./storage";
-import { checkpointer, checkpointerTurns, noteStoreThread, openReport } from "./db-sqlite";
+import { checkpointer, checkpointerTurns, noteStoreThread, openReport } from "./db-report";
 import { errorFromMessage, patiently, readsOnly, STORE_NOT_ANSWERED, STORE_PAGE_ROWS, withAnswerToCome, type StoreErrorMessage } from "./store-protocol";
 import type { StoreWorkerFile } from "./store-worker-file";
 
@@ -97,8 +97,14 @@ function mirror(said: Mirror): void {
   }
 }
 
-function refusal(message: string): Error {
-  return Object.assign(new Error(message), { code: STORE_NOT_ANSWERED });
+/**
+ * The error a call the store did not answer is refused with: `message` says
+ * why, for the log; `said`, in a plain sentence, what a person is told
+ * (app.ts answers it 503): "the store did not answer in time; nothing was
+ * read", and so on.
+ */
+function refusal(message: string, said: string): Error {
+  return Object.assign(new Error(message), { code: STORE_NOT_ANSWERED, said });
 }
 
 /**
@@ -215,7 +221,8 @@ export class StoreClient {
       let gone = false;
       const timer = setTimeout(() => {
         gone = true;
-        refused(refusal(`the store did not take it within ${STORE_WRITE_MS / 1000} s: updateTestWith, not sent, and not written`));
+        refused(refusal(`the store did not take it within ${STORE_WRITE_MS / 1000} s: updateTestWith, not sent, and not written`,
+          "the store did not answer in time; nothing was written"));
       }, STORE_WRITE_MS);
       this.line!.push(() => {
         clearTimeout(timer);
@@ -422,7 +429,8 @@ export class StoreClient {
       for (const call of Array.from(thread.pending.values())) {
         if (call.timer) clearTimeout(call.timer);
         if (!call.settled) this.refuse(call, `the store's worker thread ended before it answered (${why})`, true);
-        call.late?.reject(refusal(`the store's worker thread ended before it answered (${why}): ${call.method}, what it reads is not known`));
+        call.late?.reject(refusal(`the store's worker thread ended before it answered (${why}): ${call.method}, what it reads is not known`,
+          "the store did not answer; nothing was read"));
       }
       thread.pending.clear();
       if (!thread.closing) console.error(`[db] the store's worker thread ended (${why}); the next call starts a new one`);
@@ -455,7 +463,10 @@ export class StoreClient {
     if (call.settled) return;
     call.settled = true;
     const what = !call.write ? "what it reads is not known" : sent ? "not known to be written" : "not sent, and not written";
-    const refused = refusal(`${why}: ${call.method}, ${what}`);
+    // Said to a person: whether the store ran out of time or its thread ended, and what that leaves.
+    const answered = why.includes("ended") ? "the store did not answer" : "the store did not answer in time";
+    const left = !call.write ? "nothing was read" : sent ? "it is not known whether this was written" : "nothing was written";
+    const refused = refusal(`${why}: ${call.method}, ${what}`, `${answered}; ${left}`);
     // A read still on the thread: its answer, when it comes, for a caller that waits it out (patiently).
     if (answerToCome) {
       withAnswerToCome(refused, new Promise((resolve, reject) => {

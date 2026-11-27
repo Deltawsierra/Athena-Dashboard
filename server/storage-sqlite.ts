@@ -13,8 +13,6 @@ import { backendScanIdOf } from "@shared/engine-record";
 import { hashPassword, verifyPassword, dummyVerify } from "./password";
 import { generateApiKey, hashApiKey, apiKeyPrefix } from "./api-keys";
 import { readsOnly, STORE_PAGE_ROWS } from "./store-protocol";
-import { StoreClient } from "./store-client";
-import { storeWorkerFile } from "./store-worker-file";
 import type {
   User, InsertUser,
   Client, InsertClient,
@@ -1162,29 +1160,14 @@ export function withBusyRetry<T extends object>(target: T, retryForMs = BUSY_RET
 
 /**
  * Every call the store's worker thread answers: SqliteStorage's own methods,
- * by name. The worker takes no other (store-worker.ts), and the client on the
- * event loop forwards each one it does not answer itself (SqliteStoreClient).
+ * by name. The worker takes no other (store-worker.ts).
  */
 export const STORE_CALLS: readonly string[] = Object.freeze(
   Object.getOwnPropertyNames(SqliteStorage.prototype).filter((name) => name !== "constructor"),
 );
 
 /**
- * The store as the server calls it: a client of the worker thread that runs
- * SqliteStorage under withBusyRetry (server/store-client.ts), each call a
- * message. Its methods are on its prototype, one per call the worker answers.
+ * The store as the server calls it: a client of the worker thread that runs SqliteStorage (store-client.ts),
+ * made in storage-sqlite-client.ts, which the event loop loads without this module or the driver.
  */
-export class SqliteStoreClient extends StoreClient {}
-for (const name of STORE_CALLS) {
-  if (name in StoreClient.prototype) continue;
-  Object.defineProperty(SqliteStoreClient.prototype, name, {
-    value: function (this: StoreClient, ...args: unknown[]) {
-      return this.ask(name, args);
-    },
-    writable: true,
-    configurable: true,
-  });
-}
-
-/** The worker thread runs the file storeWorkerFile() names: the bundle's own, or the source's (store-worker-file.ts). */
-export const storage: IStorage = new SqliteStoreClient(storeWorkerFile());
+export { SqliteStoreClient, storage } from "./storage-sqlite-client";
