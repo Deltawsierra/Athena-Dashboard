@@ -2,7 +2,7 @@ import crypto from "crypto";
 import type { Request, RequestHandler } from "express";
 import "express-session";
 import { storage } from "./storage-unified";
-import type { User } from "@shared/schema";
+import type { ApiKey, User } from "@shared/schema";
 import { hashApiKey, API_KEY_PREFIX } from "./api-keys";
 import { patiently } from "./store-protocol";
 
@@ -26,6 +26,8 @@ declare global {
       currentUser?: User;
       /** Set when requireAdmin authorised a stop from the session in memory, without reading the account. */
       authorisedFromSession?: boolean;
+      /** The account behind the API key a stop presented, when the stop was authorised from memory (apiKeyStopHolder). */
+      apiKeyHolder?: { id: string; role: string | null; keyId: string };
       /** Set when a signature relay was authorised though its command's action could not be learnt in time: it may be a stop's. */
       relayedAsPossibleStop?: boolean;
     }
@@ -126,7 +128,11 @@ async function loadApiKeyUser(req: Request): Promise<User | undefined> {
   // refused for their time, they would drop the stop.
   const stop = isStopFromTheRequest(req);
   const read = <T>(one: Promise<T>): Promise<T> => (stop ? patiently(one) : one);
-  const record = await read(storage.findActiveApiKeyByHash(hashApiKey(presented)));
+  const hash = hashApiKey(presented);
+  const record = await read(storage.findActiveApiKeyByHash(hash));
+  // What the record says now is what the key directory holds from now on.
+  if (record) noteApiKey(record);
+  else apiKeyDirectory.delete(hash);
   if (!record || !record.createdBy) return undefined;
 
   const user = await read(storage.getUser(record.createdBy));
@@ -169,6 +175,81 @@ function touchOnce(req: Request, keyId: string): void {
 
 /** How many API-key usage stamps were sent, and how many of them failed. */
 export const apiKeyTouches = { sent: 0, failed: 0 };
+
+/**
+ * Every API key this process knows to be live, by the hash of its secret:
+ * the key's id and the account that created it. Learnt as the app starts
+ * (learnApiKeys), kept when a key is created or revoked here (noteApiKey,
+ * noteApiKeyRevoked), and by every read of a key (loadApiKeyUser).
+ *
+ * A Stop presented with a key is authorised from it and from the account
+ * directory below -- from memory, never from a read -- so a store a stalled
+ * disk holds does not hold an API key's Stop: it waited on two reads (the key,
+ * its account), 3008 ms under a store held 3 s (DASH-STORE-OFF-THE-LOOP, 1.3).
+ * Only a stop (apiKeyStopHolder): a start or a read reads the key as ever, so
+ * an entry left here by a revoke on another dashboard gains only a stop.
+ */
+const apiKeyDirectory = new Map<string, { id: string; createdBy: string | null }>();
+
+/** Remember a key as it is now: live, or revoked (then forgotten). */
+export function noteApiKey(key: Pick<ApiKey, "id" | "keyHash" | "createdBy" | "revokedAt">): void {
+  if (key.revokedAt != null) {
+    noteApiKeyRevoked(key.id);
+    return;
+  }
+  apiKeyDirectory.set(key.keyHash, { id: key.id, createdBy: key.createdBy });
+}
+
+/** Forget a key: revoked here, from this moment on its stops are authorised as any request is, from the record. */
+export function noteApiKeyRevoked(id: string): void {
+  for (const [hash, one] of Array.from(apiKeyDirectory.entries())) {
+    if (one.id === id) apiKeyDirectory.delete(hash);
+  }
+}
+
+/**
+ * Learn every live key, and the account behind each, as the app starts: in
+ * the background, on no stop's path. A key or an account that could not be
+ * read is not known here, and its stops are authorised from the record, as
+ * before.
+ */
+export async function learnApiKeys(): Promise<void> {
+  const keys = await storage.getAllApiKeys();
+  for (const key of keys) noteApiKey(key);
+  const creators = new Set(keys.filter((key) => key.revokedAt == null && key.createdBy).map((key) => key.createdBy as string));
+  for (const id of Array.from(creators)) {
+    if (accounts.has(id)) continue;
+    const user = await storage.getUser(id).catch(() => null);
+    if (user) noteAccount(user);
+    else if (user === undefined) noteAccountDeleted(id);
+  }
+}
+
+/**
+ * The account behind the API key a stop presents, as this process knows
+ * them (the key directory above, the account directory below): null for
+ * anything but a stop, for a request with a session, and for a key or an
+ * account not known here to be live. Never reads.
+ */
+export function apiKeyStopHolder(req: Request): { id: string; role: string | null; keyId: string } | null {
+  if (req.session?.userId || !isStopFromTheRequest(req)) return null;
+  const presented = presentedApiKey(req);
+  if (!presented) return null;
+  const key = apiKeyDirectory.get(hashApiKey(presented));
+  if (!key?.createdBy) return null;
+  const account = accounts.get(key.createdBy);
+  if (!account || !account.isActive) return null;
+  return { id: key.createdBy, role: account.role, keyId: key.id };
+}
+
+/** A stop authorised from the key directory: who it is from (actor), and the key's usage stamp, never waited on. */
+function authorisedByApiKey(req: Request): boolean {
+  const holder = apiKeyStopHolder(req);
+  if (!holder) return false;
+  req.apiKeyHolder = holder;
+  touchOnce(req, holder.keyId);
+  return true;
+}
 
 /**
  * Every account this process has signed in, or changed, as it is now: its role
@@ -476,6 +557,11 @@ export const requireAuth: RequestHandler = (req, res, next) => {
     next();
     return;
   }
+  // A stop presented with an API key this process knows to be live: authorised from memory too (apiKeyStopHolder).
+  if (authorisedByApiKey(req)) {
+    next();
+    return;
+  }
   loadSessionUser(req)
     .then((user) => {
       if (!user) {
@@ -493,10 +579,11 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
     adminFromAccount(req, res, next);
     return;
   }
-  const remembered = sessionUser(req);
+  const remembered = sessionUser(req) ?? (authorisedByApiKey(req) ? req.apiKeyHolder ?? null : null);
   if (remembered?.role === "admin" && req.method !== "GET") {
-    // A stop, by an admin as this process knows the account now: authorised from
-    // memory, waiting on nothing.
+    // A stop, by an admin as this process knows the account now -- from the
+    // session, or from the API key it presents: authorised from memory,
+    // waiting on nothing.
     req.authorisedFromSession = true;
     next();
     return;
@@ -627,7 +714,7 @@ export function accountNow(req: Request): Promise<User | undefined> {
  *  back to the session's own id. */
 export function actor(req: Request): { userId: string | null; ipAddress: string | null } {
   return {
-    userId: req.currentUser?.id ?? req.session?.userId ?? null,
+    userId: req.currentUser?.id ?? req.session?.userId ?? req.apiKeyHolder?.id ?? null,
     ipAddress: req.ip ?? null,
   };
 }
